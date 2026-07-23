@@ -24,6 +24,7 @@ import { useChatStore } from "../../stores/chat.store";
 import { useAgentStore } from "../../stores/agent.store";
 import { useUIStore } from "../../stores/ui.store";
 import { useGenerate } from "../../hooks/use-generate";
+import { useSTTConfig } from "../../hooks/use-stt";
 import { useCommitSpatialOwnerTurn } from "../../hooks/use-spatial-context";
 import { useApplyRegex } from "../../hooks/use-apply-regex";
 import { useInstalledCapabilityPackages } from "../../hooks/use-capability-packages";
@@ -55,6 +56,7 @@ import { isGenerationSendBlocked } from "../../lib/generation-stream-policy";
 import { requestChatScrollToBottom } from "../../lib/chat-scroll-events";
 import { EmojiPicker } from "../ui/EmojiPicker";
 import { SpeechToTextButton } from "../ui/SpeechToTextButton";
+import { PushToTalkButton } from "../ui/PushToTalkButton";
 import { QuickConnectionSwitcher } from "./QuickConnectionSwitcher";
 import { QuickPersonaSwitcher } from "./QuickPersonaSwitcher";
 import { QuickSwitcherMobile } from "./QuickSwitcherMobile";
@@ -308,6 +310,8 @@ export const ChatInput = memo(function ChatInput({
   const showQuickReplyGuide = useUIStore((s) => s.showQuickReplyGuide);
   const showQuickReplyImpersonate = useUIStore((s) => s.showQuickReplyImpersonate);
   const speechToTextEnabled = useUIStore((s) => s.speechToTextEnabled);
+  const { data: sttConfig } = useSTTConfig();
+  const pushToTalkEnabled = mode === "roleplay" && sttConfig?.enabled === true;
   const quoteFormat = useUIStore((s) => s.quoteFormat);
   const createMessage = useCreateMessage(activeChatId);
   const commitSpatialOwnerTurn = useCommitSpatialOwnerTurn();
@@ -1579,6 +1583,25 @@ export const ChatInput = memo(function ChatInput({
     [activeChatId, quoteFormat, setInputDraft, syncInputState],
   );
 
+  const handleVoiceMessage = useCallback(
+    (transcript: string) => {
+      if (!activeChatId || isInputBusy) return;
+      void (async () => {
+        try {
+          await generateWithNarrativeDirector({
+            chatId: activeChatId,
+            connectionId: null,
+            userMessage: transcript,
+          });
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : "Generation failed";
+          toast.error(msg);
+        }
+      })();
+    },
+    [activeChatId, generateWithNarrativeDirector, isInputBusy],
+  );
+
   const ensureInputVisible = useCallback(() => {
     if (typeof window === "undefined" || !window.matchMedia("(max-width: 767px)").matches) return;
     const scroll = () => {
@@ -1894,6 +1917,15 @@ export const ChatInput = memo(function ChatInput({
           <SpeechToTextButton
             disabled={!activeChatId || isInputBusy}
             onTranscript={handleSpeechTranscript}
+            className="rounded-full"
+            iconSize={16}
+          />
+        )}
+
+        {pushToTalkEnabled && (
+          <PushToTalkButton
+            disabled={!activeChatId || isInputBusy}
+            onTranscribed={handleVoiceMessage}
             className="rounded-full"
             iconSize={16}
           />

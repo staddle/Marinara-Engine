@@ -50,6 +50,7 @@ import { gameAssetsRoutes } from "./game-assets.routes.js";
 import { turnGamesRoutes } from "./turn-games.routes.js";
 import { sidecarRoutes } from "./sidecar.routes.js";
 import { ttsRoutes } from "./tts.routes.js";
+import { sttRoutes } from "./stt.routes.js";
 import { promptOverridesRoutes } from "./prompt-overrides.routes.js";
 import { csrfDiagnosticsRoutes } from "./csrf-diagnostics.routes.js";
 import { professorMariWorkspaceRoutes } from "./professor-mari-workspace.routes.js";
@@ -105,6 +106,7 @@ export async function registerRoutes(app: FastifyInstance) {
   await app.register(gameAssetsRoutes, { prefix: "/api/game-assets" });
   await app.register(turnGamesRoutes, { prefix: "/api/turn-games" });
   await app.register(ttsRoutes, { prefix: "/api/tts" });
+  await app.register(sttRoutes, { prefix: "/api/stt" });
   await app.register(promptOverridesRoutes, { prefix: "/api/prompt-overrides" });
   await app.register(csrfDiagnosticsRoutes, { prefix: "/api/csrf" });
   await app.register(professorMariWorkspaceRoutes, { prefix: "/api/professor-mari/workspace" });

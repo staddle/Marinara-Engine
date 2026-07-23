@@ -4,6 +4,7 @@
 
 // Types
 export * from "./types/tts.js";
+export * from "./types/stt.js";
 export * from "./types/chat.js";
 export * from "./types/spotify.js";
 export * from "./types/character.js";
