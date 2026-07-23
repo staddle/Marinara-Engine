@@ -16,10 +16,18 @@ import {
   Plus,
   X,
   Download,
+  Upload,
+  Mic,
 } from "lucide-react";
 import { cn } from "../../../lib/utils";
 import { toast } from "sonner";
-import { useTTSConfig, useUpdateTTSConfig, useTTSVoices } from "../../../hooks/use-tts";
+import {
+  useTTSConfig,
+  useUpdateTTSConfig,
+  useTTSVoices,
+  useUploadTTSCloneReference,
+  useDeleteTTSCloneReference,
+} from "../../../hooks/use-tts";
 import { useCharacters } from "../../../hooks/use-characters";
 import { ttsService } from "../../../lib/tts-service";
 import {
@@ -44,6 +52,8 @@ import {
   TTS_DIALOGUE_PAUSE_DEFAULT_SECONDS,
   TTS_DIALOGUE_PAUSE_MAX_SECONDS,
   TTS_DIALOGUE_PAUSE_MIN_SECONDS,
+  TTS_CLONE_VOICE_ID,
+  isTTSCloneVoice,
   ttsSourceProfileFromConfig,
 } from "@marinara-engine/shared";
 import { HelpTooltip } from "../../ui/HelpTooltip";
@@ -118,6 +128,9 @@ function defaultSourceProfile(source: TTSSource): TTSSourceProfile {
     elevenLabsLanguageCode: "",
     voiceMode: "single",
     voiceAssignments: [],
+    cloneReferenceText: "",
+    cloneReferenceAudioFile: "",
+    cloneReferenceAudioName: "",
     narratorVoiceEnabled: false,
     narratorVoice: defaults.voice,
     npcDefaultVoicesEnabled: false,
@@ -167,7 +180,14 @@ function addSavedVoiceOption(options: VoiceOption[], voiceId: string): VoiceOpti
   return [...options, { id, name: id, category: "saved" }];
 }
 
+const CLONE_VOICE_OPTION: VoiceOption = {
+  id: TTS_CLONE_VOICE_ID,
+  name: "🎙️ Voice Cloning (reference clip)",
+  category: "clone",
+};
+
 function formatVoiceOptionLabel(option: VoiceOption): string {
+  if (option.id === TTS_CLONE_VOICE_ID) return option.name;
   if (option.category === "saved") return `${option.id} (saved; not in current voice list)`;
   return option.name === option.id ? option.id : `${option.name} (${option.id})`;
 }
@@ -454,6 +474,8 @@ export function TTSConfigCard() {
   const { data: savedConfig, isLoading } = useTTSConfig();
   const updateConfig = useUpdateTTSConfig();
   const { data: characters } = useCharacters();
+  const uploadCloneReference = useUploadTTSCloneReference();
+  const deleteCloneReference = useDeleteTTSCloneReference();
 
   // Local draft state
   const [enabled, setEnabled] = useState(false);
@@ -464,6 +486,10 @@ export function TTSConfigCard() {
   const [voice, setVoice] = useState("alloy");
   const [voiceMode, setVoiceMode] = useState<TTSVoiceMode>("single");
   const [voiceAssignments, setVoiceAssignments] = useState<TTSVoiceAssignment[]>([]);
+  const [cloneReferenceText, setCloneReferenceText] = useState("");
+  const [cloneReferenceAudioFile, setCloneReferenceAudioFile] = useState("");
+  const [cloneReferenceAudioName, setCloneReferenceAudioName] = useState("");
+  const [uploadingCloneReference, setUploadingCloneReference] = useState(false);
   const [narratorVoiceEnabled, setNarratorVoiceEnabled] = useState(false);
   const [narratorVoice, setNarratorVoice] = useState("");
   const [npcDefaultVoicesEnabled, setNpcDefaultVoicesEnabled] = useState(false);
@@ -520,6 +546,9 @@ export function TTSConfigCard() {
     setVoice(savedConfig.voice);
     setVoiceMode(savedConfig.voiceMode ?? "single");
     setVoiceAssignments(savedConfig.voiceAssignments ?? []);
+    setCloneReferenceText(savedConfig.cloneReferenceText ?? "");
+    setCloneReferenceAudioFile(savedConfig.cloneReferenceAudioFile ?? "");
+    setCloneReferenceAudioName(savedConfig.cloneReferenceAudioName ?? "");
     setNarratorVoiceEnabled(savedConfig.narratorVoiceEnabled ?? false);
     setNarratorVoice(savedConfig.narratorVoice ?? "");
     setNpcDefaultVoicesEnabled(savedConfig.npcDefaultVoicesEnabled ?? false);
@@ -592,6 +621,9 @@ export function TTSConfigCard() {
     voice,
     voiceMode,
     voiceAssignments,
+    cloneReferenceText,
+    cloneReferenceAudioFile,
+    cloneReferenceAudioName,
     narratorVoiceEnabled,
     narratorVoice,
     npcDefaultVoicesEnabled,
@@ -668,6 +700,9 @@ export function TTSConfigCard() {
     setVoice(nextProfile.voice);
     setVoiceMode(nextProfile.voiceMode);
     setVoiceAssignments(nextProfile.voiceAssignments);
+    setCloneReferenceText(nextProfile.cloneReferenceText);
+    setCloneReferenceAudioFile(nextProfile.cloneReferenceAudioFile);
+    setCloneReferenceAudioName(nextProfile.cloneReferenceAudioName);
     setNarratorVoiceEnabled(nextProfile.narratorVoiceEnabled);
     setNarratorVoice(nextProfile.narratorVoice);
     setNpcDefaultVoicesEnabled(nextProfile.npcDefaultVoicesEnabled);
@@ -684,6 +719,39 @@ export function TTSConfigCard() {
     });
   };
 
+  const handleCloneReferenceUpload = async (file: File) => {
+    const previousFile = cloneReferenceAudioFile;
+    setUploadingCloneReference(true);
+    try {
+      const result = await uploadCloneReference.mutateAsync(file);
+      setCloneReferenceAudioFile(result.file);
+      setCloneReferenceAudioName(result.name);
+      mark({ cloneReferenceAudioFile: result.file, cloneReferenceAudioName: result.name });
+      if (previousFile) {
+        void deleteCloneReference.mutateAsync(previousFile).catch(() => {});
+      }
+    } catch {
+      toast.error("Failed to upload reference clip.");
+    } finally {
+      setUploadingCloneReference(false);
+    }
+  };
+
+  const handleCloneReferenceRemove = () => {
+    const previousFile = cloneReferenceAudioFile;
+    setCloneReferenceAudioFile("");
+    setCloneReferenceAudioName("");
+    mark({ cloneReferenceAudioFile: "", cloneReferenceAudioName: "" });
+    if (previousFile) {
+      void deleteCloneReference.mutateAsync(previousFile).catch(() => {});
+    }
+  };
+
+  const handleCloneReferenceTextChange = (value: string) => {
+    setCloneReferenceText(value);
+    mark({ cloneReferenceText: value });
+  };
+
   const handlePreview = () => {
     if (ttsState === "playing" || ttsState === "loading") {
       ttsService.stop();
@@ -696,8 +764,13 @@ export function TTSConfigCard() {
         payload.voiceMode === "per-character"
           ? (payload.voiceAssignments.find((assignment) => assignment.voice)?.voice ?? payload.voice)
           : payload.voice;
+      const previewIsClone = payload.source === "openai" && isTTSCloneVoice(previewVoice);
       if (payload.source === "elevenlabs" && !previewVoice) {
         toast.error("Select an ElevenLabs voice before previewing.");
+        return;
+      }
+      if (previewIsClone && !payload.cloneReferenceAudioFile) {
+        toast.error("Upload a reference clip before previewing voice cloning.");
         return;
       }
 
@@ -749,6 +822,9 @@ export function TTSConfigCard() {
     let nextOptions = fetchedVoiceOptions.length > 0 ? fetchedVoiceOptions : [];
     if (source === "elevenlabs" && nextOptions.length === 0) {
       nextOptions = ELEVENLABS_DEFAULT_VOICE_OPTIONS;
+    }
+    if (source === "openai") {
+      nextOptions = [CLONE_VOICE_OPTION, ...nextOptions];
     }
     for (const savedVoice of [
       voice,
@@ -839,13 +915,28 @@ export function TTSConfigCard() {
   const allCharactersAssigned = characterOptions.length > 0 && assignedCharacterIds.size >= characterOptions.length;
   const customVoiceCount = voiceAssignments.filter((assignment) => assignment.characterId && assignment.voice).length;
   const selectedSource = TTS_SOURCE_DEFAULTS[source];
+  const singleVoiceIsClone = source === "openai" && isTTSCloneVoice(voice);
+  const cloneSelectedAnywhere =
+    source === "openai" &&
+    (singleVoiceIsClone ||
+      voiceAssignments.some((assignment) => isTTSCloneVoice(assignment.voice)) ||
+      (narratorVoiceEnabled && isTTSCloneVoice(narratorVoice)) ||
+      (npcDefaultVoicesEnabled &&
+        (npcDefaultMaleVoices.some((v) => isTTSCloneVoice(v)) || npcDefaultFemaleVoices.some((v) => isTTSCloneVoice(v)))));
+  const cloneReferenceLabel = cloneReferenceAudioName || "Voice cloning (no reference clip uploaded)";
   const selectedVoiceLabel =
     voiceMode === "per-character"
       ? `Per character${customVoiceCount > 0 ? ` · ${customVoiceCount} custom` : ""}`
-      : voice || (source === "elevenlabs" ? "No voice selected" : selectedSource.voice);
-  const narratorVoiceLabel = narratorVoice || (source === "elevenlabs" ? "No narrator voice selected" : voice);
+      : singleVoiceIsClone
+        ? cloneReferenceLabel
+        : voice || (source === "elevenlabs" ? "No voice selected" : selectedSource.voice);
+  const narratorVoiceIsClone = source === "openai" && isTTSCloneVoice(narratorVoice);
+  const narratorVoiceLabel = narratorVoiceIsClone
+    ? cloneReferenceLabel
+    : narratorVoice || (source === "elevenlabs" ? "No narrator voice selected" : voice);
   const previewVoice =
     voiceMode === "per-character" ? (voiceAssignments.find((assignment) => assignment.voice)?.voice ?? voice) : voice;
+  const previewIsClone = source === "openai" && isTTSCloneVoice(previewVoice);
   const selectedLanguage =
     ELEVENLABS_TTS_LANGUAGE_OPTIONS.find((option) => option.code === elevenLabsLanguageCode) ??
     ELEVENLABS_TTS_LANGUAGE_OPTIONS[0];
@@ -862,15 +953,21 @@ export function TTSConfigCard() {
     (source === "elevenlabs" || source === "xai") && speedSliderValue !== speed
       ? `Speed — ${speedSliderValue.toFixed(2)}× (clamped from ${speed.toFixed(2)}×)`
       : `Speed — ${speed.toFixed(2)}×`;
-  const previewDisabled = !enabled || ttsState === "loading" || (source === "elevenlabs" && !previewVoice);
+  const previewDisabled =
+    !enabled ||
+    ttsState === "loading" ||
+    (source === "elevenlabs" && !previewVoice) ||
+    (previewIsClone && !cloneReferenceAudioFile);
   const previewTitle =
     source === "elevenlabs" && !previewVoice
       ? "Select an ElevenLabs voice first"
-      : !enabled
-        ? "Enable TTS first"
-        : ttsState === "playing"
-          ? "Stop preview"
-          : "Preview voice";
+      : previewIsClone && !cloneReferenceAudioFile
+        ? "Upload a reference clip first"
+        : !enabled
+          ? "Enable TTS first"
+          : ttsState === "playing"
+            ? "Stop preview"
+            : "Preview voice";
   const updateVoiceAssignments = (nextAssignments: TTSVoiceAssignment[]) => {
     setVoiceAssignments(nextAssignments);
     mark({ voiceAssignments: nextAssignments });
@@ -903,7 +1000,7 @@ export function TTSConfigCard() {
     const nextAssignment: TTSVoiceAssignment = {
       characterId: nextCharacter?.id ?? "",
       characterName: nextCharacter?.name ?? "",
-      voice: voiceOptions[0]?.id ?? voice,
+      voice: voiceOptions.find((option) => !isTTSCloneVoice(option.id))?.id ?? voice,
     };
     updateVoiceAssignments([...voiceAssignments, nextAssignment]);
   };
@@ -1119,10 +1216,88 @@ export function TTSConfigCard() {
             )}
           </FieldRow>
 
+          {cloneSelectedAnywhere && (
+            <FieldRow
+              label="Reference Clip"
+              help="Upload a short reference clip of the voice to clone (WAV, MP3, OGG, FLAC, M4A, or WebM)."
+            >
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <label
+                    className={cn(
+                      "mari-chrome-control flex flex-1 cursor-pointer items-center justify-center gap-1.5 text-xs",
+                      uploadingCloneReference && "pointer-events-none opacity-60",
+                    )}
+                  >
+                    {uploadingCloneReference ? (
+                      <Loader2 size="0.75rem" className="animate-spin" />
+                    ) : (
+                      <Upload size="0.75rem" />
+                    )}
+                    {cloneReferenceAudioName ? "Replace clip" : "Upload clip"}
+                    <input
+                      type="file"
+                      accept="audio/*,.wav,.mp3,.ogg,.flac,.m4a,.webm"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        e.target.value = "";
+                        if (file) void handleCloneReferenceUpload(file);
+                      }}
+                    />
+                  </label>
+                  {cloneReferenceAudioFile && (
+                    <button
+                      type="button"
+                      onClick={handleCloneReferenceRemove}
+                      className="mari-chrome-control mari-chrome-control--small shrink-0 text-xs"
+                      title="Remove reference clip"
+                    >
+                      <X size="0.75rem" />
+                    </button>
+                  )}
+                </div>
+                {cloneReferenceAudioName ? (
+                  <div className="flex items-center gap-1.5 rounded-lg bg-black/10 px-2.5 py-1.5 text-[0.6875rem] text-[var(--muted-foreground)]">
+                    <Mic size="0.75rem" className="shrink-0 text-sky-400" />
+                    <span className="truncate">{cloneReferenceAudioName}</span>
+                  </div>
+                ) : (
+                  <p className="rounded-lg border border-dashed border-[var(--border)] px-2.5 py-2 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+                    No reference clip uploaded yet.
+                  </p>
+                )}
+              </div>
+            </FieldRow>
+          )}
+
+          {cloneSelectedAnywhere && (
+            <FieldRow
+              label="Reference Transcript"
+              help="The exact words spoken in the reference clip (sent to the provider as ref_text). Helps the provider match cadence to the target speech."
+            >
+              <textarea
+                value={cloneReferenceText}
+                onChange={(e) => handleCloneReferenceTextChange(e.target.value)}
+                rows={3}
+                className={cn(INPUT_CLS, "resize-y")}
+                placeholder="Transcript of what is said in the reference clip..."
+              />
+            </FieldRow>
+          )}
+
+          {cloneSelectedAnywhere && (
+            <p className="rounded-lg border border-dashed border-sky-400/20 bg-sky-400/5 px-2.5 py-2 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+              "Voice Cloning" shares one reference clip and transcript. Selecting it for the single voice, a
+              character, the narrator, or an NPC pool synthesizes that line from the clip instead of a provider
+              voice — everywhere else keeps using its own selected voice.
+            </p>
+          )}
+
           {/* Voice assignment mode */}
           <FieldRow
             label="Voice Option"
-            help="Use one voice for every character, or assign specific voices to characters from your Characters tab."
+            help="Use one voice for every character, or assign specific voices to characters from your Characters tab. OpenAI-compatible sources can assign 'Voice Cloning' to any of these just like a normal voice."
           >
             <select
               value={voiceMode}

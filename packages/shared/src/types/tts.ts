@@ -23,6 +23,18 @@ function normalizeDialoguePauseMs(value: number): number {
   );
 }
 
+/**
+ * Sentinel voice ID selectable in any OpenAI-compatible voice picker (single voice, a
+ * character assignment, the narrator voice, or an NPC default pool). Wherever it is
+ * selected, that line is synthesized from the configured reference clip instead of a
+ * provider-listed voice.
+ */
+export const TTS_CLONE_VOICE_ID = "__voice_clone__";
+
+export function isTTSCloneVoice(voice: string | null | undefined): boolean {
+  return voice === TTS_CLONE_VOICE_ID;
+}
+
 export const ttsConversationCallAudioInputModeSchema = z.enum(["system", "auto", "transcribe", "local_whisper"]);
 export type TTSConversationCallAudioInputMode = z.infer<typeof ttsConversationCallAudioInputModeSchema>;
 
@@ -127,6 +139,12 @@ const ttsConfigBaseSchema = z.object({
   elevenLabsLanguageCode: z.string().max(8).default(""),
   voiceMode: ttsVoiceModeSchema.default("single"),
   voiceAssignments: z.array(ttsVoiceAssignmentSchema).default([]),
+  /** Voice cloning: transcript of the reference clip's speech, sent to the provider as ref_text. */
+  cloneReferenceText: z.string().max(4000).default(""),
+  /** Voice cloning: server-stored filename of the uploaded reference clip (see /api/tts/clone-reference). */
+  cloneReferenceAudioFile: z.string().default(""),
+  /** Voice cloning: original filename of the uploaded reference clip, for display. */
+  cloneReferenceAudioName: z.string().default(""),
   narratorVoiceEnabled: z.boolean().default(false),
   narratorVoice: z.string().default(""),
   npcDefaultVoicesEnabled: z.boolean().default(false),
@@ -175,6 +193,9 @@ export const ttsSourceProfileSchema = ttsConfigBaseSchema.pick({
   elevenLabsLanguageCode: true,
   voiceMode: true,
   voiceAssignments: true,
+  cloneReferenceText: true,
+  cloneReferenceAudioFile: true,
+  cloneReferenceAudioName: true,
   narratorVoiceEnabled: true,
   narratorVoice: true,
   npcDefaultVoicesEnabled: true,
@@ -212,6 +233,9 @@ export function ttsSourceProfileFromConfig(config: TTSConfig): TTSSourceProfile 
     elevenLabsLanguageCode: config.elevenLabsLanguageCode,
     voiceMode: config.voiceMode,
     voiceAssignments: config.voiceAssignments,
+    cloneReferenceText: config.cloneReferenceText,
+    cloneReferenceAudioFile: config.cloneReferenceAudioFile,
+    cloneReferenceAudioName: config.cloneReferenceAudioName,
     narratorVoiceEnabled: config.narratorVoiceEnabled,
     narratorVoice: config.narratorVoice,
     npcDefaultVoicesEnabled: config.npcDefaultVoicesEnabled,

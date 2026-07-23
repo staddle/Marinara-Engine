@@ -44,6 +44,24 @@ export function useTTSVoices(source: TTSSource, baseUrl: string, enabled: boolea
   });
 }
 
+// ── Voice cloning reference clip ──────────────────
+
+export function useUploadTTSCloneReference() {
+  return useMutation({
+    mutationFn: (file: File) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      return api.upload<{ file: string; name: string }>("/tts/clone-reference", formData);
+    },
+  });
+}
+
+export function useDeleteTTSCloneReference() {
+  return useMutation({
+    mutationFn: (filename: string) => api.delete<void>(`/tts/clone-reference/${encodeURIComponent(filename)}`),
+  });
+}
+
 // ── Speak (fire-and-forget mutation used by tts-service) ─────────────────
 
 export { TTS_API_KEY_MASK };
