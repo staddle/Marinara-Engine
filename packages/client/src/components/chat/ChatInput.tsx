@@ -16,6 +16,7 @@ import {
   Sparkles,
   WandSparkles,
   Swords,
+  Phone,
 } from "lucide-react";
 import { createPortal } from "react-dom";
 import { toast } from "sonner";
@@ -24,7 +25,9 @@ import { useChatStore } from "../../stores/chat.store";
 import { useAgentStore } from "../../stores/agent.store";
 import { useUIStore } from "../../stores/ui.store";
 import { useGenerate } from "../../hooks/use-generate";
-import { useSTTConfig } from "../../hooks/use-stt";
+import { useSTTConfig, useTranscribeAudio } from "../../hooks/use-stt";
+import { useCallVoiceSession } from "../../hooks/use-call-voice-session";
+import { ttsService } from "../../lib/tts-service";
 import { useCommitSpatialOwnerTurn } from "../../hooks/use-spatial-context";
 import { useApplyRegex } from "../../hooks/use-apply-regex";
 import { useInstalledCapabilityPackages } from "../../hooks/use-capability-packages";
@@ -57,6 +60,7 @@ import { requestChatScrollToBottom } from "../../lib/chat-scroll-events";
 import { EmojiPicker } from "../ui/EmojiPicker";
 import { SpeechToTextButton } from "../ui/SpeechToTextButton";
 import { PushToTalkButton } from "../ui/PushToTalkButton";
+import { CallModeBar, type CallModePhase } from "./CallModeBar";
 import { QuickConnectionSwitcher } from "./QuickConnectionSwitcher";
 import { QuickPersonaSwitcher } from "./QuickPersonaSwitcher";
 import { QuickSwitcherMobile } from "./QuickSwitcherMobile";
@@ -173,6 +177,21 @@ function readFileAsDataUrl(file: Blob): Promise<string> {
     reader.onerror = () => reject(reader.error ?? new Error("Failed to read file"));
     reader.readAsDataURL(file);
   });
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Call Mode shouldn't reopen the mic while the character's reply is still being spoken (mic
+ * pickup of the device's own TTS playback). Autoplay kicks in asynchronously after streaming
+ * ends, so wait a grace period for it to start, then wait for it to finish (a no-op if autoplay
+ * is off, since ttsService never leaves "idle" in that case).
+ */
+async function waitForTTSSettle(): Promise<void> {
+  await sleep(400);
+  while (ttsService.getState() === "loading" || ttsService.getState() === "playing") {
+    await sleep(150);
+  }
 }
 
 interface ChatInputProps {
@@ -312,6 +331,10 @@ export const ChatInput = memo(function ChatInput({
   const speechToTextEnabled = useUIStore((s) => s.speechToTextEnabled);
   const { data: sttConfig } = useSTTConfig();
   const pushToTalkEnabled = mode === "roleplay" && sttConfig?.enabled === true;
+  const transcribeAudio = useTranscribeAudio();
+  const [callActive, setCallActive] = useState(false);
+  const [callPhase, setCallPhase] = useState<CallModePhase>("listening");
+  const [callMuted, setCallMuted] = useState(false);
   const quoteFormat = useUIStore((s) => s.quoteFormat);
   const createMessage = useCreateMessage(activeChatId);
   const commitSpatialOwnerTurn = useCommitSpatialOwnerTurn();
@@ -1602,6 +1625,68 @@ export const ChatInput = memo(function ChatInput({
     [activeChatId, generateWithNarrativeDirector, isInputBusy],
   );
 
+  const handleCallUtterance = useCallback(
+    (blob: Blob) => {
+      if (!activeChatId) return;
+      setCallPhase("thinking");
+      void (async () => {
+        try {
+          const { text } = await transcribeAudio.mutateAsync(blob);
+          const trimmed = text.trim();
+          if (trimmed) {
+            setCallPhase("speaking");
+            try {
+              await generateWithNarrativeDirector({
+                chatId: activeChatId,
+                connectionId: null,
+                userMessage: trimmed,
+              });
+            } catch (error) {
+              toast.error(error instanceof Error ? error.message : "Generation failed");
+            }
+            await waitForTTSSettle();
+          }
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Transcription failed.");
+        } finally {
+          setCallPhase("listening");
+        }
+      })();
+    },
+    [activeChatId, generateWithNarrativeDirector, transcribeAudio],
+  );
+
+  const handleCallVoiceError = useCallback((message: string) => {
+    toast.error(message);
+    setCallActive(false);
+  }, []);
+
+  const callVoiceSession = useCallVoiceSession({
+    onUtterance: handleCallUtterance,
+    onError: handleCallVoiceError,
+    paused: callPhase !== "listening" || callMuted,
+  });
+  const { start: startCallVoiceSession, stop: stopCallVoiceSession } = callVoiceSession;
+
+  useEffect(() => {
+    if (!callActive) return;
+    void startCallVoiceSession();
+    return () => stopCallVoiceSession();
+  }, [callActive, startCallVoiceSession, stopCallVoiceSession]);
+
+  useEffect(() => {
+    // End the call automatically if the user switches chats mid-call.
+    return () => setCallActive(false);
+  }, [activeChatId]);
+
+  const handleStartCall = useCallback(() => {
+    setCallPhase("listening");
+    setCallMuted(false);
+    setCallActive(true);
+  }, []);
+  const handleEndCall = useCallback(() => setCallActive(false), []);
+  const handleToggleCallMute = useCallback(() => setCallMuted((m) => !m), []);
+
   const ensureInputVisible = useCallback(() => {
     if (typeof window === "undefined" || !window.matchMedia("(max-width: 767px)").matches) return;
     const scroll = () => {
@@ -1651,6 +1736,16 @@ export const ChatInput = memo(function ChatInput({
 
   return (
     <div className="mari-chat-input chat-input-container px-3 pb-3">
+      {callActive ? (
+        <CallModeBar
+          phase={callPhase}
+          voiceState={callVoiceSession.state}
+          muted={callMuted}
+          onToggleMute={handleToggleCallMute}
+          onEndCall={handleEndCall}
+        />
+      ) : (
+        <>
       {/* Slash command autocomplete popup */}
       {completions.length > 0 && (
         <div className="mb-2 max-h-[min(18rem,45dvh)] overflow-y-auto rounded-xl border border-foreground/10 bg-[var(--card)] shadow-xl backdrop-blur-xl [-webkit-overflow-scrolling:touch]">
@@ -1931,6 +2026,22 @@ export const ChatInput = memo(function ChatInput({
           />
         )}
 
+        {pushToTalkEnabled && (
+          <button
+            type="button"
+            onClick={handleStartCall}
+            disabled={!activeChatId || isInputBusy}
+            className={cn(
+              "flex h-11 w-11 shrink-0 items-center justify-center rounded-xl transition-all duration-200 active:scale-90 sm:h-8 sm:w-8",
+              "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70",
+              (!activeChatId || isInputBusy) && "cursor-not-allowed opacity-50",
+            )}
+            title="Start voice call"
+          >
+            <Phone size={16} />
+          </button>
+        )}
+
         {showQuickRepliesMenu && quickReplyActions.length > 0 && (
           <QuickReplyMenu actions={quickReplyActions} disabled={!activeChatId || isInputBusy || isReadingAttachments} />
         )}
@@ -2016,6 +2127,8 @@ export const ChatInput = memo(function ChatInput({
           </div>,
           document.body,
         )}
+        </>
+      )}
     </div>
   );
 });
