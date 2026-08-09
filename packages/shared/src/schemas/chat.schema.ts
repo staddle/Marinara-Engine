@@ -4,7 +4,7 @@
 import { z } from "zod";
 import { pendingSpatialTransitionSchema } from "./spatial-context.schema.js";
 
-export const chatModeSchema = z.enum(["conversation", "roleplay", "visual_novel", "game"]);
+export const chatModeSchema = z.enum(["conversation", "roleplay", "game"]);
 
 export const messageRoleSchema = z.enum(["user", "assistant", "system", "narrator"]);
 
@@ -29,8 +29,11 @@ export const createMessageSchema = z.object({
 export const generateRequestSchema = z.object({
   chatId: z.string(),
   userMessage: z.string().nullable().default(null),
+  submissionId: z.string().min(1).max(100).nullable().optional().default(null),
   regenerateMessageId: z.string().nullable().default(null),
   continueMessageId: z.string().nullable().default(null),
+  /** Whether continuation text is separated from the existing message by a blank line. */
+  continueAddsNewline: z.boolean().optional().default(true),
   connectionId: z.string().nullable().default(null),
   pendingSpatialTransition: pendingSpatialTransitionSchema.nullable().optional().default(null),
 

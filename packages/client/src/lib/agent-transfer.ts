@@ -1,8 +1,14 @@
 import {
+  CUSTOM_AGENT_IMPORT_SOURCE_SETTING,
+  CUSTOM_AGENT_PERMISSIONS_EXPLICIT_SETTING,
+  agentResultTypeSchema,
+  createImportedAgentType,
   getFolderManifestConfig,
+  normalizeCustomAgentCapabilities,
   normalizeAgentPhaseForType,
   normalizeAgentPhaseValue,
   sanitizeFolderSegment,
+  type CustomAgentCapability,
 } from "@marinara-engine/shared";
 import type { ZipFileInput } from "./download-zip";
 import {
@@ -39,6 +45,8 @@ const TRANSFER_UNSAFE_AGENT_SETTING_KEYS = new Set([
   "imageConnectionId",
   "lorebookWriteEnabled",
   "customAgentRepositorySource",
+  CUSTOM_AGENT_IMPORT_SOURCE_SETTING,
+  CUSTOM_AGENT_PERMISSIONS_EXPLICIT_SETTING,
 ]);
 
 const TRANSFER_UNSAFE_ENABLED_TOOLS = new Set(["save_lorebook_entry"]);
@@ -99,19 +107,6 @@ function parseAgentSettings(value: unknown): Record<string, unknown> {
   return {};
 }
 
-function createImportedAgentType(sourceType: string): string {
-  const slug =
-    sourceType
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/(^-|-$)/g, "") || "agent";
-  const suffix =
-    globalThis.crypto && "randomUUID" in globalThis.crypto
-      ? globalThis.crypto.randomUUID()
-      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-  return `custom-import-${slug}-${suffix}`;
-}
-
 export function normalizeAgentImportEntry(entry: unknown, resolveTextFile?: (path: unknown) => string | null) {
   const source = getFolderManifestConfig(entry);
   if (!isJsonRecord(source)) return null;
@@ -134,7 +129,18 @@ export function normalizeAgentImportEntry(entry: unknown, resolveTextFile?: (pat
   if (typeof settings.author !== "string" || !settings.author.trim()) {
     settings.author = "Unknown";
   }
-  const resultType = typeof source.resultType === "string" ? source.resultType : settings.resultType;
+  const parsedResultType = agentResultTypeSchema.safeParse(
+    typeof source.resultType === "string" ? source.resultType : settings.resultType,
+  );
+  const resultType = parsedResultType.success ? parsedResultType.data : undefined;
+  const permissionSettings = { ...settings };
+  delete permissionSettings[CUSTOM_AGENT_PERMISSIONS_EXPLICIT_SETTING];
+  if (resultType) permissionSettings.resultType = resultType;
+  const requestedCapabilities = (
+    Object.entries(normalizeCustomAgentCapabilities(permissionSettings)) as Array<[CustomAgentCapability, boolean]>
+  )
+    .filter(([, enabled]) => enabled === true)
+    .map(([capability]) => capability);
 
   return {
     type,
@@ -148,7 +154,8 @@ export function normalizeAgentImportEntry(entry: unknown, resolveTextFile?: (pat
       resolveTextFile?.(source.promptTemplatePath) ??
       (typeof source.promptTemplate === "string" ? source.promptTemplate : ""),
     settings,
-    ...(typeof resultType === "string" ? { resultType } : {}),
+    requestedCapabilities,
+    ...(resultType ? { resultType } : {}),
   };
 }
 

@@ -55,12 +55,24 @@ export interface CommitSpatialOwnerTurnInput {
 }
 
 type CommitResult = { message: CapabilityMessageRecord; snapshot: SpatialContextSnapshot };
+export type AppliedSpatialOwnerTurn = { messageId: string; snapshot: SpatialContextSnapshot };
 interface OwnerTurnService {
   commitSpatialOwnerTurn(input: CommitSpatialOwnerTurnInput): Promise<CommitResult>;
+  findAppliedSpatialOwnerTurn?(
+    input: Pick<CommitSpatialOwnerTurnInput, "chatId" | "transition">,
+  ): Promise<AppliedSpatialOwnerTurn | null>;
+}
+
+export async function findAppliedSpatialOwnerTurn(
+  input: Pick<CommitSpatialOwnerTurnInput, "chatId" | "transition">,
+): Promise<AppliedSpatialOwnerTurn | null> {
+  const provider = getCapabilityService<OwnerTurnService>("hierarchical-maps:owner-turn");
+  if (!provider) throw new SpatialOwnerTurnError("spatial_feature_unavailable", "World Maps is not active.", 409);
+  return provider.findAppliedSpatialOwnerTurn?.(input) ?? null;
 }
 
 export async function commitSpatialOwnerTurn(input: CommitSpatialOwnerTurnInput): Promise<CommitResult> {
   const provider = getCapabilityService<OwnerTurnService>("hierarchical-maps:owner-turn");
-  if (!provider) throw new SpatialOwnerTurnError("spatial_feature_unavailable", "Hierarchical Maps is not active.", 409);
+  if (!provider) throw new SpatialOwnerTurnError("spatial_feature_unavailable", "World Maps is not active.", 409);
   return provider.commitSpatialOwnerTurn(input);
 }

@@ -1,4 +1,13 @@
-export type VideoDefaultsService = "gemini_omni" | "google_veo" | "xai" | "openrouter" | "seedance" | "comfyui";
+import type { ComfyUiLoraSetting } from "./image-generation-defaults.js";
+
+export type VideoDefaultsService =
+  | "gemini_omni"
+  | "google_veo"
+  | "xai"
+  | "openrouter"
+  | "atlas"
+  | "seedance"
+  | "comfyui";
 
 export type VideoAspectRatio = "16:9" | "9:16";
 export type VideoResolution = "480p" | "720p" | "1080p";
@@ -31,11 +40,21 @@ export interface OpenRouterVideoDefaults {
   resolution: VideoResolution;
 }
 
-export interface ComfyUiVideoDefaults {
-  /** ComfyUI workflows receive this duration as a 16 fps frame count through %length%. */
+export interface AtlasCloudVideoDefaults {
+  /** Atlas Cloud model schemas vary; these are the common scene-video controls. */
   durationSeconds: number;
   aspectRatio: VideoAspectRatio;
   resolution: VideoResolution;
+}
+
+export interface ComfyUiVideoDefaults {
+  /** ComfyUI workflows receive this duration through %length_s% and as a frame count through %length%. */
+  durationSeconds: number;
+  /** Frame rate exposed as %fps% and used to derive the legacy %length% frame count. */
+  fps: number;
+  aspectRatio: VideoAspectRatio;
+  resolution: VideoResolution;
+  loras: ComfyUiLoraSetting[];
 }
 
 export interface SeedanceVideoDefaults {
@@ -55,6 +74,7 @@ export interface VideoGenerationDefaultsProfile {
   googleVeo: GoogleVeoVideoDefaults;
   xai: XaiVideoDefaults;
   openrouter: OpenRouterVideoDefaults;
+  atlas: AtlasCloudVideoDefaults;
   seedance: SeedanceVideoDefaults;
   comfyui: ComfyUiVideoDefaults;
 }

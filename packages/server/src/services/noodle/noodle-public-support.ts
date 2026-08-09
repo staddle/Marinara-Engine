@@ -7,9 +7,11 @@ import {
   type NoodleInteractionType,
   type NoodleSettings,
 } from "@marinara-engine/shared";
+import { logger } from "../../lib/logger.js";
 import { createCharactersStorage } from "../storage/characters.storage.js";
 import { createNoodleStorage, parseNoodleAvatarCrop } from "../storage/noodle.storage.js";
 import { isNoodleProfileGenerated } from "./noodle-profile-selection.js";
+import { ensureAmbientNoodleAccounts } from "./noodle-ambient-profiles.js";
 
 const PROFESSOR_MARI_NOODLE_BIO =
   "She/Her | 18+ | Skill Issue | Your Assistant After Hours (hey, I get to do fun stuff, too!) | Simp for Il Dottore 24/7 | LLMs Fan";
@@ -140,6 +142,7 @@ export async function bootstrapVisibleNoodle(
 ) {
   const settings = await noodle.getSettings();
   const livePersonaIds = await ensurePersonaAccounts(noodle, characters);
+  await ensureAmbientNoodleAccounts(noodle, settings.allowRandomUsers);
   if (settings.allowProfessorMari) await ensureProfessorMariAccount(noodle, characters);
   const existingCharacterAccounts = (await noodle.listAccounts()).filter(
     (account) => account.kind === "character" && account.entityId !== PROFESSOR_MARI_ID,
@@ -147,7 +150,16 @@ export async function bootstrapVisibleNoodle(
   const characterRowsById = new Map((await characters.list()).map((row) => [row.id, row]));
   for (const account of existingCharacterAccounts) {
     const row = characterRowsById.get(account.entityId);
-    if (!row) continue;
+    if (!row) {
+      // Character was deleted but the account cleanup failed or predates it existing (see
+      // characters.routes.ts delete handler) — reconcile the ghost here on every open.
+      try {
+        await noodle.deleteAccountByEntity("character", account.entityId);
+      } catch (err) {
+        logger.error(err, "Failed to reconcile ghost Noodle account for character %s", account.entityId);
+      }
+      continue;
+    }
     await noodle.upsertAccountFromProfile({
       kind: "character",
       entityId: row.id,
@@ -190,4 +202,35 @@ export function interactionDigestVerb(type: NoodleInteractionType) {
 export function noodleDigestAccountLabel(account: Pick<NoodleAccount, "kind" | "displayName" | "handle">) {
   const identity = `${account.displayName} (@${account.handle})`;
   return account.kind === "persona" ? `Persona ${identity}` : identity;
+}
+
+/**
+ * Drops character accounts whose character card no longer exists.
+ *
+ * A Noodle account stores its own name and handle, so a stale account keeps rendering in the
+ * "Active Noodle Accounts" list while `characters.getById` returns null for it. The refresh prompt
+ * then carries the name with no character card, and the lorebook scan is scoped to a character ID
+ * that cannot match anything — every character and lore detail silently disappears from generation
+ * with no error. Accounts are left in place (posts still reference them); they are only skipped
+ * when choosing who takes part in a refresh.
+ *
+ * Accounts go stale whenever a character's row stops matching the stored entityId: deleting the
+ * character (`characters.remove` does not touch noodle_accounts, and there is no cascade), or any
+ * re-create path that mints a fresh ID, such as a profile import (`characters.create` calls newId).
+ */
+export async function filterResolvableNoodleParticipants(
+  accounts: NoodleAccount[],
+  characters: ReturnType<typeof createCharactersStorage>,
+): Promise<{ resolvable: NoodleAccount[]; staleAccounts: NoodleAccount[] }> {
+  const resolvable: NoodleAccount[] = [];
+  const staleAccounts: NoodleAccount[] = [];
+  for (const account of accounts) {
+    if (account.kind !== "character") {
+      resolvable.push(account);
+      continue;
+    }
+    if (await characters.getById(account.entityId)) resolvable.push(account);
+    else staleAccounts.push(account);
+  }
+  return { resolvable, staleAccounts };
 }

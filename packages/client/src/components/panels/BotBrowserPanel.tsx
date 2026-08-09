@@ -11,10 +11,14 @@ import { cn, getAvatarCropStyle } from "../../lib/utils";
 import { sortBasicPanelItems } from "../../lib/panel-sort";
 import { ContextMenu, type ContextMenuItem } from "../ui/ContextMenu";
 import { showConfirmDialog } from "../../lib/app-dialogs";
+import { useLocalizedUiText } from "../../localization/use-localized-ui-text";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 type CharacterRow = { id: string; data: string; avatarPath: string | null; createdAt: string; updatedAt: string };
 
 export function BotBrowserPanel() {
+  const { t: localizeUi } = useUiTranslation();
+  const localize = useLocalizedUiText();
   const { data: characters, isLoading } = useCharacters();
   const deleteCharacter = useDeleteCharacter();
   const openCharacterDetail = useUIStore((s) => s.openCharacterDetail);
@@ -89,9 +93,9 @@ export function BotBrowserPanel() {
   const handleDeleteCharacter = useCallback(
     async (character: { id: string; name: string }) => {
       const confirmed = await showConfirmDialog({
-        title: "Delete Imported Character",
-        message: `Delete "${character.name}" from your imported characters? This cannot be undone.`,
-        confirmLabel: "Delete",
+        title:localizeUi("ui.panels.botbrowserpanel.deleteImportedCharacter"),
+        message:localizeUi("ui.panels.botbrowserpanel.deleteValue1FromYourImportedCharactersThisCannotBe", { value1: character.name }),
+        confirmLabel:localizeUi("lorebook.editor.batch.delete"),
         tone: "destructive",
       });
       if (!confirmed) return;
@@ -100,14 +104,14 @@ export function BotBrowserPanel() {
       try {
         await deleteCharacter.mutateAsync(character.id);
         if (characterDetailId === character.id) closeCharacterDetail();
-        toast.success(`Deleted "${character.name}".`);
+        toast.success(localizeUi("ui.panels.botbrowserpanel.deletedValue1", { value1: character.name }));
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Failed to delete character.");
+        toast.error(error instanceof Error ? error.message :localizeUi("ui.panels.botbrowserpanel.failedToDeleteCharacter"));
       } finally {
         setDeletingCharacterId(null);
       }
     },
-    [characterDetailId, closeCharacterDetail, deleteCharacter],
+    [characterDetailId, closeCharacterDetail, deleteCharacter, localizeUi],
   );
 
   return (
@@ -120,9 +124,7 @@ export function BotBrowserPanel() {
           botBrowserOpen && "mari-chrome-control--selected",
         )}
       >
-        <Bot size="0.875rem" />
-        Download Cards
-      </button>
+        <Bot size="0.875rem" />{localizeUi("ui.panels.botbrowserpanel.downloadCards")}</button>
 
       {/* Search + Sort */}
       <div className="flex gap-1.5">
@@ -135,7 +137,7 @@ export function BotBrowserPanel() {
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search imported..."
+            placeholder={localize("Search imported...")}
             className="mari-chrome-field h-10 w-full py-0 pl-8 pr-3 text-xs md:h-9"
           />
         </div>
@@ -144,13 +146,13 @@ export function BotBrowserPanel() {
             value={sort}
             onChange={(e) => setSort(e.target.value as ResourcePanelSort)}
             className="mari-chrome-field mari-chrome-sort-field mari-accent-animated h-10 appearance-none py-0 pl-2.5 pr-7 text-[0.6875rem] md:h-9"
-            title="Sort order"
-            aria-label="Sort imported characters"
+            title={localizeUi("ui.panels.agentspanel.sortOrder")}
+            aria-label={localizeUi("ui.panels.botbrowserpanel.sortImportedCharacters")}
           >
-            <option value="name-asc">A-Z</option>
-            <option value="name-desc">Z-A</option>
-            <option value="newest">Newest</option>
-            <option value="oldest">Oldest</option>
+            <option value="name-asc">{localizeUi("ui.panels.backgroundpicker.aZ")}</option>
+            <option value="name-desc">{localizeUi("ui.panels.backgroundpicker.zA")}</option>
+            <option value="newest">{localizeUi("ui.panels.backgroundpicker.newest")}</option>
+            <option value="oldest">{localizeUi("ui.panels.backgroundpicker.oldest")}</option>
           </select>
           <ArrowUpDown
             size="0.625rem"
@@ -161,10 +163,10 @@ export function BotBrowserPanel() {
 
       {/* Character list */}
       {isLoading ? (
-        <div className="mari-chrome-text-muted py-4 text-center text-xs">Loading...</div>
+        <div className="mari-chrome-text-muted py-4 text-center text-xs">{localizeUi("ui.characters.characterlibraryview.loading")}</div>
       ) : filtered.length === 0 ? (
         <div className="mari-chrome-text-muted py-4 text-center text-xs">
-          {search ? "No matches" : "No imported characters yet"}
+          {search ?localizeUi("ui.panels.botbrowserpanel.noMatches") :localizeUi("ui.panels.botbrowserpanel.noImportedCharactersYet")}
         </div>
       ) : (
         <div className="flex flex-col gap-0.5">
@@ -218,8 +220,8 @@ export function BotBrowserPanel() {
                 }}
                 disabled={deletingCharacterId !== null}
                 className="mari-chrome-control mari-chrome-control--small mr-1 h-8 w-8 shrink-0 p-0 disabled:cursor-wait disabled:opacity-50"
-                title={`Delete ${char.name}`}
-                aria-label={`Delete ${char.name}`}
+                title={localizeUi("ui.panels.botbrowserpanel.deleteValue1", { value1: char.name })}
+                aria-label={localizeUi("ui.panels.botbrowserpanel.deleteValue1", { value1: char.name })}
               >
                 <Trash2 size="0.75rem" />
               </button>

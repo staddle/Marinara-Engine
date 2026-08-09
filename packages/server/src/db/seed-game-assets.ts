@@ -1,6 +1,6 @@
 // ──────────────────────────────────────────────
 // Seed: Default Game Assets
-// Copies bundled game-mode assets (music, SFX, sprites)
+// Copies bundled game-mode assets (music, ambient, and SFX)
 // into the data/game-assets directory on first boot.
 // All assets are CC0 — see CREDITS.md in the bundle.
 // ──────────────────────────────────────────────
@@ -103,9 +103,7 @@ export async function seedDefaultGameAssets(): Promise<void> {
     const copied = copyDirRecursive(BUNDLED_GAME_ASSETS_DIR, GAME_ASSETS_DIR);
     writeFileSync(SEED_MARKER, `${bundleHash}\n`, "utf-8");
     if (copied > 0) {
-      logger.info(
-        `[seed] Installed ${copied} default game asset${copied > 1 ? "s" : ""} (music, ambient, SFX, sprites)`,
-      );
+      logger.info(`[seed] Installed ${copied} default game asset${copied > 1 ? "s" : ""} (music, ambient, SFX)`);
     }
   }
 

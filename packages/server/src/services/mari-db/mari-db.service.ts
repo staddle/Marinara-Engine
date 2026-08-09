@@ -23,7 +23,9 @@ import { executeWikiCli } from "../professor-mari/fandom-mediawiki/wiki-cli.js";
 import {
   LIMITS,
   PROFESSOR_MARI_ID,
+  createPersonalExtensionSchema,
   normalizeLorebookCategory,
+  normalizePersonalExtensionCapabilities,
   type MariDbCommandResult,
   type MariDbDiffSummary,
   type MariDbHistoryEntry,
@@ -32,6 +34,7 @@ import {
   type MariDbValidationIssue,
   type MariDbValidationResult,
 } from "@marinara-engine/shared";
+import { computePersonalExtensionHash } from "../extensions/personal-extension-hash.js";
 
 type Row = Record<string, unknown>;
 type Table = AnyFileTable;
@@ -65,9 +68,11 @@ type Plan = {
   request: ParsedMutationRequest;
 };
 type ParsedMutationRequest = {
-  kind: "insert" | "patch" | "replace" | "delete" | "transform" | "theme-create" | "theme-update" | "theme-set-active";
+  kind: "insert" | "patch" | "replace" | "delete" | "transform" | "theme-create" | "theme-update" | "theme-set-active" | "character-move-folder";
   table: string | "all";
   id?: string;
+  characterId?: string;
+  folderId?: string;
   where?: string;
   row?: Row;
   patch?: Row;
@@ -79,6 +84,7 @@ type ParsedMutationRequest = {
   cwd?: string;
   apply: boolean;
   requiresApproval?: boolean;
+  personalExtensionDraftMutation?: boolean;
   cascade: boolean;
   reason: string | null;
   generatedIds?: string[];
@@ -185,12 +191,26 @@ function runProcess(bin: string, args: string[], options: { cwd: string; timeout
     let settled = false;
     let timedOut = false;
 
-    const child = spawn(bin, args, {
-      cwd: options.cwd,
-      env: process.env,
-      shell: process.platform === "win32",
-      windowsHide: true,
-    });
+    const useWindowsCommand = process.platform === "win32" && bin === "pnpm";
+    const windowsCommand = useWindowsCommand
+      ? [bin, ...args]
+          .map((part) => {
+            if (!/^[A-Za-z0-9@._/:=+-]+$/u.test(part)) {
+              throw new Error(`Unsupported character in command argument: ${part}`);
+            }
+            return part;
+          })
+          .join(" ")
+      : "";
+    const child = spawn(
+      useWindowsCommand ? (process.env.ComSpec ?? "cmd.exe") : bin,
+      useWindowsCommand ? ["/d", "/s", "/c", windowsCommand] : args,
+      {
+        cwd: options.cwd,
+        env: process.env,
+        windowsHide: true,
+      },
+    );
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -300,6 +320,7 @@ const JSON_COLUMNS: Record<string, readonly string[]> = {
   agent_runs: ["resultData"],
   agent_memory: ["value"],
   custom_tools: ["parametersSchema"],
+  installed_extensions: ["capabilities", "revisions"],
   game_state_snapshots: [
     "presentCharacters",
     "recentEvents",
@@ -309,10 +330,10 @@ const JSON_COLUMNS: Record<string, readonly string[]> = {
     "fieldLocks",
   ],
   game_checkpoints: ["snapshotData", "spatialSnapshotData"],
-  // chat_images, character_images, assets, custom_themes, and installed_extensions
+  // chat_images, character_images, assets, and custom_themes
   // have no JSON columns; their former entries named columns that do not exist.
   game_engine_state: ["state"],
-  regex_scripts: ["trimStrings", "placement", "targetCharacterIds"],
+  regex_scripts: ["trimStrings", "placement", "targetCharacterIds", "targetPromptPresetIds"],
 };
 
 function buildTableMetas() {
@@ -556,6 +577,15 @@ function normalizeOffset(value: unknown) {
   return Math.floor(parsed);
 }
 
+function parseChatRangeInteger(value: string | undefined, flag: string, options: { minimum: number; maximum: number }) {
+  if (value === undefined) return null;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < options.minimum || parsed > options.maximum) {
+    throw new Error(`--${flag} must be an integer from ${options.minimum} to ${options.maximum}`);
+  }
+  return parsed;
+}
+
 function validationFromIssues(issues: MariDbValidationIssue[]): MariDbValidationResult {
   const errors = issues.filter((issue) => issue.level === "error");
   const notices = issues.filter((issue) => issue.level === "notice");
@@ -636,6 +666,7 @@ function normalizeAppDataActionName(action: string): string {
     .replace(/^personas\./, "persona.")
     .replace(/^lorebooks\./, "lorebook.")
     .replace(/^themes\./, "theme.")
+    .replace(/^personalextensions\./, "personalextension.")
     .replace(/^agents\./, "agent.")
     .replace(/^presets\./, "preset.")
     .replace(/^promptpresets\./, "preset.");
@@ -818,6 +849,7 @@ export function buildLorebookEntryCreateRow(
     generationTriggerFilters: [],
     additionalMatchingSources: [],
     position: firstNumber(data, ["position"]) ?? 0,
+    outletName: firstString(data, ["outletName", "outlet_name"]) ?? "",
     depth: firstNumber(data, ["depth"]) ?? 4,
     order: firstNumber(data, ["order"]) ?? defaultOrder,
     role: firstString(data, ["role"]) ?? "system",
@@ -1600,6 +1632,7 @@ export class MariDbService {
   private pending = new Map<string, PendingRecord>();
   private history: MariDbHistoryEntry[] = [];
   private writeQueue: Promise<unknown> = Promise.resolve();
+  private characterFolderMutationQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly db: DB) {}
 
@@ -1669,6 +1702,9 @@ export class MariDbService {
       if (key.startsWith("persona.")) return await this.executePersonaAction(key.slice("persona.".length), envelope, context);
       if (key.startsWith("lorebook.")) return await this.executeLorebookAction(key.slice("lorebook.".length), envelope, context);
       if (key.startsWith("theme.")) return await this.executeThemeAction(key.slice("theme.".length), envelope, context);
+      if (key.startsWith("personalextension.")) {
+        return await this.executePersonalExtensionAction(key.slice("personalextension.".length), envelope, context);
+      }
       if (key.startsWith("agent.")) return await this.executeAgentAction(key.slice("agent.".length), envelope, context);
       if (key.startsWith("preset.")) return await this.executePresetAction(key.slice("preset.".length), envelope, context);
       return {
@@ -1676,7 +1712,7 @@ export class MariDbService {
         mode: "read",
         command,
         error:
-          "Unsupported app_data action. Use character.*, persona.*, lorebook.*, theme.*, agent.*, or preset.* actions for structured no-shell app-data work.",
+          "Unsupported app_data action. Use character.*, persona.*, lorebook.*, theme.*, personal_extension.*, agent.*, or preset.* actions for structured no-shell app-data work.",
       };
     } catch (err) {
       logger.warn(err, "[mari-db] structured app_data action failed");
@@ -1690,6 +1726,22 @@ export class MariDbService {
     context: { command: string; sessionId: string; cwd?: string },
   ): Promise<MariDbCommandResult> {
     switch (sub) {
+      case "folder.list": {
+        const rows = (await this.rawRows("character_groups"))
+          .map((row) => parseRow("character_groups", row))
+          .sort((a, b) => String(a.name ?? "").localeCompare(String(b.name ?? "")));
+        return {
+          ok: true,
+          mode: "read",
+          command: context.command,
+          output: rows.map((row) => ({
+            id: row.id,
+            name: row.name,
+            description: row.description,
+            characterIds: row.characterIds,
+          })),
+        };
+      }
       case "list": {
         const limit = normalizeLimit(firstNumber(args, ["limit"]), 50, 1000);
         const search = firstString(args, ["search", "query"])?.toLowerCase();
@@ -1819,6 +1871,53 @@ export class MariDbService {
           context.command,
           context.sessionId,
         );
+      }
+      case "movetofolder": {
+        return this.withCharacterFolderMutationLock(async () => {
+          const characterId = requiredString(args, ["characterId", "id"], "character id");
+          const character = await this.getRawById(getMeta("characters"), characterId);
+          if (!character) throw new Error(`Character ${characterId} not found`);
+
+          const requestedFolderId = firstString(args, ["folderId"]);
+          const requestedFolderName = firstString(args, ["folderName", "folder"]);
+          if (!requestedFolderId && !requestedFolderName) {
+            throw new Error("character.moveToFolder needs folderId or folderName");
+          }
+
+          const groups = await this.rawRows("character_groups");
+          const matches = requestedFolderId
+            ? groups.filter((group) => group.id === requestedFolderId)
+            : groups.filter(
+                (group) =>
+                  typeof group.name === "string" &&
+                  group.name.trim().toLowerCase() === requestedFolderName!.trim().toLowerCase(),
+              );
+          if (matches.length === 0) {
+            throw new Error(
+              requestedFolderId
+                ? `Character folder ${requestedFolderId} not found`
+                : `Character folder ${requestedFolderName} not found`,
+            );
+          }
+          if (matches.length > 1) {
+            throw new Error(`More than one character folder is named ${requestedFolderName}; use folderId instead`);
+          }
+
+          return this.executeMutation(
+            {
+              kind: "character-move-folder",
+              table: "character_groups",
+              characterId,
+              folderId: String(matches[0]!.id),
+              apply: firstBoolean(args, ["apply"]) === true,
+              cascade: false,
+              reason: firstString(args, ["reason"]) ?? null,
+              cwd: context.cwd,
+            },
+            context.command,
+            context.sessionId,
+          );
+        });
       }
       default:
         return { ok: false, mode: "read", command: context.command, error: "Unsupported character app_data action." };
@@ -2075,6 +2174,13 @@ export class MariDbService {
     changed = assignBooleanTextField(target, source, ["constant"], "constant") || changed;
     changed = assignNumberField(target, source, ["order"], "order") || changed;
     changed = assignNumberField(target, source, ["position"], "position") || changed;
+    for (const key of ["outletName", "outlet_name"]) {
+      const value = source[key];
+      if (typeof value !== "string") continue;
+      target.outletName = value.trim();
+      changed = true;
+      break;
+    }
     changed = assignNumberField(target, source, ["depth"], "depth") || changed;
     changed = assignStringField(target, source, ["role"], "role") || changed;
     changed = assignStringField(target, source, ["group"], "group") || changed;
@@ -2165,6 +2271,7 @@ export class MariDbService {
           category: "uncategorized",
           isGlobal: "false",
           enabled: "true",
+          hiddenFromLibrary: "false",
           scanDepth: 2,
           tokenBudget: 2048,
           entryLimit: 100,
@@ -2267,6 +2374,7 @@ export class MariDbService {
           "constant",
           "order",
           "position",
+          "outletName",
           "depth",
           "role",
           "group",
@@ -2308,6 +2416,7 @@ export class MariDbService {
           "constant",
           "order",
           "position",
+          "outletName",
           "depth",
           "role",
           "group",
@@ -2412,6 +2521,227 @@ export class MariDbService {
       }
       default:
         return { ok: false, mode: "read", command: context.command, error: "Unsupported theme app_data action." };
+    }
+  }
+
+  private async executePersonalExtensionAction(
+    sub: string,
+    args: Row,
+    context: { command: string; sessionId: string; cwd?: string },
+  ): Promise<MariDbCommandResult> {
+    const table = "installed_extensions";
+    const capabilitiesFromRow = (row: Row) => {
+      try {
+        return normalizePersonalExtensionCapabilities(
+          typeof row.capabilities === "string" ? JSON.parse(row.capabilities) : row.capabilities,
+        );
+      } catch {
+        return [];
+      }
+    };
+    const summarize = (row: Row) => ({
+      id: row.id,
+      name: row.name,
+      version: row.version ?? null,
+      description: row.description ?? "",
+      runtime: row.runtime === "server" ? "server" : "client",
+      capabilities: capabilitiesFromRow(row),
+      enabled: row.enabled === "true",
+      contentHash: row.contentHash ?? null,
+      approvedHash: row.approvedHash ?? null,
+      source: row.source ?? "legacy",
+      updatedAt: row.updatedAt,
+    });
+    const executableFromRow = (row: Row) => {
+      const runtime = row.runtime === "server" ? "server" : "client";
+      return {
+        runtime,
+        capabilities: runtime === "client" ? capabilitiesFromRow(row) : [],
+        css: runtime === "client" && typeof row.css === "string" ? row.css : null,
+        js: runtime === "client" && typeof row.js === "string" ? row.js : null,
+        serverJs: runtime === "server" && typeof row.serverJs === "string" ? row.serverJs : null,
+      } as const;
+    };
+
+    switch (sub) {
+      case "list": {
+        const limit = normalizeLimit(firstNumber(args, ["limit"]), 50, 1000);
+        const rows = (await this.rawRows(table)).sort((left, right) =>
+          String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")),
+        );
+        return { ok: true, mode: "read", command: context.command, output: rows.slice(0, limit).map(summarize) };
+      }
+      case "get": {
+        const id = requiredString(args, ["id", "extensionId"], "Personal Extension id");
+        const row = await this.getRawById(getMeta(table), id);
+        return { ok: Boolean(row), mode: "read", command: context.command, output: row ? parseRow(table, row) : null };
+      }
+      case "search": {
+        const query = requiredString(args, ["query", "search"], "Personal Extension search query").toLowerCase();
+        const limit = normalizeLimit(firstNumber(args, ["limit"]), 50, 1000);
+        const rows = (await this.rawRows(table))
+          .filter((row) => JSON.stringify(row).toLowerCase().includes(query))
+          .slice(0, limit)
+          .map(summarize);
+        return { ok: true, mode: "read", command: context.command, output: rows };
+      }
+      case "create": {
+        const data = actionDataWithTopLevel(args, ["data", "extension", "row"], [
+          "name",
+          "version",
+          "description",
+          "runtime",
+          "capabilities",
+          "css",
+          "js",
+          "serverJs",
+        ]);
+        const parsed = createPersonalExtensionSchema.parse(data);
+        const runtime = parsed.runtime === "server" ? "server" : "client";
+        const executable = {
+          runtime,
+          capabilities: runtime === "client" ? normalizePersonalExtensionCapabilities(parsed.capabilities) : [],
+          css: runtime === "client" ? (parsed.css ?? null) : null,
+          js: runtime === "client" ? (parsed.js ?? null) : null,
+          serverJs: runtime === "server" ? (parsed.serverJs ?? null) : null,
+        } as const;
+        const timestamp = now();
+        const id = firstString(args, ["id", "extensionId"]) ?? newId();
+        const row: Row = {
+          id,
+          name: parsed.name,
+          version: parsed.version == null ? null : String(parsed.version),
+          description: parsed.description ?? "",
+          ...executable,
+          capabilities: JSON.stringify(executable.capabilities),
+          enabled: "false",
+          contentHash: computePersonalExtensionHash(executable),
+          approvedHash: null,
+          source: "professor_mari",
+          revisions: [],
+          installedAt: timestamp,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+        return this.executeMutation(
+          {
+            kind: "insert",
+            table,
+            id,
+            row,
+            apply: appDataCreateApply(args),
+            requiresApproval: false,
+            personalExtensionDraftMutation: true,
+            cascade: false,
+            reason: firstString(args, ["reason"]) ?? "Professor Mari created a Personal Extension draft",
+            cwd: context.cwd,
+          },
+          context.command,
+          context.sessionId,
+        );
+      }
+      case "update": {
+        const id = requiredString(args, ["id", "extensionId"], "Personal Extension id");
+        const existingRaw = await this.getRawById(getMeta(table), id);
+        if (!existingRaw) throw new Error(`Personal Extension ${id} not found`);
+        const existing = parseRow(table, existingRaw);
+        const data = actionDataWithTopLevel(args, ["patch", "data", "extension"], [
+          "name",
+          "version",
+          "description",
+          "runtime",
+          "capabilities",
+          "css",
+          "js",
+          "serverJs",
+        ]);
+        if (Object.keys(data).length === 0) throw new Error("personal_extension.update needs a code or metadata patch");
+        const runtime = data.runtime === "server" || (data.runtime === undefined && existing.runtime === "server") ? "server" : "client";
+        const textOrFallback = (key: string, fallback: unknown) =>
+          data[key] === null ? null : typeof data[key] === "string" ? data[key] : fallback;
+        const parsed = createPersonalExtensionSchema.parse({
+          name: textOrFallback("name", existing.name),
+          version: textOrFallback("version", existing.version),
+          description: textOrFallback("description", existing.description),
+          runtime,
+          capabilities:
+            runtime === "client"
+              ? data.capabilities === undefined
+                ? capabilitiesFromRow(existing)
+                : normalizePersonalExtensionCapabilities(data.capabilities)
+              : [],
+          css: runtime === "client" ? textOrFallback("css", existing.css) : null,
+          js: runtime === "client" ? textOrFallback("js", existing.js) : null,
+          serverJs: runtime === "server" ? textOrFallback("serverJs", existing.serverJs) : null,
+        });
+        const executable = {
+          runtime,
+          capabilities: runtime === "client" ? normalizePersonalExtensionCapabilities(parsed.capabilities) : [],
+          css: runtime === "client" ? (parsed.css ?? null) : null,
+          js: runtime === "client" ? (parsed.js ?? null) : null,
+          serverJs: runtime === "server" ? (parsed.serverJs ?? null) : null,
+        } as const;
+        const previousExecutable = executableFromRow(existing);
+        const previousHash =
+          typeof existing.contentHash === "string" && existing.contentHash
+            ? existing.contentHash
+            : computePersonalExtensionHash(previousExecutable);
+        const contentHash = computePersonalExtensionHash(executable);
+        const executableChanged = contentHash !== previousHash;
+        const existingRevisions = Array.isArray(existing.revisions) ? existing.revisions : [];
+        const revisions = executableChanged
+          ? [
+              {
+                contentHash: previousHash,
+                version: typeof existing.version === "string" ? existing.version : null,
+                ...previousExecutable,
+                savedAt: now(),
+              },
+              ...existingRevisions.filter(
+                (revision) => !isRecord(revision) || revision.contentHash !== previousHash,
+              ),
+            ].slice(0, 10)
+          : existingRevisions;
+        const row: Row = {
+          ...existing,
+          id,
+          name: parsed.name,
+          version: parsed.version == null ? null : String(parsed.version),
+          description: parsed.description ?? "",
+          ...executable,
+          capabilities: JSON.stringify(executable.capabilities),
+          enabled: executableChanged ? "false" : existing.enabled,
+          contentHash,
+          approvedHash: executableChanged ? null : existing.approvedHash,
+          source: "professor_mari",
+          revisions,
+          installedAt: existing.installedAt,
+          createdAt: existing.createdAt,
+          updatedAt: now(),
+        };
+        return this.executeMutation(
+          {
+            kind: "replace",
+            table,
+            id,
+            row,
+            apply: firstBoolean(args, ["apply"]) === true,
+            personalExtensionDraftMutation: true,
+            cascade: false,
+            reason: firstString(args, ["reason"]) ?? "Professor Mari updated a Personal Extension draft",
+            cwd: context.cwd,
+          },
+          context.command,
+          context.sessionId,
+        );
+      }
+      default:
+        return {
+          ok: false,
+          mode: "read",
+          command: context.command,
+          error: "Unsupported Personal Extension app_data action.",
+        };
     }
   }
 
@@ -3435,12 +3765,16 @@ export class MariDbService {
           category: normalizeLorebookCategory(flagString(flags, "category")),
           isGlobal: hasFlag(flags, "global") ? "true" : "false",
           enabled: "true",
+          hiddenFromLibrary: "false",
           scanDepth: 2,
           tokenBudget: 2048,
           entryLimit: 100,
           recursiveScanning: "false",
           maxRecursionDepth: 3,
           excludeFromVectorization: "false",
+          vectorQueryDepth: 10,
+          vectorScoreThreshold: 0.3,
+          vectorMaxResults: 10,
           scope: { mode: "all", chatIds: [] },
           tags: [],
           generatedBy: "agent",
@@ -3508,7 +3842,7 @@ export class MariDbService {
         const lorebookId = parsed.positionals[0];
         if (!lorebookId) {
           throw new Error(
-            "Usage: mari lorebooks add-entry <lorebook-id> --name <name> [--content <text>] [--keys <k1,k2,...>] [--description <text>] [--tag <tag>] [--folder-id <folder-id>] [--apply] [--reason <text>]",
+            "Usage: mari lorebooks add-entry <lorebook-id> --name <name> [--content <text>] [--keys <k1,k2,...>] [--description <text>] [--tag <tag>] [--outlet-name <name>] [--folder-id <folder-id>] [--apply] [--reason <text>]",
           );
         }
         const entryName = flagString(flags, "name")?.trim();
@@ -3529,6 +3863,7 @@ export class MariDbService {
               .map((k) => k.trim())
               .filter(Boolean)
           : [];
+        const addOutletName = flagString(flags, "outlet-name")?.trim() ?? "";
         const timestamp = now();
         const entryRow: Row = {
           id: flagString(flags, "id") ?? newId(),
@@ -3554,7 +3889,8 @@ export class MariDbService {
           generationTriggerFilterMode: "any",
           generationTriggerFilters: [],
           additionalMatchingSources: [],
-          position: 0,
+          position: addOutletName ? 7 : 0,
+          outletName: addOutletName,
           depth: 4,
           order: 100,
           role: "system",
@@ -3586,7 +3922,7 @@ export class MariDbService {
         const entryId = parsed.positionals[0];
         if (!entryId) {
           throw new Error(
-            "Usage: mari lorebooks update-entry <entry-id> [--name <name>] [--content <text>] [--keys <k1,k2,...>] [--description <text>] [--tag <tag>] [--enable] [--disable] [--constant] [--no-constant] [--order <n>] [--folder-id <folder-id>|none] [--apply] [--reason <text>]",
+            "Usage: mari lorebooks update-entry <entry-id> [--name <name>] [--content <text>] [--keys <k1,k2,...>] [--description <text>] [--tag <tag>] [--outlet-name <name>] [--enable] [--disable] [--constant] [--no-constant] [--order <n>] [--folder-id <folder-id>|none] [--apply] [--reason <text>]",
           );
         }
         const entryExists = await this.getRawById(getMeta("lorebook_entries"), entryId);
@@ -3597,11 +3933,13 @@ export class MariDbService {
           ["content", "content"],
           ["description", "description"],
           ["tag", "tag"],
+          ["outlet-name", "outletName"],
         ];
         for (const [flagName, fieldName] of entryFieldMap) {
           const val = flagString(flags, flagName);
-          if (val !== undefined) entryPatch[fieldName] = val;
+          if (val !== undefined) entryPatch[fieldName] = fieldName === "outletName" ? val.trim() : val;
         }
+        if (typeof entryPatch.outletName === "string" && entryPatch.outletName) entryPatch.position = 7;
         const keysRaw = flagString(flags, "keys");
         if (keysRaw !== undefined) {
           entryPatch.keys = keysRaw
@@ -3632,7 +3970,7 @@ export class MariDbService {
         }
         if (Object.keys(entryPatch).length <= 1) {
           throw new Error(
-            "Provide at least one field to update (--name, --content, --keys, --description, --tag, --enable, --disable, --constant, --no-constant, --order, --folder-id)",
+            "Provide at least one field to update (--name, --content, --keys, --description, --tag, --outlet-name, --enable, --disable, --constant, --no-constant, --order, --folder-id)",
           );
         }
         const updateEntryRequest: ParsedMutationRequest = {
@@ -3759,25 +4097,44 @@ export class MariDbService {
       }
       case "messages": {
         const chatId = parsed.positionals[0];
-        if (!chatId) throw new Error("Usage: mari chats messages <chat-id> [--limit <n>] [--offset <n>] [--tail]");
+        if (!chatId) {
+          throw new Error(
+            "Usage: mari chats messages <chat-id> [--last <n> | --after-post <n>] [--limit <n>] [--offset <n>] [--tail]",
+          );
+        }
         const limitFlag = flagString(flags, "limit");
         const limit = limitFlag !== undefined ? normalizeLimit(limitFlag, 20, 200) : null;
         const offset = normalizeOffset(flagString(flags, "offset"));
         const tail = hasFlag(flags, "tail");
+        const last = parseChatRangeInteger(flagString(flags, "last"), "last", { minimum: 1, maximum: 200 });
+        const afterPost = parseChatRangeInteger(flagString(flags, "after-post"), "after-post", {
+          minimum: 0,
+          maximum: Number.MAX_SAFE_INTEGER,
+        });
+        if (last !== null && afterPost !== null) throw new Error("Use either --last or --after-post, not both");
+        if (afterPost !== null && tail) throw new Error("--after-post cannot be combined with --tail");
         let messages = (await this.rawRows("messages")).filter((m) => m.chatId === chatId);
         messages.sort((a, b) => String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")));
-        if (tail) {
-          const offsetMessages = offset > 0 ? messages.slice(0, Math.max(0, messages.length - offset)) : messages;
-          messages = limit !== null ? offsetMessages.slice(-limit) : offsetMessages;
+        const numberedMessages = messages.map((message, index) => ({ message, postNumber: index + 1 }));
+        let selectedMessages: typeof numberedMessages;
+        if (last !== null || afterPost !== null) {
+          const scopedMessages =
+            last !== null ? numberedMessages.slice(-last) : numberedMessages.slice(afterPost ?? 0);
+          selectedMessages = scopedMessages.slice(offset, limit !== null ? offset + limit : undefined);
+        } else if (tail) {
+          const offsetMessages =
+            offset > 0 ? numberedMessages.slice(0, Math.max(0, numberedMessages.length - offset)) : numberedMessages;
+          selectedMessages = limit !== null ? offsetMessages.slice(-limit) : offsetMessages;
         } else {
-          messages = messages.slice(offset, limit !== null ? offset + limit : undefined);
+          selectedMessages = numberedMessages.slice(offset, limit !== null ? offset + limit : undefined);
         }
-        const result = messages.map((row) => ({
-          id: row.id,
-          role: row.role,
-          characterId: row.characterId ?? null,
-          content: typeof row.content === "string" ? row.content : "",
-          createdAt: row.createdAt,
+        const result = selectedMessages.map(({ message, postNumber }) => ({
+          postNumber,
+          id: message.id,
+          role: message.role,
+          characterId: message.characterId ?? null,
+          content: typeof message.content === "string" ? message.content : "",
+          createdAt: message.createdAt,
         }));
         return { ok: true, mode: "read", command: context.command, output: result };
       }
@@ -4111,7 +4468,35 @@ export class MariDbService {
     else if (request.kind === "theme-create") changes = await this.planThemeCreate(request, timestamp, issues);
     else if (request.kind === "theme-update") changes = await this.planThemeUpdate(request, timestamp, issues);
     else if (request.kind === "theme-set-active") changes = await this.planThemeSetActive(request, timestamp, issues);
+    else if (request.kind === "character-move-folder") changes = await this.planCharacterMoveFolder(request, timestamp);
     else changes = await this.planTransform(request, timestamp, allocateId);
+
+    const personalExtensionChanges = changes.filter((change) => change.table === "installed_extensions");
+    if (personalExtensionChanges.length > 0 && !request.personalExtensionDraftMutation) {
+      issues.push({
+        level: "error",
+        table: "installed_extensions",
+        message:
+          "Professor Mari cannot mutate Personal Extensions through raw DB actions. Use personal_extension.create or personal_extension.update; only the user can approve execution in Settings > Addons.",
+      });
+    }
+    if (request.personalExtensionDraftMutation) {
+      for (const change of personalExtensionChanges) {
+        const enabledEscalated = change.afterRaw?.enabled === "true" && change.beforeRaw?.enabled !== "true";
+        const approvalEscalated =
+          typeof change.afterRaw?.approvedHash === "string" &&
+          change.afterRaw.approvedHash.length > 0 &&
+          change.afterRaw.approvedHash !== change.beforeRaw?.approvedHash;
+        if (enabledEscalated || approvalEscalated) {
+          issues.push({
+            level: "error",
+            table: "installed_extensions",
+            id: change.id,
+            message: "Professor Mari can save Personal Extension drafts but cannot approve or enable them.",
+          });
+        }
+      }
+    }
 
     const touchedTables = [...new Set(changes.map((change) => change.table))];
     const validation = await this.validateTouchedRows(changes, touchedTables, issues);
@@ -4202,6 +4587,61 @@ export class MariDbService {
     this.fillTimestamps(meta, next, false, timestamp);
     const afterRaw = serializeRow(meta.name, next);
     return [{ table: meta.name, id: rowId(meta, existing), action: "replace", before: parseRow(meta.name, existing), after: parseRow(meta.name, afterRaw), beforeRaw: existing, afterRaw, apply: true }];
+  }
+
+  private async planCharacterMoveFolder(request: ParsedMutationRequest, timestamp: string): Promise<PlanChange[]> {
+    const characterId = String(request.characterId ?? "");
+    const targetFolderId = String(request.folderId ?? "");
+    const meta = getMeta("character_groups");
+    const groups = await this.rawRows(meta.name);
+    if (!groups.some((group) => group.id === targetFolderId)) {
+      throw new Error(`Character folder ${targetFolderId} not found`);
+    }
+
+    return groups
+      .map((group): PlanChange | null => {
+        const parsed = parseRow(meta.name, group);
+        if (!Array.isArray(parsed.characterIds)) {
+          throw new Error(`Character folder ${String(group.id)} has invalid membership data`);
+        }
+        const currentIds = parsed.characterIds.filter((id): id is string => typeof id === "string" && !!id);
+        const matchingIdCount = currentIds.filter((id) => id === characterId).length;
+        const withoutCharacter = currentIds.filter((id) => id !== characterId);
+        const nextIds =
+          group.id === targetFolderId
+            ? matchingIdCount === 1
+              ? currentIds
+              : [...withoutCharacter, characterId]
+            : withoutCharacter;
+        if (nextIds.length === currentIds.length && nextIds.every((id, index) => id === currentIds[index])) {
+          return null;
+        }
+        const afterRaw = serializeRow(meta.name, {
+          ...parsed,
+          characterIds: nextIds,
+          updatedAt: timestamp,
+        });
+        return {
+          table: meta.name,
+          id: rowId(meta, group),
+          action: "update",
+          before: parsed,
+          after: parseRow(meta.name, afterRaw),
+          beforeRaw: group,
+          afterRaw,
+          apply: true,
+        };
+      })
+      .filter((change): change is PlanChange => change !== null);
+  }
+
+  private withCharacterFolderMutationLock<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.characterFolderMutationQueue.then(operation);
+    this.characterFolderMutationQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 
   private async planDelete(request: ParsedMutationRequest, issues: MariDbValidationIssue[]): Promise<PlanChange[]> {
@@ -4777,8 +5217,8 @@ export class MariDbService {
       "Read:  search <query> [--limit <n>]",
       "Write: create --name <name> [--description <text>] [--category <text>] [--global] [--apply] [--reason <text>]",
       "Write: update <id> [--name <name>] [--description <text>] [--category <text>] [--tags <t1,t2,...>] [--global] [--enable] [--disable] [--apply] [--reason <text>]",
-      "Write: add-entry <lorebook-id> --name <name> [--content <text>] [--keys <k1,k2,...>] [--description <text>] [--tag <tag>] [--folder-id <folder-id>] [--apply] [--reason <text>]",
-      "Write: update-entry <entry-id> [--name <name>] [--content <text>] [--keys <k1,k2,...>] [--description <text>] [--tag <tag>] [--enable] [--disable] [--constant] [--no-constant] [--order <n>] [--folder-id <folder-id>|none] [--apply] [--reason <text>]",
+      "Write: add-entry <lorebook-id> --name <name> [--content <text>] [--keys <k1,k2,...>] [--description <text>] [--tag <tag>] [--outlet-name <name>] [--folder-id <folder-id>] [--apply] [--reason <text>]",
+      "Write: update-entry <entry-id> [--name <name>] [--content <text>] [--keys <k1,k2,...>] [--description <text>] [--tag <tag>] [--outlet-name <name>] [--enable] [--disable] [--constant] [--no-constant] [--order <n>] [--folder-id <folder-id>|none] [--apply] [--reason <text>]",
       "Write: delete-entry <entry-id> [--apply] [--reason <text>]",
       "Write: link-character <lorebook-id> --character <character-id> [--apply] [--reason <text>]",
       "Write: unlink-character <lorebook-id> --character <character-id> [--apply] [--reason <text>]",
@@ -4792,7 +5232,9 @@ export class MariDbService {
       "Usage: mari chats <command>",
       "Read:  list [--limit <n>] [--character <id>]",
       "Read:  get <id>",
-      "Read:  messages <chat-id> [--limit <n>] [--offset <n>] [--tail]",
+      "Read:  messages <chat-id> [--last <n> | --after-post <n>] [--limit <n>] [--offset <n>] [--tail]",
+      "       --last counts back from the newest post; --after-post uses the 1-indexed #post shown in chat.",
+      "       Add --limit and advance --offset to page within either requested range.",
       "Read:  search <query> [--limit <n>]",
       "All chat commands are read-only.",
     ].join("\n");

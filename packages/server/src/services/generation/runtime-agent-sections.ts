@@ -167,19 +167,19 @@ export function splitRuntimeHandledAgentInjections(
   messages: Array<{ content: string }>,
   tokenMap: ReadonlyMap<RuntimeAgentSectionType, RuntimeAgentSectionTokens>,
   injections: AgentInjection[],
-): { fallbackInjections: AgentInjection[]; handledTypes: Set<string> } {
+  options: { omitUnmatched?: boolean } = {},
+): { fallbackInjections: AgentInjection[]; omittedInjections: AgentInjection[] } {
   const fallbackInjections: AgentInjection[] = [];
-  const handledTypes = new Set<string>();
+  const omittedInjections: AgentInjection[] = [];
   for (const injection of injections) {
     const tokens = tokenMap.get(injection.agentType);
     const handledByPresetSection = tokens !== undefined && replaceRuntimeAgentSection(messages, tokens, injection.text);
-    if (handledByPresetSection) {
-      handledTypes.add(injection.agentType);
-    } else {
-      fallbackInjections.push(injection);
+    if (!handledByPresetSection) {
+      if (options.omitUnmatched) omittedInjections.push(injection);
+      else fallbackInjections.push(injection);
     }
   }
-  return { fallbackInjections, handledTypes };
+  return { fallbackInjections, omittedInjections };
 }
 
 export const splitRuntimeHandledAgentInjectionsForTest = splitRuntimeHandledAgentInjections;

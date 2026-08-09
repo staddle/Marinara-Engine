@@ -1,6 +1,7 @@
 import type {
   GeminiOmniVideoDefaults,
   GoogleVeoVideoDefaults,
+  AtlasCloudVideoDefaults,
   OpenRouterVideoDefaults,
   ComfyUiVideoDefaults,
   SeedanceVideoDefaults,
@@ -11,6 +12,7 @@ import type {
   VideoResolution,
   XaiVideoDefaults,
 } from "../types/video-generation-defaults.js";
+import { normalizeComfyUiLoraSettings } from "./image-generation-defaults.js";
 
 export const VIDEO_DEFAULTS_STORAGE_KEY = "videoGeneration";
 export const VIDEO_GENERATION_DEFAULTS_VERSION = 1 as const;
@@ -20,6 +22,7 @@ export const VIDEO_DEFAULTS_SERVICES: VideoDefaultsService[] = [
   "google_veo",
   "xai",
   "openrouter",
+  "atlas",
   "seedance",
   "comfyui",
 ];
@@ -47,6 +50,12 @@ export const DEFAULT_OPENROUTER_VIDEO_DEFAULTS: OpenRouterVideoDefaults = {
   resolution: "720p",
 };
 
+export const DEFAULT_ATLAS_CLOUD_VIDEO_DEFAULTS: AtlasCloudVideoDefaults = {
+  durationSeconds: 8,
+  aspectRatio: "16:9",
+  resolution: "720p",
+};
+
 export const DEFAULT_SEEDANCE_VIDEO_DEFAULTS: SeedanceVideoDefaults = {
   durationSeconds: 5,
   aspectRatio: "16:9",
@@ -57,8 +66,10 @@ export const DEFAULT_SEEDANCE_VIDEO_DEFAULTS: SeedanceVideoDefaults = {
 
 export const DEFAULT_COMFYUI_VIDEO_DEFAULTS: ComfyUiVideoDefaults = {
   durationSeconds: 5,
+  fps: 16,
   aspectRatio: "16:9",
   resolution: "720p",
+  loras: [],
 };
 
 export function createDefaultVideoGenerationProfile(
@@ -71,8 +82,9 @@ export function createDefaultVideoGenerationProfile(
     googleVeo: { ...DEFAULT_GOOGLE_VEO_VIDEO_DEFAULTS },
     xai: { ...DEFAULT_XAI_VIDEO_DEFAULTS },
     openrouter: { ...DEFAULT_OPENROUTER_VIDEO_DEFAULTS },
+    atlas: { ...DEFAULT_ATLAS_CLOUD_VIDEO_DEFAULTS },
     seedance: { ...DEFAULT_SEEDANCE_VIDEO_DEFAULTS },
-    comfyui: { ...DEFAULT_COMFYUI_VIDEO_DEFAULTS },
+    comfyui: { ...DEFAULT_COMFYUI_VIDEO_DEFAULTS, loras: [] },
   };
 }
 
@@ -86,20 +98,12 @@ export function normalizeVideoGenerationProfile(rawProfile: unknown): {
   profile.service = rawService;
   const rawOmni = isRecord(raw.geminiOmni) ? raw.geminiOmni : rawService === "gemini_omni" ? raw : {};
   profile.geminiOmni = {
-    durationSeconds: readInteger(
-      rawOmni.durationSeconds,
-      DEFAULT_GEMINI_OMNI_VIDEO_DEFAULTS.durationSeconds,
-      1,
-      60,
-    ),
+    durationSeconds: readInteger(rawOmni.durationSeconds, DEFAULT_GEMINI_OMNI_VIDEO_DEFAULTS.durationSeconds, 1, 60),
     aspectRatio: readAspectRatio(rawOmni.aspectRatio, DEFAULT_GEMINI_OMNI_VIDEO_DEFAULTS.aspectRatio),
   };
   const rawGoogleVeo = isRecord(raw.googleVeo) ? raw.googleVeo : rawService === "google_veo" ? raw : {};
   profile.googleVeo = {
-    durationSeconds: readVeoDuration(
-      rawGoogleVeo.durationSeconds,
-      DEFAULT_GOOGLE_VEO_VIDEO_DEFAULTS.durationSeconds,
-    ),
+    durationSeconds: readVeoDuration(rawGoogleVeo.durationSeconds, DEFAULT_GOOGLE_VEO_VIDEO_DEFAULTS.durationSeconds),
     aspectRatio: readAspectRatio(rawGoogleVeo.aspectRatio, DEFAULT_GOOGLE_VEO_VIDEO_DEFAULTS.aspectRatio),
     resolution: readResolution(rawGoogleVeo.resolution, DEFAULT_GOOGLE_VEO_VIDEO_DEFAULTS.resolution),
   };
@@ -120,6 +124,12 @@ export function normalizeVideoGenerationProfile(rawProfile: unknown): {
     aspectRatio: readAspectRatio(rawOpenRouter.aspectRatio, DEFAULT_OPENROUTER_VIDEO_DEFAULTS.aspectRatio),
     resolution: readResolution(rawOpenRouter.resolution, DEFAULT_OPENROUTER_VIDEO_DEFAULTS.resolution),
   };
+  const rawAtlas = isRecord(raw.atlas) ? raw.atlas : rawService === "atlas" ? raw : {};
+  profile.atlas = {
+    durationSeconds: readInteger(rawAtlas.durationSeconds, DEFAULT_ATLAS_CLOUD_VIDEO_DEFAULTS.durationSeconds, 1, 60),
+    aspectRatio: readAspectRatio(rawAtlas.aspectRatio, DEFAULT_ATLAS_CLOUD_VIDEO_DEFAULTS.aspectRatio),
+    resolution: readResolution(rawAtlas.resolution, DEFAULT_ATLAS_CLOUD_VIDEO_DEFAULTS.resolution),
+  };
   const rawSeedance = isRecord(raw.seedance) ? raw.seedance : rawService === "seedance" ? raw : {};
   profile.seedance = {
     durationSeconds: readInteger(rawSeedance.durationSeconds, DEFAULT_SEEDANCE_VIDEO_DEFAULTS.durationSeconds, 4, 15),
@@ -137,14 +147,18 @@ export function normalizeVideoGenerationProfile(rawProfile: unknown): {
   const rawComfyUi = isRecord(raw.comfyui) ? raw.comfyui : rawService === "comfyui" ? raw : {};
   profile.comfyui = {
     durationSeconds: readInteger(rawComfyUi.durationSeconds, DEFAULT_COMFYUI_VIDEO_DEFAULTS.durationSeconds, 1, 60),
+    fps: readInteger(rawComfyUi.fps, DEFAULT_COMFYUI_VIDEO_DEFAULTS.fps, 1, 120),
     aspectRatio: readAspectRatio(rawComfyUi.aspectRatio, DEFAULT_COMFYUI_VIDEO_DEFAULTS.aspectRatio),
     resolution: readResolution(rawComfyUi.resolution, DEFAULT_COMFYUI_VIDEO_DEFAULTS.resolution),
+    loras: normalizeComfyUiLoraSettings(rawComfyUi.loras),
   };
   const changed = JSON.stringify(profile) !== JSON.stringify(rawProfile);
   return { profile, changed };
 }
 
-export function sanitizeVideoGenerationProfile(profile: VideoGenerationDefaultsProfile): VideoGenerationDefaultsProfile {
+export function sanitizeVideoGenerationProfile(
+  profile: VideoGenerationDefaultsProfile,
+): VideoGenerationDefaultsProfile {
   return normalizeVideoGenerationProfile(profile).profile;
 }
 
@@ -179,6 +193,7 @@ function readVeoDuration(value: unknown, fallback: number): 4 | 6 | 8 {
 function readService(value: unknown): VideoDefaultsService {
   return value === "xai" ||
     value === "openrouter" ||
+    value === "atlas" ||
     value === "seedance" ||
     value === "google_veo" ||
     value === "comfyui" ||

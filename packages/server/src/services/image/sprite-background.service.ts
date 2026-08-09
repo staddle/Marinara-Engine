@@ -60,7 +60,8 @@ export function selectSpriteChromaMatte(appearance: string): SpriteChromaMatte {
 export function spriteChromaMatteInstruction(matte: SpriteChromaMatte): string {
   return [
     `use one perfectly flat, uniform ${matte.label} ${matte.hex} background across the entire canvas and every sheet gutter`,
-    `no white background, off-white background, gray background, scenery, floor line, texture, gradient, glow, lighting variation, cast shadow, contact shadow, grid border, panel border, or separator line`,
+    `this must be a real solid-color backdrop, never a painted transparency checkerboard or fake alpha preview`,
+    `no white background, off-white background, gray background, checkerboard pattern, transparency grid, scenery, floor line, texture, gradient, glow, lighting variation, cast shadow, contact shadow, grid border, panel border, or separator line`,
     `keep the character fully separated from the canvas edges and do not reflect or spill the background color onto the character`,
   ].join(", ");
 }
@@ -309,6 +310,39 @@ export async function removeUniformSpriteBackgroundPng(
     enqueueMatte(yPos * width + width - 1);
   }
 
+  // A chroma backdrop can be completely enclosed by the subject — for
+  // example, the negative space between an arm and the torso. Border-only
+  // flood filling leaves those pockets behind. The selected matte is a
+  // saturated color chosen to avoid the character, so exact interior chroma
+  // pixels are safe additional flood-fill seeds. Keep neutral/white legacy
+  // mattes border-connected so pale costume details remain intact.
+  const matteChannels = [analysis.color.red, analysis.color.green, analysis.color.blue];
+  const matteSaturation = Math.max(...matteChannels) - Math.min(...matteChannels);
+  const matteHighChannels = matteChannels
+    .map((channel, index) => ({ channel, index }))
+    .filter(({ channel }) => channel >= Math.max(...matteChannels) - 48)
+    .map(({ index }) => index);
+  const matteLowChannels = matteChannels
+    .map((channel, index) => ({ channel, index }))
+    .filter(({ channel }) => channel <= Math.min(...matteChannels) + 48)
+    .map(({ index }) => index);
+  const chromaDominance = (color: RgbColor) => {
+    const channels = [color.red, color.green, color.blue];
+    const high = Math.min(...matteHighChannels.map((index) => channels[index] ?? 0));
+    const low =
+      matteLowChannels.reduce((sum, index) => sum + (channels[index] ?? 0), 0) /
+      Math.max(1, matteLowChannels.length);
+    return high - low;
+  };
+  const matteChromaDominance = chromaDominance(analysis.color);
+  if (matteSaturation >= 120) {
+    for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex++) {
+      if (matteMask[pixelIndex] || matteDistance(pixelIndex) > hardCutoff) continue;
+      matteMask[pixelIndex] = 1;
+      queue[queueEnd++] = pixelIndex;
+    }
+  }
+
   while (queueStart < queueEnd) {
     const pixelIndex = queue[queueStart++]!;
     const xPos = pixelIndex % width;
@@ -319,12 +353,46 @@ export async function removeUniformSpriteBackgroundPng(
     if (yPos < height - 1) enqueueMatte(pixelIndex + width);
   }
 
+  const chromaCleanupRadius = matteSaturation >= 120 ? 16 : 0;
+  const matteProximity = new Uint8Array(pixelCount);
+  if (chromaCleanupRadius > 0) {
+    const proximityQueue = new Int32Array(pixelCount);
+    let proximityStart = 0;
+    let proximityEnd = 0;
+    for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex++) {
+      if (!matteMask[pixelIndex]) continue;
+      matteProximity[pixelIndex] = 1;
+      proximityQueue[proximityEnd++] = pixelIndex;
+    }
+
+    while (proximityStart < proximityEnd) {
+      const pixelIndex = proximityQueue[proximityStart++]!;
+      const distance = matteProximity[pixelIndex] ?? 0;
+      if (distance > chromaCleanupRadius) continue;
+      const xPos = pixelIndex % width;
+      const yPos = Math.floor(pixelIndex / width);
+      for (let yOffset = -1; yOffset <= 1; yOffset++) {
+        const sampleY = yPos + yOffset;
+        if (sampleY < 0 || sampleY >= height) continue;
+        for (let xOffset = -1; xOffset <= 1; xOffset++) {
+          if (xOffset === 0 && yOffset === 0) continue;
+          const sampleX = xPos + xOffset;
+          if (sampleX < 0 || sampleX >= width) continue;
+          const sampleIndex = sampleY * width + sampleX;
+          if (matteProximity[sampleIndex]) continue;
+          matteProximity[sampleIndex] = distance + 1;
+          proximityQueue[proximityEnd++] = sampleIndex;
+        }
+      }
+    }
+  }
+
   const findForegroundNeighborColor = (pixelIndex: number) => {
     const xPos = pixelIndex % width;
     const yPos = Math.floor(pixelIndex / width);
     const samples: Array<RgbColor & { distance: number; weight: number }> = [];
 
-    for (let radius = 1; radius <= 4; radius++) {
+    for (let radius = 1; radius <= 6; radius++) {
       for (let yOffset = -radius; yOffset <= radius; yOffset++) {
         const sampleY = yPos + yOffset;
         if (sampleY < 0 || sampleY >= height) continue;
@@ -369,6 +437,30 @@ export async function removeUniformSpriteBackgroundPng(
     };
   };
 
+  const findNearestForegroundDistance = (pixelIndex: number) => {
+    const xPos = pixelIndex % width;
+    const yPos = Math.floor(pixelIndex / width);
+    for (let radius = 1; radius <= 6; radius++) {
+      for (let yOffset = -radius; yOffset <= radius; yOffset++) {
+        const sampleY = yPos + yOffset;
+        if (sampleY < 0 || sampleY >= height) continue;
+        for (let xOffset = -radius; xOffset <= radius; xOffset++) {
+          if (Math.max(Math.abs(xOffset), Math.abs(yOffset)) !== radius) continue;
+          const sampleX = xPos + xOffset;
+          if (sampleX < 0 || sampleX >= width) continue;
+          const sampleIndex = sampleY * width + sampleX;
+          if (matteMask[sampleIndex]) continue;
+          const sampleOffset = pixelOffset(sampleIndex);
+          if ((rgba[sampleOffset + 3] ?? 255) <= 32) continue;
+          const sampleColor = readPixel(sampleIndex);
+          if (matteDistance(sampleIndex) <= haloCutoff || chromaDominance(sampleColor) > 8) continue;
+          return radius;
+        }
+      }
+    }
+    return null;
+  };
+
   const despillPixel = (pixelIndex: number, matteWeight: number) => {
     if (matteWeight <= 0) return;
     const offset = pixelOffset(pixelIndex);
@@ -402,25 +494,72 @@ export async function removeUniformSpriteBackgroundPng(
 
   for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex++) {
     if (matteMask[pixelIndex]) continue;
+    if (matteSaturation >= 120 && !matteProximity[pixelIndex]) continue;
     const xPos = pixelIndex % width;
     const yPos = Math.floor(pixelIndex / width);
     let matteNeighbors = 0;
-    for (let yOffset = -2; yOffset <= 2; yOffset++) {
+    const matteNeighborRadius = 3;
+    for (let yOffset = -matteNeighborRadius; yOffset <= matteNeighborRadius; yOffset++) {
       const sampleY = yPos + yOffset;
       if (sampleY < 0 || sampleY >= height) continue;
-      for (let xOffset = -2; xOffset <= 2; xOffset++) {
+      for (let xOffset = -matteNeighborRadius; xOffset <= matteNeighborRadius; xOffset++) {
         if (xOffset === 0 && yOffset === 0) continue;
         const sampleX = xPos + xOffset;
         if (sampleX < 0 || sampleX >= width) continue;
         if (matteMask[sampleY * width + sampleX]) matteNeighbors += 1;
       }
     }
-    if (matteNeighbors === 0) continue;
 
     const distance = matteDistance(pixelIndex);
     const offset = pixelOffset(pixelIndex);
     const originalAlpha = rgba[offset + 3] ?? 255;
-    const foreground = findForegroundNeighborColor(pixelIndex);
+    let foreground: RgbColor | null = null;
+    if (matteSaturation >= 120) {
+      const observed = readPixel(pixelIndex);
+      const observedDominance = chromaDominance(observed);
+      const nearestForegroundDistance = observedDominance > 8 ? findNearestForegroundDistance(pixelIndex) : null;
+      if (nearestForegroundDistance !== null) foreground = findForegroundNeighborColor(pixelIndex);
+      const foregroundDominance = foreground ? chromaDominance(foreground) : 0;
+      const hasChromaSpill = observedDominance > Math.max(8, foregroundDominance + 6);
+
+      if (hasChromaSpill) {
+        if (matteNeighbors === 0 && (nearestForegroundDistance === null || nearestForegroundDistance > 2)) {
+          rgba[offset + 3] = 0;
+          continue;
+        }
+        const foregroundCoverage = clampUnit(
+          (matteChromaDominance - observedDominance) /
+            Math.max(1, matteChromaDominance - foregroundDominance),
+        );
+        const matteContact = clampUnit(matteNeighbors / 40);
+
+        if (matteContact >= 0.85) {
+          rgba[offset + 3] = 0;
+        } else if (foreground && foregroundDominance < observedDominance - 6) {
+          if (foregroundCoverage <= 0.02) {
+            rgba[offset + 3] = 0;
+          } else {
+            const matteWeight = 1 - foregroundCoverage;
+            rgba[offset] = clampByte(
+              (observed.red - analysis.color.red * matteWeight) / foregroundCoverage,
+            );
+            rgba[offset + 1] = clampByte(
+              (observed.green - analysis.color.green * matteWeight) / foregroundCoverage,
+            );
+            rgba[offset + 2] = clampByte(
+              (observed.blue - analysis.color.blue * matteWeight) / foregroundCoverage,
+            );
+            rgba[offset + 3] = clampByte(originalAlpha * foregroundCoverage);
+          }
+        } else {
+          rgba[offset + 3] = 0;
+        }
+        continue;
+      }
+    }
+
+    if (matteNeighbors === 0) continue;
+    foreground ??= findForegroundNeighborColor(pixelIndex);
     if (foreground) {
       const observed = readPixel(pixelIndex);
       const foregroundVector = {
@@ -462,6 +601,34 @@ export async function removeUniformSpriteBackgroundPng(
     const cleanupWeight = similarity * clampUnit(matteNeighbors / 5) * (0.28 + strength / 260);
     despillPixel(pixelIndex, cleanupWeight);
     rgba[offset + 3] = clampByte(originalAlpha * (1 - cleanupWeight * 0.28));
+  }
+
+  if (matteSaturation >= 120) {
+    const residualDominanceFloor = 2;
+    for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex++) {
+      if (!matteProximity[pixelIndex]) continue;
+      const offset = pixelOffset(pixelIndex);
+      const originalAlpha = rgba[offset + 3] ?? 255;
+      if (originalAlpha <= 4) continue;
+
+      const color = readPixel(pixelIndex);
+      const residualDominance = chromaDominance(color);
+      if (residualDominance <= residualDominanceFloor) continue;
+
+      const spillAmount = residualDominance - residualDominanceFloor;
+      const channels = [color.red, color.green, color.blue];
+      for (const channelIndex of matteHighChannels) {
+        channels[channelIndex] = clampByte((channels[channelIndex] ?? 0) - spillAmount);
+      }
+      rgba[offset] = channels[0] ?? 0;
+      rgba[offset + 1] = channels[1] ?? 0;
+      rgba[offset + 2] = channels[2] ?? 0;
+
+      const matteFraction = clampUnit(
+        spillAmount / Math.max(1, matteChromaDominance - residualDominanceFloor),
+      );
+      rgba[offset + 3] = clampByte(originalAlpha * (1 - matteFraction));
+    }
   }
 
   return {

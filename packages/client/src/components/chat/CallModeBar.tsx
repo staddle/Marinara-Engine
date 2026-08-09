@@ -1,6 +1,7 @@
 import { Mic, MicOff, PhoneOff } from "lucide-react";
 import { cn } from "../../lib/utils";
 import type { CallVoiceState } from "../../hooks/use-call-voice-session";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 export type CallModePhase = "listening" | "thinking" | "speaking";
 
@@ -21,6 +22,7 @@ function callStatusLabel(phase: CallModePhase, voiceState: CallVoiceState, muted
 }
 
 export function CallModeBar({ phase, voiceState, muted, onToggleMute, onEndCall }: CallModeBarProps) {
+  const { t: localizeUi } = useUiTranslation();
   const pulsing = !muted && phase === "listening" && voiceState === "speech-detected";
   const thinking = phase === "thinking";
   const speaking = phase === "speaking";
@@ -46,7 +48,9 @@ export function CallModeBar({ phase, voiceState, muted, onToggleMute, onEndCall 
 
       <div className="min-w-0 flex-1">
         <div className="text-sm font-medium text-foreground/90">{callStatusLabel(phase, voiceState, muted)}</div>
-        <div className="text-[0.6875rem] text-foreground/50">Call mode — chat history stays interactive above</div>
+        <div className="text-[0.6875rem] text-foreground/50">
+          {localizeUi("ui.chat.callmodebar.callModeChatHistoryStaysInteractiveAbove")}
+        </div>
       </div>
 
       <button
@@ -58,7 +62,9 @@ export function CallModeBar({ phase, voiceState, muted, onToggleMute, onEndCall 
             ? "bg-foreground/15 text-foreground/70 hover:bg-foreground/20"
             : "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70",
         )}
-        title={muted ? "Unmute microphone" : "Mute microphone"}
+        title={
+          muted ? localizeUi("ui.chat.callmodebar.unmuteMicrophone") : localizeUi("ui.chat.callmodebar.muteMicrophone")
+        }
         aria-pressed={muted}
       >
         {muted ? <MicOff size="1rem" /> : <Mic size="1rem" />}
@@ -68,7 +74,7 @@ export function CallModeBar({ phase, voiceState, muted, onToggleMute, onEndCall 
         type="button"
         onClick={onEndCall}
         className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-500/15 text-red-400 transition-colors hover:bg-red-500/25"
-        title="End call"
+        title={localizeUi("ui.chat.callmodebar.endCall")}
       >
         <PhoneOff size="1rem" />
       </button>

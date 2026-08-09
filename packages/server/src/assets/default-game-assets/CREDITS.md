@@ -41,15 +41,6 @@ sound libraries (OpenGameArt, Freesound.org CC0 tier, Kenney, etc.).
 | `ambient/interior/eerie-atmosphere.ogg` | interior |
 | `ambient/interior/rain-on-roof.mp3`     | interior |
 
-## Character Sprites
-
-| Directory                                      | Pack                                                               | Author       | Source                                                                       |
-| ---------------------------------------------- | ------------------------------------------------------------------ | ------------ | ---------------------------------------------------------------------------- |
-| `sprites/generic-fantasy/cabbit-vn/`           | VN Characters (17 sprites, 5 characters with emotions)             | Cabbit KusSv | [OpenGameArt](https://opengameart.org/content/vn-characters)                 |
-| `sprites/generic-fantasy/anime-vn/`            | VN Character Sprite (65 sprites, 5 anime characters with emotions) | FALLiNG_AiR  | [OpenGameArt](https://opengameart.org/content/visual-novel-character-sprite) |
-| `sprites/generic-fantasy/rpg-portraits/`       | 2D RPG Character Portraits (33 portraits + silhouettes)            | Arcade Dream | [OpenGameArt](https://opengameart.org/content/2d-rpg-character-portraits)    |
-| `sprites/generic-fantasy/hachi-characters.png` | Character Imageset (sprite sheet)                                  | HachiStudio  | [OpenGameArt](https://opengameart.org/content/character-imageset)            |
-
 ## Adding Your Own Assets
 
 Drop files into the appropriate subdirectory and hit the **Rescan** button in the app, or call `POST /api/game-assets/rescan`.

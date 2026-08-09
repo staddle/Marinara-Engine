@@ -33,6 +33,7 @@ import {
 } from "@marinara-engine/shared";
 import { Modal } from "../ui/Modal.js";
 import { GEMMA_RESTART_MESSAGE, useSidecarStore } from "../../stores/sidecar.store.js";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface Props {
   open: boolean;
@@ -156,6 +157,7 @@ function ResponseBlock({ label, value }: { label: string; value: string }) {
 }
 
 export function ModelDownloadModal({ open, onClose }: Props) {
+  const { t: localizeUi } = useUiTranslation();
   const {
     status,
     config,
@@ -360,7 +362,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
     if (!repoInput.trim()) return;
     markPrompted();
     if (await startCustomDownload(repoInput.trim(), isAppleSilicon ? undefined : selectedCustomPath)) {
-      toast.success("Local model downloaded. Completely restart Marinara Engine before using it.");
+      toast.success(localizeUi("ui.modals.modeldownloadmodal.localModelDownloadedCompletelyRestartMarinaraEngineBeforeUsing"));
     }
   };
 
@@ -489,36 +491,26 @@ export function ModelDownloadModal({ open, onClose }: Props) {
   };
 
   return (
-    <Modal open={open} onClose={onClose} title="Local AI Model" width="max-w-2xl" contentRef={modalScrollRef}>
+    <Modal open={open} onClose={onClose} title={localizeUi("ui.modals.modeldownloadmodal.localAiModel")} width="max-w-2xl" contentRef={modalScrollRef}>
       <div className="flex flex-col gap-5">
         <div className="flex items-start gap-3">
           <div className="mari-chrome-accent-soft-tile mari-accent-animated flex h-10 w-10 shrink-0 items-center justify-center rounded-xl">
             <BrainCircuit size="1.25rem" />
           </div>
           <div className="text-sm text-[var(--muted-foreground)]">
-            <p>
-              Marinara Engine can run a local sidecar for trackers, scene analysis, and game-state helpers without
-              spending main-model tokens.
-            </p>
+            <p>{localizeUi("ui.modals.modeldownloadmodal.marinaraEngineCanRunALocalSidecarForTrackers")}</p>
             <p className="mt-1.5 text-xs text-[var(--muted-foreground)]/70">
               {isAppleSilicon
-                ? "Set up the MLX runtime first if you want Marinara to keep it private and isolated, then choose either a curated Gemma preset or an MLX-native HuggingFace repo."
-                : "Set up the runtime first, then choose either a curated Gemma preset or any GGUF from HuggingFace. Runtime device selection lives inside Runtime Settings."}
+                ?localizeUi("ui.modals.modeldownloadmodal.setUpTheMlxRuntimeFirstIfYouWant")
+                :localizeUi("ui.modals.modeldownloadmodal.setUpTheRuntimeFirstThenChooseEitherA")}
             </p>
           </div>
         </div>
 
         <div className="rounded-xl border border-[var(--warning)]/30 bg-[var(--warning)]/10 p-3">
           <div className="flex items-center gap-2 text-sm font-semibold text-[var(--warning)]">
-            <AlertTriangle size="0.95rem" className="shrink-0" />
-            Local Model is for helpers, not main roleplay
-          </div>
-          <p className="mt-1.5 text-xs leading-relaxed text-[var(--muted-foreground)]">
-            The bundled model is deliberately small so it can handle tracker agents, scene analysis, and lightweight
-            background chores without stealing main-model tokens. It is not intended for main chat, roleplay, Game
-            Master narration, or Professor Mari creation/editing. Use a stronger local or API language connection for
-            those.
-          </p>
+            <AlertTriangle size="0.95rem" className="shrink-0" />{localizeUi("ui.modals.modeldownloadmodal.localModelIsForHelpersNotMainRoleplay")}</div>
+          <p className="mt-1.5 text-xs leading-relaxed text-[var(--muted-foreground)]">{localizeUi("ui.modals.modeldownloadmodal.theBundledModelIsDeliberatelySmallSoItCan")}</p>
         </div>
 
         {hasModel && (
@@ -532,9 +524,9 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                 <div className="text-xs text-[var(--muted-foreground)]/70">
                   {config.customModelRepo
                     ? config.backend === "mlx"
-                      ? `Custom MLX repo: ${config.customModelRepo}`
-                      : `Custom GGUF from ${config.customModelRepo}`
-                    : `${formatQuantizationLabel(config.quantization, config.backend)} Gemma 4 ${config.backend === "mlx" ? "MLX" : "GGUF"} preset`}
+                      ?localizeUi("ui.modals.modeldownloadmodal.customMlxRepoValue1", { value1: config.customModelRepo })
+                      :localizeUi("ui.modals.modeldownloadmodal.customGgufFromValue1", { value1: config.customModelRepo })
+                    :localizeUi("ui.modals.modeldownloadmodal.value1Gemma4Value2Preset", { value1: formatQuantizationLabel(config.quantization, config.backend), value2: config.backend === "mlx" ?localizeUi("ui.modals.modeldownloadmodal.mlx") :localizeUi("ui.modals.modeldownloadmodal.gguf") })}
                 </div>
               </div>
             </div>
@@ -545,38 +537,32 @@ export function ModelDownloadModal({ open, onClose }: Props) {
           <div className="flex items-start justify-between gap-3 max-sm:flex-col">
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 text-sm font-medium">
-                <Server size="0.95rem" className="mari-chrome-accent-icon mari-accent-animated" />
-                Runtime
-              </div>
+                <Server size="0.95rem" className="mari-chrome-accent-icon mari-accent-animated" />{localizeUi("ui.panels.extensionsettings.runtime")}</div>
               <div className="mt-1 text-xs text-[var(--muted-foreground)]">
-                <span>Status: {runtimeStatusLabel}</span>
+                <span>{localizeUi("ui.modals.modeldownloadmodal.status")} {runtimeStatusLabel}</span>
                 <span> • </span>
                 <span>{quickRuntimeSummary}</span>
               </div>
               <div className="mt-1 text-xs text-[var(--muted-foreground)]/75">
                 {runtime.installed
                   ? isSystemRuntime
-                    ? `Using system llama-server${runtime.systemPath ? `: ${runtime.systemPath}` : ""}`
+                    ?localizeUi("ui.modals.modeldownloadmodal.usingSystemLlamaServerValue1", { value1: runtime.systemPath ?localizeUi("ui.modals.modeldownloadmodal.value1", { value1: runtime.systemPath }) : "" })
                     : runtime.variant
-                      ? `Installed runtime: ${formatRuntimeVariantLabel(runtime.variant)}`
-                      : "Runtime installed and ready to use."
+                      ?localizeUi("ui.modals.modeldownloadmodal.installedRuntimeValue1", { value1: formatRuntimeVariantLabel(runtime.variant) })
+                      :localizeUi("ui.modals.modeldownloadmodal.runtimeInstalledAndReadyToUse")
                   : hasModel
-                    ? "Your model is ready, but the runtime has not been installed yet."
-                    : "Install and configure the runtime here, then choose a model below."}
+                    ?localizeUi("ui.modals.modeldownloadmodal.yourModelIsReadyButTheRuntimeHasNot")
+                    :localizeUi("ui.modals.modeldownloadmodal.installAndConfigureTheRuntimeHereThenChooseA")}
               </div>
               {status === "server_error" && (
-                <div className="mt-2 text-xs text-amber-200">
-                  Runtime startup failed. Open Runtime Settings for details.
-                </div>
+                <div className="mt-2 text-xs text-amber-200">{localizeUi("ui.modals.modeldownloadmodal.runtimeStartupFailedOpenRuntimeSettingsForDetails")}</div>
               )}
             </div>
             <button
               onClick={() => setShowRuntimeSettings((current) => !current)}
               className="flex items-center justify-center gap-2 rounded-xl border border-[var(--border)] px-3 py-2 text-sm text-[var(--foreground)] transition-colors hover:bg-[var(--secondary)]"
             >
-              <Settings2 size="0.875rem" />
-              Runtime Settings
-              {showRuntimeSettings ? <ChevronUp size="0.875rem" /> : <ChevronDown size="0.875rem" />}
+              <Settings2 size="0.875rem" />{localizeUi("ui.modals.modeldownloadmodal.runtimeSettings")}{showRuntimeSettings ? <ChevronUp size="0.875rem" /> : <ChevronDown size="0.875rem" />}
             </button>
           </div>
 
@@ -588,7 +574,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                   className="mari-chrome-accent-surface mari-accent-animated flex items-center justify-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition-colors"
                 >
                   <Download size="0.875rem" />
-                  {activeBackend === "mlx" ? "Install MLX Runtime" : "Install Runtime"}
+                  {activeBackend === "mlx" ?localizeUi("ui.modals.modeldownloadmodal.installMlxRuntime") :localizeUi("ui.modals.modeldownloadmodal.installRuntime")}
                 </button>
               ) : (
                 <>
@@ -599,10 +585,10 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                     >
                       <Loader2 size="0.875rem" />
                       {status === "server_error"
-                        ? "Retry Startup"
+                        ?localizeUi("ui.modals.modeldownloadmodal.retryStartup")
                         : inferenceReady
-                          ? "Restart Runtime"
-                          : "Start Runtime"}
+                          ?localizeUi("ui.modals.modeldownloadmodal.restartRuntime")
+                          :localizeUi("ui.modals.modeldownloadmodal.startRuntime")}
                     </button>
                   )}
                   {canReinstallRuntime && (
@@ -610,9 +596,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                       onClick={() => void reinstallRuntime()}
                       className="flex items-center justify-center gap-2 rounded-xl border border-[var(--border)] px-4 py-2 text-sm text-[var(--foreground)] transition-colors hover:bg-[var(--secondary)]"
                     >
-                      <Download size="0.875rem" />
-                      Reinstall Runtime
-                    </button>
+                      <Download size="0.875rem" />{localizeUi("ui.modals.modeldownloadmodal.reinstallRuntime")}</button>
                   )}
                 </>
               )}
@@ -628,9 +612,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                   <Loader2 size="0.875rem" className="animate-spin" />
                 ) : (
                   <MessageSquare size="0.875rem" />
-                )}
-                Send Test Message
-              </button>
+                )}{localizeUi("ui.connections.connectioneditor.sendTestMessage")}</button>
             </div>
           )}
 
@@ -638,13 +620,9 @@ export function ModelDownloadModal({ open, onClose }: Props) {
             <div className="mt-4 flex flex-col gap-4 rounded-xl border border-[var(--border)]/80 bg-[var(--secondary)]/40 p-4">
               <div className="grid gap-4 md:grid-cols-2">
                 <div className="flex flex-col gap-2">
-                  <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">
-                    Runtime Target
-                  </div>
+                  <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">{localizeUi("ui.modals.modeldownloadmodal.runtimeTarget")}</div>
                   {activeBackend === "mlx" ? (
-                    <div className="rounded-xl border border-[var(--border)] bg-[var(--card)]/60 px-3 py-2 text-sm text-[var(--muted-foreground)]/75">
-                      MLX chooses the Apple Silicon accelerator path automatically.
-                    </div>
+                    <div className="rounded-xl border border-[var(--border)] bg-[var(--card)]/60 px-3 py-2 text-sm text-[var(--muted-foreground)]/75">{localizeUi("ui.modals.modeldownloadmodal.mlxChoosesTheAppleSiliconAcceleratorPathAutomatically")}</div>
                   ) : (
                     <>
                       <div className="relative">
@@ -666,27 +644,18 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                           className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[var(--muted-foreground)]/70"
                         />
                       </div>
-                      <div className="text-xs text-[var(--muted-foreground)]/70">
-                        Pick the GPU family you actually want Marinara to target so it does not guess the wrong adapter.
-                      </div>
+                      <div className="text-xs text-[var(--muted-foreground)]/70">{localizeUi("ui.modals.modeldownloadmodal.pickTheGpuFamilyYouActuallyWantMarinaraTo")}</div>
                       {platform === "linux" && config.runtimePreference === "nvidia" && (
-                        <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-100">
-                          Linux CUDA binaries are not currently published by llama.cpp, so Marinara tries Vulkan first
-                          and falls back to CPU. Use System llama-server for a custom CUDA build.
-                        </div>
+                        <div className="rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-100">{localizeUi("ui.modals.modeldownloadmodal.linuxCudaBinariesAreNotCurrentlyPublishedByLlama")}</div>
                       )}
                     </>
                   )}
                 </div>
 
                 <div className="flex flex-col gap-2">
-                  <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">
-                    GPU Offload
-                  </div>
+                  <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">{localizeUi("ui.modals.modeldownloadmodal.gpuOffload")}</div>
                   {activeBackend === "mlx" ? (
-                    <div className="rounded-xl border border-[var(--border)] bg-[var(--card)]/60 px-3 py-2 text-sm text-[var(--muted-foreground)]/75">
-                      MLX manages GPU offload automatically.
-                    </div>
+                    <div className="rounded-xl border border-[var(--border)] bg-[var(--card)]/60 px-3 py-2 text-sm text-[var(--muted-foreground)]/75">{localizeUi("ui.modals.modeldownloadmodal.mlxManagesGpuOffloadAutomatically")}</div>
                   ) : (
                     <>
                       <div className="relative">
@@ -697,9 +666,9 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                           }
                           className="w-full appearance-none rounded-xl border border-[var(--border)] bg-[var(--card)]/80 px-3 py-2 pr-10 text-sm text-[var(--foreground)] outline-none transition-colors focus:border-[var(--marinara-chat-chrome-input-border-focus)] focus:ring-1 focus:ring-[var(--marinara-chat-chrome-focus-ring)]"
                         >
-                          <option value="auto">Auto offload</option>
-                          <option value="cpu">CPU only</option>
-                          <option value="custom">Custom GPU layers</option>
+                          <option value="auto">{localizeUi("ui.modals.modeldownloadmodal.autoOffload")}</option>
+                          <option value="cpu">{localizeUi("ui.modals.modeldownloadmodal.cpuOnly")}</option>
+                          <option value="custom">{localizeUi("ui.modals.modeldownloadmodal.customGpuLayers")}</option>
                         </select>
                         <ChevronDown
                           size="0.95rem"
@@ -723,15 +692,10 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                           <button
                             onClick={handleApplyCustomGpuLayers}
                             className="flex shrink-0 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--card)]/70 px-4 py-2 text-sm text-[var(--foreground)] transition-colors hover:bg-[var(--card)]"
-                          >
-                            Apply
-                          </button>
+                          >{localizeUi("ui.modals.modeldownloadmodal.apply")}</button>
                         </div>
                       )}
-                      <div className="text-xs text-[var(--muted-foreground)]/70">
-                        Auto tries max offload first, CPU only disables GPU use, and custom lets you cap how many layers
-                        go to the GPU.
-                      </div>
+                      <div className="text-xs text-[var(--muted-foreground)]/70">{localizeUi("ui.modals.modeldownloadmodal.autoTriesMaxOffloadFirstCpuOnlyDisablesGpu")}</div>
                     </>
                   )}
                 </div>
@@ -740,19 +704,15 @@ export function ModelDownloadModal({ open, onClose }: Props) {
               <div className="rounded-xl border border-[var(--border)] bg-[var(--card)]/50 p-4">
                 <div className="flex items-start justify-between gap-3 max-sm:flex-col">
                   <div>
-                    <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">
-                      Native Tool Calls
-                    </div>
+                    <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">{localizeUi("ui.modals.modeldownloadmodal.nativeToolCalls")}</div>
                     <div className="mt-1 text-xs leading-relaxed text-[var(--muted-foreground)]/75">
                       {activeBackend === "mlx"
-                        ? "This llama.cpp --jinja option does not apply to MLX-native sidecar runtimes."
-                        : "Starts llama-server with --jinja so OpenAI-compatible tool calls can be parsed natively. Tool-aware model templates work best; changing this restarts the local server."}
+                        ?localizeUi("ui.modals.modeldownloadmodal.thisLlamaCppJinjaOptionDoesNotApplyTo")
+                        :localizeUi("ui.modals.modeldownloadmodal.startsLlamaServerWithJinjaSoOpenaiCompatibleTool")}
                     </div>
                   </div>
                   {activeBackend === "mlx" ? (
-                    <span className="rounded-full border border-[var(--border)] px-3 py-1 text-xs text-[var(--muted-foreground)]">
-                      llama.cpp only
-                    </span>
+                    <span className="rounded-full border border-[var(--border)] px-3 py-1 text-xs text-[var(--muted-foreground)]">{localizeUi("ui.modals.modeldownloadmodal.llamaCppOnly")}</span>
                   ) : (
                     <button
                       type="button"
@@ -770,27 +730,21 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                           }`}
                         />
                       </span>
-                      {config.enableNativeToolCalls ? "Enabled" : "Disabled"}
+                      {config.enableNativeToolCalls ?localizeUi("ui.noodle.noodlehome.enabled") :localizeUi("ui.agents.agenteditor.disabled")}
                     </button>
                   )}
                 </div>
                 {!config.enableNativeToolCalls && activeBackend !== "mlx" && (
-                  <div className="mt-3 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-100">
-                    Professor Mari and custom agents need this enabled before the local sidecar can execute tools.
-                  </div>
+                  <div className="mt-3 rounded-lg border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-100">{localizeUi("ui.modals.modeldownloadmodal.professorMariAndCustomAgentsNeedThisEnabledBefore")}</div>
                 )}
               </div>
 
               {activeBackend !== "mlx" && (
                 <div className="rounded-xl border border-[var(--border)] bg-[var(--card)]/50 p-4">
-                  <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">
-                    Embedding Endpoint
-                  </div>
+                  <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">{localizeUi("ui.modals.modeldownloadmodal.embeddingEndpoint")}</div>
                   <div className="mt-3 grid gap-3 md:grid-cols-2">
                     <label className="flex flex-col gap-1.5">
-                      <span className="text-[0.6875rem] font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">
-                        Pooling Type
-                      </span>
+                      <span className="text-[0.6875rem] font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">{localizeUi("ui.modals.modeldownloadmodal.poolingType")}</span>
                       <div className="relative">
                         <select
                           value={config.embeddingPooling}
@@ -813,9 +767,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                     </label>
 
                     <label className="flex flex-col gap-1.5">
-                      <span className="text-[0.6875rem] font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">
-                        Physical Batch Size
-                      </span>
+                      <span className="text-[0.6875rem] font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">{localizeUi("ui.modals.modeldownloadmodal.physicalBatchSize")}</span>
                       <div className="flex items-center gap-2">
                         <input
                           value={embeddingBatchSizeInput}
@@ -833,28 +785,19 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                           onClick={handleApplyEmbeddingBatchSize}
                           disabled={!embeddingBatchSizeValid || !embeddingBatchSizeDirty}
                           className="flex shrink-0 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--card)]/70 px-4 py-2 text-sm text-[var(--foreground)] transition-colors hover:bg-[var(--card)] disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                          Apply
-                        </button>
+                        >{localizeUi("ui.modals.modeldownloadmodal.apply")}</button>
                       </div>
                     </label>
                   </div>
-                  <div className="mt-3 text-xs leading-relaxed text-[var(--muted-foreground)]/70">
-                    Use Mean pooling for OpenAI-compatible lorebook embeddings. Raise the physical batch size when long
-                    entries exceed llama-server's current batch limit; Gemma commonly works with 1024.
-                  </div>
+                  <div className="mt-3 text-xs leading-relaxed text-[var(--muted-foreground)]/70">{localizeUi("ui.modals.modeldownloadmodal.useMeanPoolingForOpenaiCompatibleLorebookEmbeddingsRaise")}</div>
                 </div>
               )}
 
               <div className="rounded-xl border border-[var(--border)] bg-[var(--card)]/50 p-4">
-                <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">
-                  Inference Settings
-                </div>
+                <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">{localizeUi("ui.modals.modeldownloadmodal.inferenceSettings")}</div>
                 <div className="mt-3 grid gap-3 md:grid-cols-2">
                   <label className="flex flex-col gap-1.5">
-                    <span className="text-[0.6875rem] font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">
-                      Context Window
-                    </span>
+                    <span className="text-[0.6875rem] font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">{localizeUi("ui.modals.modeldownloadmodal.contextWindow")}</span>
                     <input
                       value={contextSizeInput}
                       onChange={(event) => setContextSizeInput(event.target.value.replace(/[^\d]/g, ""))}
@@ -865,9 +808,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                   </label>
 
                   <label className="flex flex-col gap-1.5">
-                    <span className="text-[0.6875rem] font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">
-                      Max Response Tokens
-                    </span>
+                    <span className="text-[0.6875rem] font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">{localizeUi("ui.modals.modeldownloadmodal.maxResponseTokens")}</span>
                     <input
                       value={maxTokensInput}
                       onChange={(event) => setMaxTokensInput(event.target.value.replace(/[^\d]/g, ""))}
@@ -878,9 +819,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                   </label>
 
                   <label className="flex flex-col gap-1.5">
-                    <span className="text-[0.6875rem] font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">
-                      Temperature
-                    </span>
+                    <span className="text-[0.6875rem] font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">{localizeUi("ui.modals.modeldownloadmodal.temperature")}</span>
                     <input
                       value={temperatureInput}
                       onChange={(event) => setTemperatureInput(event.target.value.replace(/[^0-9.]/g, ""))}
@@ -891,9 +830,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                   </label>
 
                   <label className="flex flex-col gap-1.5">
-                    <span className="text-[0.6875rem] font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">
-                      Top P
-                    </span>
+                    <span className="text-[0.6875rem] font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">{localizeUi("ui.modals.modeldownloadmodal.topP")}</span>
                     <input
                       value={topPInput}
                       onChange={(event) => setTopPInput(event.target.value.replace(/[^0-9.]/g, ""))}
@@ -904,9 +841,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                   </label>
 
                   <label className="flex flex-col gap-1.5 md:max-w-[12rem]">
-                    <span className="text-[0.6875rem] font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">
-                      Top K
-                    </span>
+                    <span className="text-[0.6875rem] font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">{localizeUi("ui.modals.modeldownloadmodal.topK")}</span>
                     <input
                       value={topKInput}
                       onChange={(event) => setTopKInput(event.target.value.replace(/[^\d]/g, ""))}
@@ -917,69 +852,54 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                   </label>
                 </div>
                 <div className="mt-3 flex items-center justify-between gap-3 max-sm:flex-col max-sm:items-stretch">
-                  <div className="text-xs text-[var(--muted-foreground)]/70">
-                    Max response tokens caps how much the local runtime can generate. If it is too large relative to the
-                    context window, Marinara has to trim more of the prompt to make room. Marinara does not impose an
-                    upper limit here; the selected model and your hardware still decide what can actually run.
-                  </div>
+                  <div className="text-xs text-[var(--muted-foreground)]/70">{localizeUi("ui.modals.modeldownloadmodal.maxResponseTokensCapsHowMuchTheLocalRuntime")}</div>
                   <button
                     onClick={handleApplyGenerationSettings}
                     disabled={!generationSettingsValid || !generationSettingsDirty}
                     className="flex shrink-0 items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--card)]/70 px-4 py-2 text-sm text-[var(--foreground)] transition-colors hover:bg-[var(--card)] disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    Apply Settings
-                  </button>
+                  >{localizeUi("ui.modals.modeldownloadmodal.applySettings")}</button>
                 </div>
               </div>
 
               {runtime.installed && (
                 <div className="flex flex-col gap-1 rounded-xl border border-[var(--border)] bg-[var(--card)]/50 p-3 text-xs text-[var(--muted-foreground)]/75">
-                  <span>Status: {runtimeStatusLabel}</span>
+                  <span>{localizeUi("ui.modals.modeldownloadmodal.status")} {runtimeStatusLabel}</span>
                   {runtime.build && runtime.variant && (
-                    <span>
-                      Runtime build: {runtime.build} • {runtime.variant}
+                    <span>{localizeUi("ui.modals.modeldownloadmodal.runtimeBuild")} {runtime.build} • {runtime.variant}
                     </span>
                   )}
                   {isSystemRuntime && runtime.systemPath && (
-                    <span>Using system llama-server: {runtime.systemPath}</span>
+                    <span>{localizeUi("ui.modals.modeldownloadmodal.usingSystemLlamaServer")} {runtime.systemPath}</span>
                   )}
                 </div>
               )}
 
               {status === "server_error" && (
                 <div className="rounded-xl border border-amber-500/25 bg-amber-500/5 p-4">
-                  <div className="text-sm font-medium text-amber-200">Local runtime failed to start</div>
-                  <div className="mt-1 text-xs text-[var(--muted-foreground)]/85">
-                    Marinara will keep working without the local model until you retry or change these settings.
-                  </div>
+                  <div className="text-sm font-medium text-amber-200">{localizeUi("ui.modals.modeldownloadmodal.localRuntimeFailedToStart")}</div>
+                  <div className="mt-1 text-xs text-[var(--muted-foreground)]/85">{localizeUi("ui.modals.modeldownloadmodal.marinaraWillKeepWorkingWithoutTheLocalModelUntil")}</div>
                   <div className="mt-3 flex flex-col gap-1 text-xs text-[var(--muted-foreground)]/75">
-                    {failedRuntimeVariant && <span>Runtime: {formatRuntimeVariantLabel(failedRuntimeVariant)}</span>}
-                    {startupError && <span>Error: {startupError}</span>}
-                    {logPath && <span>Log: {logPath}</span>}
+                    {failedRuntimeVariant && <span>{localizeUi("ui.panels.sidecarcard.runtime")} {formatRuntimeVariantLabel(failedRuntimeVariant)}</span>}
+                    {startupError && <span>{localizeUi("ui.modals.modeldownloadmodal.error")} {startupError}</span>}
+                    {logPath && <span>{localizeUi("ui.modals.modeldownloadmodal.log")} {logPath}</span>}
                   </div>
                   <div className="mt-3 flex gap-2 max-sm:flex-col">
                     <button
                       onClick={() => void restartRuntime()}
                       className="flex items-center justify-center gap-2 rounded-xl bg-amber-500/15 px-4 py-2.5 text-sm font-medium text-amber-200 transition-colors hover:bg-amber-500/25"
                     >
-                      <Loader2 size="0.875rem" />
-                      Retry Startup
-                    </button>
+                      <Loader2 size="0.875rem" />{localizeUi("ui.modals.modeldownloadmodal.retryStartup")}</button>
                     {canReinstallRuntime && (
                       <button
                         onClick={() => void reinstallRuntime()}
                         className="flex items-center justify-center gap-2 rounded-xl border border-amber-500/20 px-4 py-2.5 text-sm text-amber-100 transition-colors hover:bg-amber-500/10"
                       >
-                        <Download size="0.875rem" />
-                        Reinstall Runtime
-                      </button>
+                        <Download size="0.875rem" />{localizeUi("ui.modals.modeldownloadmodal.reinstallRuntime")}</button>
                     )}
                     <button
                       onClick={() => void updateConfig({ useForTrackers: false, useForGameScene: false })}
                       className="flex items-center justify-center gap-2 rounded-xl border border-[var(--border)] px-4 py-2.5 text-sm text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)]"
-                    >
-                      Continue Without Local AI
-                    </button>
+                    >{localizeUi("ui.modals.modeldownloadmodal.continueWithoutLocalAi")}</button>
                   </div>
                 </div>
               )}
@@ -994,52 +914,47 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                 >
                   <div
                     className={`text-sm font-medium ${testMessageResult.success ? "text-emerald-300" : "text-red-300"}`}
-                  >
-                    Local Test Message {testMessageResult.success ? "Succeeded" : "Failed"}
+                  >{localizeUi("ui.modals.modeldownloadmodal.localTestMessage")} {testMessageResult.success ?localizeUi("ui.modals.modeldownloadmodal.succeeded") :localizeUi("ui.connections.testresultcard.failed")}
                   </div>
-                  <div className="mt-1 text-xs text-[var(--muted-foreground)]/75">{testMessageResult.latencyMs}ms</div>
+                  <div className="mt-1 text-xs text-[var(--muted-foreground)]/75">{testMessageResult.latencyMs}{localizeUi("ui.connections.testresultcard.ms")}</div>
                   {testMessageResult.success ? (
                     <div className="mt-3 flex flex-col gap-3">
                       {testMessageResult.nonce && (
-                        <div className="text-xs text-[var(--muted-foreground)]/75">
-                          Verification token:{" "}
+                        <div className="text-xs text-[var(--muted-foreground)]/75">{localizeUi("ui.modals.modeldownloadmodal.verificationToken")}{" "}
                           <span className="font-mono text-[var(--foreground)]">{testMessageResult.nonce}</span>
-                          {testMessageResult.nonceVerified ? " • echoed by model" : " • not echoed"}
+                          {testMessageResult.nonceVerified ?localizeUi("ui.modals.modeldownloadmodal.echoedByModel") :localizeUi("ui.modals.modeldownloadmodal.notEchoed")}
                         </div>
                       )}
                       {(testMessageResult.usage || testMessageResult.timings) && (
                         <div className="text-xs text-[var(--muted-foreground)]/75">
                           {testMessageResult.usage && (
-                            <span>
-                              Usage: prompt {testMessageResult.usage.promptTokens ?? "?"}, completion{" "}
-                              {testMessageResult.usage.completionTokens ?? "?"}, total{" "}
+                            <span>{localizeUi("ui.modals.modeldownloadmodal.usagePrompt")} {testMessageResult.usage.promptTokens ?? "?"}{localizeUi("ui.modals.modeldownloadmodal.completion")}{" "}
+                              {testMessageResult.usage.completionTokens ?? "?"}{localizeUi("ui.modals.modeldownloadmodal.total")}{" "}
                               {testMessageResult.usage.totalTokens ?? "?"}
                             </span>
                           )}
                           {testMessageResult.usage && testMessageResult.timings && <span> • </span>}
                           {testMessageResult.timings && (
-                            <span>
-                              Timings: prompt {testMessageResult.timings.promptMs ?? "?"}ms / gen{" "}
-                              {testMessageResult.timings.predictedMs ?? "?"}ms
-                            </span>
+                            <span>{localizeUi("ui.modals.modeldownloadmodal.timingsPrompt")} {testMessageResult.timings.promptMs ?? "?"}{localizeUi("ui.modals.modeldownloadmodal.msGen")}{" "}
+                              {testMessageResult.timings.predictedMs ?? "?"}{localizeUi("ui.connections.testresultcard.ms")}</span>
                           )}
                         </div>
                       )}
                       {!!testMessageResult.messageContent && (
-                        <ResponseBlock label="Message Content" value={testMessageResult.messageContent} />
+                        <ResponseBlock label={localizeUi("ui.modals.modeldownloadmodal.messageContent")} value={testMessageResult.messageContent} />
                       )}
                       {!!testMessageResult.reasoningContent && (
-                        <ResponseBlock label="Reasoning Content" value={testMessageResult.reasoningContent} />
+                        <ResponseBlock label={localizeUi("ui.modals.modeldownloadmodal.reasoningContent")} value={testMessageResult.reasoningContent} />
                       )}
                       {!testMessageResult.messageContent && !testMessageResult.reasoningContent && (
-                        <ResponseBlock label="Response" value={testMessageResult.response} />
+                        <ResponseBlock label={localizeUi("ui.modals.modeldownloadmodal.response")} value={testMessageResult.response} />
                       )}
                     </div>
                   ) : (
                     <div className="mt-3 flex flex-col gap-1 text-xs text-red-200/90">
                       <span>{testMessageResult.error || "No response received from the local runtime."}</span>
                       {testMessageResult.failedRuntimeVariant && (
-                        <span>Runtime: {formatRuntimeVariantLabel(testMessageResult.failedRuntimeVariant)}</span>
+                        <span>{localizeUi("ui.panels.sidecarcard.runtime")} {formatRuntimeVariantLabel(testMessageResult.failedRuntimeVariant)}</span>
                       )}
                     </div>
                   )}
@@ -1048,33 +963,29 @@ export function ModelDownloadModal({ open, onClose }: Props) {
 
               {runtimeDiagnostics && (
                 <div className="rounded-xl border border-[var(--border)] bg-[var(--card)]/50 p-3">
-                  <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">
-                    Diagnostics
-                  </div>
+                  <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">{localizeUi("ui.modals.modeldownloadmodal.diagnostics")}</div>
                   <div className="mt-2 flex flex-col gap-1 text-xs text-[var(--muted-foreground)]/75">
                     {runtimeDiagnostics.gpuVendors.length > 0 && (
-                      <span>Detected GPU vendors: {runtimeDiagnostics.gpuVendors.join(", ")}</span>
+                      <span>{localizeUi("ui.modals.modeldownloadmodal.detectedGpuVendors")} {runtimeDiagnostics.gpuVendors.join(", ")}</span>
                     )}
-                    <span>
-                      Backend hints:
-                      {runtimeDiagnostics.preferCuda ? " CUDA" : ""}
-                      {runtimeDiagnostics.preferHip ? " HIP" : ""}
-                      {runtimeDiagnostics.preferRocm ? " ROCm" : ""}
-                      {runtimeDiagnostics.preferSycl ? " SYCL" : ""}
-                      {runtimeDiagnostics.preferVulkan ? " Vulkan" : ""}
+                    <span>{localizeUi("ui.modals.modeldownloadmodal.backendHints")}{runtimeDiagnostics.preferCuda ?localizeUi("ui.modals.modeldownloadmodal.cuda") : ""}
+                      {runtimeDiagnostics.preferHip ?localizeUi("ui.modals.modeldownloadmodal.hip") : ""}
+                      {runtimeDiagnostics.preferRocm ?localizeUi("ui.modals.modeldownloadmodal.rocm") : ""}
+                      {runtimeDiagnostics.preferSycl ?localizeUi("ui.modals.modeldownloadmodal.sycl") : ""}
+                      {runtimeDiagnostics.preferVulkan ?localizeUi("ui.modals.modeldownloadmodal.vulkan") : ""}
                       {!runtimeDiagnostics.preferCuda &&
                       !runtimeDiagnostics.preferHip &&
                       !runtimeDiagnostics.preferRocm &&
                       !runtimeDiagnostics.preferSycl &&
                       !runtimeDiagnostics.preferVulkan
-                        ? " none"
+                        ?localizeUi("ui.modals.modeldownloadmodal.none")
                         : ""}
                     </span>
                     {runtimeDiagnostics.systemLlamaPath && (
-                      <span>System llama-server: {runtimeDiagnostics.systemLlamaPath}</span>
+                      <span>{localizeUi("ui.modals.modeldownloadmodal.systemLlamaServer")} {runtimeDiagnostics.systemLlamaPath}</span>
                     )}
                     {runtimeDiagnostics.launchCommand && (
-                      <span>Last launch command: {runtimeDiagnostics.launchCommand}</span>
+                      <span>{localizeUi("ui.modals.modeldownloadmodal.lastLaunchCommand")} {runtimeDiagnostics.launchCommand}</span>
                     )}
                   </div>
                 </div>
@@ -1127,7 +1038,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
           <>
             <div className="flex flex-col gap-2">
               <span className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">
-                {isAppleSilicon ? "Curated Gemma 4 Presets for Apple Silicon" : "Curated Gemma 4 Presets"}
+                {isAppleSilicon ?localizeUi("ui.modals.modeldownloadmodal.curatedGemma4PresetsForAppleSilicon") :localizeUi("ui.modals.modeldownloadmodal.curatedGemma4Presets")}
               </span>
               {curatedModels.map((model) => (
                 <label
@@ -1167,14 +1078,11 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                         {formatBytes(model.sizeBytes)}
                       </span>
                       <span className="flex items-center gap-1">
-                        <HardDrive size="0.75rem" />~{formatBytes(model.ramBytes)} RAM
-                      </span>
+                        <HardDrive size="0.75rem" />~{formatBytes(model.ramBytes)} {localizeUi("ui.modals.modeldownloadmodal.ram")}</span>
                     </div>
                   </div>
                   {model.quantization === "q8_0" && (
-                    <span className="mari-chrome-accent-surface mari-accent-animated rounded-full px-2 py-0.5 text-[0.625rem] font-medium">
-                      Recommended
-                    </span>
+                    <span className="mari-chrome-accent-surface mari-accent-animated rounded-full px-2 py-0.5 text-[0.625rem] font-medium">{localizeUi("ui.modals.modeldownloadmodal.recommended")}</span>
                   )}
                 </label>
               ))}
@@ -1184,18 +1092,18 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                 className="mari-chrome-accent-surface mari-accent-animated mt-1 flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition-colors disabled:opacity-50"
               >
                 <Zap size="0.875rem" />
-                {hasModel ? "Switch to Curated Preset" : "Use Curated Preset"}
+                {hasModel ?localizeUi("ui.modals.modeldownloadmodal.switchToCuratedPreset") :localizeUi("ui.modals.modeldownloadmodal.useCuratedPreset")}
               </button>
             </div>
 
             <div className="rounded-xl border border-[var(--border)] bg-[var(--card)]/50 p-3">
               <div className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">
-                {isAppleSilicon ? "Use Your Own MLX Model From HuggingFace" : "Use Your Own Model From HuggingFace"}
+                {isAppleSilicon ?localizeUi("ui.modals.modeldownloadmodal.useYourOwnMlxModelFromHuggingface") :localizeUi("ui.modals.modeldownloadmodal.useYourOwnModelFromHuggingface")}
               </div>
               <div className="mt-2 text-xs text-[var(--muted-foreground)]/70">
                 {isAppleSilicon
-                  ? "Enter an MLX-native HuggingFace repo. Marinara will validate it, then let the MLX runtime pull and cache it locally on first startup."
-                  : "Enter a GGUF repo on HuggingFace, list the available files, and choose the one you want to download."}
+                  ?localizeUi("ui.modals.modeldownloadmodal.enterAnMlxNativeHuggingfaceRepoMarinaraWillValidate")
+                  :localizeUi("ui.modals.modeldownloadmodal.enterAGgufRepoOnHuggingfaceListTheAvailable")}
               </div>
               <div className="mt-3 flex flex-col gap-2">
                 <div className="flex gap-2 max-sm:flex-col">
@@ -1208,7 +1116,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                         setSelectedCustomPath("");
                       }
                     }}
-                    placeholder="owner/repo"
+                    placeholder={localizeUi("ui.modals.modeldownloadmodal.ownerRepo")}
                     className="flex-1 rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm outline-none transition-colors focus:border-[var(--marinara-chat-chrome-input-border-focus)]"
                   />
                   <button
@@ -1221,7 +1129,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                     ) : (
                       <Search size="0.875rem" />
                     )}
-                    {isAppleSilicon ? "Validate Repo" : "List Models"}
+                    {isAppleSilicon ?localizeUi("ui.modals.modeldownloadmodal.validateRepo") :localizeUi("ui.modals.modeldownloadmodal.listModels")}
                   </button>
                 </div>
 
@@ -1237,7 +1145,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                     <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-[var(--muted-foreground)]/75">
                       {selectedCustomEntry.quantizationLabel && <span>{selectedCustomEntry.quantizationLabel}</span>}
                       {selectedCustomEntry.sizeBytes && <span>{formatBytes(selectedCustomEntry.sizeBytes)}</span>}
-                      <span>MLX repo validated</span>
+                      <span>{localizeUi("ui.modals.modeldownloadmodal.mlxRepoValidated")}</span>
                     </div>
                   </div>
                 )}
@@ -1252,8 +1160,8 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                       {customModels.map((entry) => (
                         <option key={entry.path} value={entry.path}>
                           {entry.filename}
-                          {entry.quantizationLabel ? ` • ${entry.quantizationLabel}` : ""}
-                          {entry.sizeBytes ? ` • ${formatBytes(entry.sizeBytes)}` : ""}
+                          {entry.quantizationLabel ?localizeUi("ui.modals.modeldownloadmodal.value1_8a04cf4", { value1: entry.quantizationLabel }) : ""}
+                          {entry.sizeBytes ?localizeUi("ui.modals.modeldownloadmodal.value1_8a04cf4", { value1: formatBytes(entry.sizeBytes) }) : ""}
                         </option>
                       ))}
                     </select>
@@ -1263,7 +1171,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                       className="flex items-center justify-center gap-2 rounded-xl bg-sky-500/15 px-4 py-2.5 text-sm font-medium text-sky-300 transition-colors hover:bg-sky-500/25 disabled:opacity-50"
                     >
                       <Download size="0.875rem" />
-                      {hasModel ? "Switch to Selected GGUF" : "Download Selected GGUF"}
+                      {hasModel ?localizeUi("ui.modals.modeldownloadmodal.switchToSelectedGguf") :localizeUi("ui.modals.modeldownloadmodal.downloadSelectedGguf")}
                     </button>
                   </>
                 )}
@@ -1275,7 +1183,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                     className="flex items-center justify-center gap-2 rounded-xl bg-sky-500/15 px-4 py-2.5 text-sm font-medium text-sky-300 transition-colors hover:bg-sky-500/25 disabled:opacity-50"
                   >
                     <Download size="0.875rem" />
-                    {hasModel ? "Switch to Validated MLX Repo" : "Use Validated MLX Repo"}
+                    {hasModel ?localizeUi("ui.modals.modeldownloadmodal.switchToValidatedMlxRepo") :localizeUi("ui.modals.modeldownloadmodal.useValidatedMlxRepo")}
                   </button>
                 )}
               </div>
@@ -1295,38 +1203,32 @@ export function ModelDownloadModal({ open, onClose }: Props) {
               onClick={handleCancelSetup}
               className="flex w-full items-center justify-center gap-2 rounded-xl border border-[var(--border)] px-4 py-2.5 text-sm text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)]"
             >
-              <X size="0.875rem" />
-              Cancel Setup
-            </button>
+              <X size="0.875rem" />{localizeUi("ui.modals.modeldownloadmodal.cancelSetup")}</button>
           ) : (
             <>
               <button
                 onClick={handleSkip}
                 className="flex-1 rounded-xl border border-[var(--border)] px-4 py-2.5 text-sm text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)]"
               >
-                {hasModel ? "Close" : "Skip for Now"}
+                {hasModel ?localizeUi("capabilities.actions.close") :localizeUi("ui.modals.modeldownloadmodal.skipForNow")}
               </button>
               <button
                 onClick={handleDone}
                 disabled={!canFinish}
                 className="mari-chrome-accent-surface mari-accent-animated flex flex-1 items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                Done
-              </button>
+              >{localizeUi("lorebook.editor.batch.done")}</button>
             </>
           )}
         </div>
 
         {!hasModel && !showSetupProgress && (
           <div className="rounded-xl border border-[var(--border)] bg-[var(--card)]/50 p-3">
-            <span className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">
-              What the local model handles
-            </span>
+            <span className="text-xs font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">{localizeUi("ui.modals.modeldownloadmodal.whatTheLocalModelHandles")}</span>
             <ul className="mt-2 flex flex-col gap-1 text-xs text-[var(--muted-foreground)]/80">
-              <li>Tracker agents in roleplay mode</li>
-              <li>Scene effects in game mode (backgrounds, music, SFX, ambient)</li>
-              <li>Widget updates, weather, and time-of-day changes</li>
-              <li>NPC reputation tracking and expression selection</li>
+              <li>{localizeUi("ui.modals.modeldownloadmodal.trackerAgentsInRoleplayMode")}</li>
+              <li>{localizeUi("ui.modals.modeldownloadmodal.sceneEffectsInGameModeBackgroundsMusicSfxAmbient")}</li>
+              <li>{localizeUi("ui.modals.modeldownloadmodal.widgetUpdatesWeatherAndTimeOfDayChanges")}</li>
+              <li>{localizeUi("ui.modals.modeldownloadmodal.npcReputationTrackingAndExpressionSelection")}</li>
             </ul>
           </div>
         )}

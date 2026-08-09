@@ -10,11 +10,13 @@ import {
   type CapabilityRuntimeHost,
   type CapabilityRuntimeLogArgument,
   type InstalledCapabilityPackage,
+  parseAgentSettingsRecord,
 } from "@marinara-engine/shared";
 import { isDebugAgentsEnabled } from "../../config/runtime-config.js";
 import { logger, logDebugOverride } from "../../lib/logger.js";
 import { DATA_DIR } from "../../utils/data-dir.js";
 import { parseGameJsonish } from "../game/jsonish.js";
+import { createAgentsStorage } from "../storage/agents.storage.js";
 import { capabilityPackageManager } from "./package-manager.service.js";
 import {
   registerCapabilityConversationCommand,
@@ -22,8 +24,14 @@ import {
 } from "./capability-command-registry.service.js";
 import { registerCapabilityService } from "./capability-service-registry.service.js";
 import { createCapabilityLanguageModelHost } from "./capability-language-model.service.js";
+import { createCapabilityEmbeddingHost } from "./capability-embedding.service.js";
 import { createCapabilityPersistenceHost } from "./capability-persistence.service.js";
 import { createCapabilityResourceHost } from "./capability-resources.service.js";
+import { registerCapabilityPrivilegedRoutes } from "./capability-route-registration.service.js";
+import {
+  registerCapabilityPromptContext,
+  type CapabilityPromptContextContributor,
+} from "./capability-prompt-context.service.js";
 
 type Cleanup = () => void | Promise<void>;
 type CapabilityActivationContext = {
@@ -35,11 +43,21 @@ type CapabilityActivationContext = {
     registerTurnGameEngine(engine: AnyTurnGameEngine): Cleanup;
     registerConversationCommand(registration: CapabilityConversationCommandRegistration): Cleanup;
     registerService<T>(key: string, service: T): Cleanup;
+    /** Contribute text to each turn's system prompt. Requires the `prompt-context` permission. */
+    registerPromptContext(contributor: CapabilityPromptContextContributor): Cleanup;
+    registerPrivilegedRoutes(routes: import("fastify").FastifyPluginAsync, options: { prefix: string }): Promise<Cleanup>;
   };
 };
 
-function createCapabilityRuntimeHost(app: FastifyInstance): CapabilityRuntimeHost {
+function createCapabilityRuntimeHost(app: FastifyInstance, packageId: string): CapabilityRuntimeHost {
   return Object.freeze({
+    embeddings: createCapabilityEmbeddingHost(),
+    async getAgentConfig() {
+      const config = await createAgentsStorage(app.db).getByType(packageId);
+      return config
+        ? { connectionId: config.connectionId, settings: parseAgentSettingsRecord(config.settings) }
+        : null;
+    },
     isDebugAgentsEnabled,
     json: Object.freeze({ parseJsonish: parseGameJsonish }),
     languageModels: createCapabilityLanguageModelHost(app.db),
@@ -145,11 +163,23 @@ class CapabilityModuleRuntime {
         dataDir: DATA_DIR,
         package: installed,
         api: {
-          runtime: createCapabilityRuntimeHost(app),
+          runtime: createCapabilityRuntimeHost(app, installed.id),
           registerTurnGameEngine: (engine) => trackCleanup(registerTurnGameEngine(engine)),
           registerConversationCommand: (registration) =>
             trackCleanup(registerCapabilityConversationCommand(registration)),
           registerService: (key, service) => trackCleanup(registerCapabilityService(key, service)),
+          // Gated on the permission the manifest already declares, so a package can't reach the prompt
+          // without asking for it up front. Contract in capability-prompt-context.service.ts.
+          registerPromptContext: (contributor) => {
+            if (!installed.manifest.permissions?.includes("prompt-context")) {
+              throw new Error(
+                `Capability package ${installed.id} must declare the "prompt-context" permission to contribute prompt context`,
+              );
+            }
+            return trackCleanup(registerCapabilityPromptContext(installed.id, contributor));
+          },
+          registerPrivilegedRoutes: async (routes, options) =>
+            trackCleanup(await registerCapabilityPrivilegedRoutes(app, installed, routes, options)),
         },
       };
       const cleanup = await module.activate(context);

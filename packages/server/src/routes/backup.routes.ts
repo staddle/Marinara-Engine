@@ -5,14 +5,17 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { join, relative } from "path";
 import { createReadStream, createWriteStream, existsSync, readdirSync, statSync } from "fs";
 import type { WriteStream } from "fs";
-import { cp, mkdir, copyFile, readFile, readdir, writeFile, stat, mkdtemp, rm, open } from "fs/promises";
+import { cp, mkdir, copyFile, readFile, readdir, writeFile, stat, mkdtemp, rm, open, rename } from "fs/promises";
 import type { FileHandle } from "fs/promises";
 import { tmpdir } from "os";
 import { pipeline } from "stream/promises";
-import { createHash } from "crypto";
+import { StringDecoder } from "string_decoder";
+import { createHash, randomUUID } from "crypto";
 import { inflateRawSync } from "zlib";
 import AdmZip from "adm-zip";
 import { FILE_BACKED_TABLES } from "../db/file-backed-store.js";
+import { migrateLegacyNoodleAccountRow } from "../db/noodle-platform-migration.js";
+import { migrateLegacyNoodlePostAccessRow } from "../db/noodle-access-migration.js";
 import { getFileTableConfig, isFileTable, type AnyFileTable } from "../db/file-schema.js";
 import * as schema from "../db/schema/index.js";
 import { createCharactersStorage } from "../services/storage/characters.storage.js";
@@ -20,7 +23,12 @@ import { createLorebooksStorage } from "../services/storage/lorebooks.storage.js
 import { createPromptsStorage } from "../services/storage/prompts.storage.js";
 import { createAgentsStorage } from "../services/storage/agents.storage.js";
 import { createThemesStorage } from "../services/storage/themes.storage.js";
-import { canReparentFolder, type ExportEnvelope } from "@marinara-engine/shared";
+import { createAppSettingsStorage } from "../services/storage/app-settings.storage.js";
+import {
+  canReparentFolder,
+  normalizePersonalExtensionCapabilities,
+  type ExportEnvelope,
+} from "@marinara-engine/shared";
 import { getDataDir } from "../utils/data-dir.js";
 import { getFileStorageDir } from "../config/runtime-config.js";
 import { normalizeTimestampOverrides } from "../services/import/import-timestamps.js";
@@ -37,6 +45,19 @@ import {
   type ProfileImportAssetInput,
   type StagedProfileImportAssets,
 } from "../services/import/profile-import-assets.js";
+import { ProfileImportRequestError } from "../services/import/profile-import-errors.js";
+import { planProfileNoodleImport, type ProfileNoodleImportWarning } from "../services/import/profile-import-noodle.js";
+import { withNoodleAutoPostPaused } from "../services/noodle/noodle-autopost-scheduler.service.js";
+import { computePersonalExtensionHash } from "../services/extensions/personal-extension-hash.js";
+import { personalServerExtensionRuntime } from "../services/extensions/personal-server-extension-runtime.js";
+import {
+  AUTOMATIC_BACKUP_FILENAME,
+  automaticBackupArchiveFilename,
+  automaticBackupExists,
+  normalizeAutomaticBackupRetentionCount,
+  parseAutomaticBackupRetentionCount,
+  pruneAutomaticBackupFiles,
+} from "../services/backup/automatic-backup-retention.js";
 
 /** Directories inside DATA_DIR that should be included in every backup. */
 const BACKUP_DIRS = [
@@ -53,9 +74,11 @@ const BACKUP_DIRS = [
   "custom-emojis",
   "custom-stickers",
   "tts-clone-references",
+  "notification-sounds",
   "lorebooks/images",
   "agents/images",
   "connections/images",
+  "long-term-memory",
 ];
 const ENCRYPTION_KEY_FILENAME = ".encryption-key";
 const PROFILE_ASSET_DIRS = BACKUP_DIRS.filter((dirName) => dirName !== "storage");
@@ -64,7 +87,10 @@ const PROFILE_IMPORT_ARCHIVE_LIMIT_BYTES = 1024 * 1024 * 1024;
 const PROFILE_ARCHIVE_ENTRY_LIMIT_BYTES = 256 * 1024 * 1024;
 const PROFILE_ARCHIVE_CENTRAL_DIRECTORY_LIMIT_BYTES = 64 * 1024 * 1024;
 const PROFILE_ARCHIVE_TOTAL_UNCOMPRESSED_LIMIT_BYTES = 1024 * 1024 * 1024;
+const PROFILE_IMPORT_MEMORY_WARNING_BYTES = 512 * 1024 * 1024;
 const PROFILE_EXPORT_JSON_TOO_LARGE_CODE = "PROFILE_EXPORT_JSON_TOO_LARGE";
+const AUTOMATIC_BACKUP_SETTINGS_KEY = "automatic_backup";
+const AUTOMATIC_BACKUP_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 const ZIP32_MAX_VALUE = 0xffffffff;
 const ZIP_EOCD_SIGNATURE = 0x06054b50;
 const ZIP_CENTRAL_DIRECTORY_SIGNATURE = 0x02014b50;
@@ -73,6 +99,43 @@ const ZIP_EOCD_MIN_SIZE = 22;
 const ZIP_EOCD_MAX_COMMENT_BYTES = 0xffff;
 const ZIP_ENCRYPTED_FLAG = 0x0001;
 let profileImportLifecycleTail = Promise.resolve();
+let automaticBackupLifecycleTail = Promise.resolve();
+
+type AutomaticBackupFrequency = "daily" | "weekly" | "monthly";
+type AutomaticBackupSettings = {
+  enabled: boolean;
+  frequency: AutomaticBackupFrequency;
+  retentionCount: number;
+  lastBackupAt: string | null;
+  lastError: string | null;
+};
+
+function normalizeAutomaticBackupSettings(value: unknown): AutomaticBackupSettings {
+  const candidate = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  const frequency: AutomaticBackupFrequency =
+    candidate.frequency === "weekly" || candidate.frequency === "monthly" ? candidate.frequency : "daily";
+  return {
+    enabled: candidate.enabled === true,
+    frequency,
+    retentionCount: normalizeAutomaticBackupRetentionCount(candidate.retentionCount),
+    lastBackupAt: typeof candidate.lastBackupAt === "string" ? candidate.lastBackupAt : null,
+    lastError: typeof candidate.lastError === "string" ? candidate.lastError : null,
+  };
+}
+
+function automaticBackupPeriodMs(frequency: AutomaticBackupFrequency) {
+  if (frequency === "weekly") return 7 * 24 * 60 * 60 * 1000;
+  if (frequency === "monthly") return 30 * 24 * 60 * 60 * 1000;
+  return 24 * 60 * 60 * 1000;
+}
+
+function automaticBackupNextAt(settings: AutomaticBackupSettings) {
+  if (!settings.enabled) return null;
+  const lastBackupMs = settings.lastBackupAt ? Date.parse(settings.lastBackupAt) : Number.NaN;
+  return new Date(
+    Number.isFinite(lastBackupMs) ? lastBackupMs + automaticBackupPeriodMs(settings.frequency) : Date.now(),
+  ).toISOString();
+}
 
 /** Serialize database replacement, asset promotion, and failure recovery as one import lifecycle. */
 async function withProfileImportLifecycleLock<T>(task: () => Promise<T>): Promise<T> {
@@ -87,6 +150,26 @@ async function withProfileImportLifecycleLock<T>(task: () => Promise<T>): Promis
   } finally {
     release();
   }
+}
+
+/** Serialize automatic backup rotation and retention pruning against the same archive directory. */
+async function withAutomaticBackupLifecycleLock<T>(task: () => Promise<T>): Promise<T> {
+  const predecessor = automaticBackupLifecycleTail;
+  let release: () => void = () => undefined;
+  automaticBackupLifecycleTail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await predecessor;
+  try {
+    return await task();
+  } finally {
+    release();
+  }
+}
+
+/** Resolve the directory shared by automatic archives and user-created backup folders. */
+function getBackupsRoot(): string {
+  return join(getDataDir(), "backups");
 }
 
 function normalizeLorebookScope(value: unknown): { mode: "all" | "disabled" | "specific"; chatIds: string[] } {
@@ -107,6 +190,12 @@ type ProfileStorageSnapshot = {
   tables: ProfileTableSnapshots;
   files: ProfileFileAsset[];
 };
+type ProfileArchiveTableFile = { path: string; count: number; size: number };
+type ProfileArchiveStorageSnapshot = {
+  version: 2;
+  tables: Record<string, ProfileArchiveTableFile>;
+  files: ProfileFileAsset[];
+};
 type ProfileExportEnvelopeOptions = {
   includeFileStorage?: boolean;
   inlineFileData?: boolean;
@@ -123,7 +212,7 @@ type ProfileInlineJsonBudget = {
 };
 type ProfileAssetReader = (safePath: string) => Buffer | null | Promise<Buffer | null>;
 type ProfileArchiveAssetIndex = Map<string, { entryName: string; expectedSize: number }>;
-type ProfileImportWarning = { type: "missing_asset"; path: string; message: string };
+type ProfileImportWarning = ProfileNoodleImportWarning | { type: "missing_asset"; path: string; message: string };
 type ProfileZipEntry = {
   entryName: string;
   isDirectory: boolean;
@@ -142,7 +231,13 @@ type ProfileZipArchive = {
 };
 type StoredZipEntrySource =
   | { entryName: string; data: Buffer; mtime?: Date }
-  | { entryName: string; filePath: string; size: number; mtime?: Date };
+  | {
+      entryName: string;
+      filePath: string;
+      size: number;
+      mtime?: Date;
+      tolerateSourceChanges?: boolean;
+    };
 type StoredZipEntryRecord = {
   entryName: string;
   crc32: number;
@@ -150,6 +245,7 @@ type StoredZipEntryRecord = {
   localHeaderOffset: number;
   dosTime: number;
   dosDate: number;
+  usesDataDescriptor: boolean;
 };
 type ProfileImportInput = {
   envelope: ExportEnvelope;
@@ -187,8 +283,6 @@ class ProfileJsonTooLargeError extends Error {
 }
 
 class ProfileArchiveTooLargeError extends Error {}
-
-class ProfileImportRequestError extends Error {}
 
 class ProfileImportArchiveTooLargeError extends ProfileImportRequestError {}
 
@@ -240,6 +334,7 @@ function stSelectiveLogic(value: unknown): number {
 
 function stPosition(value: unknown): number {
   const position = Number(value ?? 0);
+  if (position === 7) return 7;
   if (position === 2) return 4;
   if (position === 1) return 1;
   return 0;
@@ -264,6 +359,7 @@ function buildCompatibleLorebookExport(lb: Record<string, any>) {
       selectiveLogic: stSelectiveLogic(entry.selectiveLogic),
       order: Number(entry.order ?? 100),
       position: stPosition(entry.position),
+      outletName: String(entry.outletName ?? ""),
       depth: Number(entry.depth ?? 4),
       probability: entry.probability ?? null,
       scanDepth: entry.scanDepth ?? null,
@@ -405,6 +501,22 @@ for (const candidate of Object.values(schema)) {
 }
 
 export function sanitizeProfileTableRows(tableName: string, rows: Array<Record<string, unknown>>) {
+  if (tableName === "chats") {
+    return rows.map((row) => {
+      if (typeof row.metadata !== "string") return row;
+      try {
+        const metadata = JSON.parse(row.metadata) as unknown;
+        if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return row;
+        const sanitized = { ...(metadata as Record<string, unknown>) };
+        delete sanitized.branchParentChatId;
+        delete sanitized.branchParentMessageId;
+        delete sanitized.branchMessageId;
+        return { ...row, metadata: JSON.stringify(sanitized) };
+      } catch {
+        return row;
+      }
+    });
+  }
   if (tableName === "api_connections") {
     return rows.map((row) => ({ ...row, apiKeyEncrypted: "" }));
   }
@@ -419,7 +531,43 @@ export function sanitizeProfileTableRows(tableName: string, rows: Array<Record<s
   if (tableName === "custom_tools") {
     return rows.map((row) => ({ ...row, webhookUrl: "" }));
   }
+  if (tableName === "installed_extensions") {
+    return rows.map(quarantineProfilePersonalExtensionRow);
+  }
   return rows;
+}
+
+export function quarantineProfilePersonalExtensionRow(row: Record<string, unknown>) {
+  const runtime = row.runtime === "server" ? "server" : "client";
+  const capabilities =
+    runtime === "client"
+      ? (() => {
+          try {
+            return normalizePersonalExtensionCapabilities(
+              typeof row.capabilities === "string" ? JSON.parse(row.capabilities) : row.capabilities,
+            );
+          } catch {
+            return [];
+          }
+        })()
+      : [];
+  const contentHash = computePersonalExtensionHash({
+    runtime,
+    capabilities,
+    css: runtime === "client" && typeof row.css === "string" ? row.css : null,
+    js: runtime === "client" && typeof row.js === "string" ? row.js : null,
+    serverJs: runtime === "server" && typeof row.serverJs === "string" ? row.serverJs : null,
+  });
+  return {
+    ...row,
+    runtime,
+    capabilities: JSON.stringify(capabilities),
+    enabled: "false",
+    contentHash,
+    approvedHash: null,
+    source: "profile_import",
+    revisions: typeof row.revisions === "string" ? row.revisions : "[]",
+  };
 }
 
 // Secret-bearing columns to omit on the conflict-UPDATE path so an existing row
@@ -566,17 +714,26 @@ async function buildProfileStorageSnapshot(
   app: FastifyInstance,
   options: ProfileStorageSnapshotOptions = {},
 ): Promise<ProfileStorageSnapshot> {
-  return {
+  // Tables and assets are two separate reads. The NoodleR reserve writes both in one pass, so
+  // without holding it still the archive can contain a row whose media bytes are missing, or
+  // media no surviving row owns.
+  return withNoodleAutoPostPaused(async () => ({
     version: 1,
     tables: await buildProfileTableSnapshot(app),
     files: await collectProfileAssetFiles(getDataDir(), options),
-  };
+  }));
 }
 
 function isProfileStorageSnapshot(value: unknown): value is ProfileStorageSnapshot {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<ProfileStorageSnapshot>;
   return candidate.version === 1 && !!candidate.tables && typeof candidate.tables === "object";
+}
+
+function isProfileArchiveStorageSnapshot(value: unknown): value is ProfileArchiveStorageSnapshot {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<ProfileArchiveStorageSnapshot>;
+  return candidate.version === 2 && !!candidate.tables && typeof candidate.tables === "object";
 }
 
 function buildProfileImportStats(tableCounts: Record<string, number>, files: number) {
@@ -728,6 +885,7 @@ function buildProfileImportAssetInputs(
 async function importProfileStorageSnapshot(
   app: FastifyInstance,
   snapshot: ProfileStorageSnapshot,
+  warnings: ProfileImportWarning[],
   onProgress?: ProfileImportProgressReporter,
   readAsset?: ProfileAssetReader,
 ) {
@@ -766,9 +924,10 @@ async function importProfileStorageSnapshot(
     let rollbackFailed = false;
     try {
       await app.db.transaction(async (tx) => {
+        const plannedSnapshot = await planProfileNoodleImport(tx, snapshot, warnings);
         for (const tableName of FILE_BACKED_TABLES) {
           const table = profileTableObjects.get(tableName);
-          const rows = snapshot.tables[tableName];
+          const rows = plannedSnapshot.tables[tableName];
           if (!table || !Array.isArray(rows) || rows.length === 0) {
             tableCounts[tableName] = 0;
             continue;
@@ -776,8 +935,14 @@ async function importProfileStorageSnapshot(
 
           emit("tables", `Importing ${tableName.replace(/_/g, " ")}`);
           for (const row of rows) {
-            const cleanRow = { ...row };
+            let cleanRow = { ...row };
+            // A pre-rename snapshot carries `visibility`/`publicAccountId`. Inserting it raw
+            // lets the column default fill `platform: "noodle"`, putting a restored NoodleR
+            // account and its posts on the Noodle timeline.
+            if (tableName === "noodle_accounts") cleanRow = migrateLegacyNoodleAccountRow(cleanRow);
+            if (tableName === "noodle_posts") cleanRow = migrateLegacyNoodlePostAccessRow(cleanRow);
             if (tableName === "api_connections") cleanRow.apiKeyEncrypted = "";
+            if (tableName === "installed_extensions") cleanRow = quarantineProfilePersonalExtensionRow(cleanRow);
             const insert = tx.insert(table as any).values(cleanRow as any) as any;
             const conflictTarget = schemaPrimaryKeyColumn(table);
             if (conflictTarget) {
@@ -806,6 +971,9 @@ async function importProfileStorageSnapshot(
         await flushDB();
       });
       committed = true;
+      if ((tableCounts.installed_extensions ?? 0) > 0) {
+        await personalServerExtensionRuntime.reloadAll();
+      }
       return buildProfileImportStats(tableCounts, files);
     } catch (error) {
       try {
@@ -931,16 +1099,13 @@ function getProfileStorageSnapshotFromEnvelope(envelope: ExportEnvelope) {
   return isProfileStorageSnapshot(data.fileStorage) ? data.fileStorage : null;
 }
 
-async function collectProfileAssetZipSources(envelope: ExportEnvelope) {
-  const snapshot = getProfileStorageSnapshotFromEnvelope(envelope);
-  if (!snapshot || !Array.isArray(snapshot.files)) return [];
-
+async function collectProfileAssetZipSources(files: ProfileFileAsset[], basePath = "") {
   const dataDir = getDataDir();
   const sources: StoredZipEntrySource[] = [];
   let totalUncompressedBytes = 0;
   const seenEntryNames = new Set<string>();
 
-  for (const file of snapshot.files) {
+  for (const file of files) {
     const safePath = normalizeProfileAssetPath(file.path);
     if (!safePath) continue;
     const inputPath = assertInsideDir(dataDir, join(dataDir, ...safePath.split("/")));
@@ -965,27 +1130,91 @@ async function collectProfileAssetZipSources(envelope: ExportEnvelope) {
         ),
       );
     }
-    if (seenEntryNames.has(safePath)) continue;
-    seenEntryNames.add(safePath);
-    sources.push({ entryName: safePath, filePath: inputPath, size: fileStat.size, mtime: fileStat.mtime });
+    const entryName = profileArchiveEntryPath(basePath, safePath);
+    if (seenEntryNames.has(entryName)) continue;
+    seenEntryNames.add(entryName);
+    sources.push({ entryName, filePath: inputPath, size: fileStat.size, mtime: fileStat.mtime });
   }
 
   return sources;
 }
 
-async function writeNativeProfileZip(app: FastifyInstance, outputPath: string) {
-  const envelope = await buildProfileExportEnvelope(app, {
-    inlineFileData: false,
-    includeLegacyAvatarBase64: false,
-  });
+async function writeProfileTableJsonLines(outputPath: string, tableName: string, rows: Array<Record<string, unknown>>) {
+  const stream = createWriteStream(outputPath);
+  let size = 0;
+  try {
+    for (const row of sanitizeProfileTableRows(tableName, rows)) {
+      const line = Buffer.from(`${JSON.stringify(row)}\n`, "utf8");
+      await writeZipBuffer(stream, line);
+      size += line.length;
+    }
+    await finishZipStream(stream);
+    return size;
+  } catch (error) {
+    stream.destroy();
+    throw error;
+  }
+}
+
+async function buildProfileArchiveSources(
+  app: FastifyInstance,
+  basePath: string,
+  workingDir: string,
+  includeAssets: boolean,
+) {
+  const tables: Record<string, ProfileArchiveTableFile> = {};
+  const tableSources: StoredZipEntrySource[] = [];
+  const tablesDir = join(workingDir, "profile-tables");
+  await mkdir(tablesDir, { recursive: true });
+
+  for (const tableName of FILE_BACKED_TABLES) {
+    const table = profileTableObjects.get(tableName);
+    if (!table) continue;
+    const rows = (await app.db.select().from(table as any)) as Array<Record<string, unknown>>;
+    const relativePath = `profile-tables/${tableName}.jsonl`;
+    const outputPath = join(tablesDir, `${tableName}.jsonl`);
+    const size = await writeProfileTableJsonLines(outputPath, tableName, rows);
+    tables[tableName] = { path: relativePath, count: rows.length, size };
+    tableSources.push({
+      entryName: profileArchiveEntryPath(basePath, relativePath),
+      filePath: outputPath,
+      size,
+    });
+  }
+
+  const files = await collectProfileAssetFiles(getDataDir(), { inlineFileData: false });
+  const snapshot: ProfileArchiveStorageSnapshot = { version: 2, tables, files };
+  const envelope: ExportEnvelope = {
+    type: "marinara_profile",
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    data: { fileStorage: snapshot },
+  };
   const manifest = Buffer.from(JSON.stringify(envelope, null, 2), "utf8");
   if (manifest.length > PROFILE_IMPORT_BODY_LIMIT_BYTES) {
     throw new ProfileArchiveTooLargeError(
       profileArchiveSizeError("Profile ZIP manifest", manifest.length, PROFILE_IMPORT_BODY_LIMIT_BYTES),
     );
   }
-  const assetSources = await collectProfileAssetZipSources(envelope);
-  await writeStoredZipArchive(outputPath, [{ entryName: "marinara-profile.json", data: manifest }, ...assetSources]);
+
+  return [
+    { entryName: profileArchiveEntryPath(basePath, "marinara-profile.json"), data: manifest },
+    ...tableSources,
+    ...(includeAssets ? await collectProfileAssetZipSources(files, basePath) : []),
+  ] satisfies StoredZipEntrySource[];
+}
+
+async function writeNativeProfileZip(app: FastifyInstance, outputPath: string) {
+  const workingDir = await mkdtemp(join(tmpdir(), "marinara-profile-tables-"));
+  try {
+    // Same row/asset consistency requirement as the JSON snapshot above.
+    const sources = await withNoodleAutoPostPaused(() =>
+      buildProfileArchiveSources(app, "", workingDir, true),
+    );
+    await writeStoredZipArchive(outputPath, sources);
+  } finally {
+    await rm(workingDir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 function cleanupTempDirAfterReply(reply: FastifyReply, dirPath: string) {
@@ -1209,13 +1438,13 @@ function buildLocalFileHeader(record: StoredZipEntryRecord) {
   const header = Buffer.alloc(30);
   header.writeUInt32LE(0x04034b50, 0);
   header.writeUInt16LE(20, 4);
-  header.writeUInt16LE(0x0800, 6);
+  header.writeUInt16LE(record.usesDataDescriptor ? 0x0808 : 0x0800, 6);
   header.writeUInt16LE(0, 8);
   header.writeUInt16LE(record.dosTime, 10);
   header.writeUInt16LE(record.dosDate, 12);
-  header.writeUInt32LE(record.crc32, 14);
-  header.writeUInt32LE(record.size, 18);
-  header.writeUInt32LE(record.size, 22);
+  header.writeUInt32LE(record.usesDataDescriptor ? 0 : record.crc32, 14);
+  header.writeUInt32LE(record.usesDataDescriptor ? 0 : record.size, 18);
+  header.writeUInt32LE(record.usesDataDescriptor ? 0 : record.size, 22);
   header.writeUInt16LE(filename.length, 26);
   header.writeUInt16LE(0, 28);
   return Buffer.concat([header, filename]);
@@ -1227,7 +1456,7 @@ function buildCentralDirectoryHeader(record: StoredZipEntryRecord) {
   header.writeUInt32LE(0x02014b50, 0);
   header.writeUInt16LE(20, 4);
   header.writeUInt16LE(20, 6);
-  header.writeUInt16LE(0x0800, 8);
+  header.writeUInt16LE(record.usesDataDescriptor ? 0x0808 : 0x0800, 8);
   header.writeUInt16LE(0, 10);
   header.writeUInt16LE(record.dosTime, 12);
   header.writeUInt16LE(record.dosDate, 14);
@@ -1242,6 +1471,15 @@ function buildCentralDirectoryHeader(record: StoredZipEntryRecord) {
   header.writeUInt32LE(0, 38);
   header.writeUInt32LE(record.localHeaderOffset, 42);
   return Buffer.concat([header, filename]);
+}
+
+function buildStoredZipDataDescriptor(record: StoredZipEntryRecord) {
+  const descriptor = Buffer.alloc(16);
+  descriptor.writeUInt32LE(0x08074b50, 0);
+  descriptor.writeUInt32LE(record.crc32, 4);
+  descriptor.writeUInt32LE(record.size, 8);
+  descriptor.writeUInt32LE(record.size, 12);
+  return descriptor;
 }
 
 function buildEndOfCentralDirectory(entryCount: number, centralDirectorySize: number, centralDirectoryOffset: number) {
@@ -1262,43 +1500,86 @@ async function writeStoredZipFileEntry(
   stream: WriteStream,
   source: StoredZipEntrySource,
   position: number,
-): Promise<{ record: StoredZipEntryRecord; position: number }> {
+): Promise<{ record: StoredZipEntryRecord; position: number } | null> {
   const entryName = normalizeStoredZipEntryName(source.entryName);
-  const { dosTime, dosDate } = getZipDosTimeDate(source.mtime);
-  const size = "data" in source ? source.data.length : source.size;
-  assertZip32Value(size, `${entryName} size`);
-  assertZip32Value(position, `${entryName} offset`);
-
-  const crc32 = "data" in source ? crc32Buffer(source.data) : await crc32File(source.filePath);
-  const record: StoredZipEntryRecord = {
-    entryName,
-    crc32,
-    size,
-    localHeaderOffset: position,
-    dosTime,
-    dosDate,
-  };
-  const header = buildLocalFileHeader(record);
-  await writeZipBuffer(stream, header);
-  position += header.length;
-
-  if ("data" in source) {
-    await writeZipBuffer(stream, source.data);
-    position += source.data.length;
-  } else {
-    let written = 0;
-    for await (const chunk of createReadStream(source.filePath)) {
-      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      await writeZipBuffer(stream, buffer);
-      written += buffer.length;
-      position += buffer.length;
+  const tolerateSourceChanges = "filePath" in source && source.tolerateSourceChanges === true;
+  let sourceHandle: FileHandle | null = null;
+  try {
+    let sourceMtime = source.mtime;
+    if (tolerateSourceChanges) {
+      try {
+        sourceHandle = await open(source.filePath, "r");
+        const currentStat = await sourceHandle.stat();
+        assertZip32Value(currentStat.size, `${entryName} size`);
+        sourceMtime = currentStat.mtime;
+      } catch (error) {
+        await sourceHandle?.close().catch(() => {});
+        sourceHandle = null;
+        if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") {
+          logger.warn("[backup] Skipping ZIP source that disappeared during export: %s", entryName);
+          return null;
+        }
+        throw error;
+      }
     }
-    if (written !== source.size) {
-      throw new Error(`Profile ZIP source changed while exporting: ${entryName}`);
+
+    const { dosTime, dosDate } = getZipDosTimeDate(sourceMtime);
+    const size = "data" in source ? source.data.length : tolerateSourceChanges ? 0 : source.size;
+    assertZip32Value(size, `${entryName} size`);
+    assertZip32Value(position, `${entryName} offset`);
+
+    const crc32 =
+      "data" in source ? crc32Buffer(source.data) : tolerateSourceChanges ? 0 : await crc32File(source.filePath);
+    const record: StoredZipEntryRecord = {
+      entryName,
+      crc32,
+      size,
+      localHeaderOffset: position,
+      dosTime,
+      dosDate,
+      usesDataDescriptor: tolerateSourceChanges,
+    };
+    const header = buildLocalFileHeader(record);
+    await writeZipBuffer(stream, header);
+    position += header.length;
+
+    if ("data" in source) {
+      await writeZipBuffer(stream, source.data);
+      position += source.data.length;
+    } else if (sourceHandle) {
+      let crcState = 0xffffffff;
+      let written = 0;
+      for await (const chunk of sourceHandle.createReadStream({ autoClose: false })) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        await writeZipBuffer(stream, buffer);
+        crcState = updateCrc32State(crcState, buffer);
+        written += buffer.length;
+        position += buffer.length;
+      }
+      record.crc32 = finishCrc32(crcState);
+      record.size = written;
+      assertZip32Value(record.size, `${entryName} size`);
+      assertZip32Value(position, `${entryName} offset`);
+      const descriptor = buildStoredZipDataDescriptor(record);
+      await writeZipBuffer(stream, descriptor);
+      position += descriptor.length;
+    } else {
+      let written = 0;
+      for await (const chunk of createReadStream(source.filePath)) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        await writeZipBuffer(stream, buffer);
+        written += buffer.length;
+        position += buffer.length;
+      }
+      if (written !== source.size) {
+        throw new Error(`Profile ZIP source changed while exporting: ${entryName}`);
+      }
     }
+
+    return { record, position };
+  } finally {
+    await sourceHandle?.close().catch(() => {});
   }
-
-  return { record, position };
 }
 
 async function finishZipStream(stream: WriteStream) {
@@ -1325,6 +1606,7 @@ async function writeStoredZipArchive(outputPath: string, sources: StoredZipEntry
   try {
     for (const source of sources) {
       const result = await writeStoredZipFileEntry(stream, source, position);
+      if (!result) continue;
       records.push(result.record);
       position = result.position;
     }
@@ -1513,6 +1795,152 @@ function getProfileZipEntry(zip: ProfileZipArchive, entryName: string) {
   return zip.entriesByName.get(normalizeProfileArchiveEntryPath(entryName));
 }
 
+async function readProfileArchiveTableRows(
+  zip: ProfileZipArchive,
+  entry: ProfileZipEntry,
+  descriptor: ProfileArchiveTableFile,
+  tableName: string,
+) {
+  const compressedSize = getZipEntryCompressedSize(entry);
+  const uncompressedSize = getZipEntryUncompressedSize(entry);
+  if (compressedSize === null || uncompressedSize === null || entry.header.method !== 0) {
+    throw new ProfileImportRequestError(`Profile table ${tableName} is not a supported stored JSONL entry.`);
+  }
+  if (uncompressedSize !== descriptor.size || compressedSize !== descriptor.size) {
+    throw new ProfileImportRequestError(`Profile table ${tableName} does not match its manifest size.`);
+  }
+  if (uncompressedSize > PROFILE_ARCHIVE_TOTAL_UNCOMPRESSED_LIMIT_BYTES) {
+    throw new ProfileImportRequestError(
+      profileArchiveSizeError(
+        `Profile table ${tableName}`,
+        uncompressedSize,
+        PROFILE_ARCHIVE_TOTAL_UNCOMPRESSED_LIMIT_BYTES,
+      ),
+    );
+  }
+  if (descriptor.size === 0) {
+    if (descriptor.count !== 0 || entry.header.crc32 !== crc32Buffer(Buffer.alloc(0))) {
+      throw new ProfileImportRequestError(`Profile table ${tableName} failed archive integrity checks.`);
+    }
+    return [];
+  }
+
+  const rows: Array<Record<string, unknown>> = [];
+  const stream = createReadStream(zip.filePath, {
+    start: entry.header.dataOffset,
+    end: entry.header.dataOffset + compressedSize - 1,
+  });
+  const decoder = new StringDecoder("utf8");
+  let pending = "";
+  let crcState = 0xffffffff;
+  let bytesRead = 0;
+
+  const parseLine = (line: string) => {
+    if (!line.trim()) return;
+    let row: unknown;
+    try {
+      row = JSON.parse(line);
+    } catch {
+      throw new ProfileImportRequestError(`Profile table ${tableName} contains invalid JSONL.`);
+    }
+    if (!row || typeof row !== "object" || Array.isArray(row)) {
+      throw new ProfileImportRequestError(`Profile table ${tableName} contains an invalid row.`);
+    }
+    rows.push(row as Record<string, unknown>);
+  };
+
+  for await (const chunk of stream) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    crcState = updateCrc32State(crcState, buffer);
+    bytesRead += buffer.length;
+    pending += decoder.write(buffer);
+    let newlineIndex = pending.indexOf("\n");
+    while (newlineIndex >= 0) {
+      parseLine(pending.slice(0, newlineIndex));
+      pending = pending.slice(newlineIndex + 1);
+      newlineIndex = pending.indexOf("\n");
+    }
+    if (Buffer.byteLength(pending, "utf8") > PROFILE_ARCHIVE_ENTRY_LIMIT_BYTES) {
+      throw new ProfileImportRequestError(`Profile table ${tableName} contains an oversized row.`);
+    }
+  }
+  pending += decoder.end();
+  parseLine(pending);
+
+  if (bytesRead !== descriptor.size || finishCrc32(crcState) !== entry.header.crc32) {
+    throw new ProfileImportRequestError(`Profile table ${tableName} failed archive integrity checks.`);
+  }
+  if (rows.length !== descriptor.count) {
+    throw new ProfileImportRequestError(`Profile table ${tableName} does not match its manifest row count.`);
+  }
+  return rows;
+}
+
+async function hydrateProfileArchiveStorageSnapshot(
+  zip: ProfileZipArchive,
+  basePath: string,
+  envelope: ExportEnvelope,
+) {
+  const data = envelope.data as Record<string, unknown>;
+  const archiveSnapshot = data.fileStorage;
+  if (!isProfileArchiveStorageSnapshot(archiveSnapshot)) return;
+
+  const tables: ProfileTableSnapshots = {};
+  let memoryWarningLogged = false;
+  for (const tableName of FILE_BACKED_TABLES) {
+    const descriptor = archiveSnapshot.tables[tableName];
+    if (!descriptor) {
+      tables[tableName] = [];
+      continue;
+    }
+    const expectedPath = `profile-tables/${tableName}.jsonl`;
+    if (
+      descriptor.path !== expectedPath ||
+      !Number.isSafeInteger(descriptor.count) ||
+      descriptor.count < 0 ||
+      !Number.isSafeInteger(descriptor.size) ||
+      descriptor.size < 0
+    ) {
+      throw new ProfileImportRequestError(`Profile table ${tableName} has an invalid archive manifest.`);
+    }
+    const entry = getProfileZipEntry(zip, profileArchiveEntryPath(basePath, expectedPath));
+    if (!entry || entry.isDirectory) {
+      throw new ProfileImportRequestError(`Profile archive is missing table ${tableName}.`);
+    }
+    const rows = await readProfileArchiveTableRows(zip, entry, descriptor, tableName);
+    tables[tableName] = rows;
+    const memoryUsage = process.memoryUsage();
+    const heapMiB = Math.round(memoryUsage.heapUsed / (1024 * 1024));
+    const rssMiB = Math.round(memoryUsage.rss / (1024 * 1024));
+    logger.debug(
+      "[backup] Hydrated profile table %s (%d rows); heap=%d MiB, rss=%d MiB",
+      tableName,
+      rows.length,
+      heapMiB,
+      rssMiB,
+    );
+    // Hydration currently re-materializes tables; retain peak visibility until imports can consume table streams.
+    if (
+      !memoryWarningLogged &&
+      Math.max(memoryUsage.heapUsed, memoryUsage.rss) >= PROFILE_IMPORT_MEMORY_WARNING_BYTES
+    ) {
+      memoryWarningLogged = true;
+      logger.warn(
+        "[backup] Profile import hydration exceeded 512 MiB after table %s; heap=%d MiB, rss=%d MiB",
+        tableName,
+        heapMiB,
+        rssMiB,
+      );
+    }
+  }
+
+  data.fileStorage = {
+    version: 1,
+    tables,
+    files: Array.isArray(archiveSnapshot.files) ? archiveSnapshot.files : [],
+  } satisfies ProfileStorageSnapshot;
+}
+
 async function readProfileEnvelopeFromArchive(zip: ProfileZipArchive) {
   const profileEntry =
     zip.entries.find((entry) => !entry.isDirectory && entry.entryName === "marinara-profile.json") ??
@@ -1545,10 +1973,10 @@ async function readProfileEnvelopeFromArchive(zip: ProfileZipArchive) {
       );
     }
     const profileBuffer = await readProfileArchiveEntryBuffer(zip, profileEntry, profileEntrySize);
-    return {
-      envelope: JSON.parse(profileBuffer.toString("utf8")) as ExportEnvelope,
-      basePath: profileArchiveBasePath(profileEntry.entryName),
-    };
+    const envelope = JSON.parse(profileBuffer.toString("utf8")) as ExportEnvelope;
+    const basePath = profileArchiveBasePath(profileEntry.entryName);
+    await hydrateProfileArchiveStorageSnapshot(zip, basePath, envelope);
+    return { envelope, basePath };
   } catch (err) {
     if (err instanceof ProfileImportRequestError) throw err;
     throw new ProfileImportRequestError("Profile archive contains an unreadable marinara-profile.json.");
@@ -1722,7 +2150,7 @@ function buildBackupRestoreNotes() {
     "For one-click import inside Marinara:",
     "1. Open Settings -> Import.",
     "2. Use Import Profile and select the downloaded backup zip archive.",
-    "3. If this backup has been extracted, marinara-profile.json restores data without asset files.",
+    "3. Keep the ZIP intact so its streamed table shards and assets remain available to the importer.",
     "",
     "The .marinara.json importer is for individual characters, personas, lorebooks, and presets.",
   ].join("\n");
@@ -1734,10 +2162,119 @@ async function copyPersistedEncryptionKey(dataDir: string, backupDir: string) {
   await copyFile(keyPath, join(backupDir, ENCRYPTION_KEY_FILENAME));
 }
 
-async function addPersistedEncryptionKeyToZip(dataDir: string, zip: AdmZip, backupName: string) {
+async function collectDirectoryZipSources(sourceDir: string, entryRoot: string) {
+  const sources: StoredZipEntrySource[] = [];
+  if (!existsSync(sourceDir)) return sources;
+  const stack = [sourceDir];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    for (const entry of await readdir(current, { withFileTypes: true })) {
+      const fullPath = join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(fullPath);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const relativePath = relative(sourceDir, fullPath).split(/[\\/]/g).join("/");
+      let fileStat: Awaited<ReturnType<typeof stat>>;
+      try {
+        fileStat = await stat(fullPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") {
+          logger.warn(
+            "[backup] Skipping ZIP source that disappeared during collection: %s/%s",
+            entryRoot,
+            relativePath,
+          );
+          continue;
+        }
+        throw error;
+      }
+      sources.push({
+        entryName: `${entryRoot}/${relativePath}`,
+        filePath: fullPath,
+        size: fileStat.size,
+        mtime: fileStat.mtime,
+        tolerateSourceChanges: true,
+      });
+    }
+  }
+  return sources;
+}
+
+async function writeFullBackupArchive(
+  app: FastifyInstance,
+  outputPath: string,
+  backupName: string,
+  workingDir: string,
+) {
+  const dataDir = getDataDir();
+  const sources = await withNoodleAutoPostPaused(() =>
+    buildProfileArchiveSources(app, backupName, workingDir, false),
+  );
+  sources.push({
+    entryName: `${backupName}/RESTORE.txt`,
+    data: Buffer.from(buildBackupRestoreNotes(), "utf8"),
+  });
+
+  for (const dirName of BACKUP_DIRS) {
+    const sourceDir = resolveBackupDir(dataDir, dirName);
+    sources.push(...(await collectDirectoryZipSources(sourceDir, `${backupName}/${dirName}`)));
+  }
+
   const keyPath = resolvePersistedEncryptionKeyPath(dataDir);
-  if (!existsSync(keyPath)) return;
-  zip.addFile(`${backupName}/${ENCRYPTION_KEY_FILENAME}`, await readFile(keyPath));
+  if (existsSync(keyPath)) {
+    const keyStat = await stat(keyPath);
+    sources.push({
+      entryName: `${backupName}/${ENCRYPTION_KEY_FILENAME}`,
+      filePath: keyPath,
+      size: keyStat.size,
+      mtime: keyStat.mtime,
+    });
+  }
+
+  await writeStoredZipArchive(outputPath, sources);
+}
+
+async function writeAutomaticBackup(app: FastifyInstance, retentionCount: number) {
+  await flushDB();
+  const backupsRoot = getBackupsRoot();
+  const workingDir = await mkdtemp(join(tmpdir(), "marinara-automatic-backup-"));
+  const pendingPath = join(backupsRoot, `${AUTOMATIC_BACKUP_FILENAME}.pending`);
+  const finalPath = join(backupsRoot, AUTOMATIC_BACKUP_FILENAME);
+  const legacyPreviousPath = join(backupsRoot, `${AUTOMATIC_BACKUP_FILENAME}.previous`);
+  let archivedPreviousPath: string | null = null;
+  try {
+    await mkdir(backupsRoot, { recursive: true });
+    await rm(pendingPath, { force: true });
+    if (!existsSync(finalPath) && existsSync(legacyPreviousPath)) {
+      await rename(legacyPreviousPath, finalPath);
+    } else {
+      await rm(legacyPreviousPath, { force: true });
+    }
+    await writeFullBackupArchive(app, pendingPath, "marinara-automatic-backup", workingDir);
+    const hadPreviousBackup = existsSync(finalPath);
+    try {
+      if (hadPreviousBackup) {
+        const previousStat = await stat(finalPath);
+        archivedPreviousPath = join(
+          backupsRoot,
+          automaticBackupArchiveFilename(previousStat.mtime, randomUUID().slice(0, 8)),
+        );
+        await rename(finalPath, archivedPreviousPath);
+      }
+      await rename(pendingPath, finalPath);
+    } catch (error) {
+      if (hadPreviousBackup && archivedPreviousPath && !existsSync(finalPath) && existsSync(archivedPreviousPath)) {
+        await rename(archivedPreviousPath, finalPath).catch(() => {});
+      }
+      throw error;
+    }
+    return await pruneAutomaticBackupFiles(backupsRoot, retentionCount);
+  } finally {
+    await rm(pendingPath, { force: true }).catch(() => {});
+    await rm(workingDir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 function getBackupErrorMessage(err: unknown, fallback: string) {
@@ -1757,6 +2294,106 @@ function sendBackupRouteError(reply: FastifyReply, err: unknown, operation: stri
 }
 
 export async function backupRoutes(app: FastifyInstance) {
+  const automaticBackupStorage = createAppSettingsStorage(app.db);
+  let automaticBackupRunning = false;
+
+  const loadAutomaticBackupSettings = async () => {
+    const raw = await automaticBackupStorage.get(AUTOMATIC_BACKUP_SETTINGS_KEY);
+    if (!raw) return normalizeAutomaticBackupSettings(null);
+    try {
+      return normalizeAutomaticBackupSettings(JSON.parse(raw));
+    } catch {
+      return normalizeAutomaticBackupSettings(null);
+    }
+  };
+  const saveAutomaticBackupSettings = (settings: AutomaticBackupSettings) =>
+    automaticBackupStorage.set(AUTOMATIC_BACKUP_SETTINGS_KEY, JSON.stringify(settings));
+  const automaticBackupResponse = async (settings: AutomaticBackupSettings) => ({
+    ...settings,
+    nextBackupAt: automaticBackupNextAt(settings),
+    backupExists: await automaticBackupExists(getBackupsRoot()),
+  });
+  const runAutomaticBackupIfDue = async (force = false) => {
+    if (automaticBackupRunning) return;
+    automaticBackupRunning = true;
+    try {
+      const settings = await loadAutomaticBackupSettings();
+      if (!settings.enabled) return;
+      const lastBackupMs = settings.lastBackupAt ? Date.parse(settings.lastBackupAt) : Number.NaN;
+      const due =
+        force ||
+        !Number.isFinite(lastBackupMs) ||
+        Date.now() - lastBackupMs >= automaticBackupPeriodMs(settings.frequency);
+      if (!due) return;
+
+      const removedBackups = await withAutomaticBackupLifecycleLock(() =>
+        writeAutomaticBackup(app, settings.retentionCount),
+      );
+      const current = await loadAutomaticBackupSettings();
+      await saveAutomaticBackupSettings({
+        ...current,
+        lastBackupAt: new Date().toISOString(),
+        lastError: null,
+      });
+      logger.info("[backup] Automatic backup completed; pruned %d expired automatic archive(s)", removedBackups.length);
+    } catch (error) {
+      const current = await loadAutomaticBackupSettings();
+      const message = getBackupErrorMessage(error, "Automatic backup failed");
+      await saveAutomaticBackupSettings({ ...current, lastError: message });
+      logger.error(error, "[backup] Automatic backup failed");
+    } finally {
+      automaticBackupRunning = false;
+    }
+  };
+
+  app.get("/automatic", async () => automaticBackupResponse(await loadAutomaticBackupSettings()));
+
+  app.put<{
+    Body: { enabled?: unknown; frequency?: unknown; retentionCount?: unknown };
+  }>("/automatic", async (req, reply) => {
+    if (!requirePrivilegedAccess(req, reply, { feature: "Automatic backup settings" })) return;
+    const parsedRetentionCount =
+      req.body?.retentionCount === undefined ? undefined : parseAutomaticBackupRetentionCount(req.body.retentionCount);
+    if (
+      typeof req.body?.enabled !== "boolean" ||
+      !["daily", "weekly", "monthly"].includes(String(req.body?.frequency)) ||
+      parsedRetentionCount === null
+    ) {
+      return reply.status(400).send({ error: "Invalid automatic backup settings" });
+    }
+    const current = await loadAutomaticBackupSettings();
+    const next = normalizeAutomaticBackupSettings({
+      ...current,
+      enabled: req.body.enabled,
+      frequency: req.body.frequency,
+      retentionCount: parsedRetentionCount ?? current.retentionCount,
+      lastError: null,
+    });
+    await saveAutomaticBackupSettings(next);
+    const backupsRoot = getBackupsRoot();
+    const removedBackups = await withAutomaticBackupLifecycleLock(() =>
+      pruneAutomaticBackupFiles(backupsRoot, next.retentionCount),
+    );
+    if (removedBackups.length > 0) {
+      logger.info(
+        "[backup] Automatic backup retention changed; pruned %d expired automatic archive(s)",
+        removedBackups.length,
+      );
+    }
+    if (next.enabled) {
+      const hasAutomaticBackup = await automaticBackupExists(backupsRoot);
+      queueMicrotask(() => void runAutomaticBackupIfDue(!current.enabled || !hasAutomaticBackup));
+    }
+    return automaticBackupResponse(next);
+  });
+
+  const automaticBackupTimer = setInterval(() => void runAutomaticBackupIfDue(), AUTOMATIC_BACKUP_CHECK_INTERVAL_MS);
+  automaticBackupTimer.unref();
+  queueMicrotask(() => void runAutomaticBackupIfDue());
+  app.addHook("onClose", async () => {
+    clearInterval(automaticBackupTimer);
+  });
+
   // Create a full backup folder
   app.post("/", async (req, reply) => {
     if (!requirePrivilegedAccess(req, reply, { feature: "Backup creation" })) return;
@@ -1769,11 +2406,7 @@ export async function backupRoutes(app: FastifyInstance) {
       const backupDir = join(backupsRoot, backupName);
 
       await mkdir(backupDir, { recursive: true });
-      const profileEnvelope = await buildProfileExportEnvelope(app, {
-        inlineFileData: false,
-        includeLegacyAvatarBase64: false,
-      });
-      await writeFile(join(backupDir, "marinara-profile.json"), JSON.stringify(profileEnvelope, null, 2), "utf8");
+      await writeNativeProfileZip(app, join(backupDir, "marinara-profile.zip"));
       await writeFile(join(backupDir, "RESTORE.txt"), buildBackupRestoreNotes(), "utf8");
 
       await copyPersistedEncryptionKey(dataDir, backupDir);
@@ -1800,55 +2433,30 @@ export async function backupRoutes(app: FastifyInstance) {
   // API. Preferred on Android where the on-disk data folder isn't reachable.
   app.post("/download", async (req, reply) => {
     if (!requirePrivilegedAccess(req, reply, { feature: "Backup download" })) return;
+    let tempDir: string | null = null;
     try {
       await flushDB();
-      const dataDir = getDataDir();
       const timestamp = new Date().toISOString().replace(/[:.]/g, "-").replace("T", "_").slice(0, 19);
       const backupName = `marinara-backup-${timestamp}`;
-
-      const zip = new AdmZip();
-      const profileEnvelope = await buildProfileExportEnvelope(app, {
-        inlineFileData: false,
-        includeLegacyAvatarBase64: false,
-      });
-      zip.addFile(`${backupName}/marinara-profile.json`, Buffer.from(JSON.stringify(profileEnvelope, null, 2), "utf8"));
-      zip.addFile(`${backupName}/RESTORE.txt`, Buffer.from(buildBackupRestoreNotes(), "utf8"));
-
-      // Recursively add each data directory under backupName/<dir>/...
-      for (const dirName of BACKUP_DIRS) {
-        const src = resolveBackupDir(dataDir, dirName);
-        if (!existsSync(src)) continue;
-        const stack: string[] = [src];
-        while (stack.length > 0) {
-          const current = stack.pop()!;
-          for (const entry of readdirSync(current)) {
-            const full = join(current, entry);
-            const st = statSync(full);
-            if (st.isDirectory()) {
-              stack.push(full);
-            } else if (st.isFile()) {
-              const rel = [dirName, relative(src, full)].filter(Boolean).join("/").split(/[\\/]/g).join("/");
-              zip.addFile(`${backupName}/${rel}`, await readFile(full));
-            }
-          }
-        }
-      }
-      await addPersistedEncryptionKeyToZip(dataDir, zip, backupName);
-
-      const buf = zip.toBuffer();
+      tempDir = await mkdtemp(join(tmpdir(), "marinara-backup-download-"));
+      const archivePath = join(tempDir, `${backupName}.zip`);
+      await writeFullBackupArchive(app, archivePath, backupName, tempDir);
+      const archiveStat = await stat(archivePath);
+      cleanupTempDirAfterReply(reply, tempDir);
       return reply
         .header("Content-Type", "application/zip")
         .header("Content-Disposition", `attachment; filename="${backupName}.zip"`)
-        .header("Content-Length", buf.length.toString())
-        .send(buf);
+        .header("Content-Length", archiveStat.size.toString())
+        .send(createReadStream(archivePath));
     } catch (err) {
+      if (tempDir) await rm(tempDir, { recursive: true, force: true }).catch(() => {});
       return sendBackupRouteError(reply, err, "Backup download");
     }
   });
 
   // List existing backups
   app.get("/", async () => {
-    const backupsRoot = join(getDataDir(), "backups");
+    const backupsRoot = getBackupsRoot();
     if (!existsSync(backupsRoot)) return [];
 
     return readdirSync(backupsRoot)
@@ -1872,7 +2480,7 @@ export async function backupRoutes(app: FastifyInstance) {
     if (!/^marinara-backup-[\w-]+$/.test(name)) {
       return reply.status(400).send({ error: "Invalid backup name" });
     }
-    const backupsRoot = join(getDataDir(), "backups");
+    const backupsRoot = getBackupsRoot();
     const backupDir = join(backupsRoot, name);
 
     if (!existsSync(backupDir)) {
@@ -1951,6 +2559,9 @@ export async function backupRoutes(app: FastifyInstance) {
       const profileStoragePreviewStats = isProfileStorageSnapshot(data.fileStorage)
         ? previewProfileStorageSnapshotStats(data.fileStorage, importInput.readAsset, warnings)
         : null;
+      if (previewOnly && isProfileStorageSnapshot(data.fileStorage)) {
+        await planProfileNoodleImport(app.db, data.fileStorage, warnings);
+      }
       if (!previewOnly && expectedFingerprint && importInput.fileFingerprint !== expectedFingerprint) {
         return reply.status(409).send({
           error: "Profile file changed",
@@ -2005,6 +2616,7 @@ export async function backupRoutes(app: FastifyInstance) {
           const imported = await importProfileStorageSnapshot(
             app,
             data.fileStorage,
+            warnings,
             wantsProgressStream ? sendProgress : undefined,
             importInput.readAsset,
           );

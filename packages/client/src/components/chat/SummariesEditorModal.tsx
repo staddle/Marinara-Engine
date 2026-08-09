@@ -7,6 +7,7 @@ import { cn } from "../../lib/utils";
 import type { Chat, ChatMetadata, DaySummaryEntry, WeekSummaryEntry } from "@marinara-engine/shared";
 import { useQueryClient } from "@tanstack/react-query";
 import { chatKeys, useBackfillConversationSummaries, useUpdateChatSummaries } from "../../hooks/use-chats";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
@@ -111,6 +112,7 @@ function computeDelta(
 }
 
 export function SummariesEditorModal({ chat, open, onClose }: SummariesEditorModalProps) {
+  const { t: localizeUi } = useUiTranslation();
   const metadata = useMemo(
     () => (typeof chat.metadata === "string" ? JSON.parse(chat.metadata) : (chat.metadata ?? {})),
     [chat.metadata],
@@ -282,10 +284,9 @@ export function SummariesEditorModal({ chat, open, onClose }: SummariesEditorMod
         <div className="shrink-0 flex items-center justify-between border-b border-[var(--border)] px-5 py-3">
           <div className="flex items-center gap-2">
             <CalendarClock size="1rem" className="text-[var(--muted-foreground)]" />
-            <h3 className="text-sm font-bold">Automatic Summarization</h3>
+            <h3 className="text-sm font-bold">{localizeUi("ui.chat.chatsettingsdrawer.automaticSummarization")}</h3>
             <span className="text-[0.625rem] text-[var(--muted-foreground)]">
-              {entries.length} {entries.length === 1 ? "entry" : "entries"} &middot; ~{fmtTokens(totalTokens)} token
-              {totalTokens !== 1 ? "s" : ""}
+              {entries.length} {entries.length === 1 ?localizeUi("ui.lorebooks.lorebookeditor.entry") :localizeUi("ui.lorebooks.lorebookeditor.entries_c2e311d")} {localizeUi("ui.chat.peekpromptmodal.middot")}{fmtTokens(totalTokens)} {localizeUi("ui.chat.collapsibleblock.token")}{totalTokens !== 1 ?localizeUi("ui.noodle.stageprofileview.s") : ""}
             </span>
           </div>
           <button
@@ -298,27 +299,22 @@ export function SummariesEditorModal({ chat, open, onClose }: SummariesEditorMod
 
         {/* Body */}
         <div className="min-h-0 flex-1 overflow-y-auto p-4 space-y-3">
-          <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/30 px-3 py-2 text-[0.6875rem] text-[var(--muted-foreground)]">
-            Days from the current week are automatically consolidated into a weekly summary once the week ends. Edits to
-            the current week&apos;s days may be rewritten by that consolidation.
-          </div>
+          <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/30 px-3 py-2 text-[0.6875rem] text-[var(--muted-foreground)]">{localizeUi("ui.chat.summarieseditormodal.daysFromTheCurrentWeekAreAutomaticallyConsolidatedInto")}</div>
 
           <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/20 px-3 py-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="min-w-0">
-                <p className="text-[0.75rem] font-medium text-[var(--foreground)]">Missing Summaries</p>
-                <p className="text-[0.625rem] leading-snug text-[var(--muted-foreground)]">
-                  Retry past days that failed or never received an automatic summary.
-                </p>
+                <p className="text-[0.75rem] font-medium text-[var(--foreground)]">{localizeUi("ui.chat.summarieseditormodal.missingSummaries")}</p>
+                <p className="text-[0.625rem] leading-snug text-[var(--muted-foreground)]">{localizeUi("ui.chat.summarieseditormodal.retryPastDaysThatFailedOrNeverReceivedAn")}</p>
               </div>
               <button
                 onClick={handleBackfill}
                 disabled={isDirty || backfillSummaries.isPending}
-                title={isDirty ? "Save your edits before backfilling" : "Generate missing summaries"}
+                title={isDirty ?localizeUi("ui.chat.summarieseditormodal.saveYourEditsBeforeBackfilling") :localizeUi("ui.chat.summarieseditormodal.generateMissingSummaries")}
                 className="flex items-center gap-1.5 rounded-md bg-[var(--secondary)] px-2.5 py-1.5 text-[0.6875rem] font-medium text-[var(--foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <RefreshCw size="0.75rem" className={cn(backfillSummaries.isPending && "animate-spin")} />
-                {backfillSummaries.isPending ? "Checking…" : "Backfill"}
+                {backfillSummaries.isPending ?localizeUi("settings.notifications.customSound.status.loading") :localizeUi("ui.chat.summarieseditormodal.backfill")}
               </button>
             </div>
             {(backfillNotice || backfillSummaries.isError) && (
@@ -328,27 +324,25 @@ export function SummariesEditorModal({ chat, open, onClose }: SummariesEditorMod
                   backfillSummaries.isError ? "text-[var(--destructive)]" : "text-[var(--muted-foreground)]",
                 )}
               >
-                {backfillSummaries.isError ? "Backfill failed — check the server log for details." : backfillNotice}
+                {backfillSummaries.isError ?localizeUi("ui.chat.summarieseditormodal.backfillFailedCheckTheServerLogForDetails") : backfillNotice}
               </p>
             )}
           </div>
 
           {entries.length === 0 && (
-            <div className="rounded-lg border border-dashed border-[var(--border)] px-4 py-8 text-center text-[0.75rem] text-[var(--muted-foreground)]">
-              No summaries yet — come back after your first day of chatting has ended.
-            </div>
+            <div className="rounded-lg border border-dashed border-[var(--border)] px-4 py-8 text-center text-[0.75rem] text-[var(--muted-foreground)]">{localizeUi("ui.chat.summarieseditormodal.noSummariesYetComeBackAfterYourFirstDay")}</div>
           )}
 
           {entries.length > 0 && (
             <div className="flex items-center justify-end">
               <button
                 onClick={toggleAll}
-                title={allExpanded ? "Collapse all" : "Expand all"}
-                aria-label={allExpanded ? "Collapse all" : "Expand all"}
+                title={allExpanded ?localizeUi("ui.chat.summarieseditormodal.collapseAll") :localizeUi("ui.chat.summarieseditormodal.expandAll")}
+                aria-label={allExpanded ?localizeUi("ui.chat.summarieseditormodal.collapseAll") :localizeUi("ui.chat.summarieseditormodal.expandAll")}
                 className="flex items-center gap-1 rounded-md px-2 py-1 text-[0.6875rem] font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
               >
                 {allExpanded ? <ChevronsDownUp size="0.85rem" /> : <ChevronsUpDown size="0.85rem" />}
-                {allExpanded ? "Collapse all" : "Expand all"}
+                {allExpanded ?localizeUi("ui.chat.summarieseditormodal.collapseAll") :localizeUi("ui.chat.summarieseditormodal.expandAll")}
               </button>
             </div>
           )}
@@ -385,7 +379,7 @@ export function SummariesEditorModal({ chat, open, onClose }: SummariesEditorMod
                     {entry.kind}
                   </span>
                   <span className="ml-auto shrink-0 text-[0.625rem] text-[var(--muted-foreground)]">
-                    ~{fmtTokens(entryTokens)} token{entryTokens !== 1 ? "s" : ""}
+                    ~{fmtTokens(entryTokens)} {localizeUi("ui.chat.collapsibleblock.token")}{entryTokens !== 1 ?localizeUi("ui.noodle.stageprofileview.s") : ""}
                   </span>
                 </button>
 
@@ -393,7 +387,7 @@ export function SummariesEditorModal({ chat, open, onClose }: SummariesEditorMod
                   <div className="space-y-2 border-t border-[var(--border)] px-3 py-2">
                     {/* Summary textarea */}
                     <div className="space-y-1">
-                      <label className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Summary</label>
+                      <label className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.chat.summarieseditormodal.summary")}</label>
                       <AutoSizingTextarea
                         value={current.summary}
                         onChange={(next) => updateEntry(entry.kind, entry.key, { ...current, summary: next })}
@@ -403,9 +397,9 @@ export function SummariesEditorModal({ chat, open, onClose }: SummariesEditorMod
 
                     {/* Key details rows */}
                     <div className="space-y-1">
-                      <label className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Key Details</label>
+                      <label className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.chat.summarieseditormodal.keyDetails")}</label>
                       {current.keyDetails.length === 0 && (
-                        <p className="text-[0.6875rem] italic text-[var(--muted-foreground)]">No key details.</p>
+                        <p className="text-[0.6875rem] italic text-[var(--muted-foreground)]">{localizeUi("ui.chat.summarieseditormodal.noKeyDetails")}</p>
                       )}
                       <div className="space-y-1.5">
                         {current.keyDetails.map((detail, i) => (
@@ -425,7 +419,7 @@ export function SummariesEditorModal({ chat, open, onClose }: SummariesEditorMod
                                 updateEntry(entry.kind, entry.key, { ...current, keyDetails: nextDetails });
                               }}
                               className="shrink-0 self-start rounded-md p-1.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/10 hover:text-[var(--destructive)]"
-                              title="Delete key detail"
+                              title={localizeUi("ui.chat.summarieseditormodal.deleteKeyDetail")}
                             >
                               <Trash2 size="0.75rem" />
                             </button>
@@ -438,9 +432,7 @@ export function SummariesEditorModal({ chat, open, onClose }: SummariesEditorMod
                         }
                         className="mt-1 flex items-center gap-1 rounded-md px-2 py-1 text-[0.6875rem] text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
                       >
-                        <Plus size="0.75rem" />
-                        Add key detail
-                      </button>
+                        <Plus size="0.75rem" />{localizeUi("ui.chat.summarieseditormodal.addKeyDetail")}</button>
                     </div>
                   </div>
                 )}
@@ -452,22 +444,20 @@ export function SummariesEditorModal({ chat, open, onClose }: SummariesEditorMod
         {/* Footer */}
         <div className="shrink-0 flex items-center justify-between gap-2 border-t border-[var(--border)] px-5 py-3">
           <div className="text-[0.6875rem] text-[var(--destructive)]">
-            {updateSummaries.isError ? "Save failed — try again." : ""}
+            {updateSummaries.isError ?localizeUi("ui.chat.summarieseditormodal.saveFailedTryAgain") : ""}
           </div>
           <div className="flex items-center gap-2">
             <button
               onClick={onClose}
               disabled={updateSummaries.isPending}
               className="rounded-lg px-3 py-1.5 text-[0.75rem] font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] disabled:opacity-50"
-            >
-              Cancel
-            </button>
+            >{localizeUi("chat.delete.dialog.cancel")}</button>
             <button
               onClick={handleSave}
               disabled={!isDirty || updateSummaries.isPending}
               className="rounded-lg bg-[var(--primary)] px-3 py-1.5 text-[0.75rem] font-medium text-[var(--primary-foreground)] transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {updateSummaries.isPending ? "Saving…" : "Save"}
+              {updateSummaries.isPending ?localizeUi("chat.settings.inlineEditor.saving") :localizeUi("ui.noodle.noodlehome.save")}
             </button>
           </div>
         </div>

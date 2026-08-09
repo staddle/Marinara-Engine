@@ -13,6 +13,9 @@ import {
   NEUTRAL_PANEL_TITLE,
 } from "./neutral-surface-styles";
 import { useDialogFocusScope } from "../../hooks/use-dialog-focus-scope";
+import { useBackdropDismiss } from "../../hooks/use-backdrop-dismiss";
+import { useLocalizedUiText } from "../../localization/use-localized-ui-text";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface ModalProps {
   open: boolean;
@@ -30,9 +33,13 @@ interface ModalProps {
   mobileFullscreen?: boolean;
   /** Optional feature-local classes applied to the full panel, including its header. */
   panelClassName?: string;
+  /** Optional feature-local classes applied to the scrollable content area. */
+  contentClassName?: string;
   /** Optional feature-local style variables applied to the full panel. */
   panelStyle?: CSSProperties;
   closeDisabled?: boolean;
+  /** Let drag hit-testing reach content behind the modal while keeping the panel interactive. */
+  dragThrough?: boolean;
 }
 
 export function Modal({
@@ -48,9 +55,14 @@ export function Modal({
   chatFloatingPanel = false,
   mobileFullscreen = false,
   panelClassName,
+  contentClassName,
   panelStyle,
   closeDisabled = false,
+  dragThrough = false,
 }: ModalProps) {
+  const { t: localizeUi } = useUiTranslation();
+  const localize = useLocalizedUiText();
+  const localizedTitle = localize(title);
   const overlayRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   // Track mounted state separately so we can play the exit animation
@@ -58,7 +70,8 @@ export function Modal({
   const [mounted, setMounted] = useState(false);
   const [animating, setAnimating] = useState<"enter" | "exit" | null>(null);
   const enterRafRef = useRef<number | null>(null);
-  useDialogFocusScope(open, panelRef, initialFocusRef, restoreFocusRef, focusScopePortalSelector);
+  const backdropDismiss = useBackdropDismiss(onClose, closeDisabled);
+  useDialogFocusScope(open && mounted, panelRef, initialFocusRef, restoreFocusRef, focusScopePortalSelector);
 
   useEffect(() => {
     if (enterRafRef.current !== null) {
@@ -124,10 +137,10 @@ export function Modal({
       ref={overlayRef}
       role="dialog"
       aria-modal="true"
-      aria-label={title}
+      aria-label={localizedTitle}
       data-chat-floating-panel={chatFloatingPanel ? "true" : undefined}
       data-component="Modal"
-      className={`mari-modal fixed inset-0 z-[10000] flex items-center justify-center ${
+      className={`mari-modal fixed inset-0 z-[10000] flex items-center justify-center ${dragThrough ? "pointer-events-none" : ""} ${
         mobileFullscreen
           ? "p-0 sm:p-4"
           : "p-3 max-md:pt-[max(0.75rem,env(safe-area-inset-top))] max-md:pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:p-4"
@@ -137,12 +150,11 @@ export function Modal({
         transition: "opacity 150ms ease-out",
       }}
       onTransitionEnd={handleAnimationEnd}
-      onClick={(e) => {
-        if (e.target === overlayRef.current && !closeDisabled) onClose();
-      }}
+      {...backdropDismiss}
     >
       {/* Backdrop */}
       <div
+        data-backdrop-dismiss-surface="true"
         className="mari-modal-backdrop absolute inset-0 bg-black/55 backdrop-blur-[2px]"
         style={{
           opacity: isEntering ? 1 : 0,
@@ -154,7 +166,7 @@ export function Modal({
       <div
         ref={panelRef}
         tabIndex={-1}
-        className={`mari-modal-panel ${NEUTRAL_PANEL_SHELL} relative flex w-full flex-col ${width} max-h-[calc(100dvh-1.5rem)] sm:max-h-[min(90dvh,52rem)]${
+        className={`mari-modal-panel ${NEUTRAL_PANEL_SHELL} relative flex w-full flex-col ${dragThrough ? "pointer-events-auto" : ""} ${width} max-h-[calc(100dvh-1.5rem)] sm:max-h-[min(90dvh,52rem)]${
           mobileFullscreen
             ? " max-sm:h-full max-sm:max-h-none max-sm:max-w-none max-sm:rounded-none max-sm:border-0 max-sm:pt-[env(safe-area-inset-top)] max-sm:pb-[env(safe-area-inset-bottom)]"
             : ""
@@ -168,12 +180,12 @@ export function Modal({
       >
         {/* Header */}
         <div className={`shrink-0 flex items-center justify-between ${NEUTRAL_PANEL_HEADER}`}>
-          <h2 className={NEUTRAL_PANEL_TITLE}>{title}</h2>
+          <h2 className={NEUTRAL_PANEL_TITLE}>{localizedTitle}</h2>
           <button
             type="button"
             onClick={onClose}
             disabled={closeDisabled}
-            aria-label={`Close ${title}`}
+            aria-label={localizeUi("ui.ui.modal.value1Value2", { value1: localize("Close"), value2: localizedTitle })}
             className="rounded-lg p-1.5 text-[var(--marinara-chat-chrome-panel-muted)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg-hover)] hover:text-[var(--marinara-chat-chrome-highlight-text)] disabled:cursor-wait disabled:opacity-40"
           >
             <X size="1rem" />
@@ -183,7 +195,7 @@ export function Modal({
         {/* Content */}
         <div
           ref={contentRef}
-          className={`min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-4 ${NEUTRAL_PANEL_SCROLL_AREA}`}
+          className={`min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-4 ${NEUTRAL_PANEL_SCROLL_AREA} ${contentClassName ?? ""}`}
         >
           {children}
         </div>

@@ -3,6 +3,7 @@ import { getAdminSecret, isAdminSecretRequiredOnLoopback } from "../config/runti
 import { isBasicAuthSatisfied } from "./basic-auth.js";
 import { isInIpAllowlist, isLoopbackIp, isTrustedInterfaceRequest } from "./ip-allowlist.js";
 import { safeCompareString } from "../utils/security.js";
+import { isRequestHostTrusted } from "./host-validation.js";
 
 export function isAdminAuthorized(request: FastifyRequest): boolean {
   const adminSecret = getAdminSecret();
@@ -17,6 +18,14 @@ export function requirePrivilegedAccess(
   reply: FastifyReply,
   options: { loopbackOnly?: boolean; trustedNetwork?: boolean; feature?: string } = {},
 ): boolean {
+  if (!isRequestHostTrusted(request)) {
+    reply.status(421).send({
+      error: "Untrusted request host",
+      message: "Privileged APIs require an allowed Marinara hostname.",
+    });
+    return false;
+  }
+
   if (!isBasicAuthSatisfied(request)) {
     reply.status(403).send({
       error: "Privileged API requires authenticated access",

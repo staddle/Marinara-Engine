@@ -3,6 +3,7 @@
 // ──────────────────────────────────────────────
 import { z } from "zod";
 import { MAX_CUSTOM_AGENT_ACTIVATION_SCAN_DEPTH } from "../constants/agent-activation.js";
+import { CUSTOM_AGENT_CAPABILITY_IDS } from "../types/agent.js";
 
 export const agentPhaseSchema = z.enum(["pre_generation", "parallel", "post_processing"]);
 
@@ -58,6 +59,17 @@ export const createAgentConfigSchema = z.object({
 
 export const updateAgentConfigSchema = createAgentConfigSchema.partial();
 
+export const customAgentImportPolicyUpdateSchema = z.object({
+  enabled: z.boolean(),
+});
+
+export const importAgentConfigSchema = z.object({
+  agent: createAgentConfigSchema,
+  source: z.enum(["file", "folder"]),
+  approvedCapabilities: z.array(z.enum(CUSTOM_AGENT_CAPABILITY_IDS)).max(CUSTOM_AGENT_CAPABILITY_IDS.length),
+  acknowledgePermissions: z.literal(true),
+});
+
 /** AI-assisted rewrite of a fragment of stored agent data (Agent Suite). */
 export const agentSuiteRewriteSchema = z.object({
   connectionId: z.string().min(1),
@@ -84,4 +96,5 @@ export const agentSuiteRewriteSchema = z.object({
 
 export type CreateAgentConfigInput = z.infer<typeof createAgentConfigSchema>;
 export type UpdateAgentConfigInput = z.infer<typeof updateAgentConfigSchema>;
+export type ImportAgentConfigInput = z.infer<typeof importAgentConfigSchema>;
 export type AgentSuiteRewriteInput = z.infer<typeof agentSuiteRewriteSchema>;

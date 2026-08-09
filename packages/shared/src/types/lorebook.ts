@@ -18,6 +18,7 @@ export type SelectiveLogic = "and" | "and_all" | "or" | "not" | "not_all";
 
 /** Role for injected lorebook content. */
 export type LorebookRole = "system" | "user" | "assistant";
+export type LorebookEntryPosition = 0 | 1 | 2 | 7;
 
 /** Why an entry was activated for the current generation. */
 export type LorebookActivationSource =
@@ -81,6 +82,8 @@ export interface Lorebook {
   isGlobal: boolean;
   /** Master on/off switch for this lorebook */
   enabled: boolean;
+  /** Hide this lorebook from general library searches and selection menus without disabling it. */
+  hiddenFromLibrary: boolean;
   /** Optional runtime scope for character/persona-linked lorebooks */
   scope: LorebookScope;
   /** Tags for organizing/filtering lorebooks */
@@ -173,8 +176,10 @@ export interface LorebookEntry {
   additionalMatchingSources: LorebookMatchingSource[];
 
   // ── Injection settings ──
-  /** 0 = before character, 1 = after character, 2 = inject at message depth */
-  position: number;
+  /** 0 = before character, 1 = after character, 2 = inject at message depth, 7 = named Outlet */
+  position: LorebookEntryPosition;
+  /** Exact, case-sensitive name used by {{outlet::name}} when position is 7 */
+  outletName: string;
   /** Insertion depth in the message array */
   depth: number;
   /** Insertion priority (lower = earlier) */

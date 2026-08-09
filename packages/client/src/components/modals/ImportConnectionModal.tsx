@@ -7,6 +7,7 @@ import { Modal } from "../ui/Modal";
 import { useCreateConnection, useSaveConnectionDefaults } from "../../hooks/use-connections";
 import { getConnectionImportEntries, normalizeImportedConnectionEntry } from "../../lib/connection-transfer";
 import { api } from "../../lib/api-client";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface Props {
   open: boolean;
@@ -14,6 +15,7 @@ interface Props {
 }
 
 export function ImportConnectionModal({ open, onClose }: Props) {
+  const { t: localizeUi } = useUiTranslation();
   const fileRef = useRef<HTMLInputElement>(null);
   const createConnection = useCreateConnection();
   const saveConnectionDefaults = useSaveConnectionDefaults();
@@ -103,7 +105,7 @@ export function ImportConnectionModal({ open, onClose }: Props) {
         reset();
         onClose();
       }}
-      title="Import Connections"
+      title={localizeUi("ui.modals.importconnectionmodal.importConnections")}
     >
       <div className="flex flex-col gap-4">
         <div
@@ -122,14 +124,11 @@ export function ImportConnectionModal({ open, onClose }: Props) {
         >
           <Download size="2rem" className={dragOver ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"} />
           <div>
-            <p className="text-sm font-medium">Drop one or more connection files here or click to browse</p>
-            <p className="mt-1 text-xs text-[var(--muted-foreground)]">
-              Imported connections never include API keys. Add each key again after import.
-            </p>
+            <p className="text-sm font-medium">{localizeUi("ui.modals.importconnectionmodal.dropOneOrMoreConnectionFilesHereOrClick")}</p>
+            <p className="mt-1 text-xs text-[var(--muted-foreground)]">{localizeUi("ui.modals.importconnectionmodal.importedConnectionsNeverIncludeApiKeysAddEachKey")}</p>
           </div>
           <span className="flex items-center gap-1 rounded-full bg-[var(--secondary)] px-2.5 py-1 text-xs text-[var(--muted-foreground)]">
-            <FileJson size="0.75rem" /> .json
-          </span>
+            <FileJson size="0.75rem" /> {localizeUi("ui.modals.importcharactermodal.json")}</span>
         </div>
 
         <input
@@ -146,8 +145,7 @@ export function ImportConnectionModal({ open, onClose }: Props) {
 
         {status === "loading" && (
           <div className="flex items-center gap-2 rounded-lg bg-[var(--secondary)] p-3 text-xs">
-            <Loader2 size="0.875rem" className="animate-spin text-[var(--primary)]" /> Importing...
-          </div>
+            <Loader2 size="0.875rem" className="animate-spin text-[var(--primary)]" /> {localizeUi("ui.modals.importconnectionmodal.importing")}</div>
         )}
 
         {status === "done" && results.length > 0 && (
@@ -160,9 +158,8 @@ export function ImportConnectionModal({ open, onClose }: Props) {
               }`}
             >
               {results.some((result) => result.success) ? <CheckCircle size="0.875rem" /> : <XCircle size="0.875rem" />}
-              {results.filter((result) => result.success).length} succeeded,{" "}
-              {results.filter((result) => !result.success).length} failed
-            </div>
+              {results.filter((result) => result.success).length} {localizeUi("ui.modals.importcharactermodal.succeeded")}{" "}
+              {results.filter((result) => !result.success).length} {localizeUi("ui.modals.importcharactermodal.failed")}</div>
             <div className="max-h-52 overflow-y-auto rounded-lg border border-[var(--border)]">
               {results.map((result) => (
                 <div

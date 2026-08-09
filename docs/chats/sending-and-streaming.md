@@ -41,6 +41,20 @@ Each file must be 20 MB or smaller. A larger file is rejected with a note that s
 
 The AI can only "see" an image if the connected model supports vision. If your model is text only, turn on **Image Captioning**. This setting lives in the per chat **Chat Settings**, in the **Advanced Parameters** section, and is off by default. When on, Marinara describes each attached image in text using a connection you pick, then sends that description instead of the raw image.
 
+## Insert a gallery image into a message
+
+Attachments are for the AI to *see*. Gallery references are for the reader to *see*: they display an image from a gallery inside the message text itself.
+
+Messages support Markdown image syntax, and Marinara resolves special `card://` links to gallery files:
+
+```text
+![a caption](card://characters/<character-id>/gallery/<filename>.png)
+```
+
+In Roleplay Mode, the chat's asset browser can insert one of these links for you. You can also paste one anywhere text is written: messages, greetings, example dialogue.
+
+For images from a **character's own gallery**, prefer the portable form `card://self/gallery/<filename>`, which keeps working after the character is exported and imported. The character gallery has a **Copy image reference** button that produces it. See [Character galleries → Reuse a gallery image in messages and greetings](../characters/galleries.md#reuse-a-gallery-image-in-messages-and-greetings) for the details.
+
 ## Streaming the reply
 
 Streaming shows the reply appearing word by word as it generates, instead of waiting for the whole reply at once. The streaming controls live in **Settings**, under the **General** tab, in the **Responses** section:

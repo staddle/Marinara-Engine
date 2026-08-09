@@ -7,6 +7,7 @@
 // ──────────────────────────────────────────────
 import { useEffect, useLayoutEffect, useRef, useState, useCallback, type CSSProperties } from "react";
 import type { DirectionCommand } from "@marinara-engine/shared";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 /** Cross-fading background layer — renders two stacked layers and transitions between them. */
 function getBackgroundBlurStyle(blurPx: number): Pick<CSSProperties, "filter" | "transform"> {
@@ -104,6 +105,7 @@ export function DirectionEngine({
   onPlayingChange,
   children,
 }: DirectionEngineProps) {
+  const { t: localizeUi } = useUiTranslation();
   const [activeEffects, setActiveEffects] = useState<ActiveEffect[]>([]);
   const processedRef = useRef<string>("");
 
@@ -198,9 +200,7 @@ export function DirectionEngine({
           type="button"
           onClick={clearAll}
           className="marinara-chat-toolbar-button absolute bottom-4 right-4 z-50 rounded-lg border border-[var(--marinara-chat-chrome-button-border)] bg-[var(--marinara-chat-chrome-button-bg)] px-3 py-1.5 text-xs font-medium text-[var(--marinara-chat-chrome-button-text)] backdrop-blur-md transition-all hover:border-[var(--marinara-chat-chrome-button-border-hover)] hover:bg-[var(--marinara-chat-chrome-button-bg-hover)] hover:text-[var(--marinara-chat-chrome-button-text-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--marinara-chat-chrome-focus-ring)]"
-        >
-          Skip effects
-        </button>
+        >{localizeUi("ui.game.directionengine.skipEffects")}</button>
       )}
     </div>
   );

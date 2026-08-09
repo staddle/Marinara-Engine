@@ -26,6 +26,8 @@ import {
   Square as SquareIcon,
   ArrowUpDown,
   Tag,
+  Loader2,
+  PhoneIncoming,
 } from "lucide-react";
 import { useBulkExportChats, useChats, useCreateChat, useDeleteChat, useDeleteChatGroup } from "../../hooks/use-chats";
 import { useChatPresets, useApplyChatPreset } from "../../hooks/use-chat-presets";
@@ -43,13 +45,19 @@ import { handleFolderRenameKeyDown, useFolderRenameGesture } from "../../hooks/u
 import { useChatStore } from "../../stores/chat.store";
 import { confirmNonEmptyFolderDelete, showConfirmDialog } from "../../lib/app-dialogs";
 import { useUIStore, type UserStatus } from "../../stores/ui.store";
-import { cn, getAvatarCropStyle, type AvatarCropValue } from "../../lib/utils";
+import { cn, getAvatarCropStyle } from "../../lib/utils";
+import { chatBackgroundMetadataToUrl } from "../../lib/backgrounds";
+import { formatRelativeContact } from "../../lib/relative-time";
+import { ChatRowPeek } from "./ChatRowPeek";
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { usePresenceClock } from "../../hooks/use-presence-clock";
 import { toast } from "sonner";
 import {
+  BACKGROUND_THUMBNAIL_WIDTH,
   includesTextForMatch,
+  normalizeAvatarCrop,
   normalizeTextForMatch,
+  type AvatarCrop,
   type Chat,
   type ChatFolder,
   type ChatMode,
@@ -59,13 +67,20 @@ import { resolveLiveConversationStatus } from "../../lib/conversation-presence-s
 import { Modal } from "../ui/Modal";
 import { Reorder, useDragControls } from "framer-motion";
 import { parseChatMetadata } from "../../lib/chat-display";
-import { compareChatsByActivityAsc, compareChatsByActivityDesc } from "../../lib/chat-recency";
+import {
+  compareChatsByActivityDesc,
+  compareChatsByCreatedAtAsc,
+  compareChatsByCreatedAtDesc,
+} from "../../lib/chat-recency";
 import { getCurrentGameGroupRepresentative } from "../../lib/game-session-resolution";
 import { api } from "../../lib/api-client";
 import { SelectionActionBar } from "../ui/SelectionActionBar";
 import { SmoothFolderContent } from "../ui/SmoothFolderContent";
+import { useTranslation, useTranslation as useUiTranslation } from "react-i18next";
+import { useLocalizedUiText } from "../../localization/use-localized-ui-text";
+import { PersonalExtensionContributionSlot } from "../extensions/PersonalExtensionContributionSlot";
 
-type ChatSortOption = "newest" | "oldest" | "name-asc" | "name-desc";
+type ChatSortOption = "recent" | "newest" | "oldest" | "name-asc" | "name-desc";
 const CHAT_LIST_PAGE_SIZE = 100;
 
 const CONVERSATION_STATUS_PRIORITY: Record<ConversationPresenceStatus, number> = {
@@ -202,6 +217,9 @@ function ChatSidebarTitleIcon() {
 }
 
 export function ChatSidebar() {
+  const { t: localizeUi } = useUiTranslation();
+  const { t } = useTranslation();
+  const localize = useLocalizedUiText();
   const { data: chats, isError: chatsError, isLoading, isFetching, refetch: refetchChats } = useChats();
   const { data: connections } = useConnections();
   const createChat = useCreateChat();
@@ -214,9 +232,23 @@ export function ChatSidebar() {
   const setActiveChatId = useChatStore((s) => s.setActiveChatId);
   const unreadCounts = useChatStore((s) => s.unreadCounts);
   const hydrateUnread = useChatStore((s) => s.hydrateUnread);
+  // Liveness signals for the rows. All three are already maintained per-chat by the store,
+  // so a backgrounded chat can show what it is doing without any extra fetching.
+  // `inputDrafts` writes are debounced (ConversationInput handleInput), so subscribing to
+  // the whole Map does not re-render the list on every keystroke.
+  // Not `streamingChatId` — that one is recomputed for the newly active chat on every
+  // switch (chat.store setActiveChatId), so it goes null the moment you navigate away from
+  // a generating chat. `abortControllers` is the per-chat truth and is what that same code
+  // reads to decide whether a generation is live.
+  const abortControllers = useChatStore((s) => s.abortControllers);
+  const perChatTyping = useChatStore((s) => s.perChatTyping);
+  const inputDrafts = useChatStore((s) => s.inputDrafts);
+  const chatNotifications = useChatStore((s) => s.chatNotifications);
+  const chatListRef = useRef<HTMLDivElement>(null);
   // One interval for the whole list: a 60s-cadence clock so schedule/override-derived
   // status dots refresh when time alone changes them, without per-row timers.
   const presenceNow = usePresenceClock();
+  const chatListBackgrounds = useUIStore((s) => s.chatListBackgrounds);
   const hasAnyDetailOpen = useUIStore((s) => s.hasAnyDetailOpen);
   const editorDirty = useUIStore((s) => s.editorDirty);
   const closeAllDetails = useUIStore((s) => s.closeAllDetails);
@@ -228,18 +260,21 @@ export function ChatSidebar() {
   const { data: folders } = useChatFolders();
   const createFolderMut = useCreateFolder();
   const updateFolderMut = useUpdateFolder();
+  // Stable across renders, unlike the mutation object itself — safe as an effect dep.
+  const mutateFolder = updateFolderMut.mutate;
   const deleteFolderMut = useDeleteFolder();
   const reorderFoldersMut = useReorderFolders();
   const moveChatMut = useMoveChat();
 
   const [searchQuery, setSearchQuery] = useState("");
-  const [sort, setSort] = useState<ChatSortOption>("newest");
+  const [sort, setSort] = useState<ChatSortOption>("recent");
   const [activeTag, setActiveTag] = useState<string | null>(null);
   const [tagsExpanded, setTagsExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<"conversation" | "roleplay" | "game">("conversation");
   const [visibleChatLimit, setVisibleChatLimit] = useState(CHAT_LIST_PAGE_SIZE);
   const [deleteTarget, setDeleteTarget] = useState<{
     chatId: string;
+    chatName: string;
     groupId: string | null;
     branchCount: number;
   } | null>(null);
@@ -299,7 +334,7 @@ export function ChatSidebar() {
     () =>
       (chats ?? []).filter(
         (chat) =>
-          (chat.mode === activeTab || (activeTab === "roleplay" && chat.mode === "visual_novel")) &&
+          chat.mode === activeTab &&
           !(chat.mode === "conversation" && chat.metadata?.gameId),
       ),
     [chats, activeTab],
@@ -320,7 +355,7 @@ export function ChatSidebar() {
       {
         name: string;
         avatarUrl: string | null;
-        avatarCrop?: AvatarCropValue | null;
+        avatarCrop?: AvatarCrop | null;
         conversationStatus?: string;
       }
     >();
@@ -329,7 +364,7 @@ export function ChatSidebar() {
       map.set(character.id, {
         name: character.name,
         avatarUrl: character.avatarUrl,
-        avatarCrop: (character.avatarCrop as AvatarCropValue | undefined) ?? null,
+        avatarCrop: normalizeAvatarCrop(character.avatarCrop),
         conversationStatus: character.conversationStatus,
       });
     }
@@ -387,12 +422,14 @@ export function ChatSidebar() {
     const sorted = [...filtered].sort((a, b) => {
       switch (sort) {
         case "oldest":
-          return compareChatsByActivityAsc(a, b);
+          return compareChatsByCreatedAtAsc(a, b);
         case "name-asc":
           return toSearchText(a.name).localeCompare(toSearchText(b.name));
         case "name-desc":
           return toSearchText(b.name).localeCompare(toSearchText(a.name));
         case "newest":
+          return compareChatsByCreatedAtDesc(a, b);
+        case "recent":
         default:
           return compareChatsByActivityDesc(a, b);
       }
@@ -439,7 +476,7 @@ export function ChatSidebar() {
   const modeFolders = useMemo(() => {
     if (!folders) return [] as ChatFolder[];
     return folders
-      .filter((f) => f.mode === activeTab || (activeTab === "roleplay" && f.mode === "visual_novel"))
+      .filter((f) => f.mode === activeTab)
       .sort((a, b) => a.sortOrder - b.sortOrder);
   }, [folders, activeTab]);
 
@@ -513,10 +550,17 @@ export function ChatSidebar() {
   // Uses a structured ref so each concern (tab, folder, scroll) resolves
   // independently — folder expansion retries when folders load late, and
   // scroll waits until both tab and folder are settled.
-  const syncRef = useRef<{ chatId: string | null; tabSynced: boolean; folderSynced: boolean }>({
+  const syncRef = useRef<{
+    chatId: string | null;
+    tabSynced: boolean;
+    folderSynced: boolean;
+    /** Folder we already asked to expand — the mutation is in flight, don't ask again. */
+    expandRequestedFolderId: string | null;
+  }>({
     chatId: null,
     tabSynced: false,
     folderSynced: false,
+    expandRequestedFolderId: null,
   });
   // When true the next sync skips clearing the search query — set by
   // the sidebar's own click handler so clicking a search result doesn't
@@ -536,11 +580,12 @@ export function ChatSidebar() {
       s.chatId = activeChatId;
       s.tabSynced = false;
       s.folderSynced = false;
+      s.expandRequestedFolderId = null;
     }
 
     // 1. Tab sync — once per chat switch
     if (!s.tabSynced) {
-      const chatMode = chat.mode === "visual_novel" ? "roleplay" : chat.mode;
+      const chatMode = chat.mode;
       if (chatMode === "conversation" || chatMode === "roleplay" || chatMode === "game") {
         setActiveTab(chatMode);
       }
@@ -566,7 +611,13 @@ export function ChatSidebar() {
       } else if (folders) {
         const folder = folders.find((f) => f.id === chat.folderId);
         if (folder?.collapsed) {
-          updateFolderMut.mutate({ id: folder.id, collapsed: false });
+          // Once per folder: this effect re-runs on every render (the mutation object
+          // identity changes), and mutating re-renders — firing again here is an
+          // infinite update loop (React #185) until the folders query comes back.
+          if (s.expandRequestedFolderId !== folder.id) {
+            s.expandRequestedFolderId = folder.id;
+            mutateFolder({ id: folder.id, collapsed: false });
+          }
           // folderSynced stays false — re-runs after query invalidation
         } else {
           s.folderSynced = true;
@@ -584,16 +635,14 @@ export function ChatSidebar() {
       }, 200);
       return () => clearTimeout(timer);
     }
-  }, [activeChatId, chats, folders, updateFolderMut]);
+  }, [activeChatId, chats, folders, mutateFolder]);
 
   const handleNewChat = useCallback(
     (mode: ChatMode) => {
       if (createChat.isPending) return;
       const connectionRows = ((connections ?? []) as Array<{ id: string }>).filter((connection) => !!connection.id);
       if (connectionRows.length === 0) {
-        if (mode !== "visual_novel") {
-          setPendingNewChatMode(mode);
-        }
+        setPendingNewChatMode(mode, "sidebar");
         if (typeof window !== "undefined" && window.innerWidth < 768) setSidebarOpen(false);
         return;
       }
@@ -602,7 +651,7 @@ export function ChatSidebar() {
       if (hasAnyDetailOpen()) {
         closeAllDetails();
       }
-      // Resolve the user's starred default preset for this mode (only modes with presets).
+      // Resolve the user's starred default settings profile for this mode.
       const presets = chatPresetsData ?? [];
       const presetMode: ChatMode | null = mode === "conversation" || mode === "roleplay" ? mode : null;
       const starred = presetMode
@@ -666,20 +715,20 @@ export function ChatSidebar() {
           messagesImported?: number;
         }>("/import/st-chat", formData);
         if (data.success === false || data.error) {
-          toast.error(`Import failed: ${data.error ?? "Unknown error"}`);
+          toast.error(localizeUi("ui.layout.chatsidebar.importFailedValue1", { value1: data.error ??localizeUi("ui.layout.chatsidebar.unknownError") }));
           return;
         }
 
-        toast.success(`Imported ${data.messagesImported ?? 0} messages`);
+        toast.success(localizeUi("ui.layout.chatsidebar.importedValue1Messages", { value1: data.messagesImported ?? 0 }));
         await refetchChats();
         if (data.chatId) setActiveChatId(data.chatId);
       } catch (error) {
-        toast.error(error instanceof Error ? `Import failed: ${error.message}` : "Import failed.");
+        toast.error(error instanceof Error ?localizeUi("ui.layout.chatsidebar.importFailedValue1", { value1: error.message }) :localizeUi("chat.branches.importFailed"));
       } finally {
         setIsImportingChat(false);
       }
     },
-    [activeTab, refetchChats, setActiveChatId],
+    [activeTab, refetchChats, setActiveChatId, localizeUi],
   );
 
   const activeModeConfig = MODE_CONFIG[activeTab] ?? MODE_CONFIG.conversation;
@@ -803,10 +852,10 @@ export function ChatSidebar() {
     if (selectedChatIds.size === 0) return;
     if (
       !(await showConfirmDialog({
-        title: "Delete Chats",
-        message: `Delete ${selectedChatIds.size} chat${selectedChatIds.size > 1 ? "s" : ""}?`,
-        confirmLabel: "Delete",
-        tone: "destructive",
+        title:localizeUi("ui.layout.chatsidebar.deleteChats"),
+        message:localizeUi("ui.layout.chatsidebar.deleteValue1ChatValue2", { value1: selectedChatIds.size, value2: selectedChatIds.size > 1 ?localizeUi("ui.noodle.stageprofileview.s") : "" }),
+        confirmLabel:localizeUi("lorebook.editor.batch.delete"),
+        tone: "accent",
       }))
     ) {
       return;
@@ -816,7 +865,7 @@ export function ChatSidebar() {
     }
     if (activeChatId && selectedChatIds.has(activeChatId)) setActiveChatId(null);
     exitMultiSelect();
-  }, [selectedChatIds, deleteChat, activeChatId, setActiveChatId, exitMultiSelect]);
+  }, [selectedChatIds, deleteChat, activeChatId, setActiveChatId, exitMultiSelect, localizeUi]);
 
   const handleBatchExport = useCallback(async () => {
     if (selectedChatIds.size === 0) return;
@@ -828,13 +877,13 @@ export function ChatSidebar() {
       });
       exitMultiSelect();
     } catch (err) {
-      toast.error(err instanceof Error ? `Export failed: ${err.message}` : "Export failed");
+      toast.error(err instanceof Error ?localizeUi("ui.layout.chatsidebar.exportFailedValue1", { value1: err.message }) :localizeUi("ui.layout.chatsidebar.exportFailed"));
     }
-  }, [selectedChatIds, bulkExportChats, exitMultiSelect]);
+  }, [selectedChatIds, bulkExportChats, exitMultiSelect, localizeUi]);
 
   // ── Chat row renderer (shared between unfiled + folder sections) ──
   const renderChatRow = ({ chat, branchCount }: (typeof displayChats)[number]) => {
-    const cfg = MODE_CONFIG[chat.mode === "visual_novel" ? "roleplay" : chat.mode] ?? MODE_CONFIG.conversation;
+    const cfg = MODE_CONFIG[chat.mode] ?? MODE_CONFIG.conversation;
     const isActive = activeChatId === chat.id || (chat.groupId != null && chat.groupId === activeGroupId);
     const isSelected = selectedChatIds.has(chat.id);
     const charIds = normalizeChatCharacterIds((chat as { characterIds?: unknown }).characterIds);
@@ -845,6 +894,58 @@ export function ChatSidebar() {
       charLookup,
       presenceNow,
     );
+
+    // ── Row liveness ──
+    // Exactly one subtitle, so rows never change height as these states come and go.
+    // Precedence: typing > generating > notification > draft.
+    // Reuses the list's existing 60s clock, so these tick without per-row timers.
+    // Conversation chats only — roleplay/game rows are already busy enough.
+    const relativeTime =
+      chat.mode === "conversation" && chat.lastMessageAt
+        ? formatRelativeContact(chat.lastMessageAt, presenceNow.getTime())
+        : null;
+
+    const isGenerating = abortControllers.has(chat.id);
+    const typingCharacter = perChatTyping.get(chat.id);
+    const hasDraft = !isActive && Boolean(inputDrafts.get(chat.id)?.trim());
+    // Enrichment only: notifications auto-dismiss on a timer while the unread count badge
+    // persists, so the badge stays the durable signal and this just names who/what.
+    const notification = isActive ? undefined : chatNotifications.get(chat.id);
+    const notificationLabel = !notification
+      ? null
+      : notification.kind === "call"
+        ? notification.reason?.trim() ||
+          localizeUi("ui.layout.chatsidebar.incomingCallFromValue1", { value1: notification.characterName })
+        : localizeUi("ui.layout.chatsidebar.value1Replied", { value1: notification.characterName });
+    const subtitle = typingCharacter
+      ? localizeUi("ui.layout.chatsidebar.value1IsTyping", { value1: typingCharacter })
+      : isGenerating
+        ? localizeUi("ui.layout.chatsidebar.generating")
+        : notificationLabel
+          ? notificationLabel
+          : hasDraft
+            ? localizeUi("ui.layout.chatsidebar.unsentDraft")
+            : null;
+    // Same precedence as the subtitle: whatever the line says is what the icon marks.
+    const SubtitleIcon =
+      typingCharacter || isGenerating
+        ? Loader2
+        : notificationLabel && notification?.kind === "call"
+          ? PhoneIncoming
+          : null;
+
+    // Banner: the chat's own background image, bled across the row and heavily muted.
+    // Sits at -z-10 inside the row's own stacking context (see `isolate`), so the
+    // unpositioned row content keeps painting above it.
+    // Asks for a 320px-wide copy: a full-size background decodes to megabytes of bitmap no
+    // matter how small it is painted, and on "always" every row pays that at once.
+    // Deliberately no fallback to defaultRoleplayBackground (which ChatArea's restore effect
+    // applies): that would paint one identical banner across every roleplay chat.
+    const bannerUrl =
+      chatListBackgrounds === "off"
+        ? null
+        : chatBackgroundMetadataToUrl(chat.metadata?.background, BACKGROUND_THUMBNAIL_WIDTH);
+
     return (
       <div
         role="button"
@@ -877,9 +978,9 @@ export function ChatSidebar() {
             if (editorDirty) {
               if (
                 !(await showConfirmDialog({
-                  title: "Unsaved Changes",
-                  message: "You have unsaved changes. Discard and continue?",
-                  confirmLabel: "Discard",
+                  title:localizeUi("ui.layout.chatsidebar.unsavedChanges"),
+                  message:localizeUi("ui.layout.chatsidebar.youHaveUnsavedChangesDiscardAndContinue"),
+                  confirmLabel:localizeUi("ui.agents.agenteditor.discard"),
                   tone: "destructive",
                 }))
               ) {
@@ -893,7 +994,7 @@ export function ChatSidebar() {
           if (window.innerWidth < 768) setSidebarOpen(false);
         }}
         className={cn(
-          "group relative flex w-full touch-pan-y items-center gap-2.5 rounded-lg px-3 py-2.5 text-left transition-all duration-150",
+          "group relative isolate flex w-full touch-pan-y items-center gap-2.5 overflow-hidden rounded-lg px-3 py-2.5 text-left transition-all duration-150",
           multiSelectMode && isSelected
             ? "mari-chrome-accent-surface mari-accent-animated"
             : isActive
@@ -914,8 +1015,8 @@ export function ChatSidebar() {
         )}
         <button
           type="button"
-          aria-label="Drag chat"
-          title="Drag chat"
+          aria-label={localizeUi("ui.layout.chatsidebar.dragChat")}
+          title={localizeUi("ui.layout.chatsidebar.dragChat")}
           className="mari-chrome-accent-text-muted mari-accent-animated flex h-8 w-6 shrink-0 cursor-grab touch-none items-center justify-center rounded-md opacity-100 transition-all hover:bg-[var(--marinara-chat-chrome-highlight-bg)] hover:text-[var(--marinara-chat-chrome-button-text-hover)] active:cursor-grabbing active:scale-95 md:h-7 md:w-5 md:opacity-0 md:group-hover:opacity-100"
           onClick={(event) => event.stopPropagation()}
           onPointerDown={(event) => {
@@ -929,9 +1030,37 @@ export function ChatSidebar() {
           <GripVertical size="0.8125rem" />
         </button>
 
-        {/* Active indicator */}
+        {/* Chat background banner — active/hovered only, behind everything */}
+        {bannerUrl && (
+          <span
+            aria-hidden
+            className={cn(
+              "pointer-events-none absolute inset-0 -z-10 opacity-0 transition-opacity duration-200",
+              // "hover" on a touch device means the active row only — no hover event ever fires.
+              chatListBackgrounds === "always" || isActive ? "opacity-100" : "group-hover:opacity-100",
+            )}
+          >
+            {/* Muted twice over: the image is faint, and a scrim still sits on top. Keeping
+                the scrim means text contrast does not depend on how light the image is. */}
+            {/* Full-size chat background squeezed into a 40px row: keep the decode off the
+                main thread and let offscreen rows skip it entirely. */}
+            <img
+              src={bannerUrl}
+              alt=""
+              loading="lazy"
+              decoding="async"
+              className="h-full w-full object-cover opacity-[0.14] saturate-50"
+            />
+            <span className="absolute inset-0 bg-gradient-to-r from-[var(--sidebar-background)]/80 to-[var(--sidebar-background)]/40" />
+          </span>
+        )}
+
+        {/* Active indicator — generation is shown by the subtitle spinner instead. */}
         {isActive && (
-          <span className="mari-chrome-accent-progress mari-accent-animated absolute -left-0.5 top-1/2 h-5 w-1 -translate-y-1/2 rounded-full" />
+          <span
+            // left-0, not -left-0.5: the row now clips (overflow-hidden, for the banner).
+            className="mari-chrome-accent-progress mari-accent-animated absolute left-0 top-1/2 h-5 w-1 -translate-y-1/2 rounded-full"
+          />
         )}
 
         {/* Chat avatar(s) or mode icon fallback — with unread badge overlay */}
@@ -948,7 +1077,7 @@ export function ChatSidebar() {
               .filter(Boolean) as {
               name: string;
               avatarUrl: string | null;
-              avatarCrop?: AvatarCropValue | null;
+              avatarCrop?: AvatarCrop | null;
               conversationStatus?: string;
             }[];
 
@@ -1068,7 +1197,25 @@ export function ChatSidebar() {
           >
             {chat.name}
           </span>
+          {subtitle && (
+            <span className="mari-chrome-accent-text-muted flex items-center gap-1 truncate text-[0.6875rem] leading-tight">
+              {SubtitleIcon && (
+                <SubtitleIcon
+                  className={cn(
+                    "h-2.5 w-2.5 shrink-0",
+                    SubtitleIcon === Loader2 ? "animate-spin" : "animate-pulse",
+                  )}
+                />
+              )}
+              <span className="truncate">{subtitle}</span>
+            </span>
+          )}
         </div>
+
+        {/* Last-activity time — conversation chats only */}
+        {relativeTime && (
+          <span className="mari-chrome-accent-text-muted shrink-0 text-[0.625rem] tabular-nums">{relativeTime}</span>
+        )}
 
         {/* Branch count badge */}
         {branchCount > 1 && (
@@ -1081,16 +1228,22 @@ export function ChatSidebar() {
         {/* Delete button */}
         {!multiSelectMode && (
           <button
+            aria-label={localizeUi("chat.branches.deleteLabel", { name: chat.name })}
             onClick={async (e) => {
               e.stopPropagation();
               if (branchCount > 1 && chat.groupId) {
-                setDeleteTarget({ chatId: chat.id, groupId: chat.groupId, branchCount });
+                setDeleteTarget({
+                  chatId: chat.id,
+                  chatName: chat.name,
+                  groupId: chat.groupId,
+                  branchCount,
+                });
               } else {
                 if (
                   await showConfirmDialog({
-                    title: "Delete Chat",
-                    message: "Delete this chat?",
-                    confirmLabel: "Delete",
+                    title:localizeUi("ui.layout.chatsidebar.deleteChat"),
+                    message: localizeUi("dialog.delete.namedPermanent", { name: chat.name }),
+                    confirmLabel:localizeUi("lorebook.editor.batch.delete"),
                     tone: "destructive",
                   })
                 ) {
@@ -1111,27 +1264,34 @@ export function ChatSidebar() {
   return (
     <nav
       data-component="ChatSidebar"
-      aria-label="Chat navigation"
+      aria-label={localize("Chat navigation")}
       className="mari-chat-sidebar mari-chrome-token-scope flex h-full flex-col"
     >
       {/* Header */}
       <div className="mari-sidebar-header relative flex h-12 items-center justify-between bg-[var(--card)]/80 px-4 backdrop-blur-sm">
         <div className="absolute inset-x-0 bottom-0 h-px bg-[var(--border)]/30" />
-        <div className="flex items-center gap-2.5">
+        <div className="flex min-w-0 items-center gap-2.5">
           <ChatSidebarTitleIcon />
-          <h2 className="mari-chrome-text-strong text-sm font-semibold">Chats</h2>
+          <h2 className="mari-chrome-text-strong truncate text-sm font-semibold">{localize("Chats")}</h2>
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex min-w-0 shrink-0 items-center gap-1">
+          <PersonalExtensionContributionSlot surface="chats" position="header" className="max-w-28" />
           <button
             onClick={() => setSidebarOpen(false)}
             className="mari-chrome-control mari-chrome-control--small mari-accent-animated p-1.5 active:scale-90 md:hidden"
-            title="Close"
-            aria-label="Close chats"
+            title={localize("Close")}
+            aria-label={localize("Close chats")}
           >
             <X size="0.875rem" />
           </button>
         </div>
       </div>
+
+      <PersonalExtensionContributionSlot
+        surface="chats"
+        position="before-content"
+        className="shrink-0 border-b border-[var(--border)]/40"
+      />
 
       {/* Tabs */}
       <div className="px-3 pt-3">
@@ -1141,7 +1301,7 @@ export function ChatSidebar() {
             const isActive = activeTab === tab;
             const tabUnread =
               chats
-                ?.filter((c) => c.mode === tab || (tab === "roleplay" && c.mode === "visual_novel"))
+                ?.filter((c) => c.mode === tab)
                 .reduce((sum, c) => sum + (unreadCounts.get(c.id) || 0), 0) ?? 0;
             return (
               <button
@@ -1157,7 +1317,7 @@ export function ChatSidebar() {
               >
                 <span className="shrink-0 leading-none">{cfg.icon}</span>
                 <span className="inline-flex min-h-[1rem] items-center whitespace-nowrap pb-px leading-normal">
-                  {cfg.shortLabel}
+                  {localize(cfg.shortLabel)}
                 </span>
                 {tabUnread > 0 && !isActive && (
                   <span className="absolute -top-1 -right-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-md bg-red-500 px-0.5 text-[0.5rem] font-bold leading-none text-white">
@@ -1185,8 +1345,8 @@ export function ChatSidebar() {
             "mari-chrome-control mari-chrome-control--primary mari-chat-mode-action flex-1 text-xs",
             activeModeConfig.logoModeClass,
           )}
-          title={`New ${activeModeConfig.label}`}
-          aria-label={`New ${activeModeConfig.label}`}
+          title={t(`navigation.chatSidebar.new.${activeTab}`)}
+          aria-label={t(`navigation.chatSidebar.new.${activeTab}`)}
         >
           <Plus size="0.8125rem" className="mari-chrome-accent-icon mari-accent-animated" />
         </button>
@@ -1194,8 +1354,8 @@ export function ChatSidebar() {
           onClick={() => chatImportInputRef.current?.click()}
           disabled={isImportingChat}
           className="mari-chrome-control mari-chrome-control--primary flex-1 text-xs"
-          title={isImportingChat ? "Importing chat" : "Import SillyTavern or Marinara chat JSONL"}
-          aria-label={isImportingChat ? "Importing chat" : "Import SillyTavern or Marinara chat JSONL"}
+          title={localize(isImportingChat ? "Importing chat" : "Import SillyTavern or Marinara chat JSONL")}
+          aria-label={localize(isImportingChat ? "Importing chat" : "Import SillyTavern or Marinara chat JSONL")}
         >
           <Download size="0.8125rem" />
         </button>
@@ -1206,8 +1366,8 @@ export function ChatSidebar() {
             "mari-chrome-control mari-chrome-control--primary flex-1 text-xs",
             multiSelectMode && "mari-chrome-control--selected",
           )}
-          title={multiSelectMode ? "Cancel selection" : "Select chats"}
-          aria-label={multiSelectMode ? "Cancel selection" : "Select chats"}
+          title={localize(multiSelectMode ? "Cancel selection" : "Select chats")}
+          aria-label={localize(multiSelectMode ? "Cancel selection" : "Select chats")}
         >
           <Check size="0.8125rem" />
         </button>
@@ -1223,7 +1383,7 @@ export function ChatSidebar() {
             />
             <input
               type="text"
-              placeholder={`Search ${activeTab === "conversation" ? "conversations" : activeTab === "game" ? "games" : "roleplays"}...`}
+              placeholder={t(`navigation.chatSidebar.search.${activeTab}`)}
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="mari-chrome-field h-10 w-full py-0 pl-8 pr-3 text-xs md:h-9"
@@ -1233,13 +1393,14 @@ export function ChatSidebar() {
             <select
               value={sort}
               onChange={(e) => setSort(e.target.value as ChatSortOption)}
-              className="mari-chrome-field mari-chrome-sort-field mari-accent-animated h-10 w-[6.5rem] appearance-none py-0 pl-2.5 pr-7 text-[0.6875rem] md:h-9"
-              title="Sort chats"
+              className="mari-chrome-field mari-chrome-sort-field mari-accent-animated h-10 appearance-none py-0 pl-2.5 pr-7 text-[0.6875rem] md:h-9"
+              title={localize("Sort chats")}
             >
-              <option value="newest">Newest</option>
-              <option value="oldest">Oldest</option>
-              <option value="name-asc">A-Z</option>
-              <option value="name-desc">Z-A</option>
+              <option value="recent">{localizeUi("ui.layout.chatsidebar.recent")}</option>
+              <option value="newest">{localize("Newest")}</option>
+              <option value="oldest">{localize("Oldest")}</option>
+              <option value="name-asc">{localizeUi("ui.panels.backgroundpicker.aZ")}</option>
+              <option value="name-desc">{localizeUi("ui.panels.backgroundpicker.zA")}</option>
             </select>
             <ArrowUpDown
               size="0.625rem"
@@ -1258,11 +1419,11 @@ export function ChatSidebar() {
                   ? "mari-chrome-accent-surface mari-accent-animated"
                   : "mari-chrome-text-muted hover:bg-[var(--marinara-chat-chrome-highlight-bg)] hover:text-[var(--marinara-chat-chrome-button-text-hover)]",
               )}
-              title={tagsExpanded ? "Collapse tags" : "Expand tags"}
+              title={localize(tagsExpanded ? "Collapse tags" : "Expand tags")}
             >
               <Tag size="0.6875rem" className="shrink-0" />
               <span className="max-w-full truncate">
-                {activeTag ? `Tag: ${activeTag}` : `Tags (${allTags.length})`}
+                {activeTag ?localizeUi("ui.layout.chatsidebar.tagValue1", { value1: activeTag }) :localizeUi("ui.layout.chatsidebar.tagsValue1", { value1: allTags.length })}
               </span>
               {tagsExpanded ? (
                 <ChevronUp size="0.625rem" className="shrink-0" />
@@ -1275,7 +1436,7 @@ export function ChatSidebar() {
                 onClick={() => setActiveTag(null)}
                 className="mari-chrome-control mari-chrome-control--compact mari-chrome-control--danger"
               >
-                Clear
+                {localize("Clear")}
               </button>
             )}
             {(tagsExpanded ? allTags : allTags.slice(0, 4)).map((tag) => (
@@ -1298,8 +1459,7 @@ export function ChatSidebar() {
                 onClick={() => setTagsExpanded(true)}
                 className="mari-chrome-control mari-chrome-control--compact"
               >
-                +{allTags.length - 4} more
-              </button>
+                +{allTags.length - 4} {localizeUi("ui.layout.chatsidebar.more")}</button>
             )}
           </div>
         )}
@@ -1307,6 +1467,7 @@ export function ChatSidebar() {
 
       {/* Chat list */}
       <div
+        ref={chatListRef}
         data-chat-root-drop-zone
         className={cn(
           "flex-1 overflow-y-auto px-2 pb-1 pt-0 transition-colors",
@@ -1345,6 +1506,7 @@ export function ChatSidebar() {
           setIsRootDropTarget(false);
         }}
       >
+        <ChatRowPeek containerRef={chatListRef} activeChatId={activeChatId} disabled={multiSelectMode} />
         {isLoading && (
           <div className="flex flex-col gap-2 px-2 py-4">
             {[1, 2, 3].map((i) => (
@@ -1358,15 +1520,13 @@ export function ChatSidebar() {
             <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-[var(--destructive)]/10">
               <AlertTriangle size="1.25rem" className="text-[var(--destructive)]" />
             </div>
-            <p className="text-xs text-[var(--muted-foreground)]">
-              Marinara is still waking up. Chats should appear in a moment.
-            </p>
+            <p className="text-xs text-[var(--muted-foreground)]">{localizeUi("ui.layout.chatsidebar.marinaraIsStillWakingUpChatsShouldAppearIn")}</p>
             <button
               onClick={() => void refetchChats()}
               disabled={isFetching}
               className="mari-chrome-control mari-chrome-control--compact mt-1 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              {isFetching ? "Checking..." : "Try Again"}
+              {localize(isFetching ? "Checking..." : "Try Again")}
             </button>
           </div>
         )}
@@ -1383,9 +1543,9 @@ export function ChatSidebar() {
               )}
             </div>
             <p className="mari-chrome-text-muted text-xs">
-              {searchQuery.trim() || activeTag
-                ? `No ${activeTab === "conversation" ? "conversations" : activeTab === "game" ? "games" : "roleplays"} match the current filters`
-                : `No ${activeTab === "conversation" ? "conversations" : activeTab === "game" ? "games" : "roleplays"} yet`}
+              {t(
+                `navigation.chatSidebar.empty.${searchQuery.trim() || activeTag ? "filtered" : "initial"}.${activeTab}`,
+              )}
             </p>
             <button
               onClick={handleNewChatFromTab}
@@ -1396,7 +1556,7 @@ export function ChatSidebar() {
               )}
             >
               <span className="mari-chrome-accent-icon mari-accent-animated">+</span>
-              New {activeTab === "conversation" ? "Conversation" : activeTab === "game" ? "Game" : "Roleplay"}
+              {t(`navigation.chatSidebar.new.${activeTab}`)}
             </button>
           </div>
         )}
@@ -1409,13 +1569,15 @@ export function ChatSidebar() {
                 className="mari-chrome-control mari-chrome-control--small flex-1 justify-center text-[0.6875rem]"
               >
                 <FolderPlus size="0.75rem" />
-                New Folder
+                {localize("New Folder")}
               </button>
             </div>
           )}
 
           {modeFolders.length > 0 && activeModeHasChats && (
-            <p className="mari-folder-helper">Drag and drop chats to folders, double-click or double-tap to rename</p>
+            <p className="mari-folder-helper">
+              {localize("Drag and drop chats to folders, double-click or double-tap to rename")}
+            </p>
           )}
 
           {/* Folders (drag-to-reorder) */}
@@ -1461,7 +1623,7 @@ export function ChatSidebar() {
               onClick={() => setVisibleChatLimit((limit) => limit + CHAT_LIST_PAGE_SIZE)}
               className="mari-chrome-control mari-chrome-control--primary justify-center text-xs"
             >
-              Load more ({visibleDisplayChats.length} loaded)
+              {t("navigation.chatSidebar.loadMore", { count: visibleDisplayChats.length })}
             </button>
           )}
         </div>
@@ -1473,16 +1635,23 @@ export function ChatSidebar() {
           selectedCount={selectedChatIds.size}
           onExport={() => void handleBatchExport()}
           onDelete={handleBatchDelete}
+          deleteTone="accent"
           exporting={bulkExportChats.isPending}
           className="static mx-0"
         />
       )}
 
+      <PersonalExtensionContributionSlot
+        surface="chats"
+        position="after-content"
+        className="shrink-0 border-t border-[var(--border)]/40"
+      />
+
       {/* ── User Status Selector ── */}
       <UserStatusFooter />
 
       {/* ── Delete Branch Modal ── */}
-      <Modal open={deleteTarget !== null} onClose={() => setDeleteTarget(null)} title="Delete Chat" width="max-w-sm">
+      <Modal open={deleteTarget !== null} onClose={() => setDeleteTarget(null)} title={localizeUi("ui.layout.chatsidebar.deleteChat")} width="max-w-sm">
         {deleteTarget && (
           <div className="flex flex-col gap-4">
             <div className="flex items-start gap-3">
@@ -1490,9 +1659,10 @@ export function ChatSidebar() {
                 <AlertTriangle size="1.125rem" className="text-[var(--destructive)]" />
               </div>
               <p className="text-sm text-[var(--muted-foreground)]">
-                This conversation has{" "}
-                <strong className="text-[var(--foreground)]">{deleteTarget.branchCount} branches</strong>. What would
-                you like to delete?
+                {localizeUi("chat.delete.branchChoice", {
+                  name: deleteTarget.chatName,
+                  count: deleteTarget.branchCount,
+                })}
               </p>
             </div>
             <div className="flex flex-col gap-2">
@@ -1504,9 +1674,7 @@ export function ChatSidebar() {
                 }}
                 className="mari-chrome-control mari-chrome-control--primary w-full text-xs"
               >
-                <Trash2 size="0.8125rem" />
-                Delete This Branch Only
-              </button>
+                <Trash2 size="0.8125rem" />{localizeUi("ui.layout.chatsidebar.deleteThisBranchOnly")}</button>
               <button
                 onClick={() => {
                   if (deleteTarget.groupId) {
@@ -1517,9 +1685,7 @@ export function ChatSidebar() {
                 }}
                 className="mari-chrome-control mari-chrome-control--primary w-full text-xs"
               >
-                <Trash2 size="0.8125rem" />
-                Delete All {deleteTarget.branchCount} Branches
-              </button>
+                <Trash2 size="0.8125rem" />{localizeUi("ui.characters.spritestab.deleteAll")} {deleteTarget.branchCount} {localizeUi("ui.layout.chatsidebar.branches_f578227")}</button>
             </div>
           </div>
         )}
@@ -1552,6 +1718,7 @@ function FolderRow({
   draggedChatId: string | null;
   onDropChat: (chatIds: string[], folderId: string | null) => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const dragControls = useDragControls();
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(folder.name);
@@ -1626,8 +1793,8 @@ function FolderRow({
           role="button"
           tabIndex={0}
           aria-expanded={isExpanded}
-          aria-label={`${isExpanded ? "Collapse" : "Expand"} folder ${folder.name}. Double-tap or press F2 to rename.`}
-          title="Double-click, double-tap, or press F2 to rename."
+          aria-label={localizeUi("ui.layout.folderrow.value1FolderValue2DoubleTapOrPressF2To", { value1: isExpanded ?localizeUi("ui.panels.ttsconfigcard.collapse") :localizeUi("ui.panels.ttsconfigcard.expand"), value2: folder.name })}
+          title={localizeUi("ui.panels.backgroundpicker.doubleClickDoubleTapOrPressF2ToRename")}
           onClick={(e) =>
             handleFolderRenameGesture(folder.id, e, {
               onSingleClick: () => {
@@ -1748,6 +1915,7 @@ const STATUS_OPTIONS: Array<{
 ];
 
 function UserStatusFooter() {
+  const { t: localizeUi } = useUiTranslation();
   const userStatus = useUIStore((s) => s.userStatus);
   const userActivity = useUIStore((s) => s.userActivity);
   const recentUserActivities = useUIStore((s) => s.recentUserActivities);
@@ -1819,9 +1987,7 @@ function UserStatusFooter() {
       )}
       {activityFocused && !open && recentActivitySuggestions.length > 0 && (
         <div className="absolute bottom-full left-2 right-2 mb-1 rounded-xl bg-[var(--popover)] p-1.5 shadow-xl ring-1 ring-[var(--border)]/40">
-          <div className="px-2 pb-1 pt-0.5 text-[0.625rem] font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
-            Recent status
-          </div>
+          <div className="px-2 pb-1 pt-0.5 text-[0.625rem] font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">{localizeUi("ui.layout.userstatusfooter.recentStatus")}</div>
           {recentActivitySuggestions.map((activity) => (
             <button
               key={activity}
@@ -1840,8 +2006,8 @@ function UserStatusFooter() {
         <button
           onClick={() => setOpen((v) => !v)}
           className="mari-chrome-control mari-chrome-control--small min-w-0 shrink-0 px-2 py-1.5 max-md:h-9 max-md:min-h-9"
-          title="Change activity status"
-          aria-label="Change activity status"
+          title={localizeUi("ui.layout.userstatusfooter.changeActivityStatus")}
+          aria-label={localizeUi("ui.layout.userstatusfooter.changeActivityStatus")}
         >
           <span className={`h-2 w-2 shrink-0 rounded-full ${current.color}`} />
           <span className="mari-chrome-text max-w-20 truncate text-xs">{current.label}</span>
@@ -1863,8 +2029,8 @@ function UserStatusFooter() {
             }
           }}
           maxLength={120}
-          placeholder="What are you doing?"
-          aria-label="Custom activity"
+          placeholder={localizeUi("ui.layout.userstatusfooter.whatAreYouDoing")}
+          aria-label={localizeUi("ui.layout.userstatusfooter.customActivity")}
           className="mari-chrome-field mari-chrome-field--compact min-w-0 flex-1 px-2 py-1.5 text-xs max-md:h-9 max-md:min-h-9"
         />
       </div>

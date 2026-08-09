@@ -13,11 +13,16 @@ The official catalog, package sources, reproducible artifacts, validation script
 An agent package may contribute one or more declarative agents and optional trusted executable capabilities:
 
 - server entry points for routes, lifecycle hooks, prompt providers, result handlers, and storage migrations;
-- client entry points for panels, chat surfaces, settings sections, setup choices, and runtime displays;
+- client entry points for panels, chat surfaces, settings sections, setup choices, runtime displays, and full Game-mode surfaces;
 - shared JSON schemas and stable wire contracts;
 - package-owned assets, documentation, and Professor Mari knowledge fragments.
 
 Packages target a versioned Marinara capability API. They must not import private source paths from the engine.
+
+Client capability elements receive the Engine's selected UI locale through their `lang` and `dir` attributes and the
+`capabilityProps.localization` object. Package-owned interfaces keep their own locale files and fall back to package
+English; the Engine does not translate package prompts or package-authored machine values. Locale changes reuse the
+existing `marinara-capability-props` event so an installed interface can rerender without an Engine restart.
 
 Capability API 1.1 adds a generic runtime facade to the server activation context.
 Packages can read the effective agent-debug state and write through the Engine's
@@ -35,6 +40,37 @@ domain policy. The same API exposes normalized chat and character records, eligi
 lore-entry selection, JSON-ish response parsing, and resolved language-model calls.
 Connection credentials, provider implementations, database handles, and storage
 objects remain private to Engine.
+
+### Capability API 1.7 chat branches
+
+Capability API 1.7 adds normalized branch metadata to `CapabilityChatRecord`:
+
+```ts
+branch: {
+  title: string | null;
+  parentChatId: string | null;
+  parentMessageId: string | null;
+  childMessageId: string | null;
+} | null;
+```
+
+`title` is the trimmed persisted branch name. Roots return `null`. Known
+Engine-created branches expose the immediate parent chat, the source fork
+message, and the copied child message. Empty branches use null message anchors.
+Legacy branches, malformed metadata, and imported group siblings without a
+known relationship return null lineage fields; Engine does not infer historical
+relationships. Generic export/import omits parent and message IDs because IDs
+change between installations. Parent deletion leaves child lineage untouched.
+
+### Capability API 1.8 Game experiences
+
+Capability API 1.8 adds package-provided Game experiences, per-turn Game prompt context, and resource writes.
+
+A package may provide an entire Game mode rather than an addition to the built-in one. It declares the `game-surface` slot and is chosen while a game is created, from the Experiences block of the setup wizard; the choice is recorded on the game and fixed for its lifetime, so an experience is never switched on or off part-way through a run. The surface draws its own HUD, menus, and combat over the shared narration, and declares which built-in systems it replaces. Anything left undeclared stays built-in, so an experience opts out only of what it actually implements. The optional `contributions.gameSurface.surfaceClass` names a class the Engine applies to the game area while that surface is mounted, letting the package's stylesheet restyle the shared chrome that renders outside its own element.
+
+Packages holding the `prompt-context` permission contribute text to the system prompt of each generated Game turn, so a package that owns live state can keep the model consistent with what the player is looking at. A contribution may also declare which built-in game systems it replaces, and Engine then stops instructing the model to drive them. Contributions are collected per turn and are never required: a contributor that returns nothing is skipped, and one that throws, or that does not settle within its deadline, is logged and skipped without affecting generation.
+
+The resource facade exposes writes beside its reads, so a package's setup flow can find-or-create the player persona and its lorebook. Engine retains storage, validation, and identity; packages retain domain content.
 
 ## Initial packages
 

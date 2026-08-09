@@ -36,6 +36,8 @@ export interface OutboundUrlPolicy {
   allowedProtocols?: string[];
   /** Restrict every request and redirect hop to these exact hostnames. */
   allowedHostnames?: string[];
+  /** Restrict every request and redirect hop to these exact scheme, hostname, and port origins. */
+  allowedOrigins?: string[];
   maxRedirects?: number;
   /**
    * Optional name of the env var that, when set to true, would allow this
@@ -289,7 +291,12 @@ async function validateResolvedAddresses(
   policy: OutboundUrlPolicy,
   originalUrl?: string,
 ): Promise<Array<{ address: string; family: 4 | 6 }>> {
-  const addresses = await resolveHostname(hostname);
+  const resolvedAddresses = await resolveHostname(hostname);
+  // Some local inference servers expose an IPv4-only proxy on their public
+  // port even when their ordinary server is dual-stack (KoboldCPP Router Mode
+  // is one example). Prefer IPv4 for ambiguous loopback names such as
+  // `localhost`; explicit IPv6 loopback URLs remain IPv6.
+  const addresses = isLoopbackHostname(hostname) ? preferIpv4Records(resolvedAddresses) : resolvedAddresses;
   if (policy.allowMdns && isMdnsHostname(hostname)) {
     const preferred = preferIpv4Records(addresses);
     if (preferred.length === 0) {
@@ -326,6 +333,19 @@ export async function validateOutboundUrl(url: string | URL, policy: OutboundUrl
     throw new Error(
       `Refused to fetch ${original}: protocol '${parsed.protocol.replace(/:$/, "")}' is not allowed (allowed: ${allowedProtocols.map((proto) => proto.replace(/:$/, "")).join(", ")}).`,
     );
+  }
+
+  if (
+    policy.allowedOrigins?.length &&
+    !policy.allowedOrigins.some((origin) => {
+      try {
+        return new URL(origin).origin === parsed.origin;
+      } catch {
+        return false;
+      }
+    })
+  ) {
+    throw new Error(`Refused to fetch ${original}: origin '${parsed.origin}' is not allowed.`);
   }
 
   if (

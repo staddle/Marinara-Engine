@@ -20,6 +20,7 @@ import {
 } from "../../lib/agent-failures";
 import { ContextInjectionPanel } from "../agents/ContextInjectionPanel";
 import { ContinuityIssueChecklist } from "../agents/ContinuityIssueChecklist";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface ThoughtBubble {
   agentId: string;
@@ -71,6 +72,7 @@ export function RoleplayHUDActionsMenu({
   onClose,
   showInjectionsTab,
 }: RoleplayHUDActionsMenuProps) {
+  const { t: localizeUi } = useUiTranslation();
   const [tab, setTab] = useState<AgentsMenuTab>("activity");
   const uniqueAgentCount = new Set(thoughtBubbles.map((bubble) => bubble.agentId)).size;
   const latestActiveCustomRuns = useMemo(
@@ -159,26 +161,21 @@ export function RoleplayHUDActionsMenu({
           {isAgentProcessing && (
             <div className="flex items-center gap-2 border-b border-[var(--border)] px-3 py-2">
               <Sparkles size="0.75rem" className="animate-pulse text-[var(--muted-foreground)]" />
-              <span className="text-[0.625rem] text-[var(--muted-foreground)]">Agents thinking...</span>
+              <span className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.chat.roleplayhudactionsmenu.agentsThinking")}</span>
             </div>
           )}
           {!hasAnyActivity && (
-            <div className="px-3 py-4 text-center text-[0.625rem] text-[var(--muted-foreground)]">
-              No agent activity yet
-            </div>
+            <div className="px-3 py-4 text-center text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.chat.roleplayhudactionsmenu.noAgentActivityYet")}</div>
           )}
           {thoughtBubbles.length > 0 && (
             <>
               <div className="flex items-center justify-between border-b border-[var(--border)] px-3 py-1.5">
                 <span className="text-[0.625rem] text-[var(--muted-foreground)]">
-                  {uniqueAgentCount} agent{uniqueAgentCount !== 1 ? "s" : ""} triggered
-                </span>
+                  {uniqueAgentCount} {localizeUi("ui.agents.agentcatalogview.agent")}{uniqueAgentCount !== 1 ?localizeUi("ui.noodle.stageprofileview.s") : ""} {localizeUi("ui.chat.roleplayhudactionsmenu.triggered")}</span>
                 <button
                   onClick={clearThoughtBubbles}
                   className="text-[0.625rem] text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)]"
-                >
-                  Clear all
-                </button>
+                >{localizeUi("ui.chat.roleplayhudactionsmenu.clearAll")}</button>
               </div>
               <div className="flex flex-col gap-1 p-2">
                 {thoughtBubbles.map((bubble, index) => (
@@ -212,7 +209,7 @@ export function RoleplayHUDActionsMenu({
             <CustomAgentRunsSection
               runs={customActivityRuns}
               loading={customAgentRunsLoading}
-              title="Custom outputs"
+              title={localizeUi("ui.chat.roleplayhudactionsmenu.customOutputs")}
               countMode="latest"
               collapsible
               latestNote={
@@ -239,8 +236,8 @@ export function RoleplayHUDActionsMenu({
             <CustomAgentRunsSection
               runs={injectableCustomRuns}
               loading={customAgentRunsLoading}
-              title="Custom prompt sections"
-              emptyText="No saved prompt-section output yet."
+              title={localizeUi("ui.chat.roleplayhudactionsmenu.customPromptSections")}
+              emptyText={localizeUi("ui.chat.roleplayhudactionsmenu.noSavedPromptSectionOutputYet")}
               countMode="latest"
               collapsible
               latestNote="Showing the latest saved output per custom agent with Add as Prompt Section enabled."
@@ -254,9 +251,7 @@ export function RoleplayHUDActionsMenu({
           {showRetryFailedAction && displayedFailures.length > 0 && (
             <div className="space-y-1.5 px-3 py-2">
               <div className="flex items-center gap-1.5 text-[0.5625rem] font-semibold uppercase tracking-wide text-amber-300/90">
-                <AlertTriangle size="0.625rem" />
-                Failed agents
-              </div>
+                <AlertTriangle size="0.625rem" />{localizeUi("ui.chat.roleplayhudactionsmenu.failedAgents")}</div>
               <div className="space-y-1">
                 {displayedFailures.map((failure) => (
                   <div
@@ -282,7 +277,7 @@ export function RoleplayHUDActionsMenu({
               className="flex w-full items-center gap-2 px-3 py-2 text-[0.625rem] text-[var(--muted-foreground)] transition-colors hover:bg-red-500/10 hover:text-red-300"
             >
               <Trash2 size="0.75rem" className="text-current" />
-              <span>Clear Trackers</span>
+              <span>{localizeUi("ui.chat.roleplayhudactionsmenu.clearTrackers")}</span>
             </button>
           )}
           {showTrackerActions && onRetriggerTrackers && (
@@ -296,10 +291,10 @@ export function RoleplayHUDActionsMenu({
             >
               <RefreshCw size="0.6875rem" className={isGenerationBusy ? "animate-spin" : ""} />
               {isGenerationBusy
-                ? "Running..."
+                ?localizeUi("ui.chat.roleplayhudactionsmenu.running")
                 : hasActiveCustomAgent
-                  ? "Re-run Trackers & Custom Agents"
-                  : "Re-run Trackers"}
+                  ?localizeUi("ui.chat.roleplayhudactionsmenu.reRunTrackersCustomAgents")
+                  :localizeUi("ui.chat.roleplayhudactionsmenu.reRunTrackers")}
             </button>
           )}
           {showRetryFailedAction && (
@@ -312,7 +307,7 @@ export function RoleplayHUDActionsMenu({
               className="flex w-full items-center gap-2 px-3 py-2 text-[0.625rem] font-medium text-amber-300 transition-colors hover:bg-amber-500/10 disabled:opacity-50"
             >
               <AlertTriangle size="0.6875rem" className={isGenerationBusy ? "animate-pulse" : ""} />
-              {isGenerationBusy ? "Busy..." : `Retry Failed Agents (${failureCount})`}
+              {isGenerationBusy ?localizeUi("ui.chat.roleplayhudactionsmenu.busy") :localizeUi("ui.chat.roleplayhudactionsmenu.retryFailedAgentsValue1", { value1: failureCount })}
             </button>
           )}
         </div>
@@ -525,6 +520,7 @@ function formatRunTime(value: string): string {
 }
 
 function CustomAgentRunItem({ run }: { run: AgentRunRow }) {
+  const { t: localizeUi } = useUiTranslation();
   const updateRun = useUpdateAgentRunData();
   const mode = getEditableMode(run.resultData);
   const initialDraft = useMemo(() => getEditorValue(run.resultData, mode), [run.resultData, mode]);
@@ -578,7 +574,7 @@ function CustomAgentRunItem({ run }: { run: AgentRunRow }) {
             setError(null);
           }}
           className="rounded p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)]/45 hover:text-[var(--accent-foreground)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--ring)]"
-          title={editing ? "Close editor" : "Edit output"}
+          title={editing ?localizeUi("ui.chat.customagentrunitem.closeEditor") :localizeUi("ui.chat.customagentrunitem.editOutput")}
         >
           {editing ? <X size="0.6875rem" /> : <Pencil size="0.6875rem" />}
         </button>
@@ -598,7 +594,7 @@ function CustomAgentRunItem({ run }: { run: AgentRunRow }) {
           {error && <div className="text-[0.5625rem] text-[var(--destructive)]">{error}</div>}
           <div className="flex items-center justify-between">
             <span className="text-[0.5625rem] uppercase tracking-wide text-[var(--muted-foreground)]/70">
-              {mode === "json" ? "JSON" : "Text"}
+              {mode === "json" ?localizeUi("ui.agents.tooleditor.json") :localizeUi("ui.chat.chatbranchselector.text")}
             </span>
             <button
               type="button"
@@ -607,7 +603,7 @@ function CustomAgentRunItem({ run }: { run: AgentRunRow }) {
               className="inline-flex min-h-7 items-center gap-1 rounded-md border border-foreground/15 bg-foreground/10 px-2 py-1 text-[0.5625rem] font-medium text-foreground/70 transition-colors hover:bg-foreground/15 hover:text-foreground/85 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--ring)] disabled:opacity-50"
             >
               <Check size="0.625rem" />
-              {updateRun.isPending ? "Saving..." : "Save"}
+              {updateRun.isPending ?localizeUi("ui.noodle.stageprofileform.saving") :localizeUi("ui.noodle.noodlehome.save")}
             </button>
           </div>
         </div>

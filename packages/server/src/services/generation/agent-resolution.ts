@@ -3,6 +3,7 @@ import {
   DEFAULT_AGENT_TOOLS,
   getDefaultAgentPrompt,
   getDefaultBuiltInAgentSettings,
+  isBuiltInAgentHostManaged,
   isBuiltInAgentRuntimeDisabled,
   isAgentConfigDeleted,
   isRetiredBuiltInAgentId,
@@ -299,13 +300,15 @@ export async function resolveAgentPipelineAgents({
   const enabledConfigs = configuredAgents.filter(
     (agent) =>
       !isAgentConfigDeleted(agent.settings) &&
+      !isBuiltInAgentHostManaged(agent.type as string) &&
       !isBuiltInAgentRuntimeDisabled(agent.type as string) &&
       !isRetiredBuiltInAgentId(agent.type as string),
   );
   const resolvedAgents: ResolvedAgent[] = [];
   const agentProviderCache = new Map<string | null, AgentProviderCacheEntry>();
-  const localSidecarAvailableForTrackers =
-    sidecarModelService.getConfig().useForTrackers && sidecarModelService.getConfiguredModelRef() !== null;
+  // An agent may explicitly select the local sidecar even when the global
+  // "use for trackers" switch is off. The provider starts it on demand.
+  const localSidecarAvailableForTrackers = sidecarModelService.getConfiguredModelRef() !== null;
 
   if (localSidecarAvailableForTrackers) {
     agentProviderCache.set(LOCAL_SIDECAR_CONNECTION_ID, {
@@ -433,6 +436,7 @@ export async function resolveAgentPipelineAgents({
       id: cfg.id,
       type: cfg.type,
       name: cfg.name,
+      isCustomAgent: !BUILT_IN_AGENTS.some((agent) => agent.id === cfg.type),
       phase: normalizeAgentPhaseValue(cfg.phase),
       promptTemplate: selectedPromptTemplate,
       connectionId: effectiveConnectionId,
@@ -454,6 +458,7 @@ export async function resolveAgentPipelineAgents({
       ? BUILT_IN_AGENTS.filter((agent) => {
           if (resolvedTypes.has(agent.id)) return false;
           if (deletedBuiltInTypes.has(agent.id)) return false;
+          if (isBuiltInAgentHostManaged(agent.id)) return false;
           if (isBuiltInAgentRuntimeDisabled(agent.id)) return false;
           return perChatAgentSet.has(agent.id);
         })
@@ -540,6 +545,7 @@ export async function resolveAgentPipelineAgents({
       id: `builtin:${builtIn.id}`,
       type: builtIn.id,
       name: builtIn.name,
+      isCustomAgent: false,
       phase: normalizeAgentPhaseValue(builtIn.phase),
       promptTemplate: selectedPromptTemplate,
       connectionId: builtInConnectionId,

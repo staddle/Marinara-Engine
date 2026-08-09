@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { SearchInput } from "./SearchInput";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 const TOOLBAR_MENU_MARGIN = 8;
 const TOOLBAR_MENU_WIDTH = 176;
@@ -96,6 +97,7 @@ export function Toolbar({
   onClose,
   assetSelection,
 }: ToolbarProps) {
+  const { t: localizeUi } = useUiTranslation();
   const [newOpen, setNewOpen] = useState(false);
   const [colsOpen, setColsOpen] = useState(false);
   const newBtnRef = useRef<HTMLButtonElement>(null);
@@ -198,8 +200,8 @@ export function Toolbar({
             type="button"
             onClick={onClose}
             className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-            title="Close assets"
-            aria-label="Close assets"
+            title={localizeUi("ui.gameAssets.toolbar.closeAssets")}
+            aria-label={localizeUi("ui.gameAssets.toolbar.closeAssets")}
           >
             <X size="0.875rem" />
           </button>
@@ -218,7 +220,7 @@ export function Toolbar({
                 ? "bg-[var(--accent)] text-[var(--foreground)]/80"
                 : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
             )}
-            title="Grid view"
+            title={localizeUi("ui.gameAssets.toolbar.gridView")}
           >
             <Grid3X3 size="0.875rem" />
           </button>
@@ -230,7 +232,7 @@ export function Toolbar({
                 ? "bg-[var(--accent)] text-[var(--foreground)]/80"
                 : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
             )}
-            title="List view"
+            title={localizeUi("ui.gameAssets.toolbar.listView")}
           >
             <List size="0.875rem" />
           </button>
@@ -246,7 +248,7 @@ export function Toolbar({
                 "rounded-lg border border-[var(--border)] bg-[var(--background)] px-2 py-1.5 text-xs font-medium text-[var(--foreground)] transition-colors hover:bg-[var(--accent)]",
                 colsOpen && "bg-[var(--accent)]",
               )}
-              title="Columns"
+              title={localizeUi("ui.gameAssets.toolbar.columns")}
             >
               <List size="0.875rem" />
             </button>
@@ -260,18 +262,14 @@ export function Toolbar({
                     checked={listColumns.size}
                     onChange={() => onToggleColumn("size")}
                     className="rounded border-[var(--border)]"
-                  />
-                  Size
-                </label>
+                  />{localizeUi("ui.gameAssets.assetgrid.size")}</label>
                 <label className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-xs text-[var(--foreground)] hover:bg-[var(--accent)]">
                   <input
                     type="checkbox"
                     checked={listColumns.modified}
                     onChange={() => onToggleColumn("modified")}
                     className="rounded border-[var(--border)]"
-                  />
-                  Modified
-                </label>
+                  />{localizeUi("ui.gameAssets.assetgrid.modified")}</label>
               </>,
               colsDropdownRef,
             )}
@@ -285,17 +283,17 @@ export function Toolbar({
             className={cn(
               "flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors",
               assetSelection.active
-                ? "border-[var(--foreground)]/25 bg-[var(--foreground)]/10 text-[var(--foreground)]/80"
+                ? "border-[var(--primary)]/35 bg-[var(--primary)]/10 text-[var(--primary)]"
                 : "border-[var(--border)] bg-[var(--background)] text-[var(--foreground)] hover:bg-[var(--accent)]",
             )}
-            title="Select assets for this game"
-            aria-label="Select assets for this game"
+            title={localizeUi("ui.gameAssets.assetgrid.selectAssetsForThisGame")}
+            aria-label={localizeUi("ui.gameAssets.assetgrid.selectAssetsForThisGame")}
             aria-pressed={assetSelection.active}
           >
             <FolderCheck size="0.875rem" />
-            <span className="max-md:hidden">{assetSelection.active ? "Selecting" : "Game assets"}</span>
+            <span className="max-md:hidden">{assetSelection.active ?localizeUi("ui.gameAssets.toolbar.selecting") :localizeUi("ui.gameAssets.toolbar.gameAssets")}</span>
             {assetSelection.excludedCount > 0 && (
-              <span className="rounded-full bg-[var(--foreground)]/12 px-1.5 py-0.5 text-[0.625rem] leading-none text-[var(--foreground)]/80">
+              <span className="rounded-full bg-[var(--primary)]/15 px-1.5 py-0.5 text-[0.625rem] leading-none text-[var(--primary)]">
                 {assetSelection.excludedCount}
               </span>
             )}
@@ -307,7 +305,7 @@ export function Toolbar({
           className="flex items-center gap-1.5 rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-xs font-medium text-[var(--foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)]"
         >
           <Upload size="0.875rem" />
-          <span className="max-sm:hidden">Upload</span>
+          <span className="max-sm:hidden">{localizeUi("ui.characters.characterclipcard.upload")}</span>
         </button>
 
         <button
@@ -319,7 +317,7 @@ export function Toolbar({
           )}
         >
           <Plus size="0.875rem" />
-          <span className="max-sm:hidden">New</span>
+          <span className="max-sm:hidden">{localizeUi("ui.lorebooks.lorebookassignmentsection.new")}</span>
         </button>
         {dropdown(
           newOpen,
@@ -332,9 +330,7 @@ export function Toolbar({
               }}
               className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--foreground)] transition-colors hover:bg-[var(--accent)]"
             >
-              <Folder size="0.875rem" />
-              New folder
-            </button>
+              <Folder size="0.875rem" />{localizeUi("ui.gameAssets.toolbar.newFolder")}</button>
             <button
               onClick={() => {
                 onNewTextFile();
@@ -342,9 +338,7 @@ export function Toolbar({
               }}
               className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--foreground)] transition-colors hover:bg-[var(--accent)]"
             >
-              <FileText size="0.875rem" />
-              New text file
-            </button>
+              <FileText size="0.875rem" />{localizeUi("ui.gameAssets.toolbar.newTextFile")}</button>
             <button
               onClick={() => {
                 onNewMarkdownFile();
@@ -352,9 +346,7 @@ export function Toolbar({
               }}
               className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-[var(--foreground)] transition-colors hover:bg-[var(--accent)]"
             >
-              <FilePlus size="0.875rem" />
-              New markdown file
-            </button>
+              <FilePlus size="0.875rem" />{localizeUi("ui.gameAssets.toolbar.newMarkdownFile")}</button>
           </>,
           newDropdownRef,
         )}
@@ -362,14 +354,14 @@ export function Toolbar({
         <button
           onClick={onRescan}
           className="flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-1.5 text-xs font-medium text-[var(--foreground)] transition-colors hover:bg-[var(--accent)]"
-          title="Rescan"
+          title={localizeUi("ui.panels.gameassetssettings.rescan")}
         >
           <RefreshCw size="0.875rem" />
         </button>
         <button
           onClick={onOpenFolder}
           className="flex items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 py-1.5 text-xs font-medium text-[var(--foreground)] transition-colors hover:bg-[var(--accent)]"
-          title="Open in system folder"
+          title={localizeUi("ui.gameAssets.toolbar.openInSystemFolder")}
         >
           <ExternalLink size="0.875rem" />
         </button>

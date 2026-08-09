@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import { BookOpen, Eye, EyeOff, Plus, Trash2 } from "lucide-react";
+import { Fragment, useEffect, useState, type ReactNode } from "react";
+import { BookOpen, Eye, EyeOff, Pencil, Plus, Trash2 } from "lucide-react";
+import { useTranslation, useTranslation as useUiTranslation } from "react-i18next";
 import { LIMITS, type Lorebook } from "@marinara-engine/shared";
 import { isLorebookScopeActiveForChat } from "../../../lib/lorebook-scope";
 import type { ActiveLorebookView } from "../../../lib/chat-lorebooks";
@@ -17,6 +18,9 @@ interface LorebooksSectionProps {
   onLorebookSearchChange: (value: string) => void;
   onLorebookTokenBudgetChange: (value: number) => void;
   onShowLorebookPickerChange: (show: boolean) => void;
+  onEditLorebook: (lorebookId: string) => void;
+  editingLorebookId: string | null;
+  inlineLorebookEditor: ReactNode;
   onToggleLorebook: (lorebookId: string) => void;
   onSetLorebookExcluded: (lorebookId: string, excluded: boolean) => void;
 }
@@ -31,9 +35,14 @@ export function LorebooksSection({
   onLorebookSearchChange,
   onLorebookTokenBudgetChange,
   onShowLorebookPickerChange,
+  onEditLorebook,
+  editingLorebookId,
+  inlineLorebookEditor,
   onToggleLorebook,
   onSetLorebookExcluded,
 }: LorebooksSectionProps) {
+  const { t: localizeUi } = useUiTranslation();
+  const { t } = useTranslation();
   const [tokenBudgetDraft, setTokenBudgetDraft] = useState(String(lorebookTokenBudget));
   const activeLorebookIdSet = new Set(activeLorebooks.map((lorebook) => lorebook.id));
   const inactiveLorebooks = lorebooks
@@ -54,16 +63,16 @@ export function LorebooksSection({
 
   return (
     <ChatSettingsSection
-      label="Lorebooks"
+      id="lorebooks"
+      label={localizeUi("navigation.topbar.lorebooks")}
       icon={<BookOpen size="0.875rem" />}
       count={activeLorebooks.length}
-      help="Lorebooks contain world info, character backstories, and lore that gets injected into the AI's context when relevant keywords appear."
+      help={localizeUi("ui.chatSettings.lorebookssection.lorebooksContainWorldInfoCharacterBackstoriesAndLoreThat")}
     >
       <div className="mb-2 rounded-lg bg-[var(--secondary)]/70 p-3 ring-1 ring-[var(--border)]">
-        <label className="mb-1.5 flex items-center gap-1 text-xs font-medium">
-          Lorebook Token Budget{" "}
+        <label className="mb-1.5 flex items-center gap-1 text-xs font-medium">{localizeUi("ui.chatSettings.lorebookssection.lorebookTokenBudget")}{" "}
           <HelpTooltip
-            text={`Context cap for activated lorebook retrievals in this chat. Default: ${LIMITS.DEFAULT_LOREBOOK_TOKEN_BUDGET}. Set to 0 for unlimited.`}
+            text={localizeUi("ui.chatSettings.lorebookssection.contextCapForActivatedLorebookRetrievalsInThisChat", { value1: LIMITS.DEFAULT_LOREBOOK_TOKEN_BUDGET })}
           />
         </label>
         <input
@@ -87,78 +96,87 @@ export function LorebooksSection({
       </div>
 
       {activeLorebooks.length === 0 ? (
-        <p className="text-[0.6875rem] text-[var(--muted-foreground)]">No lorebooks active in this chat.</p>
+        <p className="text-[0.6875rem] text-[var(--muted-foreground)]">{localizeUi("ui.chatSettings.lorebookssection.noLorebooksActiveInThisChat")}</p>
       ) : (
         <div className="flex flex-col gap-1">
           {activeLorebooks.map((lorebook) => {
             const hasAutomaticReason = lorebook.activeReasons.some((reason) => reason !== "Chat");
             return (
-              <div
-                key={lorebook.id}
-                className={
-                  lorebook.isExcluded
-                    ? "flex items-center gap-2.5 rounded-lg bg-[var(--secondary)]/50 px-3 py-2 opacity-60 ring-1 ring-[var(--border)]"
-                    : "flex items-center gap-2.5 rounded-lg bg-[var(--primary)]/10 px-3 py-2 ring-1 ring-[var(--primary)]/30"
-                }
-              >
-                <BookOpen
-                  size="0.875rem"
-                  className={lorebook.isExcluded ? "text-[var(--muted-foreground)]" : "text-[var(--primary)]"}
-                />
-                <div className="min-w-0 flex-1">
-                  <span
-                    className={lorebook.isExcluded ? "block truncate text-xs line-through" : "block truncate text-xs"}
-                  >
-                    {lorebook.name}
-                  </span>
-                  <div className="mt-1 flex flex-wrap gap-1">
-                    {lorebook.isExcluded ? (
-                      <span className="rounded-full bg-[var(--background)]/70 px-1.5 py-0.5 text-[0.5625rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
-                        Disabled
-                      </span>
-                    ) : (
-                      lorebook.activeReasons.map((reason) => (
-                        <span
-                          key={reason}
-                          className="rounded-full bg-[var(--background)]/70 px-1.5 py-0.5 text-[0.5625rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)]"
-                        >
-                          {reason}
-                        </span>
-                      ))
-                    )}
+              <Fragment key={lorebook.id}>
+                <div
+                  className={
+                    lorebook.isExcluded
+                      ? "flex items-center gap-2.5 rounded-lg bg-[var(--secondary)]/50 px-3 py-2 opacity-60 ring-1 ring-[var(--border)]"
+                      : "flex items-center gap-2.5 rounded-lg bg-[var(--primary)]/10 px-3 py-2 ring-1 ring-[var(--primary)]/30"
+                  }
+                >
+                  <BookOpen
+                    size="0.875rem"
+                    className={lorebook.isExcluded ? "text-[var(--muted-foreground)]" : "text-[var(--primary)]"}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <span
+                      className={lorebook.isExcluded ? "block truncate text-xs line-through" : "block truncate text-xs"}
+                    >
+                      {lorebook.name}
+                    </span>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {lorebook.isExcluded ? (
+                        <span className="rounded-full bg-[var(--background)]/70 px-1.5 py-0.5 text-[0.5625rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">{localizeUi("ui.agents.agenteditor.disabled")}</span>
+                      ) : (
+                        lorebook.activeReasons.map((reason) => (
+                          <span
+                            key={reason}
+                            className="rounded-full bg-[var(--background)]/70 px-1.5 py-0.5 text-[0.5625rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)]"
+                          >
+                            {reason}
+                          </span>
+                        ))
+                      )}
+                    </div>
                   </div>
-                </div>
-                {lorebook.isExcluded ? (
                   <button
-                    onClick={() => onSetLorebookExcluded(lorebook.id, false)}
-                    className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--primary)]/15 hover:text-[var(--primary)]"
-                    title="Enable in this chat"
+                    type="button"
+                    onClick={() => onEditLorebook(lorebook.id)}
+                    className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+                    title={t("chat.settings.actions.editLorebookEntries")}
+                    aria-label={t("chat.settings.actions.editLorebookEntries")}
                   >
-                    <Eye size="0.6875rem" />
+                    <Pencil size="0.6875rem" />
                   </button>
-                ) : (
-                  <div className="flex shrink-0 items-center gap-1">
-                    {lorebook.isPinned && (
-                      <button
-                        onClick={() => onToggleLorebook(lorebook.id)}
-                        className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
-                        title="Remove from chat"
-                      >
-                        <Trash2 size="0.6875rem" />
-                      </button>
-                    )}
-                    {(!lorebook.isPinned || hasAutomaticReason) && (
-                      <button
-                        onClick={() => onSetLorebookExcluded(lorebook.id, true)}
-                        className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
-                        title="Disable in this chat"
-                      >
-                        <EyeOff size="0.6875rem" />
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
+                  {lorebook.isExcluded ? (
+                    <button
+                      onClick={() => onSetLorebookExcluded(lorebook.id, false)}
+                      className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--primary)]/15 hover:text-[var(--primary)]"
+                      title={localizeUi("ui.chatSettings.lorebookssection.enableInThisChat")}
+                    >
+                      <Eye size="0.6875rem" />
+                    </button>
+                  ) : (
+                    <div className="flex shrink-0 items-center gap-1">
+                      {lorebook.isPinned && (
+                        <button
+                          onClick={() => onToggleLorebook(lorebook.id)}
+                          className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
+                          title={localizeUi("ui.chatSettings.functioncallingsection.removeFromChat")}
+                        >
+                          <Trash2 size="0.6875rem" />
+                        </button>
+                      )}
+                      {(!lorebook.isPinned || hasAutomaticReason) && (
+                        <button
+                          onClick={() => onSetLorebookExcluded(lorebook.id, true)}
+                          className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
+                          title={localizeUi("ui.chatSettings.lorebookssection.disableInThisChat")}
+                        >
+                          <EyeOff size="0.6875rem" />
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+                {editingLorebookId === lorebook.id && inlineLorebookEditor}
+              </Fragment>
             );
           })}
         </div>
@@ -172,14 +190,13 @@ export function LorebooksSection({
           }}
           className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-[var(--border)] px-3 py-2 text-xs text-[var(--muted-foreground)] transition-colors hover:border-[var(--primary)]/40 hover:text-[var(--primary)]"
         >
-          <Plus size="0.75rem" /> Add Lorebook
-        </button>
+          <Plus size="0.75rem" /> {localizeUi("ui.chatSettings.lorebookssection.addLorebook")}</button>
       ) : (
         <PickerDropdown
           search={lorebookSearch}
           onSearchChange={onLorebookSearchChange}
           onClose={() => onShowLorebookPickerChange(false)}
-          placeholder="Search lorebooks…"
+          placeholder={localizeUi("ui.chatSettings.lorebookssection.searchLorebooks")}
         >
           {visibleInactiveLorebooks.map((lorebook) => (
             <button
@@ -197,7 +214,7 @@ export function LorebooksSection({
           ))}
           {visibleInactiveLorebooks.length === 0 && (
             <p className="px-3 py-2 text-[0.6875rem] text-[var(--muted-foreground)]">
-              {inactiveLorebooks.length === 0 ? "All available lorebooks are already active here." : "No matches."}
+              {inactiveLorebooks.length === 0 ?localizeUi("ui.chatSettings.lorebookssection.allAvailableLorebooksAreAlreadyActiveHere") :localizeUi("ui.lorebooks.linkedresourcepicker.noMatches")}
             </p>
           )}
         </PickerDropdown>

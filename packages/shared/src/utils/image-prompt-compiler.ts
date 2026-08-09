@@ -28,6 +28,41 @@ export interface CompileImagePromptInput {
   hardNegative?: string | null;
   /** Apply the selected grammar to generated prose that is normally preserved for review/readability. */
   applyPromptModeToSourcePrompt?: boolean;
+  /**
+   * Suppress appending the profile's raw styleText to the prompt. Used when the
+   * style is already conveyed another way (e.g. fed to the prompt-building LLM
+   * as guidance), so it is not duplicated verbatim into the final image prompt.
+   */
+  omitProfileStyleText?: boolean;
+  /**
+   * Suppress generic per-kind composition tags when a dedicated prompt template
+   * already owns layout and framing (for example Comic Page versus Illustration).
+   */
+  omitProfileSubjectTags?: boolean;
+}
+
+/**
+ * The active profile's style text when it should steer generation (a real base
+ * style, not "auto"). Empty when there is no explicit style to apply.
+ */
+export function resolveImageStyleGuidanceText(
+  styleProfiles: ImageStyleProfileSettings,
+  styleProfileId?: string | null,
+): string {
+  const profile = findImageStyleProfile(styleProfiles, styleProfileId || styleProfiles.defaultProfileId);
+  const styleText = profile.styleText?.trim() ?? "";
+  return styleText && profile.baseStyle !== "auto" ? styleText : "";
+}
+
+/**
+ * Guidance block appended to an image prompt-builder's system prompt so the
+ * generated prompt reflects the configured style instead of having the raw
+ * style text pasted verbatim into the final prompt.
+ */
+export function formatImageStylePromptGuidance(styleText: string): string {
+  const trimmed = styleText.trim();
+  if (!trimmed) return "";
+  return `\n\nVisual style guidance: compose the image prompt so it naturally reflects this style: ${trimmed}. Weave the style into the description; do not copy this guidance verbatim into your output.`;
 }
 
 export function compileImagePrompt(input: CompileImagePromptInput): CompiledImagePrompt {
@@ -83,9 +118,11 @@ function compileImagePromptPass(
   const negativePromptPrefix = imageNegativePromptPrefixFromDefaults(input.imageDefaults);
   const sourceCueText = [input.prompt, input.userPositive].filter(Boolean).join("\n");
   const sourceCues = compactPrompt ? deriveTaggedSourceCues(sourceCueText) : [];
-  const profileSubjectTags = reconcileProfileSubjectTags(profile.subjectTags[input.kind] ?? "", sourceCues);
+  const profileSubjectTags = input.omitProfileSubjectTags
+    ? ""
+    : reconcileProfileSubjectTags(profile.subjectTags[input.kind] ?? "", sourceCues);
   const profileStyleText =
-    compactPrompt || (profile.styleText && generatedStyle)
+    input.omitProfileStyleText || compactPrompt || (profile.styleText && generatedStyle)
       ? ""
       : profile.styleText && profile.baseStyle !== "auto"
         ? profile.styleText
@@ -96,6 +133,12 @@ function compileImagePromptPass(
   const positiveParts = compactPrompt
     ? [
         { value: promptPrefix, sourcePrompt: false, hardPrefix: true },
+        // Explicit profile configuration is a provider-facing prefix, even for
+        // compact avatar/portrait prompts. Protect it from priority sorting and
+        // the compact token budget so inferred source cues cannot move ahead of
+        // or silently replace the user's configured tags.
+        { value: profile.positiveTags, sourcePrompt: false, hardPrefix: true },
+        { value: profileSubjectTags, sourcePrompt: false, hardPrefix: true },
         { value: sourceCues.join(", "), sourcePrompt: false },
         {
           value: generatedStylePart,
@@ -108,8 +151,6 @@ function compileImagePromptPass(
           sourcePrompt: !protectUserPositive,
           hardPrefix: protectUserPositive,
         },
-        { value: profileSubjectTags, sourcePrompt: false },
-        { value: profile.positiveTags, sourcePrompt: false },
       ]
     : [
         { value: promptPrefix, sourcePrompt: false, hardPrefix: true },
@@ -504,6 +545,7 @@ function splitPromptFragments(
   const normalized = text
     .replace(/\r\n?/g, "\n")
     .replace(/[.!?]\s+(?=(?:avoid|no|without|exclude|do not include|don't include)\b)/gi, "\n")
+    .replace(/((?:^|\n)(?:avoid|no|without|exclude|do not include|don't include)\s+[^.!?\n]+[.!?])\s+(?=\S)/gim, "$1\n")
     .replace(/\b(?:avoid|negative prompt|undesired content)\s*:/gi, "\navoid ")
     .replace(/\b(?:SD|Stable Diffusion)\/Illustrious\s+tags?\s*:/gi, "\n")
     .replace(/\b(?:positive prompt|tags?)\s*:/gi, "\n");
@@ -906,7 +948,8 @@ function extractNegativeFragment(fragment: string): string | null {
   const clean = fragment.trim();
   const match = clean.match(/^(?:avoid|no|without|exclude|do not include|don't include)\s+(.+)/i);
   if (!match?.[1]) return null;
-  const negative = (splitPromptListItems(match[1])[0] ?? "")
+  const firstSentence = match[1].split(/[.!?]+(?:\s+|$)/u, 1)[0] ?? match[1];
+  const negative = (splitPromptListItems(firstSentence)[0] ?? "")
     .replace(/[.]+$/g, "")
     .replace(/^(?:any|all)\s+/i, "")
     .trim();

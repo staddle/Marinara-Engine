@@ -626,6 +626,8 @@ export function buildGmFormatReminder(
     addressMode?: "party" | "gm";
     /** Whether the current player turn already includes a resolved [dice: ...] roll. */
     playerDiceRollSubmitted?: boolean;
+    /** Built-in systems an installed experience replaces with its own. Undeclared systems stay built-in. */
+    experienceProvidedSystems?: { inventory?: boolean };
   },
 ): string {
   const lines: string[] = [];
@@ -652,6 +654,9 @@ export function buildGmFormatReminder(
       return lines;
     });
   const hudWidgets = Array.isArray(ctx.hudWidgets) ? ctx.hudWidgets : [];
+  // An experience that tracks items itself owns the whole loop, so asking the GM for [inventory:] here
+  // would only produce commands nothing consumes.
+  const experienceOwnsInventory = ctx.experienceProvidedSystems?.inventory === true;
   const playerInventory = Array.isArray(ctx.playerInventory)
     ? ctx.playerInventory.flatMap((item) => {
         const name = normalizePromptText(item?.name);
@@ -683,6 +688,7 @@ export function buildGmFormatReminder(
     `FORMAT:`,
     `- Narration: text - 1-4 sentences per beat, blank line between beats.`,
     `- Lines: [Name] [main|side|whisper:Target|thought] [neutral|happy|sad|angry|surprised|scared|disgusted|thinking|laughing|crying|blushing|smirk|embarrassed|determined|confused|sleepy|custom]: "Dialogue"|Thought - first bracket specifies the format, main is primary spoken line, side is a short aside like banter, cut-in, or interruption, whisper is quiet speech meant for one listener only, the thought is an internal monologue (no quotes for it), and the last bracket is the character's expression when delivering the line.`,
+    `- Party speaker labels must use the exact canonical names listed under PARTY. Never expand, combine, or replace a party member's name with a legal name, nickname, alias, title, or description-derived variant.`,
     ...(customSpriteLines.length
       ? [
           ``,
@@ -765,7 +771,11 @@ export function buildGmFormatReminder(
           `- [map_update: new_location="Location Name" connected_to="Previous Location Name" node_emoji="emoji"] - only when the party arrives at an entirely new location on the current node map.`,
         ]
       : []),
-    `- [inventory: action="add|remove" item="Item A, Item B" count="3"] - every real item gain or loss, keep names short and use count/quantity for stacked items.`,
+    ...(experienceOwnsInventory
+      ? []
+      : [
+          `- [inventory: action="add|remove" item="Item A, Item B" count="3"] - every real item gain or loss, keep names short and use count/quantity for stacked items.`,
+        ]),
     `- [Note: contents] or [Book: contents] - when a new readable note or book is acquired and should be tracked in the journal.`,
     `- [state: exploration|dialogue|combat|travel_rest] - only on actual mode transitions. If you're planning to use [state: combat], this one ALWAYS has to be at the end of the turn, as it initiates a new combat generation and UI.`,
     `- [reputation: npc="Name" action="helped"] - when an NPC's tracked stance changes because of what happened.`,
@@ -813,8 +823,9 @@ export function buildGmFormatReminder(
     );
   }
 
-  // Inventory context
-  if (playerInventory.length > 0) {
+  // Inventory context. Skipped when an experience owns items: an older save can still carry a stale
+  // built-in list, which would contradict the inventory the player has on screen.
+  if (!experienceOwnsInventory && playerInventory.length > 0) {
     lines.push(``, `PLAYER INVENTORY: ${buildCompactInventoryLine(playerInventory)}`);
   }
 
@@ -1143,7 +1154,7 @@ export function buildSessionConclusionPrompt(args: {
   const normalizedLanguage = normalizePromptLanguage(args.language);
   return [
     `Review this completed game session and return all end-of-session continuity updates in one JSON object.`,
-    `Return JSON with exactly these top-level keys and no others: summary, campaignProgression, characterCards.`,
+    `Return JSON with exactly these top-level keys and no others: summary, campaignProgression, nextSessionPlan, characterCards.`,
     ``,
     ...(normalizedLanguage
       ? [
@@ -1166,6 +1177,17 @@ export function buildSessionConclusionPrompt(args: {
     `- campaignProgression.storyArc: Refresh the overarching campaign arc only if this session materially advanced or changed it. Otherwise preserve the current arc.`,
     `- campaignProgression.plotTwists: Keep unresolved twists that still matter, remove obsolete ones, and add any major new twist revealed this session.`,
     `- campaignProgression.partyArcs: Return the FULL array of party arcs. Carry forward unfinished arcs with updated wording where needed. If an arc completed, mark completed: true and include a short resolution note.`,
+    ``,
+    `nextSessionPlan must prepare a genuinely fresh playable arc while preserving campaign continuity.`,
+    `- nextSessionPlan must be an object with exactly these keys: campaignPlan, namedNpcs.`,
+    `- nextSessionPlan.campaignPlan must contain exactly: openingSituation, pressureClocks, factions, questSeeds, encounterPrinciples.`,
+    `- openingSituation: a fresh immediate goal or situation for the next session, not a recap of the completed one.`,
+    `- pressureClocks: 0-2 objects with name, steps (1-12), current (start at 0 unless continuity requires otherwise), and failure.`,
+    `- factions: 1-2 active factions or social groups with name, goal, method, and optional secret. Replace stale or resolved faction plans rather than copying them.`,
+    `- questSeeds: 1-3 concrete new hooks or goals that can drive the next arc. Do not repeat resolved hooks from the current campaign plan.`,
+    `- encounterPrinciples: 0-2 short principles that make the next arc distinct in play.`,
+    `- namedNpcs: 1-3 NEW key NPC objects with name, emoji, description, gender, pronouns, location, and roleOrAgenda. Do not repeat an already known NPC.`,
+    `- Treat the player's next-session request as strong steering for this plan when one was supplied.`,
     ``,
     `characterCards rules:`,
     ...(args.includeCharacterCards
@@ -1249,6 +1271,7 @@ export function buildPartyRecruitCardPrompt(ctx: {
   worldOverview?: string | null;
   storyArc?: string | null;
   plotTwists?: string[] | null;
+  campaignHistory?: string | null;
   currentState?: string | null;
   recentTranscript?: string | null;
   language?: string | null;
@@ -1301,6 +1324,9 @@ export function buildPartyRecruitCardPrompt(ctx: {
   }
   if (ctx.plotTwists && ctx.plotTwists.length > 0) {
     sections.push(``, `<plot_twists>`, ...ctx.plotTwists, `</plot_twists>`);
+  }
+  if (ctx.campaignHistory?.trim()) {
+    sections.push(``, `<campaign_history>`, ctx.campaignHistory.trim(), `</campaign_history>`);
   }
   if (ctx.currentPartyCards?.trim()) {
     sections.push(``, `<existing_party_cards>`, ctx.currentPartyCards.trim(), `</existing_party_cards>`);

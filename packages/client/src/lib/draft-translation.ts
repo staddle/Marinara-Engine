@@ -6,7 +6,7 @@ export async function translateDraftText(text: string): Promise<string | null> {
 
   try {
     const { translateText } = await import("./translate-text");
-    const translated = await translateText(trimmed);
+    const translated = await translateText(trimmed, "input");
     const next = translated.trim();
     if (!next) {
       toast.error("Translation returned an empty message.");

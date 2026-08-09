@@ -18,7 +18,8 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { cn, getAvatarCropStyle, type AvatarCropValue } from "../../lib/utils";
+import type { AvatarCrop } from "@marinara-engine/shared";
+import { cn, getAvatarCropStyle } from "../../lib/utils";
 import { DraftNumberInput } from "../ui/DraftNumberInput";
 import { NEUTRAL_SURFACE_VARIABLES } from "../ui/neutral-surface-styles";
 import {
@@ -27,6 +28,7 @@ import {
   syncRpgHpFromPools,
   type RPGStatPool,
 } from "@marinara-engine/shared";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 export interface GameCharacterSheetGameCard {
   shortDescription: string;
@@ -49,7 +51,7 @@ export interface CharacterSheetCard {
   status?: string;
   level?: number;
   avatarUrl?: string | null;
-  avatarCrop?: AvatarCropValue | null;
+  avatarCrop?: AvatarCrop | null;
   stats?: Array<{ name: string; value: number; max?: number; color?: string }>;
   inventory?: Array<{ name: string; quantity?: number; location?: string }>;
   customFields?: Record<string, string>;
@@ -60,7 +62,7 @@ interface GameCharacterSheetProps {
   card: CharacterSheetCard;
   onClose: () => void;
   onSave?: (gameCard: GameCharacterSheetGameCard | undefined) => Promise<void> | void;
-  onRegenerate?: () => Promise<void> | void;
+  onRegenerate?: () => Promise<GameCharacterSheetGameCard | undefined> | GameCharacterSheetGameCard | undefined;
   isRegenerating?: boolean;
 }
 
@@ -295,6 +297,7 @@ export function GameCharacterSheet({
   onRegenerate,
   isRegenerating = false,
 }: GameCharacterSheetProps) {
+  const { t: localizeUi } = useUiTranslation();
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [draft, setDraft] = useState<GameCardDraft>(() => createDraft(card.gameCard));
@@ -430,7 +433,12 @@ export function GameCharacterSheet({
 
   const handleRegenerate = async () => {
     if (!onRegenerate || isSaving || isRegenerating) return;
-    await onRegenerate();
+    try {
+      const regenerated = await onRegenerate();
+      if (regenerated) setDraft(createDraft(regenerated));
+    } catch {
+      return;
+    }
   };
 
   return (
@@ -440,6 +448,7 @@ export function GameCharacterSheet({
       onClick={onClose}
     >
       <div
+        data-component="GameCharacterSheet"
         className={cn(
           NEUTRAL_SURFACE_VARIABLES,
           "marinara-chat-popover relative flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-panel-bg)] shadow-2xl supports-[height:100dvh]:max-h-[85dvh]",
@@ -452,49 +461,51 @@ export function GameCharacterSheet({
               <>
                 <button
                   onClick={handleCancelEdit}
-                  disabled={isSaving}
+                  disabled={isSaving || isRegenerating}
                   className="inline-flex h-8 items-center justify-center rounded-lg border border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-button-bg)] px-2.5 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg)] hover:text-[var(--foreground)] disabled:opacity-60 sm:h-auto sm:px-3 sm:py-1.5"
                 >
-                  Cancel
+                  {localizeUi("chat.delete.dialog.cancel")}
                 </button>
-                <button
-                  onClick={() => void handleSave()}
-                  disabled={isSaving}
-                  className="inline-flex h-8 min-w-8 items-center justify-center gap-1.5 rounded-lg bg-[var(--marinara-chat-chrome-highlight-bg)] px-2 text-xs font-semibold text-[var(--foreground)] ring-1 ring-[var(--marinara-chat-chrome-panel-border)] transition-colors hover:bg-[var(--marinara-chat-chrome-button-bg-hover)] disabled:opacity-60 sm:h-auto sm:min-w-0 sm:px-3 sm:py-1.5"
-                  title={isSaving ? "Saving..." : "Save Sheet"}
-                  aria-label={isSaving ? "Saving sheet" : "Save sheet"}
-                >
-                  <Save size={13} />
-                  <span className="hidden sm:inline">{isSaving ? "Saving..." : "Save Sheet"}</span>
-                </button>
-              </>
-            ) : (
-              <>
                 {onRegenerate && (
                   <button
                     onClick={() => void handleRegenerate()}
                     disabled={isRegenerating || isSaving}
                     className="inline-flex h-8 min-w-8 items-center justify-center gap-1.5 rounded-lg border border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-button-bg)] px-2 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg)] hover:text-[var(--foreground)] disabled:cursor-wait disabled:opacity-60 sm:h-auto sm:min-w-0 sm:px-3 sm:py-1.5"
-                    title="Regenerate this sheet from character and current game context"
-                    aria-label="Regenerate sheet"
+                    title={localizeUi("game.characterSheet.regenerate.help")}
+                    aria-label={localizeUi("game.characterSheet.regenerate.label")}
                   >
                     <RefreshCw size={13} className={cn(isRegenerating && "animate-spin")} />
-                    <span className="hidden sm:inline">{isRegenerating ? "Regenerating..." : "Regenerate Sheet"}</span>
+                    <span className="hidden sm:inline">
+                      {isRegenerating
+                        ? localizeUi("game.characterSheet.regenerate.loading")
+                        : localizeUi("game.characterSheet.regenerate.label")}
+                    </span>
                   </button>
                 )}
-                {onSave && (
-                  <button
-                    onClick={() => setIsEditing(true)}
-                    disabled={isRegenerating}
-                    className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-button-bg)] p-0 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg)] hover:text-[var(--foreground)] disabled:opacity-60 sm:h-auto sm:w-auto sm:min-w-0 sm:gap-1.5 sm:px-3 sm:py-1.5"
-                    title="Edit Sheet"
-                    aria-label="Edit sheet"
-                  >
-                    <Pencil size={13} />
-                    <span className="hidden sm:inline">Edit Sheet</span>
-                  </button>
-                )}
+                <button
+                  onClick={() => void handleSave()}
+                  disabled={isSaving || isRegenerating}
+                  className="inline-flex h-8 min-w-8 items-center justify-center gap-1.5 rounded-lg bg-[var(--marinara-chat-chrome-highlight-bg)] px-2 text-xs font-semibold text-[var(--foreground)] ring-1 ring-[var(--marinara-chat-chrome-panel-border)] transition-colors hover:bg-[var(--marinara-chat-chrome-button-bg-hover)] disabled:opacity-60 sm:h-auto sm:min-w-0 sm:px-3 sm:py-1.5"
+                  title={isSaving ?localizeUi("ui.noodle.stageprofileform.saving") :localizeUi("ui.game.gamecharactersheet.saveSheet")}
+                  aria-label={isSaving ?localizeUi("ui.game.gamecharactersheet.savingSheet") :localizeUi("ui.game.gamecharactersheet.saveSheet_69c9b5b")}
+                >
+                  <Save size={13} />
+                  <span className="hidden sm:inline">{isSaving ?localizeUi("ui.noodle.stageprofileform.saving") :localizeUi("ui.game.gamecharactersheet.saveSheet")}</span>
+                </button>
               </>
+            ) : (
+              onSave && (
+                <button
+                  onClick={() => setIsEditing(true)}
+                  disabled={isRegenerating}
+                  className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-button-bg)] p-0 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg)] hover:text-[var(--foreground)] disabled:opacity-60 sm:h-auto sm:w-auto sm:min-w-0 sm:gap-1.5 sm:px-3 sm:py-1.5"
+                  title={localizeUi("ui.game.gamecharactersheet.editSheet")}
+                  aria-label={localizeUi("ui.game.gamecharactersheet.editSheet_8c3fdc2")}
+                >
+                  <Pencil size={13} />
+                  <span className="hidden sm:inline">{localizeUi("ui.game.gamecharactersheet.editSheet")}</span>
+                </button>
+              )
             )}
           </div>
         )}
@@ -502,8 +513,8 @@ export function GameCharacterSheet({
         <button
           onClick={onClose}
           className="absolute right-3 top-3 z-10 flex h-7 w-7 items-center justify-center rounded-lg p-0 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg)] hover:text-[var(--foreground)] sm:h-auto sm:w-auto sm:p-1.5"
-          aria-label="Close character sheet"
-          title="Close character sheet"
+          aria-label={localizeUi("ui.game.gamecharactersheet.closeCharacterSheet")}
+          title={localizeUi("ui.game.gamecharactersheet.closeCharacterSheet")}
         >
           <X className="h-4 w-4 sm:h-[18px] sm:w-[18px]" />
         </button>
@@ -554,7 +565,7 @@ export function GameCharacterSheet({
             </div>
             {card.level != null && (
               <div className="mr-16 flex items-center gap-1 rounded border border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-input-bg)] px-1.5 py-0.5 sm:mr-0">
-                <span className="text-[0.4375rem] uppercase tracking-wider text-[var(--muted-foreground)]">LVL</span>
+                <span className="text-[0.4375rem] uppercase tracking-wider text-[var(--muted-foreground)]">{localizeUi("ui.game.gamecharactersheet.lvl")}</span>
                 <span className="text-xs font-bold leading-none text-[var(--foreground)]">{card.level}</span>
               </div>
             )}
@@ -572,26 +583,26 @@ export function GameCharacterSheet({
               <div className="border-b border-[var(--marinara-chat-chrome-panel-border)] px-5 py-4">
                 <SectionHeader
                   icon={<Pencil size={12} />}
-                  title="Sheet Details"
+                  title={localizeUi("ui.game.gamecharactersheet.sheetDetails")}
                   className="text-[var(--muted-foreground)]"
                 />
                 <div className="space-y-3">
                   <label className="block space-y-1.5">
-                    <span className={FIELD_LABEL_CLASS}>Class</span>
+                    <span className={FIELD_LABEL_CLASS}>{localizeUi("ui.game.gamecharactersheet.class")}</span>
                     <input
                       type="text"
                       value={draft.class}
                       onChange={(e) => setDraft((prev) => ({ ...prev, class: e.target.value }))}
-                      placeholder="Class or role"
+                      placeholder={localizeUi("ui.game.gamecharactersheet.classOrRole")}
                       className={TEXT_INPUT_CLASS}
                     />
                   </label>
                   <label className="block space-y-1.5">
-                    <span className={FIELD_LABEL_CLASS}>Short Description</span>
+                    <span className={FIELD_LABEL_CLASS}>{localizeUi("ui.game.gamecharactersheet.shortDescription")}</span>
                     <textarea
                       value={draft.shortDescription}
                       onChange={(e) => setDraft((prev) => ({ ...prev, shortDescription: e.target.value }))}
-                      placeholder="Brief character summary"
+                      placeholder={localizeUi("ui.game.gamecharactersheet.briefCharacterSummary")}
                       rows={3}
                       className={cn(TEXT_INPUT_CLASS, "resize-y")}
                     />
@@ -603,7 +614,7 @@ export function GameCharacterSheet({
                 <div className="mb-2.5 flex items-center justify-between gap-3">
                   <SectionHeader
                     icon={<Shield size={12} />}
-                    title="RPG Attributes"
+                    title={localizeUi("ui.personas.personastatstab.rpgAttributes")}
                     className="mb-0 text-[var(--muted-foreground)]"
                   />
                   <label className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
@@ -612,22 +623,18 @@ export function GameCharacterSheet({
                       checked={draft.rpgStatsEnabled}
                       onChange={(e) => setDraft((prev) => ({ ...prev, rpgStatsEnabled: e.target.checked }))}
                       className="h-4 w-4 rounded accent-[var(--foreground)]"
-                    />
-                    Enable
-                  </label>
+                    />{localizeUi("ui.presets.sectionstab.enable")}</label>
                 </div>
                 {draft.rpgStatsEnabled ? (
                   <div className="space-y-3">
                     <div className="space-y-2">
                       <div className="flex items-center justify-between gap-2">
-                        <span className={FIELD_LABEL_CLASS}>Pools</span>
+                        <span className={FIELD_LABEL_CLASS}>{localizeUi("ui.characters.statstab.pools")}</span>
                         <button
                           onClick={addPool}
                           className="inline-flex items-center gap-1.5 rounded-lg border border-dashed border-[var(--marinara-chat-chrome-panel-border)] px-3 py-1.5 text-xs text-[var(--muted-foreground)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg)] hover:text-[var(--foreground)]"
                         >
-                          <Plus size={13} />
-                          Add Pool
-                        </button>
+                          <Plus size={13} />{localizeUi("ui.game.gamecharactersheet.addPool")}</button>
                       </div>
                       {draft.pools.map((pool, index) => (
                         <div
@@ -639,13 +646,13 @@ export function GameCharacterSheet({
                             value={pool.color}
                             onChange={(e) => updatePool(index, { color: e.target.value })}
                             className="h-9 w-8 rounded border border-[var(--marinara-chat-chrome-panel-border)] bg-transparent p-0.5 max-sm:w-full"
-                            aria-label={`${pool.name || "Pool"} color`}
+                            aria-label={localizeUi("ui.game.gamecharactersheet.value1Color", { value1: pool.name ||localizeUi("ui.game.gamecharactersheet.pool") })}
                           />
                           <input
                             type="text"
                             value={pool.name}
                             onChange={(e) => updatePool(index, { name: e.target.value })}
-                            placeholder="HP"
+                            placeholder={localizeUi("ui.game.gamecharactersheet.hp")}
                             className={TEXT_INPUT_CLASS}
                           />
                           <DraftNumberInput
@@ -667,7 +674,7 @@ export function GameCharacterSheet({
                           <button
                             onClick={() => removePool(index)}
                             className="inline-flex items-center justify-center rounded-lg border border-[var(--marinara-chat-chrome-panel-border)] px-2 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg)] hover:text-red-400 max-sm:h-9"
-                            title="Remove pool"
+                            title={localizeUi("ui.game.gamecharactersheet.removePool")}
                           >
                             <Trash2 size={13} />
                           </button>
@@ -681,7 +688,7 @@ export function GameCharacterSheet({
                             type="text"
                             value={attr.name}
                             onChange={(e) => updateAttribute(index, "name", e.target.value)}
-                            placeholder="STR"
+                            placeholder={localizeUi("ui.game.gamecharactersheet.str")}
                             className={TEXT_INPUT_CLASS}
                           />
                           <DraftNumberInput
@@ -693,7 +700,7 @@ export function GameCharacterSheet({
                           <button
                             onClick={() => removeAttribute(index)}
                             className="inline-flex items-center justify-center rounded-lg border border-[var(--marinara-chat-chrome-panel-border)] px-2 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg)] hover:text-red-400"
-                            title="Remove attribute"
+                            title={localizeUi("ui.game.gamecharactersheet.removeAttribute")}
                           >
                             <Trash2 size={13} />
                           </button>
@@ -703,15 +710,11 @@ export function GameCharacterSheet({
                         onClick={addAttribute}
                         className="inline-flex items-center gap-1.5 rounded-lg border border-dashed border-[var(--marinara-chat-chrome-panel-border)] px-3 py-1.5 text-xs text-[var(--muted-foreground)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg)] hover:text-[var(--foreground)]"
                       >
-                        <Plus size={13} />
-                        Add Attribute
-                      </button>
+                        <Plus size={13} />{localizeUi("ui.game.gamecharactersheet.addAttribute")}</button>
                     </div>
                   </div>
                 ) : (
-                  <p className="text-sm text-[var(--muted-foreground)]">
-                    Use this when the sheet should track HP and tabletop-style attributes.
-                  </p>
+                  <p className="text-sm text-[var(--muted-foreground)]">{localizeUi("ui.game.gamecharactersheet.useThisWhenTheSheetShouldTrackHpAnd")}</p>
                 )}
               </div>
 
@@ -719,16 +722,14 @@ export function GameCharacterSheet({
                 <div className="mb-2.5 flex items-center justify-between gap-3">
                   <SectionHeader
                     icon={<Zap size={12} />}
-                    title="Abilities"
+                    title={localizeUi("ui.game.gamecharactersheet.abilities")}
                     className="mb-0 text-[var(--muted-foreground)]"
                   />
                   <button
                     onClick={() => addListItem("abilities")}
                     className="inline-flex items-center gap-1.5 rounded-lg border border-dashed border-[var(--marinara-chat-chrome-panel-border)] px-3 py-1.5 text-xs text-[var(--muted-foreground)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg)] hover:text-[var(--foreground)]"
                   >
-                    <Plus size={13} />
-                    Add
-                  </button>
+                    <Plus size={13} />{localizeUi("ui.characters.metadatatab.add")}</button>
                 </div>
                 <div className="space-y-2">
                   {draft.abilities.map((ability, index) => (
@@ -737,13 +738,13 @@ export function GameCharacterSheet({
                         type="text"
                         value={ability}
                         onChange={(e) => updateListItem("abilities", index, e.target.value)}
-                        placeholder="Dual-wielding, Arcane shield, etc."
+                        placeholder={localizeUi("ui.game.gamecharactersheet.dualWieldingArcaneShieldEtc")}
                         className={TEXT_INPUT_CLASS}
                       />
                       <button
                         onClick={() => removeListItem("abilities", index)}
                         className="inline-flex items-center justify-center rounded-lg border border-[var(--marinara-chat-chrome-panel-border)] px-2 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg)] hover:text-red-400"
-                        title="Remove ability"
+                        title={localizeUi("ui.game.gamecharactersheet.removeAbility")}
                       >
                         <Trash2 size={13} />
                       </button>
@@ -758,16 +759,14 @@ export function GameCharacterSheet({
                     <div className="mb-2.5 flex items-center justify-between gap-3">
                       <SectionHeader
                         icon={<Target size={11} />}
-                        title="Strengths"
+                        title={localizeUi("ui.game.gamecharactersheet.strengths")}
                         className="mb-0 text-emerald-500/80"
                       />
                       <button
                         onClick={() => addListItem("strengths")}
                         className="inline-flex items-center gap-1 rounded-lg border border-dashed border-[var(--marinara-chat-chrome-panel-border)] px-2 py-1 text-[0.6875rem] text-[var(--muted-foreground)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg)] hover:text-[var(--foreground)]"
                       >
-                        <Plus size={12} />
-                        Add
-                      </button>
+                        <Plus size={12} />{localizeUi("ui.characters.metadatatab.add")}</button>
                     </div>
                     <div className="space-y-2">
                       {draft.strengths.map((strength, index) => (
@@ -776,13 +775,13 @@ export function GameCharacterSheet({
                             type="text"
                             value={strength}
                             onChange={(e) => updateListItem("strengths", index, e.target.value)}
-                            placeholder="Reliable, quick thinker, etc."
+                            placeholder={localizeUi("ui.game.gamecharactersheet.reliableQuickThinkerEtc")}
                             className={TEXT_INPUT_CLASS}
                           />
                           <button
                             onClick={() => removeListItem("strengths", index)}
                             className="inline-flex items-center justify-center rounded-lg border border-[var(--marinara-chat-chrome-panel-border)] px-2 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg)] hover:text-red-400"
-                            title="Remove strength"
+                            title={localizeUi("ui.game.gamecharactersheet.removeStrength")}
                           >
                             <Trash2 size={13} />
                           </button>
@@ -794,16 +793,14 @@ export function GameCharacterSheet({
                     <div className="mb-2.5 flex items-center justify-between gap-3">
                       <SectionHeader
                         icon={<AlertTriangle size={11} />}
-                        title="Weaknesses"
+                        title={localizeUi("ui.game.gamecharactersheet.weaknesses")}
                         className="mb-0 text-red-400/80"
                       />
                       <button
                         onClick={() => addListItem("weaknesses")}
                         className="inline-flex items-center gap-1 rounded-lg border border-dashed border-[var(--marinara-chat-chrome-panel-border)] px-2 py-1 text-[0.6875rem] text-[var(--muted-foreground)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg)] hover:text-[var(--foreground)]"
                       >
-                        <Plus size={12} />
-                        Add
-                      </button>
+                        <Plus size={12} />{localizeUi("ui.characters.metadatatab.add")}</button>
                     </div>
                     <div className="space-y-2">
                       {draft.weaknesses.map((weakness, index) => (
@@ -812,13 +809,13 @@ export function GameCharacterSheet({
                             type="text"
                             value={weakness}
                             onChange={(e) => updateListItem("weaknesses", index, e.target.value)}
-                            placeholder="Impulsive, poor swimmer, etc."
+                            placeholder={localizeUi("ui.game.gamecharactersheet.impulsivePoorSwimmerEtc")}
                             className={TEXT_INPUT_CLASS}
                           />
                           <button
                             onClick={() => removeListItem("weaknesses", index)}
                             className="inline-flex items-center justify-center rounded-lg border border-[var(--marinara-chat-chrome-panel-border)] px-2 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg)] hover:text-red-400"
-                            title="Remove weakness"
+                            title={localizeUi("ui.game.gamecharactersheet.removeWeakness")}
                           >
                             <Trash2 size={13} />
                           </button>
@@ -833,20 +830,16 @@ export function GameCharacterSheet({
                 <div className="mb-2.5 flex items-center justify-between gap-3">
                   <SectionHeader
                     icon={<Info size={12} />}
-                    title="Details"
+                    title={localizeUi("ui.game.gamecharactersheet.details")}
                     className="mb-0 text-[var(--muted-foreground)]"
                   />
                   <button
                     onClick={addExtraEntry}
                     className="inline-flex items-center gap-1.5 rounded-lg border border-dashed border-[var(--marinara-chat-chrome-panel-border)] px-3 py-1.5 text-xs text-[var(--muted-foreground)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg)] hover:text-[var(--foreground)]"
                   >
-                    <Plus size={13} />
-                    Add Detail
-                  </button>
+                    <Plus size={13} />{localizeUi("ui.game.gamecharactersheet.addDetail")}</button>
                 </div>
-                <p className="mb-3 text-[0.6875rem] text-[var(--muted-foreground)]">
-                  Add custom details like Skills, Weapon, Element, Specialty, or Faction.
-                </p>
+                <p className="mb-3 text-[0.6875rem] text-[var(--muted-foreground)]">{localizeUi("ui.game.gamecharactersheet.addCustomDetailsLikeSkillsWeaponElementSpecialtyOr")}</p>
                 <div className="space-y-2">
                   {draft.extraEntries.map((entry, index) => (
                     <div
@@ -857,20 +850,20 @@ export function GameCharacterSheet({
                         type="text"
                         value={entry.key}
                         onChange={(e) => updateExtraEntry(index, "key", e.target.value)}
-                        placeholder="Skills"
+                        placeholder={localizeUi("ui.game.gamecharactersheet.skills")}
                         className={TEXT_INPUT_CLASS}
                       />
                       <input
                         type="text"
                         value={entry.value}
                         onChange={(e) => updateExtraEntry(index, "value", e.target.value)}
-                        placeholder="Lockpicking, survival, marksmanship"
+                        placeholder={localizeUi("ui.game.gamecharactersheet.lockpickingSurvivalMarksmanship")}
                         className={TEXT_INPUT_CLASS}
                       />
                       <button
                         onClick={() => removeExtraEntry(index)}
                         className="inline-flex items-center justify-center rounded-lg border border-[var(--marinara-chat-chrome-panel-border)] px-2 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg)] hover:text-red-400 max-sm:h-10"
-                        title="Remove detail"
+                        title={localizeUi("ui.game.gamecharactersheet.removeDetail")}
                       >
                         <Trash2 size={13} />
                       </button>
@@ -885,7 +878,7 @@ export function GameCharacterSheet({
             <div className="border-b border-[var(--marinara-chat-chrome-panel-border)] px-5 py-4">
               <SectionHeader
                 icon={<Shield size={12} />}
-                title="Attributes"
+                title={localizeUi("ui.characters.statstab.attributes")}
                 className="text-[var(--muted-foreground)]"
               />
               {hasRpgAttributes && (
@@ -938,7 +931,7 @@ export function GameCharacterSheet({
 
           {card.stats && card.stats.length > 0 && (
             <div className="border-b border-[var(--marinara-chat-chrome-panel-border)] px-5 py-4">
-              <SectionHeader icon={<Shield size={12} />} title="Stats" className="text-[var(--muted-foreground)]" />
+              <SectionHeader icon={<Shield size={12} />} title={localizeUi("editor.tabs.stats")} className="text-[var(--muted-foreground)]" />
               <div className="space-y-2">
                 {card.stats.map((stat) => {
                   const max = Math.max(1, stat.max ?? 100);
@@ -970,7 +963,7 @@ export function GameCharacterSheet({
 
           {!isEditing && previewGameCard && previewGameCard.abilities.length > 0 && (
             <div className="border-b border-[var(--marinara-chat-chrome-panel-border)] px-5 py-4">
-              <SectionHeader icon={<Zap size={12} />} title="Abilities" className="text-[var(--muted-foreground)]" />
+              <SectionHeader icon={<Zap size={12} />} title={localizeUi("ui.game.gamecharactersheet.abilities")} className="text-[var(--muted-foreground)]" />
               <div className="space-y-1">
                 {previewGameCard.abilities.map((ability, index) => (
                   <div
@@ -991,7 +984,7 @@ export function GameCharacterSheet({
                 <div className="grid grid-cols-2 gap-3">
                   {previewGameCard.strengths.length > 0 && (
                     <div>
-                      <SectionHeader icon={<Target size={11} />} title="Strengths" className="text-emerald-500/80" />
+                      <SectionHeader icon={<Target size={11} />} title={localizeUi("ui.game.gamecharactersheet.strengths")} className="text-emerald-500/80" />
                       <div className="space-y-0.5">
                         {previewGameCard.strengths.map((strength, index) => (
                           <div key={`${strength}-${index}`} className="text-[0.6875rem] text-[var(--foreground)]/70">
@@ -1005,7 +998,7 @@ export function GameCharacterSheet({
                     <div>
                       <SectionHeader
                         icon={<AlertTriangle size={11} />}
-                        title="Weaknesses"
+                        title={localizeUi("ui.game.gamecharactersheet.weaknesses")}
                         className="text-red-400/80"
                       />
                       <div className="space-y-0.5">
@@ -1023,7 +1016,7 @@ export function GameCharacterSheet({
 
           {!isEditing && previewGameCard && Object.keys(previewGameCard.extra).length > 0 && (
             <div className="border-b border-[var(--marinara-chat-chrome-panel-border)] px-5 py-4">
-              <SectionHeader icon={<Info size={12} />} title="Details" className="text-[var(--muted-foreground)]" />
+              <SectionHeader icon={<Info size={12} />} title={localizeUi("ui.game.gamecharactersheet.details")} className="text-[var(--muted-foreground)]" />
               <div className="space-y-1.5 text-xs">
                 {Object.entries(previewGameCard.extra).map(([key, value]) => (
                   <div key={key} className="flex items-start justify-between gap-3">
@@ -1039,7 +1032,7 @@ export function GameCharacterSheet({
 
           {card.inventory && card.inventory.length > 0 && (
             <div className="border-b border-[var(--marinara-chat-chrome-panel-border)] px-5 py-4">
-              <SectionHeader icon={<Swords size={12} />} title="Inventory" className="text-[var(--muted-foreground)]" />
+              <SectionHeader icon={<Swords size={12} />} title={localizeUi("ui.game.gamecharactersheet.inventory")} className="text-[var(--muted-foreground)]" />
               <div className="space-y-1">
                 {card.inventory.map((item) => (
                   <div
@@ -1057,7 +1050,7 @@ export function GameCharacterSheet({
                       )}
                     </div>
                     {item.quantity != null && item.quantity > 1 && (
-                      <span className="font-mono text-[var(--muted-foreground)]">x{item.quantity}</span>
+                      <span className="font-mono text-[var(--muted-foreground)]">{localizeUi("ui.panels.imagedimensionrow.x")}{item.quantity}</span>
                     )}
                   </div>
                 ))}
@@ -1067,7 +1060,7 @@ export function GameCharacterSheet({
 
           {card.customFields && Object.keys(card.customFields).length > 0 && (
             <div className="border-b border-[var(--marinara-chat-chrome-panel-border)] px-5 py-4">
-              <SectionHeader icon={<Sparkles size={12} />} title="Traits" className="text-[var(--muted-foreground)]" />
+              <SectionHeader icon={<Sparkles size={12} />} title={localizeUi("ui.game.gamecharactersheet.traits")} className="text-[var(--muted-foreground)]" />
               <div className="space-y-1.5 text-xs">
                 {Object.entries(card.customFields).map(([key, value]) => (
                   <div key={key} className="flex items-start justify-between gap-3">
@@ -1081,9 +1074,7 @@ export function GameCharacterSheet({
 
           {!isEditing && !hasAnyData && (
             <div className="px-5 py-8 text-center">
-              <p className="text-sm text-[var(--muted-foreground)]">
-                Character data will populate as the story progresses.
-              </p>
+              <p className="text-sm text-[var(--muted-foreground)]">{localizeUi("ui.game.gamecharactersheet.characterDataWillPopulateAsTheStoryProgresses")}</p>
             </div>
           )}
         </div>

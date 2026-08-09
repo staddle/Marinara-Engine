@@ -1,8 +1,10 @@
 import {
   isClaudeAdaptiveOnlyNoSamplingModel,
   normalizeThinkingTagPairs,
+  resolveManagedGenerationParameters,
   resolveProviderReasoningEffort,
   type GenerationParameterSendMap,
+  type ManagedGenerationParameterDefinition,
   type ThinkingTagPair,
 } from "@marinara-engine/shared";
 
@@ -44,6 +46,7 @@ type GenerationProviderRuntimeArgs = {
   chatMode: string;
   isSceneChat: boolean;
   chatParameters: unknown;
+  managedParameterDefinitions: ManagedGenerationParameterDefinition[];
   modelAccessPolicy: Parameters<typeof mergeModelContextLimit>[0];
   initial: {
     temperature: number | undefined;
@@ -70,6 +73,7 @@ export type GenerationProviderRuntime = GenerationProviderRuntimeArgs["initial"]
   connectionParams: ReturnType<typeof parseStoredGenerationParameters>;
   chatParams: ReturnType<typeof parseStoredGenerationParameters>;
   resolvedEffort: "low" | "medium" | "high" | "xhigh" | "max" | null;
+  providerReasoningEffort: "none" | "low" | "medium" | "high" | "xhigh" | "max" | undefined;
   enableThinking: boolean;
   isClaudeNoSampling: boolean;
   providerTopK: number | undefined;
@@ -117,6 +121,14 @@ export function resolveGenerationProviderRuntime(args: GenerationProviderRuntime
   const isLocalGemma = (args.connection.model ?? "").toLowerCase().includes("gemma");
   applyParameterOverrides(connectionParams);
   applyParameterOverrides(chatParams);
+  runtime.customParameters = mergeCustomParameters(
+    runtime.customParameters,
+    resolveManagedGenerationParameters(
+      args.managedParameterDefinitions,
+      connectionParams?.managedCustomParameters,
+      chatParams?.managedCustomParameters,
+    ),
+  );
 
   if (args.isSceneChat) {
     runtime.maxTokens = 8192;
@@ -160,6 +172,12 @@ export function resolveGenerationProviderRuntime(args: GenerationProviderRuntime
   }
 
   const enableThinking = !!resolvedEffort;
+  const providerReasoningEffort =
+    runtime.enabledParameters?.reasoningEffort === false
+      ? undefined
+      : runtime.reasoningEffort === null
+        ? "none"
+        : (resolvedEffort ?? undefined);
   const isClaudeNoSampling = isClaudeAdaptiveOnlyNoSamplingModel(modelLower);
   if (isClaudeNoSampling) {
     runtime.temperature = undefined;
@@ -208,6 +226,7 @@ export function resolveGenerationProviderRuntime(args: GenerationProviderRuntime
     connectionParams,
     chatParams,
     resolvedEffort,
+    providerReasoningEffort,
     enableThinking,
     isClaudeNoSampling,
     providerTopK,

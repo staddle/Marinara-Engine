@@ -38,6 +38,7 @@ import {
 import { cn } from "../../lib/utils";
 import { useUIStore } from "../../stores/ui.store";
 import { MusicSourceButton } from "../music/MusicSourceButton";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 type SpotifyRepeatState = "off" | "track" | "context";
 
@@ -312,6 +313,7 @@ export function SpotifyMiniPlayer({
   mobile?: boolean;
   forceFloating?: boolean;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const qc = useQueryClient();
   const enabled = useUIStore((s) => s.musicPlayerEnabled && s.musicPlayerSource === "spotify");
   const openRightPanel = useUIStore((s) => s.openRightPanel);
@@ -564,10 +566,10 @@ export function SpotifyMiniPlayer({
     onError: (error, _action, context) => {
       if (context?.previous) qc.setQueryData(spotifyKeys.player, context.previous);
       if (isSpotifyRestrictionError(error)) {
-        toast.info("Spotify rejected that command on the current device. Open the Spotify app and try again.");
+        toast.info(localizeUi("ui.spotify.spotifyminiplayer.spotifyRejectedThatCommandOnTheCurrentDeviceOpen"));
         return;
       }
-      toast.error(error instanceof Error ? error.message : "Spotify control failed.");
+      toast.error(error instanceof Error ? error.message :localizeUi("ui.spotify.spotifyminiplayer.spotifyControlFailed"));
     },
   });
 
@@ -592,7 +594,7 @@ export function SpotifyMiniPlayer({
         toast.info(SPOTIFY_VOLUME_UNSUPPORTED_MESSAGE);
         return;
       }
-      toast.error(error instanceof Error ? error.message : "Spotify volume failed.");
+      toast.error(error instanceof Error ? error.message :localizeUi("ui.spotify.spotifyminiplayer.spotifyVolumeFailed"));
     },
   });
 
@@ -614,12 +616,12 @@ export function SpotifyMiniPlayer({
             className="h-14 w-14 shrink-0 rounded-lg object-contain"
             draggable={false}
           />
-          <p className="text-sm font-medium leading-snug">DJ Mari is composing a playlist for you, hold on tight!</p>
+          <p className="text-sm font-medium leading-snug">{localizeUi("ui.spotify.spotifyminiplayer.djMariIsComposingAPlaylistForYouHold")}</p>
           <button
             type="button"
             onClick={dismissDjMariToast}
             className="rounded-full p-1 text-foreground/45 transition-colors hover:bg-foreground/10 hover:text-foreground"
-            aria-label="Dismiss DJ Mari playlist toast"
+            aria-label={localizeUi("ui.spotify.spotifyminiplayer.dismissDjMariPlaylistToast")}
           >
             <X size="0.75rem" />
           </button>
@@ -627,7 +629,7 @@ export function SpotifyMiniPlayer({
       ),
       { duration: Infinity, position: "bottom-right" },
     );
-  }, [dismissDjMariToast]);
+  }, [dismissDjMariToast, localizeUi]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -652,23 +654,23 @@ export function SpotifyMiniPlayer({
     onSuccess: (result) => {
       dismissDjMariToast();
       invalidate();
-      toast.success("DJ Mari playlist is ready", {
-        description: `${result.name} - ${result.trackCount} tracks`,
+      toast.success(localizeUi("ui.spotify.spotifyminiplayer.djMariPlaylistIsReady"), {
+        description:localizeUi("ui.spotify.spotifyminiplayer.value1Value2Tracks", { value1: result.name, value2: result.trackCount }),
         duration: DJ_MARI_PLAYLIST_READY_TOAST_MS,
         action: result.playlistUrl
           ? {
-              label: "Open playlist",
+              label:localizeUi("ui.spotify.spotifyminiplayer.openPlaylist"),
               onClick: () => window.open(result.playlistUrl!, "_blank", "noopener,noreferrer"),
             }
           : undefined,
       });
       if (result.playbackStarted === false) {
-        toast.warning(result.playbackError ?? "Playlist created, but Spotify did not start playback.");
+        toast.warning(result.playbackError ??localizeUi("ui.spotify.spotifyminiplayer.playlistCreatedButSpotifyDidNotStartPlayback"));
       }
     },
     onError: (error) => {
       dismissDjMariToast();
-      toast.error(error instanceof Error ? error.message : "DJ Mari could not create the playlist.");
+      toast.error(error instanceof Error ? error.message :localizeUi("ui.spotify.spotifyminiplayer.djMariCouldNotCreateThePlaylist"));
     },
   });
 
@@ -697,7 +699,7 @@ export function SpotifyMiniPlayer({
     }
     if (!spotifyStreamingAvailable) {
       setSdkError("Reconnect Spotify to enable in-app playback.");
-      toast.info("Reconnect Spotify with the streaming scope to use Marinara as a Spotify player.");
+      toast.info(localizeUi("ui.spotify.spotifyminiplayer.reconnectSpotifyWithTheStreamingScopeToUseMarinara"));
       return;
     }
     setSdkError(null);
@@ -709,7 +711,7 @@ export function SpotifyMiniPlayer({
     runControl,
     sdkDeviceId,
     spotifyConnected,
-    spotifyStreamingAvailable,
+    spotifyStreamingAvailable, localizeUi,
   ]);
 
   const openSpotifyAgent = useCallback(() => {
@@ -907,7 +909,7 @@ export function SpotifyMiniPlayer({
           title={SPOTIFY_VOLUME_UNSUPPORTED_MESSAGE}
         >
           <Volume2 size="0.75rem" className="shrink-0" />
-          <span className="min-w-0 truncate text-[0.58rem] font-medium leading-tight">Use device volume</span>
+          <span className="min-w-0 truncate text-[0.58rem] font-medium leading-tight">{localizeUi("ui.spotify.spotifyminiplayer.useDeviceVolume")}</span>
         </button>
       );
     }
@@ -928,7 +930,7 @@ export function SpotifyMiniPlayer({
             MUSIC_PLAYER_ICON_CLASS,
             MUSIC_PLAYER_ICON_HOVER_CLASS,
           )}
-          title={volumeMuted ? "Restore volume" : "Mute"}
+          title={volumeMuted ?localizeUi("ui.spotify.spotifyminiplayer.restoreVolume") :localizeUi("ui.game.gamevolumemixer.mute")}
         >
           <VolumeIcon size="0.75rem" />
         </button>
@@ -944,11 +946,11 @@ export function SpotifyMiniPlayer({
           onBlur={commitVolume}
           className="mari-spotify-volume-slider w-full"
           style={spotifyVolumeStyle}
-          title="Volume"
+          title={localizeUi("game.toolbar.volume")}
         />
       </div>
     );
-  }, [VolumeIcon, commitVolume, spotifyVolumeStyle, toggleMute, volumeControlUnsupported, volumeDraft, volumeMuted]);
+  }, [VolumeIcon, commitVolume, spotifyVolumeStyle, toggleMute, volumeControlUnsupported, volumeDraft, volumeMuted, localizeUi]);
 
   const compactBody = useMemo(
     () => (
@@ -999,7 +1001,7 @@ export function SpotifyMiniPlayer({
               MUSIC_PLAYER_ICON_CLASS,
               MUSIC_PLAYER_ICON_HOVER_CLASS,
             )}
-            title="Previous"
+            title={localizeUi("ui.spotify.spotifyminiplayer.previous")}
           >
             <SkipBack size="0.8125rem" />
           </button>
@@ -1011,7 +1013,7 @@ export function SpotifyMiniPlayer({
               MUSIC_PLAYER_ACTION_BG_CLASS,
               MUSIC_PLAYER_ACTION_TEXT_CLASS,
             )}
-            title={player?.isPlaying ? "Pause" : "Play"}
+            title={player?.isPlaying ?localizeUi("ui.spotify.spotifyminiplayer.pause") :localizeUi("ui.spotify.spotifyminiplayer.play")}
           >
             {playPauseBusy ? (
               <Loader2 size="0.8125rem" className="animate-spin" />
@@ -1029,7 +1031,7 @@ export function SpotifyMiniPlayer({
               MUSIC_PLAYER_ICON_CLASS,
               MUSIC_PLAYER_ICON_HOVER_CLASS,
             )}
-            title="Next"
+            title={localizeUi("onboarding.actions.next")}
           >
             <SkipForward size="0.8125rem" />
           </button>
@@ -1056,10 +1058,10 @@ export function SpotifyMiniPlayer({
               MUSIC_PLAYER_ICON_CLASS,
               MUSIC_PLAYER_ICON_HOVER_CLASS,
             )}
-            title="DJ Mari composes a playlist for you!"
-            aria-label="DJ Mari composes a playlist for you!"
+            title={localizeUi("ui.spotify.spotifyminiplayer.djMariComposesAPlaylistForYou")}
+            aria-label={localizeUi("ui.spotify.spotifyminiplayer.djMariComposesAPlaylistForYou")}
           >
-            {createDjMariPlaylist.isPending ? <Loader2 size="0.8125rem" className="animate-spin" /> : "DJ"}
+            {createDjMariPlaylist.isPending ? <Loader2 size="0.8125rem" className="animate-spin" /> :localizeUi("ui.spotify.spotifyminiplayer.dj")}
           </button>
           {canUseMarinaraPlayer && (
             <button
@@ -1071,7 +1073,7 @@ export function SpotifyMiniPlayer({
                 MUSIC_PLAYER_ICON_CLASS,
                 MUSIC_PLAYER_ICON_HOVER_CLASS,
               )}
-              title={sdkDeviceId ? "Use Marinara player" : "Enable Marinara player"}
+              title={sdkDeviceId ?localizeUi("ui.spotify.spotifyminiplayer.useMarinaraPlayer") :localizeUi("ui.spotify.spotifyminiplayer.enableMarinaraPlayer")}
             >
               {browserPlaybackLoading ? (
                 <Loader2 size="0.8125rem" className="animate-spin" />
@@ -1088,7 +1090,7 @@ export function SpotifyMiniPlayer({
               MUSIC_PLAYER_ICON_CLASS,
               MUSIC_PLAYER_ICON_HOVER_CLASS,
             )}
-            title="Music DJ setup"
+            title={localizeUi("ui.spotify.spotifyminiplayer.musicDjSetup")}
           >
             <Settings size="0.8125rem" />
           </button>
@@ -1117,7 +1119,7 @@ export function SpotifyMiniPlayer({
       shuffleTitle,
       smartShuffleActive,
       subtitle,
-      title,
+      title, localizeUi,
     ],
   );
 
@@ -1169,7 +1171,7 @@ export function SpotifyMiniPlayer({
                   setCollapsed(true);
                 }}
                 className={cn("rounded-full p-1", MUSIC_PLAYER_ICON_CLASS, MUSIC_PLAYER_ICON_HOVER_CLASS)}
-                title="Close player"
+                title={localizeUi("ui.spotify.spotifyminiplayer.closePlayer")}
               >
                 <X size="0.875rem" />
               </button>

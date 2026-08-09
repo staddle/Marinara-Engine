@@ -8,6 +8,7 @@ import { useGameAssetFileInfo } from "../../hooks/use-game-assets";
 import { cn } from "../../lib/utils";
 import { formatBytes, formatDate } from "../../lib/format";
 import { gameAssetFileUrl } from "../../lib/game-asset-urls";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 /**
  * Full-screen image preview overlay with optional metadata side panel.
@@ -17,6 +18,7 @@ import { gameAssetFileUrl } from "../../lib/game-asset-urls";
  * @param onClose - Callback when modal should close
  */
 export function ImagePreviewModal({ node, onClose }: { node: TreeNode; onClose: () => void }) {
+  const { t: localizeUi } = useUiTranslation();
   const [showInfo, setShowInfo] = useState(false);
   const { data: info } = useGameAssetFileInfo(node.path);
 
@@ -32,7 +34,7 @@ export function ImagePreviewModal({ node, onClose }: { node: TreeNode; onClose: 
     <div
       role="dialog"
       aria-modal="true"
-      aria-label={`Image preview: ${node.name}`}
+      aria-label={localizeUi("ui.gameAssets.imagepreviewmodal.imagePreviewValue1", { value1: node.name })}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-3 pb-[max(env(safe-area-inset-bottom),0.75rem)] pt-[max(env(safe-area-inset-top),0.75rem)] backdrop-blur-sm sm:p-4"
       onClick={onClose}
     >
@@ -49,13 +51,13 @@ export function ImagePreviewModal({ node, onClose }: { node: TreeNode; onClose: 
           />
           <button
             type="button"
-            aria-label={showInfo ? "Hide file info" : "Show file info"}
+            aria-label={showInfo ?localizeUi("ui.gameAssets.imagepreviewmodal.hideFileInfo") :localizeUi("ui.gameAssets.imagepreviewmodal.showFileInfo")}
             onClick={(e) => {
               e.stopPropagation();
               setShowInfo(!showInfo);
             }}
             className="absolute right-2 top-2 rounded-full bg-black/50 p-1.5 text-white/80 backdrop-blur-sm transition-colors hover:bg-black/70 hover:text-white"
-            title="File info"
+            title={localizeUi("ui.gameAssets.imagepreviewmodal.fileInfo")}
           >
             <Info size="0.875rem" />
           </button>
@@ -66,19 +68,19 @@ export function ImagePreviewModal({ node, onClose }: { node: TreeNode; onClose: 
             className="ml-4 w-64 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--card)] p-4 shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <h4 className="mb-3 text-sm font-semibold text-[var(--foreground)]">File Info</h4>
+            <h4 className="mb-3 text-sm font-semibold text-[var(--foreground)]">{localizeUi("ui.gameAssets.imageinfopopover.fileInfo")}</h4>
             <div className="space-y-2 text-xs">
               <div className="flex justify-between">
-                <span className="text-[var(--muted-foreground)]">Name</span>
+                <span className="text-[var(--muted-foreground)]">{localizeUi("ui.characters.metadatatab.name")}</span>
                 <span className="text-right text-[var(--foreground)]">{info.name}</span>
               </div>
               <div className="flex justify-between">
-                <span className="text-[var(--muted-foreground)]">Size</span>
+                <span className="text-[var(--muted-foreground)]">{localizeUi("ui.gameAssets.assetgrid.size")}</span>
                 <span className="text-[var(--foreground)]">{formatBytes(info.size)}</span>
               </div>
               {info.width != null && info.height != null && (
                 <div className="flex justify-between">
-                  <span className="text-[var(--muted-foreground)]">Dimensions</span>
+                  <span className="text-[var(--muted-foreground)]">{localizeUi("ui.gameAssets.imageinfopopover.dimensions")}</span>
                   <span className="text-[var(--foreground)]">
                     {info.width} × {info.height}
                   </span>
@@ -86,12 +88,12 @@ export function ImagePreviewModal({ node, onClose }: { node: TreeNode; onClose: 
               )}
               {info.format && (
                 <div className="flex justify-between">
-                  <span className="text-[var(--muted-foreground)]">Format</span>
+                  <span className="text-[var(--muted-foreground)]">{localizeUi("ui.gameAssets.imageinfopopover.format")}</span>
                   <span className="uppercase text-[var(--foreground)]">{info.format}</span>
                 </div>
               )}
               <div className="flex justify-between">
-                <span className="text-[var(--muted-foreground)]">Modified</span>
+                <span className="text-[var(--muted-foreground)]">{localizeUi("ui.gameAssets.assetgrid.modified")}</span>
                 <span className="text-[var(--foreground)]">{formatDate(info.modified)}</span>
               </div>
             </div>

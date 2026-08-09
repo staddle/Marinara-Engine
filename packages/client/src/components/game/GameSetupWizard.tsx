@@ -1,7 +1,7 @@
 // ──────────────────────────────────────────────
 // Game: Setup Wizard (initial game setup modal)
 // ──────────────────────────────────────────────
-import { useState, useMemo, useCallback, useEffect, useRef, type ChangeEvent } from "react";
+import { lazy, Suspense, useState, useMemo, useCallback, useEffect, useRef, type ChangeEvent, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import { toast } from "sonner";
@@ -18,7 +18,6 @@ import {
   Plug,
   Image,
   Film,
-  PanelsTopLeft,
   BookOpen,
   Music2,
   Volume2,
@@ -29,17 +28,12 @@ import {
   FolderOpen,
   FileUp,
   CheckCircle2,
+  ChevronDown,
 } from "lucide-react";
 import {
   ANIME_GAME_PROMPT_TEMPLATE_ID,
   ANIME_GAME_SYSTEM_PROMPT,
-  COMIC_PAGE_GAME_VIDEO_PROMPT_TEMPLATE_ID,
   DEFAULT_GAME_SYSTEM_PROMPT,
-  STORYBOARD_OPTIMIZED_IMAGE_PROMPT_TEMPLATE_ID,
-  GAME_STORYBOARD_COMIC_ANIMATION_PROMPT_TEMPLATE_ID,
-  GAME_STORYBOARD_KEYFRAME_COUNT_DEFAULT,
-  GAME_STORYBOARD_KEYFRAME_COUNT_MAX,
-  GAME_STORYBOARD_KEYFRAME_COUNT_MIN,
   type CharacterGroup,
   type GameInitialSetupLabels,
   type GameSetupConfig,
@@ -53,7 +47,9 @@ import {
 } from "@marinara-engine/shared";
 import { getCharacterTitle } from "../../lib/character-display";
 import { api } from "../../lib/api-client";
-import { cn, getAvatarCropStyle, parseAvatarCropJson, type AvatarCropValue } from "../../lib/utils";
+import type { AvatarCrop } from "@marinara-engine/shared";
+import { normalizeAvatarCrop } from "@marinara-engine/shared";
+import { cn, getAvatarCropStyle } from "../../lib/utils";
 import {
   GenerationParametersFields,
   getEditableGenerationParameters,
@@ -83,30 +79,60 @@ import { useCapabilityAgentRegistry } from "../../hooks/use-capability-packages"
 import { useGameAssetStore } from "../../stores/game-asset.store";
 import { useUIStore } from "../../stores/ui.store";
 import { parseGameSetupShareFileJson, resolveGameSetupImport } from "../../lib/game-setup-share";
+import { useTranslation as useUiTranslation } from "react-i18next";
+import { CapabilityElement } from "../capabilities/CapabilityElement";
+
+const GameAssetsBrowserView = lazy(() =>
+  import("../game-assets/GameAssetsBrowserView").then((module) => ({ default: module.GameAssetsBrowserView })),
+);
+
+interface CapabilitySetupSelection {
+  kind: "template" | "shared-world";
+  id: string;
+  label: string;
+  payload: unknown;
+}
+
+function normalizeCapabilitySetupSelectionKind(
+  candidate: Record<string, unknown> | null,
+): CapabilitySetupSelection["kind"] | null {
+  if (candidate?.kind === "shared-world") return "shared-world";
+  if (candidate?.kind === undefined || candidate.kind === "template") return "template";
+  return null;
+}
 
 interface GameSetupWizardProps {
+  /** Optional block rendered with the other pre-start choices, used to offer installed game experiences. */
+  experiencesSlot?: ReactNode;
   onComplete: (
     config: GameSetupConfig,
     preferences: string,
     connections: { gmConnectionId?: string; shareLabels?: GameInitialSetupLabels },
     gameName?: string,
-    mapDraft?: {
-      size: SpatialMapDraftSize;
-      groundingMode: SpatialMapGroundingMode;
-      sourceLorebookIds: string[];
-      instructions?: string;
-    },
+    mapPlan?:
+      | { mode: "manual" }
+      | { mode: "template"; selection: CapabilitySetupSelection }
+      | { mode: "shared-world"; selection: CapabilitySetupSelection }
+      | {
+          mode: "ai";
+          size: SpatialMapDraftSize;
+          groundingMode: SpatialMapGroundingMode;
+          sourceLorebookIds: string[];
+          instructions?: string;
+        },
   ) => void;
   onCancel: () => void;
   isLoading: boolean;
   isDraftingMap: boolean;
+  isLinkingSharedWorld: boolean;
   characters: Array<{
     id: string;
     name: string;
     comment?: string | null;
     avatarUrl?: string | null;
-    avatarCrop?: AvatarCropValue | null;
+    avatarCrop?: AvatarCrop | null;
   }>;
+  initialPartyCharacterIds?: string[];
 }
 
 interface PersonaDisplayInfo {
@@ -130,7 +156,7 @@ function CharacterAvatar({
   character: {
     name: string;
     avatarUrl?: string | null;
-    avatarCrop?: AvatarCropValue | null;
+    avatarCrop?: AvatarCrop | null;
   };
   className?: string;
 }) {
@@ -314,6 +340,7 @@ function LearnedOptionChips({
   onForget?: (value: string) => void;
   selected?: (value: string) => boolean;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   if (options.length === 0) return null;
 
   const visible = expanded ? options : options.slice(0, LEARNED_OPTION_PREVIEW_LIMIT);
@@ -343,8 +370,8 @@ function LearnedOptionChips({
                   e.stopPropagation();
                   onForget(option);
                 }}
-                aria-label={`Forget ${option}`}
-                title="Forget this option"
+                aria-label={localizeUi("ui.game.learnedoptionchips.forgetValue1", { value1: option })}
+                title={localizeUi("ui.game.learnedoptionchips.forgetThisOption")}
                 className="ml-0.5 mr-1 inline-flex rounded-full p-0.5 opacity-40 transition-opacity hover:bg-[var(--destructive)]/20 hover:text-[var(--destructive)] hover:opacity-100 focus-visible:opacity-100 group-hover/learned:opacity-100"
               >
                 <X size={9} />
@@ -359,7 +386,7 @@ function LearnedOptionChips({
           onClick={onToggleExpanded}
           className="rounded-full border border-[var(--border)] bg-[var(--card)] px-2 py-0.5 text-[0.625rem] text-[var(--muted-foreground)] transition-colors hover:border-[var(--primary)]/40 hover:text-[var(--primary)]"
         >
-          {expanded ? "Show less" : `+${hiddenCount} more`}
+          {expanded ?localizeUi("ui.game.learnedoptionchips.showLess") :localizeUi("ui.game.learnedoptionchips.value1More", { value1: hiddenCount })}
         </button>
       )}
     </div>
@@ -405,12 +432,16 @@ function normalizeGameLanguage(language: string): string {
 }
 
 export function GameSetupWizard({
+  experiencesSlot,
   onComplete,
   onCancel,
   isLoading,
   isDraftingMap,
+  isLinkingSharedWorld,
   characters,
+  initialPartyCharacterIds = [],
 }: GameSetupWizardProps) {
+  const { t: localizeUi } = useUiTranslation();
   const prefersReducedMotion = useReducedMotion();
   const [step, setStep] = useState(0);
   const [generationElapsedSeconds, setGenerationElapsedSeconds] = useState(0);
@@ -424,7 +455,9 @@ export function GameSetupWizard({
   const [combatStyle, setCombatStyle] = useState<GameCombatStyle>("classic");
   const [gmMode, setGmMode] = useState<GameGmMode>("standalone");
   const [gmCharacterId, setGmCharacterId] = useState<string | null>(null);
-  const [partyCharacterIds, setPartyCharacterIds] = useState<string[]>([]);
+  const [partyCharacterIds, setPartyCharacterIds] = useState<string[]>(() =>
+    Array.from(new Set(initialPartyCharacterIds.filter((id) => characters.some((character) => character.id === id)))),
+  );
   const [playerGoals, setPlayerGoals] = useState(
     () => useUIStore.getState().rememberedGameSetupText?.playerGoals ?? "",
   );
@@ -443,6 +476,7 @@ export function GameSetupWizard({
   const [rating, setRating] = useState<"sfw" | "nsfw">("sfw");
   const [useLocalScene, setUseLocalScene] = useState(true);
   const [enableSpriteGeneration, setEnableSpriteGeneration] = useState(false);
+  const [enableAgents, setEnableAgents] = useState(false);
   const [enableSpotifyDj, setEnableSpotifyDj] = useState(false);
   const [gameSpotifySourceType, setGameSpotifySourceType] = useState<GameSpotifySourceType>("liked");
   const [gameSpotifyPlaylistId, setGameSpotifyPlaylistId] = useState("");
@@ -451,11 +485,6 @@ export function GameSetupWizard({
   const [enableLorebookKeeper, setEnableLorebookKeeper] = useState(false);
   const [imageConnectionId, setImageConnectionId] = useState<string | null>(null);
   const [videoConnectionId, setVideoConnectionId] = useState<string | null>(null);
-  const [enableStoryboardIllustrations, setEnableStoryboardIllustrations] = useState(true);
-  const [enableStoryboardAnimations, setEnableStoryboardAnimations] = useState(false);
-  const [storyboardKeyframeCount, setStoryboardKeyframeCount] = useState(
-    GAME_STORYBOARD_KEYFRAME_COUNT_DEFAULT,
-  );
   const [sceneConnectionId, setSceneConnectionId] = useState<string | null>(null);
   const [activeLorebookIds, setActiveLorebookIds] = useState<string[]>([]);
   const [lbSearch, setLbSearch] = useState("");
@@ -467,13 +496,18 @@ export function GameSetupWizard({
   const [gameSpecialInstructions, setGameSpecialInstructions] = useState("");
   const [promptPresetId, setPromptPresetId] = useState<string | null>(null);
   const [promptPresetTouched, setPromptPresetTouched] = useState(false);
+  const [gamePresentation, setGamePresentation] = useState<"standard" | "anime">("standard");
   const [customGamePromptEnabled, setCustomGamePromptEnabled] = useState(false);
   const [gameSystemPromptDraft, setGameSystemPromptDraft] = useState(DEFAULT_GAME_SYSTEM_PROMPT);
   const [gameSystemPromptEdited, setGameSystemPromptEdited] = useState(false);
-  const [gamePresentation, setGamePresentation] = useState<"standard" | "anime">("standard");
   const [language, setLanguage] = useState("English");
   const [startMuted, setStartMuted] = useState(false);
+  const [adjustGameAssetsOpen, setAdjustGameAssetsOpen] = useState(false);
   const [draftSpatialMap, setDraftSpatialMap] = useState(false);
+  const [manualSpatialMap, setManualSpatialMap] = useState(false);
+  const [templateSpatialMap, setTemplateSpatialMap] = useState(false);
+  const [spatialTemplatePickerOpen, setSpatialTemplatePickerOpen] = useState(false);
+  const [spatialTemplateSelection, setSpatialTemplateSelection] = useState<CapabilitySetupSelection | null>(null);
   const [spatialMapDraftSize, setSpatialMapDraftSize] = useState<SpatialMapDraftSize>("medium");
   const [spatialMapGroundingMode, setSpatialMapGroundingMode] = useState<SpatialMapGroundingMode>("setup");
   const [spatialMapInstructions, setSpatialMapInstructions] = useState("");
@@ -580,7 +614,6 @@ export function GameSetupWizard({
   const imageConnections = useMemo(() => connections.filter((c) => c.provider === "image_generation"), [connections]);
   const videoConnections = useMemo(() => connections.filter((c) => c.provider === "video_generation"), [connections]);
   const preferredImageConnectionId = useMemo(() => getPreferredConnectionId(imageConnections), [imageConnections]);
-  const preferredVideoConnectionId = useMemo(() => getPreferredConnectionId(videoConnections), [videoConnections]);
   const promptPresets = useMemo(
     () =>
       (promptPresetsList as Array<{
@@ -608,13 +641,16 @@ export function GameSetupWizard({
   );
   const personas = useMemo(
     () =>
-      (personasList as Array<{
+      ((personasList as Array<{
         id: string;
         name: string;
         avatarPath?: string | null;
-        avatarCrop?: string | null;
+        avatarCrop?: AvatarCrop | string | null;
         comment?: string;
-      }>) ?? [],
+      }>) ?? []).map((persona) => ({
+        ...persona,
+        avatarCrop: normalizeAvatarCrop(persona.avatarCrop),
+      })),
     [personasList],
   );
   const characterFolders = useMemo(
@@ -780,12 +816,6 @@ export function GameSetupWizard({
   }, [enableSpriteGeneration, imageConnectionId, preferredImageConnectionId]);
 
   useEffect(() => {
-    if (enableStoryboardAnimations && !videoConnectionId && preferredVideoConnectionId) {
-      setVideoConnectionId(preferredVideoConnectionId);
-    }
-  }, [enableStoryboardAnimations, preferredVideoConnectionId, videoConnectionId]);
-
-  useEffect(() => {
     if (!promptPresetTouched && !promptPresetId && defaultPreset?.id) {
       setPromptPresetId(defaultPreset.id);
     }
@@ -799,13 +829,17 @@ export function GameSetupWizard({
 
   useEffect(() => {
     if (installedAgentsLoading) return;
-    if (!hierarchicalMapsInstalled) setDraftSpatialMap(false);
+    if (!hierarchicalMapsInstalled) {
+      setDraftSpatialMap(false);
+      setManualSpatialMap(false);
+      setTemplateSpatialMap(false);
+      setSpatialTemplateSelection(null);
+      setSpatialTemplatePickerOpen(false);
+    }
     if (!musicDjInstalled) setEnableSpotifyDj(false);
     if (!lorebookKeeperInstalled) setEnableLorebookKeeper(false);
     if (!illustratorInstalled) {
       setEnableSpriteGeneration(false);
-      setEnableStoryboardIllustrations(false);
-      setEnableStoryboardAnimations(false);
     }
   }, [
     hierarchicalMapsInstalled,
@@ -815,6 +849,35 @@ export function GameSetupWizard({
     musicDjInstalled,
   ]);
 
+  const handleSpatialTemplateSelected = useCallback((selection: unknown) => {
+    const candidate = selection && typeof selection === "object" && !Array.isArray(selection)
+      ? (selection as Record<string, unknown>)
+      : null;
+    const kind = normalizeCapabilitySetupSelectionKind(candidate);
+    if (
+      !candidate ||
+      !kind ||
+      typeof candidate.id !== "string" ||
+      !candidate.id.trim() ||
+      typeof candidate.label !== "string" ||
+      !candidate.label.trim() ||
+      !("payload" in candidate)
+    ) {
+      toast.error(localizeUi("ui.game.gamesetupwizard.theSelectedSavedMapCouldNotBeRead"));
+      return;
+    }
+    setSpatialTemplateSelection({
+      kind,
+      id: candidate.id,
+      label: candidate.label,
+      payload: candidate.payload,
+    });
+    setTemplateSpatialMap(true);
+    setDraftSpatialMap(false);
+    setManualSpatialMap(false);
+    setSpatialTemplatePickerOpen(false);
+  }, [localizeUi]);
+
   const handlePromptPresetChange = useCallback((presetId: string | null) => {
     setPromptPresetTouched(true);
     setPromptPresetId(presetId);
@@ -822,11 +885,9 @@ export function GameSetupWizard({
 
   const canStart = !!gmConnectionId;
   const normalizedLanguage = normalizeGameLanguage(language);
-  const illustratorEnabled = illustratorInstalled && enableSpriteGeneration;
-  const musicDjEnabled = musicDjInstalled && enableSpotifyDj;
-  const lorebookKeeperEnabled = lorebookKeeperInstalled && enableLorebookKeeper;
-  const storyboardIllustrationsEnabled = illustratorEnabled && enableStoryboardIllustrations;
-  const storyboardAnimationsEnabled = storyboardIllustrationsEnabled && enableStoryboardAnimations && !!videoConnectionId;
+  const illustratorEnabled = enableAgents && illustratorInstalled && enableSpriteGeneration;
+  const musicDjEnabled = enableAgents && musicDjInstalled && enableSpotifyDj;
+  const lorebookKeeperEnabled = enableAgents && lorebookKeeperInstalled && enableLorebookKeeper;
 
   const openDownloadAgents = useCallback(() => {
     onCancel();
@@ -839,40 +900,6 @@ export function GameSetupWizard({
     setEnableSpriteGeneration(nextEnabled);
     if (nextEnabled && !imageConnectionId && preferredImageConnectionId) {
       setImageConnectionId(preferredImageConnectionId);
-    }
-    if (nextEnabled) {
-      setEnableStoryboardIllustrations(true);
-    }
-    if (!nextEnabled) {
-      setEnableStoryboardIllustrations(false);
-      setEnableStoryboardAnimations(false);
-    }
-  };
-
-  const toggleStoryboardIllustrations = () => {
-    const nextEnabled = !enableStoryboardIllustrations;
-    setEnableSpriteGeneration(true);
-    setEnableStoryboardIllustrations(nextEnabled);
-    if (nextEnabled && !imageConnectionId && preferredImageConnectionId) {
-      setImageConnectionId(preferredImageConnectionId);
-    }
-    if (!nextEnabled) {
-      setEnableStoryboardAnimations(false);
-    }
-  };
-
-  const toggleStoryboardAnimations = () => {
-    const nextEnabled = !enableStoryboardAnimations;
-    setEnableSpriteGeneration(true);
-    setEnableStoryboardIllustrations(true);
-    setEnableStoryboardAnimations(nextEnabled);
-    if (nextEnabled) {
-      if (!imageConnectionId && preferredImageConnectionId) {
-        setImageConnectionId(preferredImageConnectionId);
-      }
-      if (!videoConnectionId && preferredVideoConnectionId) {
-        setVideoConnectionId(preferredVideoConnectionId);
-      }
     }
   };
 
@@ -907,14 +934,12 @@ export function GameSetupWizard({
         .split(",")
         .map((value) => value.trim())
         .filter(Boolean);
-      const importedPresentation =
-        config.gameGmPromptTemplateId === ANIME_GAME_PROMPT_TEMPLATE_ID ? "anime" : "standard";
+      const importedStoryboardGamePrompt = config.gameGmPromptTemplateId === ANIME_GAME_PROMPT_TEMPLATE_ID;
       const importedPromptPreset = promptPresets.find((preset) => preset.id === config.promptPresetId) ?? null;
       const importedCustomPrompt = config.gameSystemPrompt?.trim() ?? "";
-      const importedBasePrompt =
-        importedPresentation === "anime"
-          ? ANIME_GAME_SYSTEM_PROMPT
-          : importedPromptPreset?.gamePrompt?.trim() || DEFAULT_GAME_SYSTEM_PROMPT;
+      const importedBasePrompt = importedStoryboardGamePrompt
+        ? ANIME_GAME_SYSTEM_PROMPT
+        : importedPromptPreset?.gamePrompt?.trim() || DEFAULT_GAME_SYSTEM_PROMPT;
       const importedWidgets = normalizeGameHudWidgets(config.customHudWidgets ?? []);
       const importedGenerationParameters = imported.effectiveGenerationParameters ?? config.generationParameters ?? null;
       const importedParameterOverrides = parseEditableGenerationParameters(importedGenerationParameters);
@@ -973,26 +998,17 @@ export function GameSetupWizard({
         config.enableSpriteGeneration === true ||
         config.gameStoryboardAutoIllustrationsEnabled === true ||
         config.gameStoryboardAutoGenerationEnabled === true;
+      setEnableAgents(
+        config.enableAgents === true ||
+          visualGenerationEnabled ||
+          config.enableSpotifyDj === true ||
+          config.enableLorebookKeeper === true ||
+          config.gameWorldMapMode === "hierarchical" ||
+          Boolean(config.spatialMapInstructions?.trim()),
+      );
       setEnableSpriteGeneration(visualGenerationEnabled);
       setImageConnectionId(config.imageConnectionId ?? null);
       setVideoConnectionId(config.videoConnectionId ?? null);
-      setEnableStoryboardIllustrations(
-        config.gameStoryboardAutoIllustrationsEnabled === true ||
-          config.gameStoryboardAutoGenerationEnabled === true,
-      );
-      setEnableStoryboardAnimations(config.gameStoryboardAutoGenerationEnabled === true);
-      setStoryboardKeyframeCount(
-        Math.min(
-          GAME_STORYBOARD_KEYFRAME_COUNT_MAX,
-          Math.max(
-            GAME_STORYBOARD_KEYFRAME_COUNT_MIN,
-            Number.isFinite(config.gameStoryboardKeyframeCount)
-              ? Math.round(config.gameStoryboardKeyframeCount!)
-              : GAME_STORYBOARD_KEYFRAME_COUNT_DEFAULT,
-          ),
-        ),
-      );
-      setGamePresentation(importedPresentation);
       setActiveLorebookIds(config.activeLorebookIds ?? []);
       setLbSearch("");
       setEnableCustomWidgets(config.enableCustomWidgets !== false);
@@ -1010,12 +1026,20 @@ export function GameSetupWizard({
       setEnableLorebookKeeper(config.enableLorebookKeeper === true);
       setPromptPresetTouched(true);
       setPromptPresetId(config.promptPresetId ?? null);
+      setGamePresentation(importedStoryboardGamePrompt ? "anime" : "standard");
       setCustomGamePromptEnabled(Boolean(importedCustomPrompt));
       setGameSystemPromptDraft(importedCustomPrompt || importedBasePrompt);
       setGameSystemPromptEdited(Boolean(importedCustomPrompt));
       setGameSpecialInstructions(config.gameSpecialInstructions?.trim() || "");
       const importedSpatialMapInstructions = config.spatialMapInstructions?.trim() || "";
-      setDraftSpatialMap(hierarchicalMapsInstalled && Boolean(importedSpatialMapInstructions));
+      setDraftSpatialMap(
+        hierarchicalMapsInstalled &&
+          (config.gameWorldMapMode === "hierarchical" || Boolean(importedSpatialMapInstructions)),
+      );
+      setManualSpatialMap(false);
+      setTemplateSpatialMap(false);
+      setSpatialTemplateSelection(null);
+      setSpatialTemplatePickerOpen(false);
       setSpatialMapDraftSize("medium");
       setSpatialMapGroundingMode("setup");
       setSpatialMapInstructions(importedSpatialMapInstructions);
@@ -1026,15 +1050,15 @@ export function GameSetupWizard({
           ? `${file.name} loaded. ${warningCount} local ${warningCount === 1 ? "selection needs" : "selections need"} review.`
           : `${file.name} loaded. Review the steps, then start the new game.`,
       );
-      toast.success("Game Mode setup imported.");
+      toast.success(localizeUi("ui.game.gamesetupwizard.gameModeSetupImported"));
       if (warningCount > 0) {
-        toast.warning("Some local selections could not be restored.", {
+        toast.warning(localizeUi("ui.game.gamesetupwizard.someLocalSelectionsCouldNotBeRestored"), {
           description: imported.warnings.join(" "),
         });
       }
     } catch (error) {
       setImportedSetupNotice(null);
-      toast.error(error instanceof Error ? error.message : "Could not import this Game Mode setup file.");
+      toast.error(error instanceof Error ? error.message :localizeUi("ui.game.gamesetupwizard.couldNotImportThisGameModeSetupFile"));
     }
   };
 
@@ -1076,7 +1100,13 @@ export function GameSetupWizard({
         difficulty,
         combatStyle,
         spatialMapInstructions:
-          hierarchicalMapsInstalled && draftSpatialMap ? spatialMapInstructions.trim() || undefined : undefined,
+          enableAgents && hierarchicalMapsInstalled && draftSpatialMap
+            ? spatialMapInstructions.trim() || undefined
+            : undefined,
+        gameWorldMapMode:
+          enableAgents && hierarchicalMapsInstalled && (draftSpatialMap || manualSpatialMap || templateSpatialMap)
+            ? "hierarchical"
+            : "standard",
         rating,
         gmMode,
         gmCharacterId: gmMode === "character" && gmCharacterId ? gmCharacterId : undefined,
@@ -1084,22 +1114,11 @@ export function GameSetupWizard({
         playerGoals: playerGoals || "Have an adventure",
         personaId: personaId ?? undefined,
         sceneConnectionId: sceneModelValue && sceneModelValue !== "local" ? sceneModelValue : undefined,
+        enableAgents: enableAgents || undefined,
         enableSpriteGeneration: illustratorEnabled || undefined,
         imageConnectionId: illustratorEnabled && imageConnectionId ? imageConnectionId : undefined,
         videoConnectionId: illustratorEnabled && videoConnectionId ? videoConnectionId : undefined,
         ...(importedArtStyleSettingsRef.current ?? {}),
-        gameStoryboardAutoIllustrationsEnabled: illustratorEnabled
-          ? enableStoryboardIllustrations
-          : undefined,
-        gameStoryboardAutoGenerationEnabled: storyboardAnimationsEnabled || undefined,
-        gameStoryboardKeyframeCount: illustratorEnabled ? storyboardKeyframeCount : undefined,
-        gameGmPromptTemplateId: gamePresentation === "anime" ? ANIME_GAME_PROMPT_TEMPLATE_ID : null,
-        gameStoryboardAnimationPromptTemplateId:
-          gamePresentation === "anime" ? GAME_STORYBOARD_COMIC_ANIMATION_PROMPT_TEMPLATE_ID : null,
-        gameStoryboardImagePromptTemplateId:
-          gamePresentation === "anime" ? STORYBOARD_OPTIMIZED_IMAGE_PROMPT_TEMPLATE_ID : null,
-        gameStoryboardVideoPromptTemplateId:
-          gamePresentation === "anime" ? COMIC_PAGE_GAME_VIDEO_PROMPT_TEMPLATE_ID : null,
         activeLorebookIds: activeLorebookIds.length > 0 ? activeLorebookIds : undefined,
         enableCustomWidgets,
         customHudWidgets:
@@ -1122,6 +1141,7 @@ export function GameSetupWizard({
           ? { ...(importedGenerationParametersRef.current ?? {}), ...generationParameters }
           : undefined,
         promptPresetId,
+        gameGmPromptTemplateId: gamePresentation === "anime" ? ANIME_GAME_PROMPT_TEMPLATE_ID : null,
         gameSystemPrompt: customGameSystemPrompt,
         gameSpecialInstructions: trimmedGameSpecialInstructions || null,
       },
@@ -1148,13 +1168,22 @@ export function GameSetupWizard({
         },
       },
       gameName.trim() || undefined,
-      hierarchicalMapsInstalled && draftSpatialMap
+      enableAgents && hierarchicalMapsInstalled && draftSpatialMap
         ? {
+            mode: "ai" as const,
             size: spatialMapDraftSize,
             groundingMode: spatialMapGroundingMode,
             sourceLorebookIds: spatialMapGroundingMode === "setup" ? [] : activeLorebookIds,
             instructions: spatialMapInstructions.trim() || undefined,
           }
+        : enableAgents && hierarchicalMapsInstalled && manualSpatialMap
+          ? { mode: "manual" as const }
+        : enableAgents && hierarchicalMapsInstalled && templateSpatialMap
+          ? spatialTemplateSelection
+            ? spatialTemplateSelection.kind === "shared-world"
+              ? { mode: "shared-world" as const, selection: spatialTemplateSelection }
+              : { mode: "template" as const, selection: spatialTemplateSelection }
+            : undefined
         : undefined,
     );
   };
@@ -1169,6 +1198,7 @@ export function GameSetupWizard({
         <AnimatePresence mode="wait">
           <motion.div
             key={currentStep.key}
+            data-component="GameSetupWizard"
             role="dialog"
             aria-modal="true"
             aria-labelledby="game-setup-wizard-title"
@@ -1176,18 +1206,16 @@ export function GameSetupWizard({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -12, scale: 0.97 }}
             transition={{ duration: 0.2, ease: "easeOut" }}
-            className={GAME_SETUP_WIZARD_PANEL_CLASS}
+            className={cn(GAME_SETUP_WIZARD_PANEL_CLASS, adjustGameAssetsOpen && "max-w-5xl")}
           >
             <div className={cn(NEUTRAL_PANEL_HEADER, "flex shrink-0 items-center justify-between")}>
-              <h3 id="game-setup-wizard-title" className={NEUTRAL_PANEL_TITLE}>
-                New Game
-              </h3>
+              <h3 id="game-setup-wizard-title" className={NEUTRAL_PANEL_TITLE}>{localizeUi("navigation.chatSidebar.new.game")}</h3>
               <button
                 type="button"
                 onClick={onCancel}
                 disabled={isLoading}
                 className="rounded-lg p-1.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-wait disabled:opacity-40"
-                aria-label="Close setup"
+                aria-label={localizeUi("ui.game.gamesetupwizard.closeSetup")}
               >
                 <X size="0.875rem" />
               </button>
@@ -1206,16 +1234,14 @@ export function GameSetupWizard({
                 accept=".json,application/json"
                 onChange={(event) => void handleImportSetupFile(event)}
                 className="sr-only"
-                aria-label="Import Game Mode setup file"
+                aria-label={localizeUi("ui.game.gamesetupwizard.importGameModeSetupFile")}
               />
               <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
                 <div className="flex min-w-0 flex-1 items-start gap-2.5">
                   <FileUp size={16} className="mt-0.5 shrink-0 text-[var(--primary)]" />
                   <div className="min-w-0">
-                    <p className="text-xs font-semibold text-[var(--foreground)]">Reuse a game setup</p>
-                    <p className="mt-0.5 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
-                      Import a setup downloaded from another campaign. You can review every step before starting.
-                    </p>
+                    <p className="text-xs font-semibold text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.reuseAGameSetup")}</p>
+                    <p className="mt-0.5 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.importASetupDownloadedFromAnotherCampaignYouCan")}</p>
                   </div>
                 </div>
                 <button
@@ -1225,7 +1251,7 @@ export function GameSetupWizard({
                   className="flex min-h-11 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 text-xs font-medium text-[var(--foreground)] transition-colors hover:bg-[var(--accent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]/40 disabled:cursor-wait disabled:opacity-50"
                 >
                   <FileUp size={13} />
-                  {setupImportResourcesReady ? "Import setup" : "Loading…"}
+                  {setupImportResourcesReady ?localizeUi("ui.game.gamesetupwizard.importSetup") :localizeUi("ui.panels.ttsconfigcard.loading")}
                 </button>
               </div>
               {importedSetupNotice && (
@@ -1240,48 +1266,45 @@ export function GameSetupWizard({
               )}
             </div>
 
+            {/* Absent when nothing provides an experience, leaving this step exactly as it was. */}
+            {experiencesSlot}
+
             <div>
-              <label className={GAME_SETUP_FIELD_LABEL}>Game Name</label>
+              <label className={GAME_SETUP_FIELD_LABEL}>{localizeUi("ui.game.gamesetupwizard.gameName")}</label>
               <input
                 type="text"
                 value={gameName}
                 onChange={(e) => setGameName(e.target.value)}
-                placeholder="Name your adventure..."
+                placeholder={localizeUi("ui.game.gamesetupwizard.nameYourAdventure")}
                 className={GAME_SETUP_INPUT_CLASS}
               />
             </div>
 
             <div>
               <label className={GAME_SETUP_FIELD_LABEL}>
-                <Plug size={12} className="mr-1 inline" />
-                Connection
-              </label>
+                <Plug size={12} className="mr-1 inline" />{localizeUi("ui.game.gamesetupwizard.connection")}</label>
               <select
                 value={gmConnectionId ?? ""}
                 onChange={(e) => setGmConnectionId(e.target.value || null)}
                 className={GAME_SETUP_INPUT_CLASS}
               >
-                <option value="">Select a connection...</option>
+                <option value="">{localizeUi("ui.game.gamesetupwizard.selectAConnection")}</option>
                 {connections.map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.name}
-                    {c.model ? ` - ${c.model}` : ""}
+                    {c.model ?localizeUi("ui.game.gamesetupwizard.value1", { value1: c.model }) : ""}
                   </option>
                 ))}
               </select>
-              <p className="mt-2 rounded-lg border border-[var(--primary)]/35 bg-[var(--primary)]/10 px-3 py-2 text-[0.6875rem] leading-relaxed text-[var(--primary)]">
-                Use a strong model for the initial world generation. You can change it later in Chat Settings.
-              </p>
+              <p className="mt-2 rounded-lg border border-[var(--primary)]/35 bg-[var(--primary)]/10 px-3 py-2 text-[0.6875rem] leading-relaxed text-[var(--primary)]">{localizeUi("ui.game.gamesetupwizard.useAStrongModelForTheInitialWorldGeneration")}</p>
               <div className="mt-3 rounded-lg border border-[var(--border)] bg-[var(--card)] p-3">
                 <button
                   onClick={() => setCustomizeParameters((prev) => !prev)}
                   className="flex w-full items-center justify-between gap-3 text-left"
                 >
                   <div>
-                    <span className="block text-xs font-medium text-[var(--foreground)]">Customize Parameters</span>
-                    <span className="block text-[0.575rem] text-[var(--muted-foreground)]">
-                      Leave this off to use the selected connection&apos;s saved defaults for the game.
-                    </span>
+                    <span className="block text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.customizeParameters")}</span>
+                    <span className="block text-[0.575rem] text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.leaveThisOffToUseTheSelectedConnectionS")}</span>
                   </div>
                   <div
                     className={cn(
@@ -1308,16 +1331,12 @@ export function GameSetupWizard({
                 )}
               </div>
               {connections.length === 0 && (
-                <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
-                  No connections configured. Add one in Settings - Connections.
-                </p>
+                <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.noConnectionsConfiguredAddOneInSettingsConnections")}</p>
               )}
             </div>
 
             <div>
-              <label className={GAME_SETUP_FIELD_LABEL}>
-                Scene Effects Connection
-                <span className="ml-1 text-[0.575rem] text-[var(--muted-foreground)]">(optional)</span>
+              <label className={GAME_SETUP_FIELD_LABEL}>{localizeUi("ui.game.gamesetupwizard.sceneEffectsConnection")}<span className="ml-1 text-[0.575rem] text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.optional")}</span>
               </label>
               <select
                 value={sceneModelValue ?? ""}
@@ -1333,18 +1352,16 @@ export function GameSetupWizard({
                 }}
                 className={GAME_SETUP_INPUT_CLASS}
               >
-                <option value="">Skip - use inline tags from GM</option>
-                {sidecarAvailable && <option value="local">Local Model (Gemma)</option>}
+                <option value="">{localizeUi("ui.game.gamesetupwizard.skipUseInlineTagsFromGm")}</option>
+                {sidecarAvailable && <option value="local">{localizeUi("ui.game.gamesetupwizard.localModelGemma")}</option>}
                 {connections.map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.name}
-                    {c.model ? ` - ${c.model}` : ""}
+                    {c.model ?localizeUi("ui.game.gamesetupwizard.value1", { value1: c.model }) : ""}
                   </option>
                 ))}
               </select>
-              <p className="mt-1 text-[0.575rem] text-[var(--muted-foreground)]">
-                Handles backgrounds, music, weather, and cinematic effects after each GM turn.
-              </p>
+              <p className="mt-1 text-[0.575rem] text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.handlesBackgroundsMusicWeatherAndCinematicEffectsAfterEach")}</p>
             </div>
           </>
         )}
@@ -1353,9 +1370,7 @@ export function GameSetupWizard({
           <>
             {/* Genre — multi-select */}
             <div>
-              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">
-                Genre ({genres.length} selected)
-              </label>
+              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.genre")}{genres.length} {localizeUi("ui.game.gamesetupwizard.selected")}</label>
               <div className="flex flex-wrap gap-1.5">
                 {GENRES.map((g) => (
                   <button
@@ -1399,7 +1414,7 @@ export function GameSetupWizard({
                   value={customGenre}
                   onChange={(e) => setCustomGenre(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && addCustomGenre()}
-                  placeholder="Add custom genre…"
+                  placeholder={localizeUi("ui.game.gamesetupwizard.addCustomGenre")}
                   className="flex-1 rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-xs text-[var(--foreground)] outline-none ring-1 ring-transparent transition-all placeholder:text-[var(--muted-foreground)] focus:ring-[var(--primary)]/40"
                 />
                 <button
@@ -1414,12 +1429,12 @@ export function GameSetupWizard({
 
             {/* Setting */}
             <div>
-              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">Setting</label>
+              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.setting")}</label>
               <input
                 type="text"
                 value={setting}
                 onChange={(e) => setSetting(e.target.value)}
-                placeholder="Describe your world…"
+                placeholder={localizeUi("ui.game.gamesetupwizard.describeYourWorld")}
                 className="w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--foreground)] outline-none ring-1 ring-transparent transition-all placeholder:text-[var(--muted-foreground)] focus:ring-[var(--primary)]/40"
               />
               <div className="mt-1.5 flex flex-wrap gap-1">
@@ -1445,9 +1460,7 @@ export function GameSetupWizard({
 
             {/* Tone — multi-select */}
             <div>
-              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">
-                Tone ({tones.length} selected)
-              </label>
+              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.tone")}{tones.length} {localizeUi("ui.game.gamesetupwizard.selected")}</label>
               <div className="flex flex-wrap gap-1.5">
                 {TONES.map((t) => (
                   <button
@@ -1491,7 +1504,7 @@ export function GameSetupWizard({
                   value={customTone}
                   onChange={(e) => setCustomTone(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && addCustomTone()}
-                  placeholder="Add custom tone…"
+                  placeholder={localizeUi("ui.game.gamesetupwizard.addCustomTone")}
                   className="flex-1 rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-xs text-[var(--foreground)] outline-none ring-1 ring-transparent transition-all placeholder:text-[var(--muted-foreground)] focus:ring-[var(--primary)]/40"
                 />
                 <button
@@ -1506,7 +1519,7 @@ export function GameSetupWizard({
 
             {/* Difficulty — single-select */}
             <div>
-              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">Difficulty</label>
+              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.difficulty")}</label>
               <div className="flex gap-1.5">
                 {DIFFICULTIES.map((d) => (
                   <button
@@ -1527,7 +1540,7 @@ export function GameSetupWizard({
 
             {/* Combat Preference — single-select */}
             <div>
-              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">Combat Preference</label>
+              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.combatPreference")}</label>
               <div className="flex gap-2">
                 <button
                   onClick={() => setCombatStyle("classic")}
@@ -1538,8 +1551,8 @@ export function GameSetupWizard({
                       : "bg-[var(--secondary)] ring-[var(--border)] hover:ring-[var(--primary)]/20",
                   )}
                 >
-                  <div className="font-medium text-[var(--foreground)]">Classic</div>
-                  <div className="mt-1 text-[var(--muted-foreground)]">Cinematic menu battles (current style)</div>
+                  <div className="font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.classic")}</div>
+                  <div className="mt-1 text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.cinematicMenuBattlesCurrentStyle")}</div>
                 </button>
                 <button
                   onClick={() => setCombatStyle("tactical")}
@@ -1550,17 +1563,15 @@ export function GameSetupWizard({
                       : "bg-[var(--secondary)] ring-[var(--border)] hover:ring-[var(--primary)]/20",
                   )}
                 >
-                  <div className="font-medium text-[var(--foreground)]">Tactical</div>
-                  <div className="mt-1 text-[var(--muted-foreground)]">
-                    Fire Emblem-style grid battles: movement, terrain, forecasts
-                  </div>
+                  <div className="font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.tactical")}</div>
+                  <div className="mt-1 text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.fireEmblemStyleGridBattlesMovementTerrainForecasts")}</div>
                 </button>
               </div>
             </div>
 
             {/* Content Rating */}
             <div>
-              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">Content Rating</label>
+              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.contentRating")}</label>
               <div className="flex gap-1.5">
                 <button
                   type="button"
@@ -1572,9 +1583,7 @@ export function GameSetupWizard({
                       ? "bg-[var(--primary)]/20 text-[var(--primary)] ring-1 ring-[var(--primary)]/40"
                       : "bg-[var(--secondary)] text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
                   )}
-                >
-                  SFW
-                </button>
+                >{localizeUi("ui.game.gamesetupwizard.sfw")}</button>
                 <button
                   type="button"
                   onClick={() => setRating("nsfw")}
@@ -1585,25 +1594,23 @@ export function GameSetupWizard({
                       ? "bg-[var(--primary)]/20 text-[var(--primary)] ring-1 ring-[var(--primary)]/40"
                       : "bg-[var(--secondary)] text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
                   )}
-                >
-                  NSFW
-                </button>
+                >{localizeUi("ui.game.gamesetupwizard.nsfw")}</button>
               </div>
               <p className="mt-1 text-[0.575rem] text-[var(--muted-foreground)]">
                 {rating === "nsfw"
-                  ? "Anything goes. Violence, dark themes, and explicit content are unrestricted."
-                  : "Dark themes and profanity allowed, but explicit scenes cut to black."}
+                  ?localizeUi("ui.game.gamesetupwizard.anythingGoesViolenceDarkThemesAndExplicitContentAre")
+                  :localizeUi("ui.game.gamesetupwizard.darkThemesAndProfanityAllowedButExplicitScenesCut")}
               </p>
             </div>
 
             {/* Language */}
             <div>
-              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">Language</label>
+              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">{localizeUi("settings.application.language.label")}</label>
               <input
                 type="text"
                 value={language}
                 onChange={(e) => setLanguage(e.target.value)}
-                placeholder="English"
+                placeholder={localizeUi("ui.game.gamesetupwizard.english")}
                 className="w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--foreground)] outline-none ring-1 ring-transparent transition-all placeholder:text-[var(--muted-foreground)] focus:ring-[var(--primary)]/40"
               />
               <div className="mt-1.5 flex flex-wrap gap-1">
@@ -1622,9 +1629,7 @@ export function GameSetupWizard({
                   </button>
                 ))}
               </div>
-              <p className="mt-1 text-[0.575rem] text-[var(--muted-foreground)]">
-                All narration and dialogue will be written in this language.
-              </p>
+              <p className="mt-1 text-[0.575rem] text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.allNarrationAndDialogueWillBeWrittenInThis")}</p>
             </div>
           </>
         )}
@@ -1633,7 +1638,7 @@ export function GameSetupWizard({
           <>
             {/* GM Mode */}
             <div>
-              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">Game Master Mode</label>
+              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.gameMasterMode")}</label>
               <div className="flex gap-2">
                 <button
                   onClick={() => setGmMode("standalone")}
@@ -1644,8 +1649,8 @@ export function GameSetupWizard({
                       : "bg-[var(--secondary)] ring-[var(--border)] hover:ring-[var(--primary)]/20",
                   )}
                 >
-                  <div className="font-medium text-[var(--foreground)]">Standalone GM</div>
-                  <div className="mt-1 text-[var(--muted-foreground)]">A snarky narrator running the show</div>
+                  <div className="font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.standaloneGm")}</div>
+                  <div className="mt-1 text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.aSnarkyNarratorRunningTheShow")}</div>
                 </button>
                 <button
                   onClick={() => setGmMode("character")}
@@ -1656,8 +1661,8 @@ export function GameSetupWizard({
                       : "bg-[var(--secondary)] ring-[var(--border)] hover:ring-[var(--primary)]/20",
                   )}
                 >
-                  <div className="font-medium text-[var(--foreground)]">Character GM</div>
-                  <div className="mt-1 text-[var(--muted-foreground)]">Use an existing character as GM</div>
+                  <div className="font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.characterGm")}</div>
+                  <div className="mt-1 text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.useAnExistingCharacterAsGm")}</div>
                 </button>
               </div>
             </div>
@@ -1665,7 +1670,7 @@ export function GameSetupWizard({
             {/* GM Character selector */}
             {gmMode === "character" && (
               <div>
-                <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">GM Character</label>
+                <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.gmCharacter")}</label>
                 {/* Selected GM */}
                 {gmCharacterId &&
                   (() => {
@@ -1678,7 +1683,7 @@ export function GameSetupWizard({
                         <button
                           onClick={() => setGmCharacterId(null)}
                           className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
-                          title="Remove"
+                          title={localizeUi("settings.notifications.customSound.actions.remove")}
                         >
                           <X size="0.6875rem" />
                         </button>
@@ -1692,7 +1697,7 @@ export function GameSetupWizard({
                     <input
                       value={gmSearch}
                       onChange={(e) => setGmSearch(e.target.value)}
-                      placeholder="Search characters…"
+                      placeholder={localizeUi("ui.game.gamesetupwizard.searchCharacters")}
                       className="flex-1 bg-transparent text-xs outline-none placeholder:text-[var(--muted-foreground)]"
                     />
                   </div>
@@ -1716,13 +1721,13 @@ export function GameSetupWizard({
                           )}
                         </div>
                         {c.id === gmCharacterId && (
-                          <span className="text-[0.625rem] text-[var(--primary)]">Selected</span>
+                          <span className="text-[0.625rem] text-[var(--primary)]">{localizeUi("ui.game.gamesetupwizard.selected_9a976fc")}</span>
                         )}
                       </button>
                     ))}
                     {filteredGmCharacters.length === 0 && (
                       <p className="px-3 py-2 text-[0.6875rem] text-[var(--muted-foreground)]">
-                        {characters.length === 0 ? "No characters found." : "No matches."}
+                        {characters.length === 0 ?localizeUi("ui.agents.regexscripteditor.noCharactersFound") :localizeUi("ui.lorebooks.linkedresourcepicker.noMatches")}
                       </p>
                     )}
                   </div>
@@ -1732,9 +1737,7 @@ export function GameSetupWizard({
 
             {/* Party Members */}
             <div>
-              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">
-                Party Members ({partyCharacterIds.length} selected)
-              </label>
+              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.partyMembers")}{partyCharacterIds.length} {localizeUi("ui.game.gamesetupwizard.selected")}</label>
               {/* Selected party members */}
               {partyCharacterIds.length > 0 && (
                 <div className="mb-2 flex flex-col gap-1">
@@ -1758,7 +1761,7 @@ export function GameSetupWizard({
                         <button
                           onClick={() => togglePartyMember(cid)}
                           className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
-                          title="Remove"
+                          title={localizeUi("settings.notifications.customSound.actions.remove")}
                         >
                           <X size="0.6875rem" />
                         </button>
@@ -1774,7 +1777,7 @@ export function GameSetupWizard({
                   <input
                     value={partySearch}
                     onChange={(e) => setPartySearch(e.target.value)}
-                    placeholder="Search characters…"
+                    placeholder={localizeUi("ui.game.gamesetupwizard.searchCharacters")}
                     className="flex-1 bg-transparent text-xs outline-none placeholder:text-[var(--muted-foreground)]"
                   />
                 </div>
@@ -1785,16 +1788,16 @@ export function GameSetupWizard({
                       value={partyFolderId}
                       onChange={(event) => setPartyFolderId(event.target.value)}
                       className="min-w-0 flex-1 bg-transparent text-xs text-[var(--foreground)] outline-none"
-                      aria-label="Add party members from folder"
+                      aria-label={localizeUi("ui.game.gamesetupwizard.addPartyMembersFromFolder")}
                     >
-                      <option value="">Add from Folder</option>
+                      <option value="">{localizeUi("ui.noodle.noodlehome.addFromFolder")}</option>
                       {characterFolders.map((folder) => {
                         const newCount = folder.characterIds.filter(
                           (id) => validCharacterIds.has(id) && id !== gmCharacterId && !partyCharacterIds.includes(id),
                         ).length;
                         return (
                           <option key={folder.id} value={folder.id}>
-                            {folder.name} ({newCount > 0 ? `${newCount} new` : "all added"})
+                            {folder.name} ({newCount > 0 ?localizeUi("ui.game.gamesetupwizard.value1New", { value1: newCount }) :localizeUi("ui.game.gamesetupwizard.allAdded")})
                           </option>
                         );
                       })}
@@ -1804,9 +1807,7 @@ export function GameSetupWizard({
                       onClick={() => addPartyMembersFromFolder(partyFolderId)}
                       disabled={!partyFolderId}
                       className="rounded-lg bg-[var(--primary)]/15 px-2.5 py-1 text-[0.625rem] font-medium text-[var(--primary)] transition-colors hover:bg-[var(--primary)]/25 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      Add
-                    </button>
+                    >{localizeUi("ui.characters.metadatatab.add")}</button>
                   </div>
                 )}
                 <div className="max-h-36 overflow-y-auto">
@@ -1831,7 +1832,7 @@ export function GameSetupWizard({
                           )}
                         </div>
                         {isSelected ? (
-                          <span className="text-[0.625rem] text-[var(--primary)]">Added</span>
+                          <span className="text-[0.625rem] text-[var(--primary)]">{localizeUi("ui.game.gamesetupwizard.added")}</span>
                         ) : (
                           <Plus size="0.75rem" className="text-[var(--muted-foreground)]" />
                         )}
@@ -1840,7 +1841,7 @@ export function GameSetupWizard({
                   })}
                   {filteredPartyCharacters.length === 0 && (
                     <p className="px-3 py-2 text-[0.6875rem] text-[var(--muted-foreground)]">
-                      {characters.length === 0 ? "No characters found. Create characters first." : "No matches."}
+                      {characters.length === 0 ?localizeUi("ui.game.gamesetupwizard.noCharactersFoundCreateCharactersFirst") :localizeUi("ui.lorebooks.linkedresourcepicker.noMatches")}
                     </p>
                   )}
                 </div>
@@ -1850,9 +1851,7 @@ export function GameSetupWizard({
             {/* Persona */}
             <div>
               <label className={GAME_SETUP_FIELD_LABEL}>
-                <User size={12} className="mr-1 inline" />
-                Player&apos;s Persona
-              </label>
+                <User size={12} className="mr-1 inline" />{localizeUi("ui.game.gamesetupwizard.playerSPersona")}</label>
               {personaId &&
                 (() => {
                   const p = personas.find((x) => x.id === personaId);
@@ -1864,7 +1863,7 @@ export function GameSetupWizard({
                         character={{
                           name: p.name,
                           avatarUrl: p.avatarPath ?? null,
-                          avatarCrop: parseAvatarCropJson(p.avatarCrop),
+                          avatarCrop: p.avatarCrop,
                         }}
                       />
                       <div className="min-w-0 flex-1">
@@ -1876,7 +1875,7 @@ export function GameSetupWizard({
                       <button
                         onClick={() => setPersonaId(null)}
                         className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
-                        title="Remove"
+                        title={localizeUi("settings.notifications.customSound.actions.remove")}
                       >
                         <X size="0.6875rem" />
                       </button>
@@ -1889,7 +1888,7 @@ export function GameSetupWizard({
                   <input
                     value={personaSearch}
                     onChange={(e) => setPersonaSearch(e.target.value)}
-                    placeholder="Search personas or titles..."
+                    placeholder={localizeUi("ui.game.gamesetupwizard.searchPersonasOrTitles")}
                     className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-[var(--muted-foreground)]"
                   />
                 </div>
@@ -1909,7 +1908,7 @@ export function GameSetupWizard({
                           character={{
                             name: p.name,
                             avatarUrl: p.avatarPath ?? null,
-                            avatarCrop: parseAvatarCropJson(p.avatarCrop),
+                            avatarCrop: p.avatarCrop,
                           }}
                         />
                         <div className="min-w-0 flex-1">
@@ -1920,13 +1919,13 @@ export function GameSetupWizard({
                             </span>
                           )}
                         </div>
-                        {p.id === personaId && <span className="text-[0.625rem] text-[var(--primary)]">Selected</span>}
+                        {p.id === personaId && <span className="text-[0.625rem] text-[var(--primary)]">{localizeUi("ui.game.gamesetupwizard.selected_9a976fc")}</span>}
                       </button>
                     );
                   })}
                   {filteredPersonas.length === 0 && (
                     <p className="px-3 py-2 text-[0.6875rem] text-[var(--muted-foreground)]">
-                      {personas.length === 0 ? "No personas found. Create one in the Personas panel." : "No matches."}
+                      {personas.length === 0 ?localizeUi("ui.game.gamesetupwizard.noPersonasFoundCreateOneInThePersonasPanel") :localizeUi("ui.lorebooks.linkedresourcepicker.noMatches")}
                     </p>
                   )}
                 </div>
@@ -1939,34 +1938,69 @@ export function GameSetupWizard({
           <>
             {/* Game Features */}
             <div>
-              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">Game Features</label>
+              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.gameFeatures")}</label>
               <div className="space-y-2">
                 {installedAgentsLoading ? (
                   <div className="flex items-center justify-center gap-2 rounded-lg border border-dashed border-[var(--border)] px-4 py-4 text-xs text-[var(--muted-foreground)]">
-                    <Loader2 size={13} className="animate-spin" />
-                    Loading installed agents…
-                  </div>
+                    <Loader2 size={13} className="animate-spin" />{localizeUi("ui.game.gamesetupwizard.loadingInstalledAgents")}</div>
                 ) : (
                   !hasInstalledAgents && (
                     <div className="rounded-lg border border-dashed border-[var(--border)] bg-[var(--secondary)]/35 px-4 py-4 text-center">
-                      <p className="text-xs font-medium text-[var(--foreground)]">No agents downloaded yet.</p>
-                      <p className="mx-auto mt-1 max-w-sm text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
-                        Download agents to add maps, Illustrator, Music DJ, Lorebook Keeper, and other optional game
-                        features.
-                      </p>
+                      <p className="text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.noAgentsDownloadedYet")}</p>
+                      <p className="mx-auto mt-1 max-w-sm text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.downloadAgentsToAddMapsIllustratorMusicDjLorebook")}</p>
                       <button
                         type="button"
                         onClick={openDownloadAgents}
                         className={cn(GAME_SETUP_PRIMARY_BUTTON_CLASS, "mx-auto mt-3 gap-2")}
                       >
-                        <Sparkles size={13} />
-                        Download Agents
-                      </button>
+                        <Sparkles size={13} />{localizeUi("ui.agents.agentcatalogview.downloadAgents")}</button>
                     </div>
                   )
                 )}
 
-                {musicDjInstalled && (
+                {!installedAgentsLoading && hasInstalledAgents && (
+                  <button
+                    type="button"
+                    onClick={() => setEnableAgents((enabled) => !enabled)}
+                    className={cn(
+                      "flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-left transition-all",
+                      enableAgents
+                        ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
+                        : "bg-[var(--secondary)] ring-1 ring-transparent hover:ring-[var(--border)]",
+                    )}
+                  >
+                    <span className="flex min-w-0 flex-1 items-center gap-2.5">
+                      <Sparkles
+                        size={14}
+                        className={enableAgents ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}
+                      />
+                      <span className="min-w-0">
+                        <span className="block text-xs font-medium text-[var(--foreground)]">
+                          {localizeUi("ui.chat.chatsettingsdrawer.enableAgents")}
+                        </span>
+                        <span className="block text-[0.575rem] text-[var(--muted-foreground)]">
+                          {localizeUi("ui.game.gamesetupwizard.enableAgentsDescription")}
+                        </span>
+                      </span>
+                    </span>
+                    <span
+                      aria-hidden="true"
+                      className={cn(
+                        "h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors",
+                        enableAgents ? "bg-[var(--primary)]" : "bg-[var(--muted-foreground)]/50",
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          "block h-4 w-4 rounded-full bg-white transition-transform",
+                          enableAgents && "translate-x-3.5",
+                        )}
+                      />
+                    </span>
+                  </button>
+                )}
+
+                {enableAgents && musicDjInstalled && (
                   <div>
                   <button
                     type="button"
@@ -1984,10 +2018,8 @@ export function GameSetupWizard({
                         className={enableSpotifyDj ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}
                       />
                       <div className="min-w-0">
-                        <span className="block text-xs font-medium text-[var(--foreground)]">Music DJ</span>
-                        <span className="block text-[0.575rem] text-[var(--muted-foreground)]">
-                          Use the Music DJ for this game instead of local music assets
-                        </span>
+                        <span className="block text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.musicDj")}</span>
+                        <span className="block text-[0.575rem] text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.useTheMusicDjForThisGameInsteadOf")}</span>
                       </div>
                     </div>
                     <div
@@ -2008,7 +2040,7 @@ export function GameSetupWizard({
                   {enableSpotifyDj && (
                     <div className="mt-2 space-y-2 rounded-lg bg-[var(--background)]/55 p-3 ring-1 ring-[var(--border)]">
                       <label className="flex flex-col gap-1">
-                        <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Music source</span>
+                        <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.musicSource")}</span>
                         <select
                           value={gameSpotifySourceType}
                           onChange={(event) => {
@@ -2038,7 +2070,7 @@ export function GameSetupWizard({
 
                       {gameSpotifySourceType === "playlist" && (
                         <label className="flex flex-col gap-1">
-                          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Playlist</span>
+                          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.playlist")}</span>
                           {spotifyPlaylistsQuery.data?.playlists.length ? (
                             <select
                               value={gameSpotifyPlaylistId}
@@ -2051,7 +2083,7 @@ export function GameSetupWizard({
                               }}
                               className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--foreground)]"
                             >
-                              <option value="">Choose playlist...</option>
+                              <option value="">{localizeUi("ui.game.gamesetupwizard.choosePlaylist")}</option>
                               {spotifyPlaylistsQuery.data.playlists.map((playlist) => {
                                 const suffix =
                                   typeof playlist.trackCount === "number"
@@ -2075,26 +2107,24 @@ export function GameSetupWizard({
                                 setGameSpotifyPlaylistName("");
                               }}
                               placeholder={
-                                spotifyPlaylistsQuery.isFetching ? "Loading playlists..." : "Paste playlist ID"
+                                spotifyPlaylistsQuery.isFetching ?localizeUi("ui.game.gamesetupwizard.loadingPlaylists") :localizeUi("ui.game.gamesetupwizard.pastePlaylistId")
                               }
                               className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]/50"
                             />
                           )}
                           {spotifyPlaylistsQuery.isError && (
-                            <span className="text-[0.5625rem] text-amber-400/90">
-                              Connect Spotify in the Music DJ agent to load playlist names.
-                            </span>
+                            <span className="text-[0.5625rem] text-[var(--primary)]">{localizeUi("ui.game.gamesetupwizard.connectSpotifyInTheMusicDjAgentToLoad")}</span>
                           )}
                         </label>
                       )}
 
                       {gameSpotifySourceType === "artist" && (
                         <label className="flex flex-col gap-1">
-                          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Artist</span>
+                          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.artist")}</span>
                           <input
                             value={gameSpotifyArtist}
                             onChange={(event) => setGameSpotifyArtist(event.target.value)}
-                            placeholder="HOYO-MiX"
+                            placeholder={localizeUi("ui.game.gamesetupwizard.hoyoMix")}
                             className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]/50"
                           />
                         </label>
@@ -2104,7 +2134,7 @@ export function GameSetupWizard({
                   </div>
                 )}
 
-                {lorebookKeeperInstalled && (
+                {enableAgents && lorebookKeeperInstalled && (
                   <button
                     type="button"
                     onClick={() => setEnableLorebookKeeper((prev) => !prev)}
@@ -2121,10 +2151,8 @@ export function GameSetupWizard({
                       className={enableLorebookKeeper ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}
                     />
                     <div className="min-w-0">
-                      <span className="block text-xs font-medium text-[var(--foreground)]">Lorebook Keeper</span>
-                      <span className="block text-[0.575rem] text-[var(--muted-foreground)]">
-                        Keep a game lorebook updated as the adventure develops
-                      </span>
+                      <span className="block text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.lorebookKeeper")}</span>
+                      <span className="block text-[0.575rem] text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.keepAGameLorebookUpdatedAsTheAdventureDevelops")}</span>
                     </div>
                   </div>
                   <div
@@ -2143,7 +2171,7 @@ export function GameSetupWizard({
                   </button>
                 )}
 
-                {illustratorInstalled && (
+                {enableAgents && illustratorInstalled && (
                   <div>
                   <button
                     type="button"
@@ -2160,10 +2188,8 @@ export function GameSetupWizard({
                       className={enableSpriteGeneration ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}
                     />
                     <div className="flex-1">
-                      <span className="block text-xs font-medium text-[var(--foreground)]">Illustrator</span>
-                      <span className="block text-[0.575rem] text-[var(--muted-foreground)]">
-                        Generate NPC portraits, location backgrounds, scene images, and optional storyboards
-                      </span>
+                      <span className="block text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.illustrator")}</span>
+                      <span className="block text-[0.575rem] text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.generateNpcPortraitsLocationBackgroundsSceneImagesAndOptional")}</span>
                     </div>
                     <div
                       className={cn(
@@ -2183,174 +2209,44 @@ export function GameSetupWizard({
                   {/* Image Connection Picker — shown when sprite gen is enabled */}
                   {enableSpriteGeneration && (
                     <div className="mt-2">
-                      <label className="mb-1 block text-[0.625rem] font-medium text-[var(--muted-foreground)]">
-                        Image Generation Connection
-                      </label>
+                      <label className="mb-1 block text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.agents.agenteditor.imageGenerationConnection")}</label>
                       <select
                         value={imageConnectionId ?? ""}
                         onChange={(e) => setImageConnectionId(e.target.value || null)}
                         className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--foreground)]"
                       >
-                        <option value="">Select image connection…</option>
+                        <option value="">{localizeUi("ui.game.gamesetupwizard.selectImageConnection")}</option>
                         {imageConnections.map((c) => (
                           <option key={c.id} value={c.id}>
                             {c.name}
-                            {c.model ? ` — ${c.model}` : ""}
+                            {c.model ?localizeUi("ui.game.gamesetupwizard.value1_4cb807e", { value1: c.model }) : ""}
                           </option>
                         ))}
                       </select>
                       {imageConnections.length === 0 && (
-                        <p className="mt-1 text-[0.55rem] text-amber-700 dark:text-amber-400/80">
-                          No image generation connections found. Add one in Settings → Connections.
-                        </p>
+                        <p className="mt-1 text-[0.55rem] text-amber-700 dark:text-amber-400/80">{localizeUi("ui.game.gamesetupwizard.noImageGenerationConnectionsFoundAddOneInSettings")}</p>
                       )}
-                      <p className="mt-1 text-[0.55rem] text-[var(--muted-foreground)]">
-                        Powers automatic portraits, backgrounds, scene illustrations, and storyboard keyframes.
-                      </p>
-                      <div className="mt-3 space-y-2 border-t border-[var(--border)] pt-3">
-                        <div className="flex items-start gap-2">
-                          <PanelsTopLeft size={12} className="mt-0.5 shrink-0 text-[var(--muted-foreground)]" />
-                          <div className="min-w-0">
-                            <p className="text-[0.625rem] font-medium text-[var(--foreground)]">Storyboards</p>
-                            <p className="text-[0.55rem] leading-relaxed text-[var(--muted-foreground)]">
-                              Attach keyframes to GM narration so the floating viewer changes with the current story
-                              section.
-                            </p>
-                            <p className="mt-1 text-[0.55rem] leading-relaxed text-[var(--muted-foreground)]">
-                              Recommended: use a strong state-of-the-art image model for storyboard images, or
-                              something equivalent to Google Nano Banana 2 Lite.
-                            </p>
-                          </div>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={toggleStoryboardIllustrations}
-                          className={cn(
-                            "flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-left transition-all",
-                            enableStoryboardIllustrations
-                              ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
-                              : "bg-[var(--background)]/70 ring-1 ring-[var(--border)] hover:bg-[var(--accent)]",
-                          )}
-                        >
-                          <span className="min-w-0 flex-1">
-                            <span className="block text-[0.6875rem] font-medium text-[var(--foreground)]">
-                              Automatic Storyboard Illustrations
-                            </span>
-                            <span className="block text-[0.575rem] text-[var(--muted-foreground)]">
-                              Low-cost manga keyframe images after completed GM turns
-                            </span>
-                          </span>
-                          <span
-                            className={cn(
-                              "h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors",
-                              enableStoryboardIllustrations
-                                ? "bg-[var(--primary)]"
-                                : "bg-[var(--muted-foreground)]/50",
-                            )}
-                          >
-                            <span
-                              className={cn(
-                                "block h-4 w-4 rounded-full bg-white transition-transform",
-                                enableStoryboardIllustrations && "translate-x-3.5",
-                              )}
-                            />
-                          </span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={toggleStoryboardAnimations}
-                          className={cn(
-                            "flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-left transition-all",
-                            enableStoryboardAnimations
-                              ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
-                              : "bg-[var(--background)]/70 ring-1 ring-[var(--border)] hover:bg-[var(--accent)]",
-                          )}
-                        >
-                          <span className="min-w-0 flex-1">
-                            <span className="block text-[0.6875rem] font-medium text-[var(--foreground)]">
-                              Automatic Storyboard Animations
-                            </span>
-                            <span className="block text-[0.575rem] text-[var(--muted-foreground)]">
-                              Adds video clips to every storyboard keyframe
-                            </span>
-                          </span>
-                          <span
-                            className={cn(
-                              "h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors",
-                              enableStoryboardAnimations ? "bg-[var(--primary)]" : "bg-[var(--muted-foreground)]/50",
-                            )}
-                          >
-                            <span
-                              className={cn(
-                                "block h-4 w-4 rounded-full bg-white transition-transform",
-                                enableStoryboardAnimations && "translate-x-3.5",
-                              )}
-                            />
-                          </span>
-                        </button>
-                        {enableStoryboardIllustrations && (
-                          <label className="block rounded-lg bg-[var(--background)]/70 px-3 py-2 ring-1 ring-[var(--border)]">
-                            <span className="flex items-center justify-between gap-3">
-                              <span>
-                                <span className="block text-[0.6875rem] font-medium text-[var(--foreground)]">
-                                  Keyframes per Turn
-                                </span>
-                                <span className="block text-[0.575rem] text-[var(--muted-foreground)]">
-                                  Target storyboard shots. Short turns may produce fewer.
-                                </span>
-                              </span>
-                              <span className="min-w-7 rounded-md bg-[var(--secondary)] px-2 py-1 text-center text-xs font-semibold text-[var(--foreground)] ring-1 ring-[var(--border)]">
-                                {storyboardKeyframeCount}
-                              </span>
-                            </span>
-                            <input
-                              type="range"
-                              min={GAME_STORYBOARD_KEYFRAME_COUNT_MIN}
-                              max={GAME_STORYBOARD_KEYFRAME_COUNT_MAX}
-                              step={1}
-                              value={storyboardKeyframeCount}
-                              onChange={(event) => setStoryboardKeyframeCount(Number(event.target.value))}
-                              className="mt-2 w-full accent-[var(--primary)]"
-                              aria-label="Keyframes per Turn"
-                            />
-                          </label>
-                        )}
-                        <p className="text-[0.55rem] leading-relaxed text-[var(--muted-foreground)]">
-                          Illustrations use the image connection. Animations also need the video connection below and
-                          cost much more per turn.
-                        </p>
-                        {enableStoryboardAnimations && !videoConnectionId && (
-                          <p className="text-[0.55rem] leading-relaxed text-amber-700 dark:text-amber-400/80">
-                            Choose a Video Generation connection below to save automatic storyboard animations.
-                          </p>
-                        )}
-                      </div>
+                      <p className="mt-1 text-[0.55rem] text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.powersAutomaticPortraitsBackgroundsAndSceneIllustrations")}</p>
                       <div className="mt-3 border-t border-[var(--border)] pt-3">
                         <label className="mb-1 flex items-center gap-1 text-[0.625rem] font-medium text-[var(--muted-foreground)]">
-                          <Film size={11} />
-                          Video Generation Connection
-                        </label>
+                          <Film size={11} />{localizeUi("ui.game.gamesetupwizard.videoGenerationConnection")}</label>
                         <select
                           value={videoConnectionId ?? ""}
                           onChange={(e) => setVideoConnectionId(e.target.value || null)}
                           className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1.5 text-xs text-[var(--foreground)]"
                         >
-                          <option value="">No scene video connection</option>
+                          <option value="">{localizeUi("ui.game.gamesetupwizard.noSceneVideoConnection")}</option>
                           {videoConnections.map((c) => (
                             <option key={c.id} value={c.id}>
                               {c.name}
-                              {c.model ? ` - ${c.model}` : ""}
+                              {c.model ?localizeUi("ui.game.gamesetupwizard.value1", { value1: c.model }) : ""}
                             </option>
                           ))}
                         </select>
                         {videoConnections.length === 0 && (
-                          <p className="mt-1 text-[0.55rem] text-amber-700 dark:text-amber-400/80">
-                            No video generation connections found. Add one in Settings -&gt; Connections.
-                          </p>
+                          <p className="mt-1 text-[0.55rem] text-amber-700 dark:text-amber-400/80">{localizeUi("ui.game.gamesetupwizard.noVideoGenerationConnectionsFoundAddOneInSettings")}</p>
                         )}
-                        <p className="mt-1 text-[0.55rem] text-[var(--muted-foreground)]">
-                          Used for manual scene videos and storyboard animations.
-                        </p>
+                        <p className="mt-1 text-[0.55rem] text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.usedForManualSceneVideos")}</p>
                       </div>
                     </div>
                   )}
@@ -2375,10 +2271,8 @@ export function GameSetupWizard({
                     className={enableCustomWidgets ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}
                   />
                   <div>
-                    <p className="text-xs font-medium text-[var(--foreground)]">Custom HUD Widgets</p>
-                    <p className="text-[0.55rem] text-[var(--muted-foreground)]">
-                      Model designs custom widgets (health bars, inventories, etc.) for the game HUD
-                    </p>
+                    <p className="text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.customHudWidgets")}</p>
+                    <p className="text-[0.55rem] text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.modelDesignsCustomWidgetsHealthBarsInventoriesEtcFor")}</p>
                   </div>
                 </div>
                 <div
@@ -2419,10 +2313,8 @@ export function GameSetupWizard({
                     )}
                   >
                     <div>
-                      <p className="text-xs font-medium text-[var(--foreground)]">Build Widget Setup</p>
-                      <p className="text-[0.55rem] text-[var(--muted-foreground)]">
-                        Choose the starting HUD widgets yourself.
-                      </p>
+                      <p className="text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.buildWidgetSetup")}</p>
+                      <p className="text-[0.55rem] text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.chooseTheStartingHudWidgetsYourself")}</p>
                     </div>
                     <div
                       className={cn(
@@ -2452,11 +2344,11 @@ export function GameSetupWizard({
           <>
             {/* Player Goals */}
             <div>
-              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">Player Goals</label>
+              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.playerGoals")}</label>
               <textarea
                 value={playerGoals}
                 onChange={(e) => setPlayerGoals(e.target.value)}
-                placeholder="What do you want to achieve?"
+                placeholder={localizeUi("ui.game.gamesetupwizard.whatDoYouWantToAchieve")}
                 rows={3}
                 className="w-full resize-none rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--foreground)] outline-none ring-1 ring-transparent transition-all placeholder:text-[var(--muted-foreground)] focus:ring-[var(--primary)]/40"
               />
@@ -2483,13 +2375,11 @@ export function GameSetupWizard({
 
             {/* Preferences */}
             <div>
-              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">
-                Additional Preferences
-              </label>
+              <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.additionalPreferencesOptional")}</label>
               <textarea
                 value={preferences}
                 onChange={(e) => setPreferences(e.target.value)}
-                placeholder="Any extra details for the GM?"
+                placeholder={localizeUi("ui.game.gamesetupwizard.anyExtraDetailsForTheGm")}
                 rows={3}
                 className="w-full resize-none rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--foreground)] outline-none ring-1 ring-transparent transition-all placeholder:text-[var(--muted-foreground)] focus:ring-[var(--primary)]/40"
               />
@@ -2520,12 +2410,8 @@ export function GameSetupWizard({
             {/* Lorebooks */}
             <div>
               <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">
-                <BookOpen size={12} className="mr-1 inline" />
-                Lorebooks
-              </label>
-              <p className="mb-2 text-[0.55rem] text-[var(--muted-foreground)]">
-                Attach lorebooks to inject world lore, character info, and other context into game generations.
-              </p>
+                <BookOpen size={12} className="mr-1 inline" />{localizeUi("navigation.topbar.lorebooks")}</label>
+              <p className="mb-2 text-[0.55rem] text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.attachLorebooksToInjectWorldLoreCharacterInfoAnd")}</p>
 
               {/* Active lorebooks */}
               {activeLorebookIds.length > 0 && (
@@ -2543,7 +2429,7 @@ export function GameSetupWizard({
                         <button
                           onClick={() => toggleLorebook(lb.id)}
                           className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
-                          title="Remove"
+                          title={localizeUi("settings.notifications.customSound.actions.remove")}
                         >
                           <X size={11} />
                         </button>
@@ -2560,7 +2446,7 @@ export function GameSetupWizard({
                   <input
                     value={lbSearch}
                     onChange={(e) => setLbSearch(e.target.value)}
-                    placeholder="Search lorebooks…"
+                    placeholder={localizeUi("ui.game.gamesetupwizard.searchLorebooks")}
                     className="flex-1 bg-transparent text-xs outline-none placeholder:text-[var(--muted-foreground)]"
                   />
                 </div>
@@ -2579,24 +2465,29 @@ export function GameSetupWizard({
                   {availableLorebooks.length === 0 && (
                     <p className="px-3 py-2 text-[0.625rem] text-[var(--muted-foreground)]">
                       {lorebooks.filter((lb) => !activeLorebookIds.includes(lb.id)).length === 0
-                        ? "All lorebooks already added."
-                        : "No matches."}
+                        ?localizeUi("ui.game.gamesetupwizard.allLorebooksAlreadyAdded")
+                        :localizeUi("ui.lorebooks.linkedresourcepicker.noMatches")}
                     </p>
                   )}
                 </div>
               </div>
             </div>
+          </>
+        )}
 
-            {hierarchicalMapsInstalled && (
+        {step === 5 && enableAgents && hierarchicalMapsInstalled && (
               <div>
                 <label className="mb-1.5 block text-xs font-medium text-[var(--foreground)]">
-                  <MapIcon size={12} className="mr-1 inline" />
-                  Hierarchical world map
-                </label>
+                  <MapIcon size={12} className="mr-1 inline" />{localizeUi("ui.game.gamesetupwizard.hierarchicalWorldMap")}</label>
                 <button
                 type="button"
                 aria-pressed={draftSpatialMap}
-                onClick={() => setDraftSpatialMap((enabled) => !enabled)}
+                onClick={() => {
+                  setDraftSpatialMap((enabled) => !enabled);
+                  setManualSpatialMap(false);
+                  setTemplateSpatialMap(false);
+                  setSpatialTemplateSelection(null);
+                }}
                 className={cn(
                   "flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-left transition-all",
                   draftSpatialMap
@@ -2610,10 +2501,8 @@ export function GameSetupWizard({
                     className={draftSpatialMap ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}
                   />
                   <span className="min-w-0">
-                    <span className="block text-xs font-medium text-[var(--foreground)]">Draft with AI</span>
-                    <span className="block text-[0.575rem] leading-relaxed text-[var(--muted-foreground)]">
-                      After setup, AI builds nested regions and places for you to review.
-                    </span>
+                    <span className="block text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.draftWithAi")}</span>
+                    <span className="block text-[0.575rem] leading-relaxed text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.afterSetupAiBuildsNestedRegionsAndPlacesFor")}</span>
                   </span>
                 </span>
                 <span
@@ -2632,31 +2521,123 @@ export function GameSetupWizard({
                 </span>
                 </button>
 
+                <button
+                  type="button"
+                  aria-pressed={manualSpatialMap}
+                  onClick={() => {
+                    setManualSpatialMap((enabled) => !enabled);
+                    setDraftSpatialMap(false);
+                    setTemplateSpatialMap(false);
+                    setSpatialTemplateSelection(null);
+                  }}
+                  className={cn(
+                    "mt-2 flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-left transition-all",
+                    manualSpatialMap
+                      ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
+                      : "bg-[var(--secondary)] ring-1 ring-transparent hover:ring-[var(--border)]",
+                  )}
+                >
+                  <span className="flex min-w-0 flex-1 items-center gap-2.5">
+                    <Plus
+                      size={14}
+                      className={manualSpatialMap ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}
+                    />
+                    <span className="min-w-0">
+                      <span className="block text-xs font-medium text-[var(--foreground)]">
+                        {localizeUi("ui.game.gamesetupwizard.createManually")}
+                      </span>
+                      <span className="block text-[0.575rem] leading-relaxed text-[var(--muted-foreground)]">
+                        {localizeUi("ui.game.gamesetupwizard.openTheBlankMapDesignerAfterSetupWithoutGeneratingAMap")}
+                      </span>
+                    </span>
+                  </span>
+                  <span
+                    aria-hidden="true"
+                    className={cn(
+                      "h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors",
+                      manualSpatialMap ? "bg-[var(--primary)]" : "bg-[var(--muted-foreground)]/50",
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "block h-4 w-4 rounded-full bg-white transition-transform",
+                        manualSpatialMap && "translate-x-3.5",
+                      )}
+                    />
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  aria-pressed={templateSpatialMap}
+                  onClick={() => {
+                    setSpatialTemplatePickerOpen(true);
+                  }}
+                  className={cn(
+                    "mt-2 flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-left transition-all",
+                    templateSpatialMap
+                      ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
+                      : "bg-[var(--secondary)] ring-1 ring-transparent hover:ring-[var(--border)]",
+                  )}
+                >
+                  <span className="flex min-w-0 flex-1 items-center gap-2.5">
+                    <FolderOpen
+                      size={14}
+                      className={templateSpatialMap ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}
+                    />
+                    <span className="min-w-0">
+                      <span className="block text-xs font-medium text-[var(--foreground)]">
+                        {localizeUi("ui.game.gamesetupwizard.useATemplateOrSharedWorld")}
+                      </span>
+                      <span className="block text-[0.575rem] leading-relaxed text-[var(--muted-foreground)]">
+                        {spatialTemplateSelection
+                          ? localizeUi(
+                              spatialTemplateSelection.kind === "shared-world"
+                                ? "ui.game.gamesetupwizard.selectedSharedWorldValue1"
+                                : "ui.game.gamesetupwizard.selectedMapTemplateValue1",
+                              { value1: spatialTemplateSelection.label },
+                            )
+                          : localizeUi("ui.game.gamesetupwizard.chooseASavedMapTemplateOrSharedWorld")}
+                      </span>
+                    </span>
+                  </span>
+                  <span
+                    aria-hidden="true"
+                    className={cn(
+                      "h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors",
+                      templateSpatialMap ? "bg-[var(--primary)]" : "bg-[var(--muted-foreground)]/50",
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "block h-4 w-4 rounded-full bg-white transition-transform",
+                        templateSpatialMap && "translate-x-3.5",
+                      )}
+                    />
+                  </span>
+                </button>
+
                 {draftSpatialMap && (
                   <div className="mt-2 space-y-3 rounded-lg bg-[var(--background)]/55 p-3 ring-1 ring-[var(--border)]">
                     <div>
                       <label
                         htmlFor="game-setup-spatial-map-instructions"
                         className="text-[0.625rem] font-medium text-[var(--foreground)]"
-                      >
-                        What should this world include?
-                      </label>
+                      >{localizeUi("ui.game.gamesetupwizard.whatShouldThisWorldInclude")}</label>
                       <textarea
                         id="game-setup-spatial-map-instructions"
                         value={spatialMapInstructions}
                         onChange={(event) => setSpatialMapInstructions(event.target.value)}
                         maxLength={4_000}
                         rows={3}
-                        placeholder="A misty coastal city with a harbor, market, haunted inn, lighthouse, and sewers beneath the old district."
+                        placeholder={localizeUi("ui.game.gamesetupwizard.aMistyCoastalCityWithAHarborMarketHaunted")}
                         className="mt-2 w-full resize-y rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs leading-relaxed text-[var(--foreground)] outline-none ring-1 ring-[var(--border)] transition-all placeholder:text-[var(--muted-foreground)] focus:ring-[var(--primary)]/40"
                       />
-                      <p className="mt-1 text-[0.5625rem] leading-relaxed text-[var(--muted-foreground)]">
-                        Optional. If left blank, Marinara builds from the existing game setup.
-                      </p>
+                      <p className="mt-1 text-[0.5625rem] leading-relaxed text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.optionalIfLeftBlankMarinaraBuildsFromTheExisting")}</p>
                     </div>
 
                   <fieldset>
-                    <legend className="text-[0.625rem] font-medium text-[var(--foreground)]">Map size</legend>
+                    <legend className="text-[0.625rem] font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.mapSize")}</legend>
                     <div className="mt-2 grid grid-cols-3 gap-2">
                       {SPATIAL_MAP_DRAFT_SIZE_OPTIONS.map((option) => (
                         <button
@@ -2679,7 +2660,7 @@ export function GameSetupWizard({
                   </fieldset>
 
                   <fieldset>
-                    <legend className="text-[0.625rem] font-medium text-[var(--foreground)]">Build from</legend>
+                    <legend className="text-[0.625rem] font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.buildFrom")}</legend>
                     <div className="mt-2 grid grid-cols-3 gap-2">
                       {([
                         { value: "setup", label: "Game setup" },
@@ -2705,21 +2686,17 @@ export function GameSetupWizard({
                     </div>
                     <p className="mt-2 text-[0.5625rem] leading-relaxed text-[var(--muted-foreground)]">
                       {spatialMapGroundingMode === "setup"
-                        ? "Uses the generated game world and party."
+                        ?localizeUi("ui.game.gamesetupwizard.usesTheGeneratedGameWorldAndParty")
                         : spatialMapGroundingMode === "lore_strict"
-                          ? `Only creates places supported by the ${activeLorebookIds.length} selected lorebook${activeLorebookIds.length === 1 ? "" : "s"}.`
-                          : `Uses the ${activeLorebookIds.length} selected lorebook${activeLorebookIds.length === 1 ? "" : "s"} as canon and may add fitting places.`}
+                          ?localizeUi("ui.game.gamesetupwizard.onlyCreatesPlacesSupportedByTheValue1SelectedLorebook", { value1: activeLorebookIds.length, value2: activeLorebookIds.length === 1 ? "" :localizeUi("ui.noodle.stageprofileview.s") })
+                          :localizeUi("ui.game.gamesetupwizard.usesTheValue1SelectedLorebookValue2AsCanonAnd", { value1: activeLorebookIds.length, value2: activeLorebookIds.length === 1 ? "" :localizeUi("ui.noodle.stageprofileview.s") })}
                     </p>
                   </fieldset>
 
-                  <p className="text-[0.5625rem] leading-relaxed text-[var(--muted-foreground)]">
-                    The draft stays disabled until you review, apply, enable, and save it in the map editor.
-                  </p>
+                  <p className="text-[0.5625rem] leading-relaxed text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.theDraftStaysDisabledUntilYouReviewApplyEnable")}</p>
                   </div>
                 )}
               </div>
-            )}
-          </>
         )}
 
         {step === 5 && (
@@ -2737,8 +2714,8 @@ export function GameSetupWizard({
                     <Volume2 size={14} className="text-[var(--primary)]" />
                   )}
                   <div>
-                    <p className="text-xs font-medium text-[var(--foreground)]">Start Muted</p>
-                    <p className="text-[0.55rem] text-[var(--muted-foreground)]">Begin the game with all audio muted</p>
+                    <p className="text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.startMuted")}</p>
+                    <p className="text-[0.55rem] text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.beginTheGameWithAllAudioMuted")}</p>
                   </div>
                 </div>
                 <div
@@ -2756,6 +2733,46 @@ export function GameSetupWizard({
                 </div>
               </button>
             </div>
+
+            <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-3">
+              <button
+                type="button"
+                onClick={() => setAdjustGameAssetsOpen((open) => !open)}
+                aria-expanded={adjustGameAssetsOpen}
+                className="flex w-full items-center justify-between gap-3 text-left"
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <FolderOpen size={14} className="shrink-0 text-[var(--primary)]" />
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.adjustGameAssetsForThisGame")}</p>
+                    <p className="text-[0.55rem] leading-relaxed text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.chooseWhichAssetFoldersThisGameMayUseAll")}</p>
+                  </div>
+                </div>
+                <ChevronDown
+                  size={14}
+                  className={cn(
+                    "shrink-0 text-[var(--muted-foreground)] transition-transform",
+                    adjustGameAssetsOpen && "rotate-180",
+                  )}
+                />
+              </button>
+              {adjustGameAssetsOpen && (
+                <div className="mt-3 h-[min(60dvh,30rem)] min-h-80 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--background)]">
+                  <Suspense
+                    fallback={
+                      <div className="flex h-full items-center justify-center gap-2 text-xs text-[var(--muted-foreground)]">
+                        <Loader2 size={14} className="animate-spin" />{localizeUi("ui.game.gamesetupwizard.loadingAssets")}</div>
+                    }
+                  >
+                    <GameAssetsBrowserView
+                      embedded
+                      selectFoldersByDefault
+                      onClose={() => setAdjustGameAssetsOpen(false)}
+                    />
+                  </Suspense>
+                </div>
+              )}
+            </div>
           </>
         )}
 
@@ -2764,50 +2781,31 @@ export function GameSetupWizard({
             <div>
               <label className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-[var(--foreground)]">
                 <Sparkles size={12} />
-                Game Presentation
+                {localizeUi("settings.sections.gamePresentation.title")}
               </label>
               <select
                 value={gamePresentation}
                 onChange={(event) => setGamePresentation(event.target.value === "anime" ? "anime" : "standard")}
                 className={GAME_SETUP_INPUT_CLASS}
               >
-                <option value="standard">Standard</option>
-                <option value="anime">Storyboard Optimized</option>
+                <option value="standard">{localizeUi("ui.game.gamesetupwizard.standard")}</option>
+                <option value="anime">{localizeUi("ui.game.gamesetupwizard.storyboardOptimized")}</option>
               </select>
               <p className="mt-1 text-[0.575rem] leading-relaxed text-[var(--muted-foreground)]">
                 {gamePresentation === "anime"
-                  ? "Coordinates the game narration, storyboard planning, image formatting, and video formatting without enabling media generation or changing your connections."
-                  : "Uses the standard flexible Game Mode narration and media prompts."}
+                  ? localizeUi("ui.game.gamesetupwizard.storyboardOptimizedNarrationDescription")
+                  : localizeUi("ui.game.gamesetupwizard.usesTheStandardFlexibleGameModeNarrationAndMedia")}
               </p>
-              {gamePresentation === "anime" && (
-                <dl className="mt-2 grid gap-1.5 rounded-lg bg-[var(--secondary)]/55 p-2 ring-1 ring-[var(--border)] sm:grid-cols-2">
-                  {[
-                    ["Game Prompt", "Storyboard Game Prompt"],
-                    ["Animation Planner", "Comic Page Animation"],
-                    ["Storyboard Illustration Prompt", "Storyboard Illustration"],
-                    ["Storyboard Video Prompt", "Comic Page Video"],
-                  ].map(([label, value]) => (
-                    <div key={label} className="min-w-0 rounded-md bg-[var(--background)]/65 px-2 py-1.5">
-                      <dt className="text-[0.525rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                        {label}
-                      </dt>
-                      <dd className="truncate text-[0.625rem] font-semibold text-[var(--foreground)]">{value}</dd>
-                    </div>
-                  ))}
-                </dl>
-              )}
             </div>
             <div>
               <label className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-[var(--foreground)]">
-                <Feather size={12} />
-                Base Prompt Preset
-              </label>
+                <Feather size={12} />{localizeUi("ui.game.gamesetupwizard.basePromptPreset")}</label>
               <select
                 value={promptPresetId ?? ""}
                 onChange={(event) => handlePromptPresetChange(event.target.value || null)}
                 className={GAME_SETUP_INPUT_CLASS}
               >
-                <option value="">None</option>
+                <option value="">{localizeUi("ui.game.gamesurfacecomponent.none")}</option>
                 {promptPresets.map((preset) => (
                   <option key={preset.id} value={preset.id}>
                     {preset.name}
@@ -2816,20 +2814,18 @@ export function GameSetupWizard({
               </select>
               <p className="mt-1 text-[0.575rem] leading-relaxed text-[var(--muted-foreground)]">
                 {gamePresentation === "anime"
-                  ? "The Storyboard Game Prompt replaces the selected preset's Game prompt. Other preset settings remain available."
-                  : "Uses the Game mode prompt from the selected preset unless the custom GM prompt below is enabled."}
+                  ? localizeUi("ui.game.gamesetupwizard.theStoryboardGamePromptReplacesTheSelectedPresetS")
+                  : localizeUi("ui.game.gamesetupwizard.usesTheGameModePromptFromTheSelectedPreset")}
               </p>
             </div>
 
             <div>
               <label className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-[var(--foreground)]">
-                <Feather size={12} />
-                Extra Instructions
-              </label>
+                <Feather size={12} />{localizeUi("ui.game.gamesetupwizard.extraInstructions")}</label>
               <textarea
                 value={gameSpecialInstructions}
                 onChange={(event) => setGameSpecialInstructions(event.target.value)}
-                placeholder="Write in the style of Terry Pratchett."
+                placeholder={localizeUi("ui.game.gamesetupwizard.writeInTheStyleOfTerryPratchett")}
                 rows={4}
                 maxLength={2000}
                 className="w-full resize-y rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs leading-relaxed text-[var(--foreground)] outline-none ring-1 ring-[var(--border)] transition-all placeholder:text-[var(--muted-foreground)]/50 focus:ring-[var(--primary)]/40"
@@ -2851,17 +2847,17 @@ export function GameSetupWizard({
                     className={customGamePromptEnabled ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}
                   />
                   <div className="min-w-0">
-                    <p className="text-xs font-medium text-[var(--foreground)]">GM Prompt</p>
+                    <p className="text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.game.gamesetupwizard.gmPrompt")}</p>
                     <p className="text-[0.55rem] text-[var(--muted-foreground)]">
                       {customGamePromptEnabled
                         ? gameSystemPromptEdited
-                          ? "Custom prompt will override the selected prompt"
-                          : "Previewing the selected prompt; edit it to override"
+                          ?localizeUi("ui.game.gamesetupwizard.customPromptWillOverrideTheSelectedPrompt")
+                          :localizeUi("ui.game.gamesetupwizard.previewingTheSelectedPromptEditItToOverride")
                         : gamePresentation === "anime"
-                          ? "Using Storyboard Game Prompt"
+                          ? localizeUi("ui.game.gamesetupwizard.usingStoryboardGamePrompt")
                           : selectedPromptPresetName
-                          ? `Using ${selectedPromptPresetName}`
-                          : "Using default game prompt"}
+                          ?localizeUi("ui.game.gamesetupwizard.usingValue1", { value1: selectedPromptPresetName })
+                          :localizeUi("ui.game.gamesetupwizard.usingDefaultGamePrompt")}
                     </p>
                   </div>
                 </div>
@@ -2869,13 +2865,13 @@ export function GameSetupWizard({
                   <span className="rounded-full bg-[var(--background)] px-2 py-0.5 text-[0.5625rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
                     {customGamePromptEnabled
                       ? gameSystemPromptEdited
-                        ? "Custom"
-                        : "Preview"
+                        ?localizeUi("settings.notifications.customSound.status.custom")
+                        :localizeUi("settings.notifications.customSound.actions.preview")
                       : gamePresentation === "anime"
-                        ? "Storyboard"
+                        ? localizeUi("ui.game.gamesurfacecomponent.storyboard")
                         : selectedPromptPresetName
-                          ? "Preset"
-                          : "Default"}
+                          ?localizeUi("chat.toolbar.preset")
+                          :localizeUi("ui.noodle.noodlehome.default")}
                   </span>
                   <div
                     className={cn(
@@ -2906,9 +2902,7 @@ export function GameSetupWizard({
                     className="max-h-72 min-h-48 w-full resize-y rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs leading-relaxed text-[var(--foreground)] outline-none ring-1 ring-[var(--border)] transition-all placeholder:text-[var(--muted-foreground)]/50 focus:ring-[var(--primary)]/40"
                   />
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <p className="text-[0.5625rem] text-[var(--muted-foreground)]">
-                      Leaving this unchanged keeps the selected presentation or preset.
-                    </p>
+                    <p className="text-[0.5625rem] text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.leavingThisUnchangedKeepsTheSelectedPresentationOrPreset")}</p>
                     <button
                       type="button"
                       onClick={() => {
@@ -2917,9 +2911,7 @@ export function GameSetupWizard({
                       }}
                       className="inline-flex items-center gap-1 rounded-lg border border-[var(--border)] px-2.5 py-1 text-[0.625rem] font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
                     >
-                      <RotateCcw size={11} />
-                      Reset to selected
-                    </button>
+                      <RotateCcw size={11} />{localizeUi("ui.game.gamesetupwizard.resetToSelected")}</button>
                   </div>
                 </div>
               )}
@@ -2935,17 +2927,22 @@ export function GameSetupWizard({
                   <div className="flex items-center justify-between gap-3 text-[0.6875rem]">
                     <span className="font-medium text-[var(--foreground)]" role="status" aria-live="polite">
                       {isDraftingMap
-                        ? "The world is ready. Now drafting its map for your review."
-                        : "Hold on tight, the game is being generated right now!"}
+                        ?localizeUi("ui.game.gamesetupwizard.theWorldIsReadyNowDraftingItsMapFor")
+                        : isLinkingSharedWorld
+                          ? localizeUi("ui.game.gamesetupwizard.theGameIsReadyNowLinkingItsSharedWorld")
+                          : localizeUi("ui.game.gamesetupwizard.holdOnTightTheGameIsBeingGeneratedRight")}
                     </span>
                     <span aria-hidden="true" className="shrink-0 tabular-nums text-[var(--muted-foreground)]">
-                      {generationElapsedSeconds}s
-                    </span>
+                      {generationElapsedSeconds}{localizeUi("ui.noodle.stageprofileview.s")}</span>
                   </div>
                   <div
                     className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--muted)]/60"
                     role="progressbar"
-                    aria-label={isDraftingMap ? "Drafting hierarchical world map" : "Generating game world"}
+                    aria-label={isDraftingMap
+                      ? localizeUi("ui.game.gamesetupwizard.draftingHierarchicalWorldMap")
+                      : isLinkingSharedWorld
+                        ? localizeUi("ui.game.gamesetupwizard.linkingSharedWorld")
+                        : localizeUi("ui.game.gamesetupwizard.generatingGameWorld")}
                   >
                     <motion.div
                       className="h-full w-2/5 rounded-full bg-[var(--primary)]"
@@ -2964,7 +2961,7 @@ export function GameSetupWizard({
                   <button
                     key={item.key}
                     type="button"
-                    aria-label={`Go to ${item.title}`}
+                    aria-label={localizeUi("ui.game.gamesetupwizard.goToValue1", { value1: item.title })}
                     aria-current={i === step ? "step" : undefined}
                     disabled={isLoading || i >= step}
                     onClick={() => {
@@ -2983,9 +2980,7 @@ export function GameSetupWizard({
               </div>
 
               {step === steps.length - 1 && !canStart && (
-                <p className="mb-3 text-center text-[0.6875rem] text-[var(--destructive)]">
-                  Select a connection on the first step before starting.
-                </p>
+                <p className="mb-3 text-center text-[0.6875rem] text-[var(--destructive)]">{localizeUi("ui.game.gamesetupwizard.selectAConnectionOnTheFirstStepBeforeStarting")}</p>
               )}
 
               <div className="flex items-center justify-between">
@@ -2996,7 +2991,7 @@ export function GameSetupWizard({
                   className={cn(GAME_SETUP_GHOST_BUTTON_CLASS, "disabled:cursor-wait disabled:opacity-40")}
                 >
                   <ArrowLeft size={14} />
-                  {step === 0 ? "Cancel" : "Back"}
+                  {step === 0 ?localizeUi("chat.delete.dialog.cancel") :localizeUi("ui.noodle.noodlerframe.back")}
                 </button>
 
                 {step < steps.length - 1 ? (
@@ -3005,9 +3000,7 @@ export function GameSetupWizard({
                     onClick={() => setStep(step + 1)}
                     disabled={isLoading}
                     className={GAME_SETUP_PRIMARY_BUTTON_CLASS}
-                  >
-                    Next
-                    <ArrowRight size={14} />
+                  >{localizeUi("onboarding.actions.next")}<ArrowRight size={14} />
                   </button>
                 ) : (
                   <button
@@ -3015,18 +3008,20 @@ export function GameSetupWizard({
                     onClick={handleComplete}
                     disabled={isLoading || !canStart}
                     className={GAME_SETUP_PRIMARY_BUTTON_CLASS}
-                    title={!canStart ? "Select a connection on the first step" : undefined}
+                    title={!canStart ?localizeUi("ui.game.gamesetupwizard.selectAConnectionOnTheFirstStep") : undefined}
                   >
                     {isLoading ? (
                       <>
                         <Loader2 size={14} className="animate-spin" />
-                        {isDraftingMap ? "Drafting Map…" : "Generating World…"}
+                        {isDraftingMap
+                          ?localizeUi("ui.game.gamesetupwizard.draftingMap")
+                          : isLinkingSharedWorld
+                            ? localizeUi("ui.game.gamesetupwizard.linkingWorld")
+                            : localizeUi("ui.game.gamesetupwizard.generatingWorld")}
                       </>
                     ) : (
                       <>
-                        <Wand2 size={14} />
-                        Start Game
-                      </>
+                        <Wand2 size={14} />{localizeUi("ui.game.gamesurfacecomponent.startGame")}</>
                     )}
                   </button>
                 )}
@@ -3035,6 +3030,17 @@ export function GameSetupWizard({
           </motion.div>
         </AnimatePresence>
       </div>
+      {spatialTemplatePickerOpen && (
+        <CapabilityElement
+          packageId="hierarchical-maps"
+          view="setup"
+          capabilityProps={{
+            supportedSelectionKinds: ["template", "shared-world"],
+            onSelect: handleSpatialTemplateSelected,
+            onClose: () => setSpatialTemplatePickerOpen(false),
+          }}
+        />
+      )}
     </>
   );
 }

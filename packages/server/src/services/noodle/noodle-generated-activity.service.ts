@@ -17,6 +17,10 @@ import { createGalleryStorage } from "../storage/gallery.storage.js";
 import { createNoodleStorage } from "../storage/noodle.storage.js";
 import { createPromptOverridesStorage } from "../storage/prompt-overrides.storage.js";
 import { canCreateGeneratedNoodleInteraction } from "./noodle-interaction-policy.js";
+import {
+  isConnectionAdmissionFailure,
+  type ConnectionAdmissionMode,
+} from "../generation/connection-admission.js";
 import { normalizeNoodleHandle } from "./noodle-handle.js";
 import { normalizeNoodleImagePrompt } from "./noodle-image-prompt.js";
 import { canGenerateNoodleActivityForAccountKind } from "./noodle-prompt.js";
@@ -122,6 +126,7 @@ export async function prepareGeneratedNoodleMedia(input: {
   imageConnection: ImageConnection | null;
   debugMode: boolean;
   reviewImagePromptsBeforeSend: boolean;
+  admissionMode?: ConnectionAdmissionMode;
 }): Promise<PreparedGeneratedNoodleMedia> {
   const activeAccounts = [...(input.personaAccount ? [input.personaAccount] : []), ...input.selectedParticipants];
   const handleToAccount = new Map(activeAccounts.map((account) => [normalizeNoodleHandle(account.handle), account]));
@@ -157,6 +162,7 @@ export async function prepareGeneratedNoodleMedia(input: {
           db: input.db,
           debugMode: input.debugMode,
           previewOnly: input.reviewImagePromptsBeforeSend === true,
+          admissionMode: input.admissionMode,
         });
         prepared.imageUrl = generatedImage.imageUrl;
         Object.assign(prepared.metadata, generatedImage.metadata);
@@ -164,6 +170,9 @@ export async function prepareGeneratedNoodleMedia(input: {
         prepared.stagedMedia = generatedImage.stagedMedia;
         if (generatedImage.stagedMedia) stagedMedia.push(generatedImage.stagedMedia);
       } catch (err) {
+        // A busy image connection means this background run should yield and retry, not brand
+        // the post with a permanent image failure it never actually suffered.
+        if (isConnectionAdmissionFailure(err)) throw err;
         logger.warn(err, "[noodle] Failed to generate image for %s", account.displayName);
         prepared.imagePrompt = null;
         prepared.metadata.imageGenerationFailed = true;

@@ -151,7 +151,6 @@ function normalizeImportedMode(value: unknown): ChatMode | null {
   switch (normalized) {
     case "conversation":
     case "roleplay":
-    case "visual_novel":
     case "game":
       return normalized;
     default:
@@ -250,6 +249,9 @@ function sanitizeImportedMarinaraMetadata(
   delete sanitized.activeSceneChatId;
   delete sanitized.sceneOriginChatId;
   delete sanitized.sceneStatus;
+  delete sanitized.branchParentChatId;
+  delete sanitized.branchParentMessageId;
+  delete sanitized.branchMessageId;
 
   if (typeof sanitized.gameId === "string" && sanitized.gameId.trim().length > 0) {
     sanitized.gameId = localGameId;

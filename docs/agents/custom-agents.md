@@ -55,15 +55,20 @@ Post-Processing custom agents also get a **Turn Data Access** section. It has tw
 
 ## Custom Agent Abilities
 
-**Custom Agent Abilities** are opt-in powers. A power stays blocked until you turn its toggle on. This keeps a custom agent safe by default. There are eight toggles:
+**Custom Agent Abilities** are opt-in powers. A power stays blocked until you turn its toggle on. This keeps a custom agent safe by default. The available abilities are:
 
 | Ability | What it lets the agent do |
 |---|---|
 | **Create lorebooks** | Create a new agent-made lorebook when its lore output has no target. |
 | **Edit lorebooks** | Write lorebook entries or make lorebook update results. |
-| **Edit messages** | Replace the generated message text with rewritten text. |
+| **Edit messages** | Replace the generated message text with rewritten text, or add continuation choices to it. |
 | **Edit trackers** | Update game, character, persona, or custom tracker state. |
 | **Frontend styling** | Apply a temporary visual style effect during generation. |
+| **Change chat backgrounds** | Change and persist the background selected for a chat. |
+| **Change character sprites** | Change character and Persona expressions shown in chat. |
+| **Control media playback** | Control Spotify, YouTube, or local music playback. |
+| **Control haptic devices** | Send bounded commands to a connected haptic device. |
+| **Edit About Me details** | Change chat-specific About Me text. Public card changes still require separate approval. |
 | **Image generation** | Trigger the image generator with an image prompt. |
 | **Vectors/embeddings** | Use vector or embedding context. Vectors are a way to search text by meaning. |
 | **Main prompt edits** | Edit the prompt sent to the main AI model. |
@@ -88,6 +93,14 @@ The **Result Type** tells Marinara how to read your agent's output. Most result 
 | **Image Prompt** | Asks the image generator to draw a scene. | Image generation |
 | **Prompt Patch** | Adds, prepends, or replaces prompt sections. | Main prompt edits |
 | **Frontend Style** | Applies a temporary styling effect. | Frontend styling |
+| **Background Change** | Selects and persists an available chat background. | Change chat backgrounds |
+| **Sprite Change** | Changes character and Persona expressions shown in chat. | Change character sprites |
+| **Spotify Control** | Controls Spotify playback. | Control media playback |
+| **YouTube Control** | Controls YouTube playback. | Control media playback |
+| **Local Music Control** | Controls playback from your local music collection. | Control media playback |
+| **Haptic Command** | Sends a bounded command to a connected haptic device. | Control haptic devices |
+| **About Me Update** | Updates chat-specific About Me text and proposes public edits. | Edit About Me details |
+| **Interactive Choices** | Adds continuation choices to the generated message. | Edit messages |
 
 **Context Injection** is the friendliest starting point. It needs no ability toggle and no strict output format. Use it when you just want the agent to add a short note to the prompt or record a summary.
 
@@ -182,7 +195,11 @@ To export from the editor, click the **Export agent** button (the upload icon) i
 
 To export several agents at once, use **Select agents** in the **Agents** panel, pick the agents you want, and export the group.
 
-To import, open the **Agents** panel and click **Import agents** for a single file, or **Import agent folder** to pick a whole folder. Each file import becomes a new custom agent, so it cannot replace a curated Agent with the same internal type. For safety, Marinara also ignores bundled functions and clears tool selections from imported agent settings. Import trusted functions separately from **Function Calls**, review them, and explicitly attach them to the agent afterward.
+External Agent imports are locked by default. Open **Settings → Advanced → Danger Zone** and enable **Allow custom Agent imports** first. This toggle does not need an `.env` change. It affects only Agents supplied through files, folders, or custom repositories: Agents you create in Marinara and official Agents installed through **Download Agents** remain available normally.
+
+To import, open the **Agents** panel and click **Import agents** for a single file, or **Import agent folder** to pick a whole folder. Marinara shows a permission review before anything is stored. Approve only the capabilities the Agent needs; unchecked capabilities stay blocked. Each file import receives a new custom identity, so it cannot replace a curated Agent with the same internal type.
+
+For safety, Marinara ignores bundled functions, clears tool selections from imported settings, sanitizes temporary CSS before applying it, and checks approved capabilities before an imported Agent can change messages, trackers, lorebooks, backgrounds, sprites, media, haptics, About Me data, prompts, or generated images. Import trusted functions separately from **Function Calls**, review them, and explicitly attach them to the Agent afterward. Turning the Danger Zone toggle off again prevents externally imported Agents from running; locally authored and official Agents are not affected.
 
 ## Related guides
 

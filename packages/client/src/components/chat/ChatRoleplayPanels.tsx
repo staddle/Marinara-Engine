@@ -1,5 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertTriangle, BookOpen, ChevronDown, ChevronRight, Loader2, MapPin, PenLine, Sparkles, X } from "lucide-react";
+import type { TFunction } from "i18next";
+import {
+  AlertTriangle,
+  BookOpen,
+  ChevronDown,
+  ChevronRight,
+  Loader2,
+  MapPin,
+  PenLine,
+  Sparkles,
+  X,
+} from "lucide-react";
 import { useUpdateChatMetadata } from "../../hooks/use-chats";
 import { type BudgetSkippedLorebookEntry, useActiveLorebookEntries } from "../../hooks/use-lorebooks";
 import { cn } from "../../lib/utils";
@@ -10,27 +21,29 @@ import {
   ROLEPLAY_POPOVER_SUBTITLE,
   ROLEPLAY_POPOVER_TITLE,
 } from "./roleplay-popover-styles";
+import { useTranslation as useUiTranslation } from "react-i18next";
+import { MacroTextarea } from "../ui/MacroTextarea";
 
 type LorebookEntryStatus = "normal" | "constant" | "selective";
 
 const LOREBOOK_ENTRY_STATUS_STYLE: Record<
   LorebookEntryStatus,
-  { label: string; dot: string; row: string; badge: string }
+  { labelKey: string; dot: string; row: string; badge: string }
 > = {
   normal: {
-    label: "NORMAL",
+    labelKey: "chat.activeContext.status.normal",
     dot: "bg-emerald-400",
     row: "border border-emerald-400/20 bg-emerald-400/10 hover:bg-emerald-400/15",
     badge: "bg-emerald-400/15 text-emerald-300 ring-1 ring-emerald-400/20",
   },
   constant: {
-    label: "CONST",
+    labelKey: "chat.activeContext.status.constant",
     dot: "bg-yellow-300",
     row: "border border-yellow-300/25 bg-yellow-300/10 hover:bg-yellow-300/15",
     badge: "bg-yellow-300/15 text-yellow-200 ring-1 ring-yellow-300/20",
   },
   selective: {
-    label: "SELECT",
+    labelKey: "chat.activeContext.status.selective",
     dot: "bg-red-400",
     row: "border border-red-400/25 bg-red-400/10 hover:bg-red-400/15",
     badge: "bg-red-400/15 text-red-200 ring-1 ring-red-400/20",
@@ -54,6 +67,13 @@ function formatSemanticScore(score: number | null | undefined) {
   return typeof score === "number" && Number.isFinite(score) ? score.toFixed(3) : null;
 }
 
+function formatActivationSource(
+  source: "current_location" | "keyword" | "semantic" | "constant" | "sticky" | "recursive",
+  t: TFunction,
+) {
+  return t(`chat.activeContext.source.${source}`);
+}
+
 function ActiveLorebookEntryRow({
   entry,
 }: {
@@ -72,6 +92,7 @@ function ActiveLorebookEntryRow({
     semanticScore?: number;
   };
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const [expanded, setExpanded] = useState(false);
   const status = getLorebookEntryStatus(entry);
   const statusStyle = LOREBOOK_ENTRY_STATUS_STYLE[status];
@@ -94,18 +115,19 @@ function ActiveLorebookEntryRow({
         <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", isSemanticMatch ? "bg-cyan-300" : statusStyle.dot)} />
         <span className="truncate font-medium text-[var(--foreground)]/80">{entry.name}</span>
         <span className={cn("shrink-0 rounded px-1 py-0.5 text-[0.5rem] font-semibold", statusStyle.badge)}>
-          {statusStyle.label}
+          {localizeUi(statusStyle.labelKey)}
         </span>
         {isSemanticMatch && (
           <span className="inline-flex shrink-0 items-center gap-0.5 rounded px-1 py-0.5 text-[0.5rem] font-semibold text-cyan-100 ring-1 ring-cyan-300/25">
             <Sparkles size="0.55rem" />
-            Vector{semanticScoreLabel ? ` ${semanticScoreLabel}` : ""}
+            {semanticScoreLabel
+              ? localizeUi("chat.activeContext.vectorScore", { score: semanticScoreLabel })
+              : localizeUi("ui.chat.activelorebookentryrow.vector")}
           </span>
         )}
         {isCurrentLocation && (
           <span className="inline-flex shrink-0 items-center gap-0.5 rounded bg-sky-400/15 px-1 py-0.5 text-[0.5rem] font-semibold text-sky-200 ring-1 ring-sky-400/25">
-            <MapPin size="0.55rem" /> Location
-          </span>
+            <MapPin size="0.55rem" /> {localizeUi("ui.noodle.noodleprofilesurface.location")}</span>
         )}
         <span className="ml-auto shrink-0 text-[0.625rem] text-[var(--muted-foreground)]">#{entry.order}</span>
         <button
@@ -115,48 +137,50 @@ function ActiveLorebookEntryRow({
             event.stopPropagation();
             useUIStore.getState().openLorebookDetail(entry.lorebookId);
           }}
-          aria-label={`Open ${entry.name} in ${entry.lorebookName}`}
-        >
-          Open
-        </button>
+          aria-label={localizeUi("chat.activeContext.openEntry", {
+            entry: entry.name,
+            lorebook: entry.lorebookName,
+          })}
+        >{localizeUi("ui.chat.activelorebookentryrow.open")}</button>
       </div>
       <p className="mt-0.5 truncate text-[0.625rem] text-[var(--muted-foreground)]">
-        {entry.lorebookName} · {entry.activationSources.map((source) => source.replaceAll("_", " ")).join(", ")}
+        {entry.lorebookName} ·{" "}
+        {entry.activationSources.map((source) => formatActivationSource(source, localizeUi)).join(", ")}
       </p>
       {entry.keys.length > 0 && (
-        <p className="mt-0.5 truncate text-[0.625rem] text-[var(--muted-foreground)]">
-          Keys: {entry.keys.slice(0, 5).join(", ")}
+        <p className="mt-0.5 truncate text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.characters.lorebooktab.keys")} {entry.keys.slice(0, 5).join(", ")}
           {entry.keys.length > 5 && ` +${entry.keys.length - 5}`}
         </p>
       )}
       {visibleMatchedKeys.length > 0 && (
-        <p className="mt-0.5 truncate text-[0.625rem] text-[var(--muted-foreground)]">
-          Matched: {visibleMatchedKeys.slice(0, 5).join(", ")}
+        <p className="mt-0.5 truncate text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.chat.activelorebookentryrow.matched")} {visibleMatchedKeys.slice(0, 5).join(", ")}
           {visibleMatchedKeys.length > 5 && ` +${visibleMatchedKeys.length - 5}`}
         </p>
       )}
       {isSemanticMatch && (
         <p className="mt-0.5 truncate text-[0.625rem] text-cyan-100/75">
-          Semantic vector match{semanticScoreLabel ? `: ${semanticScoreLabel}` : ""}
+          {semanticScoreLabel
+            ? localizeUi("chat.activeContext.semanticMatchScore", { score: semanticScoreLabel })
+            : localizeUi("ui.chat.activelorebookentryrow.semanticVectorMatch")}
         </p>
       )}
       {expanded && (
         <p className="mt-1.5 max-h-40 overflow-y-auto whitespace-pre-wrap border-t border-[var(--border)] pt-1.5 text-[0.6875rem] leading-relaxed text-[var(--muted-foreground)]">
-          {entry.content || "(empty)"}
+          {entry.content || localizeUi("chat.activeContext.emptyEntry")}
         </p>
       )}
     </div>
   );
 }
 
-function formatBudgetName(blockedBy: BudgetSkippedLorebookEntry["blockedBy"]) {
-  if (blockedBy === "lorebook") return "lorebook budget";
-  if (blockedBy === "chat") return "chat budget";
-  if (blockedBy === "location") return "current-location context cap";
-  return "lorebook and chat budgets";
+function formatBudgetName(blockedBy: BudgetSkippedLorebookEntry["blockedBy"], t: TFunction) {
+  if (blockedBy === "lorebook") return t("chat.activeContext.budget.lorebook");
+  if (blockedBy === "chat") return t("chat.activeContext.budget.chat");
+  if (blockedBy === "location") return t("chat.activeContext.budget.location");
+  return t("chat.activeContext.budget.both");
 }
 
-function formatBudgetCap(entry: BudgetSkippedLorebookEntry) {
+function formatBudgetCap(entry: BudgetSkippedLorebookEntry, t: TFunction) {
   if (entry.blockedBy === "lorebook") {
     return `${entry.lorebookUsedTokens.toLocaleString()} / ${entry.lorebookBudget.toLocaleString()}`;
   }
@@ -164,14 +188,20 @@ function formatBudgetCap(entry: BudgetSkippedLorebookEntry) {
     return `${entry.chatUsedTokens.toLocaleString()} / ${entry.chatBudget.toLocaleString()}`;
   }
   if (entry.blockedBy === "location") {
-    return `${entry.chatUsedTokens.toLocaleString()} tokens used before the location cap`;
+    return t("chat.activeContext.budget.locationUsage", {
+      count: entry.chatUsedTokens.toLocaleString(),
+    });
   }
-  const lorebookPart = `${entry.lorebookUsedTokens.toLocaleString()} / ${entry.lorebookBudget.toLocaleString()} lorebook`;
-  const chatPart = `${entry.chatUsedTokens.toLocaleString()} / ${entry.chatBudget.toLocaleString()} chat`;
-  return `${lorebookPart}, ${chatPart}`;
+  return t("chat.activeContext.budget.combinedUsage", {
+    lorebookUsed: entry.lorebookUsedTokens.toLocaleString(),
+    lorebookBudget: entry.lorebookBudget.toLocaleString(),
+    chatUsed: entry.chatUsedTokens.toLocaleString(),
+    chatBudget: entry.chatBudget.toLocaleString(),
+  });
 }
 
 function BudgetSkippedEntryRow({ entry }: { entry: BudgetSkippedLorebookEntry }) {
+  const { t: localizeUi } = useUiTranslation();
   const [expanded, setExpanded] = useState(false);
   const semanticScore = entry.semanticScore ?? parseSemanticScore(entry.matchedKeys);
   const semanticScoreLabel = formatSemanticScore(semanticScore);
@@ -189,23 +219,28 @@ function BudgetSkippedEntryRow({ entry }: { entry: BudgetSkippedLorebookEntry })
         {isSemanticMatch && (
           <span className="inline-flex shrink-0 items-center gap-0.5 rounded px-1 py-0.5 text-[0.5rem] font-semibold text-cyan-100 ring-1 ring-cyan-300/25">
             <Sparkles size="0.55rem" />
-            Vector{semanticScoreLabel ? ` ${semanticScoreLabel}` : ""}
+            {semanticScoreLabel
+              ? localizeUi("chat.activeContext.vectorScore", { score: semanticScoreLabel })
+              : localizeUi("ui.chat.activelorebookentryrow.vector")}
           </span>
         )}
         <span className="shrink-0 text-[0.625rem] text-amber-200/70">~{entry.estimatedTokens.toLocaleString()}</span>
       </div>
       <p className="mt-0.5 truncate pl-5 text-[0.625rem] text-amber-100/70">
-        {entry.lorebookName} blocked by {formatBudgetName(entry.blockedBy)}
+        {entry.lorebookName} {localizeUi("ui.chat.budgetskippedentryrow.blockedBy")}{" "}
+        {formatBudgetName(entry.blockedBy, localizeUi)}
       </p>
-      <p className="mt-0.5 truncate pl-5 text-[0.625rem] text-amber-100/60">
-        Sources: {entry.activationSources.map((source) => source.replaceAll("_", " ")).join(", ")}
+      <p className="mt-0.5 truncate pl-5 text-[0.625rem] text-amber-100/60">{localizeUi("ui.chat.budgetskippedentryrow.sources")}{" "}
+        {entry.activationSources.map((source) => formatActivationSource(source, localizeUi)).join(", ")}
       </p>
       {expanded && (
         <div className="mt-1.5 space-y-1 border-t border-amber-500/20 pt-1.5 pl-5 text-[0.625rem] leading-relaxed text-amber-50/75">
-          <p>Matched: {entry.matchedKeys.length > 0 ? entry.matchedKeys.slice(0, 5).join(", ") : "No key recorded"}</p>
-          {isSemanticMatch && <p>Semantic vector score: {semanticScoreLabel ?? "matched"}</p>}
-          <p>Entry estimate: ~{entry.estimatedTokens.toLocaleString()} tokens</p>
-          <p>Budget used before entry: {formatBudgetCap(entry)}</p>
+          <p>{localizeUi("ui.chat.activelorebookentryrow.matched")} {entry.matchedKeys.length > 0 ? entry.matchedKeys.slice(0, 5).join(", ") :localizeUi("ui.chat.budgetskippedentryrow.noKeyRecorded")}</p>
+          {isSemanticMatch && <p>{localizeUi("ui.chat.budgetskippedentryrow.semanticVectorScore")}{" "}
+            {semanticScoreLabel ?? localizeUi("chat.activeContext.matched")}</p>}
+          <p>{localizeUi("ui.chat.budgetskippedentryrow.entryEstimate")}{entry.estimatedTokens.toLocaleString()} {localizeUi("ui.agents.agenteditor.tokens")}</p>
+          <p>{localizeUi("ui.chat.budgetskippedentryrow.budgetUsedBeforeEntry")}{" "}
+            {formatBudgetCap(entry, localizeUi)}</p>
         </div>
       )}
     </button>
@@ -213,6 +248,7 @@ function BudgetSkippedEntryRow({ entry }: { entry: BudgetSkippedLorebookEntry })
 }
 
 function BudgetSkippedEntriesNotice({ entries }: { entries: BudgetSkippedLorebookEntry[] }) {
+  const { t: localizeUi } = useUiTranslation();
   const [expanded, setExpanded] = useState(false);
   if (entries.length === 0) return null;
 
@@ -226,12 +262,9 @@ function BudgetSkippedEntriesNotice({ entries }: { entries: BudgetSkippedLoreboo
         <AlertTriangle size="0.875rem" className="mt-0.5 shrink-0 text-amber-300" />
         <span className="min-w-0 flex-1">
           <span className="block font-medium text-amber-100">
-            {entries.length} matching lore {entries.length === 1 ? "entry was" : "entries were"} skipped by token budget
+            {localizeUi("chat.activeContext.skippedEntries", { count: entries.length })}
           </span>
-          <span className="mt-0.5 block text-[0.625rem] leading-relaxed text-amber-50/65">
-            Expand for budget details. Knowledge Retrieval or Knowledge Router may fit large lorebooks better than
-            simply raising caps.
-          </span>
+          <span className="mt-0.5 block text-[0.625rem] leading-relaxed text-amber-50/65">{localizeUi("ui.chat.budgetskippedentriesnotice.expandForBudgetDetailsKnowledgeRetrievalOrKnowledgeRouter")}</span>
         </span>
         {expanded ? <ChevronDown size="0.75rem" /> : <ChevronRight size="0.75rem" />}
       </button>
@@ -247,6 +280,7 @@ function BudgetSkippedEntriesNotice({ entries }: { entries: BudgetSkippedLoreboo
 }
 
 export function ActiveLorebookEntriesContent({ chatId }: { chatId: string }) {
+  const { t: localizeUi } = useUiTranslation();
   const { data, isLoading } = useActiveLorebookEntries(chatId, true);
   const entries = data?.entries ?? [];
   const skippedEntries = data?.budgetSkippedEntries ?? [];
@@ -256,9 +290,7 @@ export function ActiveLorebookEntriesContent({ chatId }: { chatId: string }) {
   if (isLoading) {
     return (
       <div className="flex items-center gap-2 py-4 text-xs text-[var(--muted-foreground)]">
-        <Loader2 size="0.75rem" className="animate-spin" />
-        Scanning entries...
-      </div>
+        <Loader2 size="0.75rem" className="animate-spin" />{localizeUi("ui.chat.activelorebookentriescontent.scanningEntries")}</div>
     );
   }
 
@@ -266,7 +298,7 @@ export function ActiveLorebookEntriesContent({ chatId }: { chatId: string }) {
     return (
       <>
         <BudgetSkippedEntriesNotice entries={skippedEntries} />
-        <p className="py-3 text-center text-xs text-[var(--muted-foreground)]">No active entries for this chat</p>
+        <p className="py-3 text-center text-xs text-[var(--muted-foreground)]">{localizeUi("ui.chat.activelorebookentriescontent.noActiveEntriesForThisChat")}</p>
       </>
     );
   }
@@ -274,14 +306,16 @@ export function ActiveLorebookEntriesContent({ chatId }: { chatId: string }) {
   return (
     <>
       <p className="mb-2 text-[0.625rem] text-[var(--muted-foreground)]">
-        {entries.length} active • ~{(data?.totalTokens ?? 0).toLocaleString()} tokens
+        {localizeUi("chat.activeContext.activeEntries", {
+          count: entries.length,
+          tokens: (data?.totalTokens ?? 0).toLocaleString(),
+        })}
       </p>
       <BudgetSkippedEntriesNotice entries={skippedEntries} />
       {currentLocationEntries.length > 0 && (
-        <section aria-label="Current location lore">
+        <section aria-label={localizeUi("ui.chat.activelorebookentriescontent.currentLocationLore")}>
           <h4 className="mb-1.5 flex items-center gap-1.5 text-[0.625rem] font-semibold uppercase tracking-wide text-sky-200">
-            <MapPin size="0.6875rem" /> Current location
-          </h4>
+            <MapPin size="0.6875rem" /> {localizeUi("ui.chat.activelorebookentriescontent.currentLocation")}</h4>
           <div className="space-y-1.5">
             {currentLocationEntries.map((entry) => (
               <ActiveLorebookEntryRow key={entry.id} entry={entry} />
@@ -290,11 +324,9 @@ export function ActiveLorebookEntriesContent({ chatId }: { chatId: string }) {
         </section>
       )}
       {otherEntries.length > 0 && (
-        <section className={cn(currentLocationEntries.length > 0 && "mt-3")} aria-label="Other active lore">
+        <section className={cn(currentLocationEntries.length > 0 && "mt-3")} aria-label={localizeUi("ui.chat.activelorebookentriescontent.otherActiveLore")}>
           {currentLocationEntries.length > 0 && (
-            <h4 className="mb-1.5 text-[0.625rem] font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
-              Other active lore
-            </h4>
+            <h4 className="mb-1.5 text-[0.625rem] font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">{localizeUi("ui.chat.activelorebookentriescontent.otherActiveLore")}</h4>
           )}
           <div className="space-y-1.5">
             {otherEntries.map((entry) => (
@@ -314,15 +346,14 @@ export function ActiveLorebookEntriesPanel({
   chatId: string;
   onClose: () => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   return (
     <>
       <h3 className={cn(ROLEPLAY_POPOVER_TITLE, "mb-2")}>
-        <BookOpen size="0.75rem" />
-        Active Context
-        <button
+        <BookOpen size="0.75rem" />{localizeUi("ui.chat.activelorebookentriespanel.activeContext")}<button
           type="button"
           onClick={onClose}
-          aria-label="Close active context"
+          aria-label={localizeUi("ui.chat.activelorebookentriespanel.closeActiveContext")}
           className={cn(ROLEPLAY_POPOVER_CLOSE_BUTTON, "ml-auto -my-1")}
         >
           <X size={ROLEPLAY_POPOVER_CLOSE_ICON_SIZE} />
@@ -342,6 +373,7 @@ export function AuthorNotesPanel({
   chatMeta: Record<string, any>;
   onClose: () => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const [notes, setNotes] = useState((chatMeta.authorNotes as string) ?? "");
   const [depthStr, setDepthStr] = useState(String((chatMeta.authorNotesDepth as number) ?? 4));
   const updateMeta = useUpdateChatMetadata();
@@ -396,30 +428,31 @@ export function AuthorNotesPanel({
   return (
     <>
       <h3 className={cn(ROLEPLAY_POPOVER_TITLE, "mb-2")}>
-        <PenLine size="0.75rem" />
-        Author's Notes
+        <PenLine size="0.75rem" />{localizeUi("ui.chat.authornotespanel.authorSNotes")}
         <button
           type="button"
           onClick={onClose}
-          aria-label="Close author's notes"
+          aria-label={localizeUi("ui.chat.authornotespanel.closeAuthorSNotes")}
           className={cn(ROLEPLAY_POPOVER_CLOSE_BUTTON, "ml-auto -my-1")}
         >
           <X size={ROLEPLAY_POPOVER_CLOSE_ICON_SIZE} />
         </button>
       </h3>
-      <p className={cn(ROLEPLAY_POPOVER_SUBTITLE, "mb-2")}>
-        Text here is injected into the prompt at the chosen depth every generation.
-      </p>
-      <textarea
+      <p className={cn(ROLEPLAY_POPOVER_SUBTITLE, "mb-2")}>{localizeUi("ui.chat.authornotespanel.textHereIsInjectedIntoThePromptAtThe")}</p>
+      <MacroTextarea
         value={notes}
-        onChange={(e) => setNotes(e.target.value)}
+        onChange={setNotes}
         onBlur={handleSave}
-        placeholder="e.g. Keep the tone dark and suspenseful. The villain is secretly an ally."
-        className="w-full resize-none rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-2 text-xs text-[var(--foreground)] outline-none transition-colors placeholder:text-[var(--muted-foreground)] focus:ring-2 focus:ring-[var(--ring)]"
+        onExpandedClose={handleSave}
+        title={localizeUi("ui.chat.authornotespanel.authorSNotes")}
+        placeholder={localizeUi("ui.chat.authornotespanel.eGKeepTheToneDarkAndSuspensefulThe")}
         rows={4}
+        ariaLabel={localizeUi("ui.chat.authornotespanel.authorSNotes")}
+        wrapperClassName="mari-author-notes-field"
+        className="resize-none px-2.5 py-2 text-xs leading-relaxed"
       />
       <div className="mt-2 flex items-center gap-2">
-        <span className="shrink-0 text-[0.625rem] text-[var(--muted-foreground)]">Injection Depth</span>
+        <span className="shrink-0 text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.chat.authornotespanel.injectionDepth")}</span>
         <input
           type="text"
           inputMode="numeric"
@@ -433,9 +466,7 @@ export function AuthorNotesPanel({
           className="w-14 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2 py-0.5 text-center text-[0.625rem] text-[var(--foreground)] outline-none transition-colors [appearance:textfield] focus:ring-2 focus:ring-[var(--ring)] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
         />
       </div>
-      <p className="mt-1 text-[0.5625rem] text-[var(--muted-foreground)]/60">
-        Depth 0 = after the latest message, 4 = four messages from the end.
-      </p>
+      <p className="mt-1 text-[0.5625rem] text-[var(--muted-foreground)]/60">{localizeUi("ui.chat.authornotespanel.depth0AfterTheLatestMessage4FourMessages")}</p>
     </>
   );
 }

@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import {
   useChatAssetBrowser,
+  useDeleteSceneVideo,
   useGalleryImages,
   useSceneVideos,
   useUploadGalleryImage,
@@ -35,6 +36,7 @@ import { useGalleryStore } from "../../stores/gallery.store";
 import { toast } from "sonner";
 import { ImageUploadDropzone } from "../ui/ImageUploadDropzone";
 import { buildCardAssetMarkdown, dispatchCardAssetInsert } from "../../lib/card-asset-links";
+import { showConfirmDialog } from "../../lib/app-dialogs";
 import { cn, copyToClipboard } from "../../lib/utils";
 import {
   ChatImageLightbox,
@@ -42,6 +44,7 @@ import {
   getChatImageDownloadName,
   getSceneVideoDownloadName,
 } from "./ChatImageLightbox";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface ChatGalleryProps {
   chatId: string;
@@ -91,15 +94,18 @@ export function ChatGallery({
   onGenerateVideo,
   onAnimateImage,
 }: ChatGalleryProps) {
+  const { t: localizeUi } = useUiTranslation();
   const { data: images, isLoading } = useGalleryImages(chatId);
-  const sceneVideosEnabled = mode === "game" || mode === "roleplay" || mode === "visual_novel";
+  const sceneVideosEnabled = mode === "game" || mode === "roleplay";
   const sceneVideosQuery = useSceneVideos(chatId, sceneVideosEnabled);
-  const sceneVideos = sceneVideosQuery.data ?? EMPTY_SCENE_VIDEOS;
+  const sceneVideos = sceneVideosEnabled ? (sceneVideosQuery.data ?? EMPTY_SCENE_VIDEOS) : EMPTY_SCENE_VIDEOS;
   const upload = useUploadGalleryImage(chatId);
   const remove = useDeleteGalleryImage(chatId);
+  const deleteVideo = useDeleteSceneVideo(chatId);
   const [lightbox, setLightbox] = useState<ChatImage | null>(null);
   const [videoLightbox, setVideoLightbox] = useState<GeneratedSceneVideo | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [deletingVideoId, setDeletingVideoId] = useState<string | null>(null);
   const [assetSearch, setAssetSearch] = useState("");
   const [copiedPromptImageId, setCopiedPromptImageId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<GalleryTab>("images");
@@ -169,11 +175,11 @@ export function ChatGallery({
     if (lightbox?.id === id) setLightbox(null);
     remove.mutate(id, {
       onSuccess: () => {
-        toast.success("Image deleted.");
+        toast.success(localizeUi("ui.chat.chatgallery.imageDeleted"));
       },
       onError: (error) => {
         if (wasPinned && image) pinImage({ ...image, chatId });
-        toast.error(error instanceof Error ? error.message : "Failed to delete image.");
+        toast.error(error instanceof Error ? error.message :localizeUi("ui.chat.chatgallery.failedToDeleteImage"));
       },
     });
   };
@@ -185,7 +191,7 @@ export function ChatGallery({
     try {
       await onIllustrate();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Image generation failed.");
+      toast.error(error instanceof Error ? error.message :localizeUi("ui.chat.chatgallery.imageGenerationFailed"));
     } finally {
       setChatIllustrating(chatId, false);
     }
@@ -198,9 +204,9 @@ export function ChatGallery({
     setChatGeneratingSelfie(chatId, true);
     try {
       await onGenerateSelfie(characterId);
-      toast.success("Selfie generated.");
+      toast.success(localizeUi("ui.chat.chatgallery.selfieGenerated"));
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Selfie generation failed.");
+      toast.error(error instanceof Error ? error.message :localizeUi("ui.chat.chatgallery.selfieGenerationFailed"));
     } finally {
       setChatGeneratingSelfie(chatId, false);
     }
@@ -213,21 +219,27 @@ export function ChatGallery({
     try {
       await onGenerateBackground();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Background generation failed.");
+      toast.error(error instanceof Error ? error.message :localizeUi("ui.chat.chatgallery.backgroundGenerationFailed"));
     } finally {
       setChatGeneratingBackground(chatId, false);
     }
   };
 
   const handleGenerateVideo = async () => {
-    if (!onGenerateVideo || useGalleryStore.getState().videoGeneratingChatIds.has(chatId)) return;
+    if (
+      !sceneVideosEnabled ||
+      !onGenerateVideo ||
+      useGalleryStore.getState().videoGeneratingChatIds.has(chatId)
+    ) {
+      return;
+    }
 
     setChatGeneratingVideo(chatId, true);
     try {
       await onGenerateVideo();
       await sceneVideosQuery.refetch();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Video generation failed.");
+      toast.error(error instanceof Error ? error.message :localizeUi("ui.chat.chatgallery.videoGenerationFailed"));
     } finally {
       setChatGeneratingVideo(chatId, false);
     }
@@ -240,21 +252,27 @@ export function ChatGallery({
     try {
       await onGenerateStoryboard();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Storyboard generation failed.");
+      toast.error(error instanceof Error ? error.message :localizeUi("ui.chat.chatgallery.storyboardGenerationFailed"));
     } finally {
       setChatGeneratingStoryboard(chatId, false);
     }
   };
 
   const handleAnimateImage = async (image: ChatImage) => {
-    if (!onAnimateImage || useGalleryStore.getState().videoGeneratingChatIds.has(chatId)) return;
+    if (
+      !sceneVideosEnabled ||
+      !onAnimateImage ||
+      useGalleryStore.getState().videoGeneratingChatIds.has(chatId)
+    ) {
+      return;
+    }
 
     setChatGeneratingVideo(chatId, true);
     try {
       await onAnimateImage(image);
       await sceneVideosQuery.refetch();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Video generation failed.");
+      toast.error(error instanceof Error ? error.message :localizeUi("ui.chat.chatgallery.videoGenerationFailed"));
     } finally {
       setChatGeneratingVideo(chatId, false);
     }
@@ -273,7 +291,7 @@ export function ChatGallery({
 
     const ok = await copyToClipboard(prompt);
     if (!ok) {
-      toast.error("Could not copy prompt.");
+      toast.error(localizeUi("ui.chat.chatgallery.couldNotCopyPrompt"));
       return;
     }
 
@@ -285,31 +303,65 @@ export function ChatGallery({
       setCopiedPromptImageId(null);
       copyResetTimerRef.current = null;
     }, 1400);
-    toast.success("Prompt copied.");
-  }, []);
+    toast.success(localizeUi("ui.chat.chatgallery.promptCopied"));
+  }, [localizeUi]);
 
   const handlePinVideo = useCallback(
     (video: GeneratedSceneVideo) => {
+      if (!sceneVideosEnabled) return;
       pinVideo({ ...video, chatId });
     },
-    [chatId, pinVideo],
+    [chatId, pinVideo, sceneVideosEnabled],
+  );
+
+  const handleDeleteVideo = useCallback(
+    async (video: GeneratedSceneVideo) => {
+      if (!sceneVideosEnabled) return;
+      if (
+        !(await showConfirmDialog({
+          title: localizeUi("ui.chat.chatgallery.deleteSceneVideo"),
+          message: localizeUi("ui.chat.chatgallery.deleteThisVideo"),
+          confirmLabel: localizeUi("lorebook.editor.batch.delete"),
+          tone: "destructive",
+        }))
+      ) {
+        return;
+      }
+
+      const wasPinned = useGalleryStore.getState().pinnedImages.some((item) => item.id === video.id);
+      unpinImage(video.id);
+      if (videoLightbox?.id === video.id) setVideoLightbox(null);
+      setDeletingVideoId(video.id);
+      try {
+        await deleteVideo.mutateAsync(video.id);
+        toast.success(localizeUi("ui.chat.chatgallery.videoDeleted"));
+      } catch (error) {
+        if (wasPinned) pinVideo({ ...video, chatId });
+        toast.error(
+          error instanceof Error ? error.message : localizeUi("ui.chat.chatgallery.failedToDeleteVideo"),
+        );
+      } finally {
+        setDeletingVideoId(null);
+      }
+    },
+    [chatId, deleteVideo, localizeUi, pinVideo, sceneVideosEnabled, unpinImage, videoLightbox?.id],
   );
 
   const handleInsertAsset = useCallback(
     (asset: ChatAssetBrowserItem) => {
       const label = asset.prompt.trim() || asset.name;
       dispatchCardAssetInsert(buildCardAssetMarkdown(label, asset.cardUrl), chatId);
-      toast.success("Image link inserted.");
+      toast.success(localizeUi("ui.chat.chatgallery.imageLinkInserted"));
       setAssetSearch("");
     },
-    [chatId],
+    [chatId, localizeUi],
   );
 
   const actionCount = [
     onIllustrate,
     onGenerateSelfie,
     onGenerateStoryboard,
-    onGenerateVideo,
+    sceneVideosEnabled && onGenerateVideo,
     onGenerateBackground,
   ].filter(Boolean).length;
   const actionGridClass =
@@ -326,13 +378,20 @@ export function ChatGallery({
   const videoCount = sceneVideos.length;
 
   useEffect(() => {
-    if (!sceneVideosEnabled && activeTab === "videos") setActiveTab("images");
-  }, [activeTab, sceneVideosEnabled]);
+    if (!sceneVideosEnabled) {
+      if (activeTab === "videos") setActiveTab("images");
+      if (videoLightbox) setVideoLightbox(null);
+    }
+  }, [activeTab, sceneVideosEnabled, videoLightbox]);
 
   return (
     <>
       <div className="flex flex-col gap-3 p-4">
-        {(onIllustrate || onGenerateSelfie || onGenerateStoryboard || onGenerateVideo || onGenerateBackground) && (
+        {(onIllustrate ||
+          onGenerateSelfie ||
+          onGenerateStoryboard ||
+          (sceneVideosEnabled && onGenerateVideo) ||
+          onGenerateBackground) && (
           <div className={actionGridClass}>
             {onIllustrate && (
               <button
@@ -347,7 +406,7 @@ export function ChatGallery({
                 ) : (
                   <Paintbrush size="1rem" className="shrink-0" />
                 )}
-                <span className="min-w-0 truncate">{isIllustrating ? "Generating..." : "Illustrate"}</span>
+                <span className="min-w-0 truncate">{isIllustrating ?localizeUi("ui.chat.summarypopover.generating") :localizeUi("ui.chat.chatgallery.illustrate")}</span>
               </button>
             )}
             {onGenerateSelfie && (
@@ -364,7 +423,7 @@ export function ChatGallery({
                   ) : (
                     <Camera size="1rem" className="shrink-0" />
                   )}
-                  <span className="min-w-0 truncate">{isGeneratingSelfie ? "Generating..." : "Selfie"}</span>
+                  <span className="min-w-0 truncate">{isGeneratingSelfie ?localizeUi("ui.chat.summarypopover.generating") :localizeUi("ui.chat.chatgallery.selfie")}</span>
                 </button>
                 {selfieCharacters.length > 1 && (
                   <select
@@ -372,7 +431,7 @@ export function ChatGallery({
                     onChange={(event) => setSelectedSelfieCharacterId(event.target.value)}
                     disabled={isGeneratingSelfie}
                     className="min-w-0 rounded-lg bg-[var(--secondary)] px-2 py-1.5 text-[0.6875rem] text-[var(--foreground)] outline-none ring-1 ring-[var(--border)] disabled:cursor-wait disabled:opacity-70"
-                    aria-label="Selfie character"
+                    aria-label={localizeUi("ui.chat.chatgallery.selfieCharacter")}
                   >
                     {selfieCharacters.map((character) => (
                       <option key={character.id} value={character.id}>
@@ -396,10 +455,10 @@ export function ChatGallery({
                 ) : (
                   <PanelsTopLeft size="1rem" className="shrink-0" />
                 )}
-                <span className="min-w-0 truncate">{isGeneratingStoryboard ? "Creating..." : "Create storyboard"}</span>
+                <span className="min-w-0 truncate">{isGeneratingStoryboard ?localizeUi("ui.chat.chatgallery.creating") :localizeUi("ui.chat.chatgallery.createStoryboard")}</span>
               </button>
             )}
-            {onGenerateVideo && (
+            {sceneVideosEnabled && onGenerateVideo && (
               <button
                 type="button"
                 onClick={() => void handleGenerateVideo()}
@@ -412,7 +471,7 @@ export function ChatGallery({
                 ) : (
                   <Film size="1rem" className="shrink-0" />
                 )}
-                <span className="min-w-0 truncate">{isGeneratingVideo ? "Generating..." : "Video"}</span>
+                <span className="min-w-0 truncate">{isGeneratingVideo ?localizeUi("ui.chat.summarypopover.generating") :localizeUi("ui.chat.chatgallery.video")}</span>
               </button>
             )}
             {onGenerateBackground && (
@@ -428,7 +487,7 @@ export function ChatGallery({
                 ) : (
                   <Image size="1rem" className="shrink-0" />
                 )}
-                <span className="min-w-0 truncate">{isGeneratingBackground ? "Generating..." : "Background"}</span>
+                <span className="min-w-0 truncate">{isGeneratingBackground ?localizeUi("ui.chat.summarypopover.generating") :localizeUi("ui.chat.chatgallery.background")}</span>
               </button>
             )}
           </div>
@@ -444,15 +503,15 @@ export function ChatGallery({
               type="search"
               value={assetSearch}
               onChange={(event) => setAssetSearch(event.target.value)}
-              placeholder="Search chat, character, persona, and sprite images"
-              aria-label="Search gallery images"
+              placeholder={localizeUi("ui.chat.chatgallery.searchChatCharacterPersonaAndSpriteImages")}
+              aria-label={localizeUi("ui.chat.chatgallery.searchGalleryImages")}
               className="h-10 w-full rounded-xl border border-[var(--border)] bg-[var(--secondary)] pl-9 pr-10 text-xs text-[var(--foreground)] outline-none transition-colors placeholder:text-[var(--muted-foreground)] focus:border-[var(--primary)] focus:ring-2 focus:ring-[var(--primary)]/20"
             />
             {assetSearch && (
               <button
                 type="button"
                 onClick={() => setAssetSearch("")}
-                aria-label="Clear gallery search"
+                aria-label={localizeUi("ui.chat.chatgallery.clearGallerySearch")}
                 className="absolute right-1.5 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-lg text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]"
               >
                 <X size="0.875rem" />
@@ -467,9 +526,7 @@ export function ChatGallery({
             onClick={onViewStoryboard}
             className="flex items-center justify-center gap-2 rounded-xl bg-[var(--secondary)] px-4 py-3 text-xs font-medium text-[var(--foreground)] transition-all hover:bg-[var(--accent)]"
           >
-            <PanelsTopLeft size="1rem" />
-            View storyboard
-          </button>
+            <PanelsTopLeft size="1rem" />{localizeUi("ui.chat.chatgallery.viewStoryboard")}</button>
         )}
 
         {(isIllustrating || isGeneratingVideo || isGeneratingBackground || isGeneratingStoryboard) && (
@@ -479,21 +536,21 @@ export function ChatGallery({
             aria-live="polite"
           >
             {isGeneratingVideo
-              ? "AI video generation is running. The new video will appear here when it finishes."
+              ?localizeUi("ui.chat.chatgallery.aiVideoGenerationIsRunningTheNewVideoWill")
               : isGeneratingStoryboard
-                ? "Storyboard generation is running. Keyframes will appear in the game storyboard viewer when ready."
+                ?localizeUi("ui.chat.chatgallery.storyboardGenerationIsRunningKeyframesWillAppearInThe")
                 : isGeneratingBackground
-                  ? "Illustrator is generating a background image for this scene."
-                  : "AI image generation is running. The new image will appear here when it finishes."}
+                  ?localizeUi("ui.chat.chatgallery.illustratorIsGeneratingABackgroundImageForThisScene")
+                  :localizeUi("ui.chat.chatgallery.aiImageGenerationIsRunningTheNewImageWill")}
           </div>
         )}
 
         {assetSearchActive && (
-          <section className="space-y-2" aria-label="Gallery image search results">
+          <section className="space-y-2" aria-label={localizeUi("ui.chat.chatgallery.galleryImageSearchResults")}>
             <div className="flex items-center justify-between gap-3 text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
               <span className="flex min-w-0 items-center gap-2">
                 <Images size="0.75rem" className="shrink-0" />
-                <span className="truncate">Image search results</span>
+                <span className="truncate">{localizeUi("ui.chat.chatgallery.imageSearchResults")}</span>
               </span>
               {!assetsLoading && <span className="shrink-0">{filteredAssets.length}</span>}
             </div>
@@ -503,18 +560,14 @@ export function ChatGallery({
                 className="flex items-center justify-center gap-2 rounded-xl border border-[var(--border)] py-10 text-xs text-[var(--muted-foreground)]"
                 role="status"
               >
-                <Loader2 size="1rem" className="animate-spin" />
-                Searching images...
-              </div>
+                <Loader2 size="1rem" className="animate-spin" />{localizeUi("ui.chat.chatgallery.searchingImages")}</div>
             )}
 
             {!assetsLoading && filteredAssets.length === 0 && (
               <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-[var(--border)] py-10 text-[var(--muted-foreground)]">
                 <Search size="1.5rem" className="opacity-45" />
-                <p className="text-xs">No matching images</p>
-                <p className="max-w-[34rem] px-4 text-center text-[0.625rem] opacity-70">
-                  Try a character name, prompt detail, or image source.
-                </p>
+                <p className="text-xs">{localizeUi("ui.chat.chatgallery.noMatchingImages")}</p>
+                <p className="max-w-[34rem] px-4 text-center text-[0.625rem] opacity-70">{localizeUi("ui.chat.chatgallery.tryACharacterNamePromptDetailOrImageSource")}</p>
               </div>
             )}
 
@@ -526,7 +579,7 @@ export function ChatGallery({
                     type="button"
                     onClick={() => handleInsertAsset(asset)}
                     className="group overflow-hidden rounded-lg bg-[var(--secondary)] text-left ring-1 ring-[var(--border)] transition-[box-shadow,transform] duration-200 ease-out hover:-translate-y-0.5 hover:ring-[var(--primary)]/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]"
-                    aria-label={`Insert ${asset.name}`}
+                    aria-label={localizeUi("ui.chat.chatgallery.insertValue1", { value1: asset.name })}
                   >
                     <img
                       src={asset.url}
@@ -556,7 +609,7 @@ export function ChatGallery({
             assetSearchActive && "hidden",
           )}
           role="tablist"
-          aria-label="Gallery media type"
+          aria-label={localizeUi("ui.chat.chatgallery.galleryMediaType")}
         >
           <button
             type="button"
@@ -571,7 +624,7 @@ export function ChatGallery({
             )}
           >
             <Image size="0.875rem" className="shrink-0" />
-            <span className="truncate">Images</span>
+            <span className="truncate">{localizeUi("ui.panels.connectiondefaultssection.images")}</span>
             <span className="rounded-md bg-[var(--muted)] px-1.5 py-0.5 text-[0.625rem] text-[var(--muted-foreground)]">
               {imageCount}
             </span>
@@ -592,7 +645,7 @@ export function ChatGallery({
             )}
           >
             <Film size="0.875rem" className="shrink-0" />
-            <span className="truncate">Videos</span>
+            <span className="truncate">{localizeUi("ui.panels.connectiondefaultssection.videos")}</span>
             <span className="rounded-md bg-[var(--muted)] px-1.5 py-0.5 text-[0.625rem] text-[var(--muted-foreground)]">
               {videoCount}
             </span>
@@ -602,7 +655,7 @@ export function ChatGallery({
         {!assetSearchActive && activeTab === "images" && (
           <>
             <ImageUploadDropzone
-              label="Upload Images"
+              label={localizeUi("ui.chat.chatgallery.uploadImages")}
               pending={upload.isPending}
               pendingLabel="Uploading…"
               dragLabel="Drop images to upload"
@@ -611,17 +664,17 @@ export function ChatGallery({
             />
 
             {/* Loading state */}
-            {isLoading && <p className="text-center text-xs text-[var(--muted-foreground)]">Loading gallery…</p>}
+            {isLoading && <p className="text-center text-xs text-[var(--muted-foreground)]">{localizeUi("ui.chat.chatgallery.loadingGallery")}</p>}
 
             {/* Empty state */}
             {!isLoading && !hasImages && (
               <div className="flex flex-col items-center gap-2 py-8 text-[var(--muted-foreground)]">
                 <Sparkles size="1.5rem" className="opacity-40" />
-                <p className="text-xs">No images yet</p>
+                <p className="text-xs">{localizeUi("ui.chat.chatgallery.noImagesYet")}</p>
                 <p className="text-[0.625rem] opacity-60">
                   {onIllustrate
-                    ? "Upload images or generate illustrations to build your gallery"
-                    : "Upload images to build your gallery"}
+                    ?localizeUi("ui.chat.chatgallery.uploadImagesOrGenerateIllustrationsToBuildYourGallery")
+                    :localizeUi("ui.chat.chatgallery.uploadImagesToBuildYourGallery")}
                 </p>
               </div>
             )}
@@ -638,7 +691,7 @@ export function ChatGallery({
                       type="button"
                       onClick={() => setLightbox(img)}
                       className="block w-full"
-                      aria-label="Open gallery image"
+                      aria-label={localizeUi("ui.chat.chatgallery.openGalleryImage")}
                     >
                       <img
                         src={img.url}
@@ -655,29 +708,29 @@ export function ChatGallery({
                           <button
                             type="button"
                             onClick={() => handlePinImage(img)}
-                            aria-label="Pin image to chat"
+                            aria-label={localizeUi("ui.chat.chatgallery.pinImageToChat")}
                             className="pointer-events-auto rounded-md bg-white/20 p-1.5 text-white transition-colors hover:bg-white/30"
-                            title="Pin to chat"
+                            title={localizeUi("ui.chat.chatgallery.pinToChat")}
                           >
                             <Pin size="0.75rem" />
                           </button>
                           <a
                             href={img.url}
                             download={getChatImageDownloadName(img)}
-                            aria-label="Download gallery image"
+                            aria-label={localizeUi("ui.chat.chatgallery.downloadGalleryImage")}
                             className="pointer-events-auto rounded-md bg-white/20 p-1.5 text-white transition-colors hover:bg-white/30"
-                            title="Download image"
+                            title={localizeUi("ui.chat.chatgallery.downloadImage")}
                           >
                             <Download size="0.75rem" />
                           </a>
-                          {onAnimateImage && (
+                          {sceneVideosEnabled && onAnimateImage && (
                             <button
                               type="button"
                               onClick={() => void handleAnimateImage(img)}
                               disabled={isGeneratingVideo}
-                              aria-label="Animate gallery illustration"
+                              aria-label={localizeUi("ui.chat.chatgallery.animateGalleryIllustration")}
                               className="pointer-events-auto rounded-md bg-white/20 p-1.5 text-white transition-colors hover:bg-white/30 disabled:cursor-wait disabled:opacity-60"
-                              title="Animate illustration"
+                              title={localizeUi("ui.chat.chatgallery.animateIllustration")}
                             >
                               {isGeneratingVideo ? (
                                 <Loader2 size="0.75rem" className="animate-spin" />
@@ -694,9 +747,9 @@ export function ChatGallery({
                               void handleCopyPrompt(img);
                             }}
                             disabled={!img.prompt.trim()}
-                            aria-label="Copy image prompt"
+                            aria-label={localizeUi("ui.chat.chatgallery.copyImagePrompt")}
                             className="pointer-events-auto rounded-md bg-white/20 p-1.5 text-white transition-colors hover:bg-white/30 disabled:cursor-not-allowed disabled:opacity-45"
-                            title={img.prompt.trim() ? "Copy prompt" : "No prompt saved"}
+                            title={img.prompt.trim() ?localizeUi("ui.chat.chatgallery.copyPrompt") :localizeUi("ui.chat.chatgallery.noPromptSaved")}
                           >
                             {copiedPromptImageId === img.id ? <Check size="0.75rem" /> : <Copy size="0.75rem" />}
                           </button>
@@ -704,7 +757,7 @@ export function ChatGallery({
                         <button
                           type="button"
                           onClick={() => setConfirmDeleteId(img.id)}
-                          aria-label="Delete gallery image"
+                          aria-label={localizeUi("ui.chat.chatgallery.deleteGalleryImage")}
                           className="pointer-events-auto rounded-md bg-red-500/40 p-1.5 text-white transition-colors hover:bg-red-500/60"
                         >
                           <Trash2 size="0.75rem" />
@@ -718,20 +771,20 @@ export function ChatGallery({
           </>
         )}
 
-        {!assetSearchActive && activeTab === "videos" && (
+        {!assetSearchActive && sceneVideosEnabled && activeTab === "videos" && (
           <>
             {sceneVideosQuery.isLoading && sceneVideosEnabled && (
-              <p className="text-center text-xs text-[var(--muted-foreground)]">Loading scene videos...</p>
+              <p className="text-center text-xs text-[var(--muted-foreground)]">{localizeUi("ui.chat.chatgallery.loadingSceneVideos")}</p>
             )}
 
             {!sceneVideosQuery.isLoading && !hasVideos && (
               <div className="flex flex-col items-center gap-2 py-8 text-[var(--muted-foreground)]">
                 <Film size="1.5rem" className="opacity-40" />
-                <p className="text-xs">No videos yet</p>
+                <p className="text-xs">{localizeUi("ui.chat.chatgallery.noVideosYet")}</p>
                 <p className="text-[0.625rem] opacity-60">
                   {onGenerateVideo || onAnimateImage
-                    ? "Generate or animate scene videos to fill this tab"
-                    : "Generated scene videos will appear here"}
+                    ?localizeUi("ui.chat.chatgallery.generateOrAnimateSceneVideosToFillThisTab")
+                    :localizeUi("ui.chat.chatgallery.generatedSceneVideosWillAppearHere")}
                 </p>
               </div>
             )}
@@ -739,9 +792,7 @@ export function ChatGallery({
             {hasVideos && (
               <section className="space-y-2">
                 <div className="flex items-center gap-2 text-[0.6875rem] font-medium uppercase text-[var(--muted-foreground)]">
-                  <Film size="0.75rem" />
-                  Scene videos
-                </div>
+                  <Film size="0.75rem" />{localizeUi("ui.chat.chatgallery.sceneVideos")}</div>
                 <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   {sceneVideos.map((video) => (
                     <div
@@ -752,7 +803,7 @@ export function ChatGallery({
                         type="button"
                         onClick={() => setVideoLightbox(video)}
                         className="block w-full"
-                        aria-label="Open scene video"
+                        aria-label={localizeUi("ui.chat.chatgallery.openSceneVideo")}
                       >
                         <video
                           src={video.url}
@@ -766,29 +817,42 @@ export function ChatGallery({
                         <div className="flex w-full items-center justify-between gap-2 p-2">
                           <div className="min-w-0 text-white">
                             <div className="truncate text-[0.6875rem] font-medium">
-                              {video.durationSeconds}s scene video
-                            </div>
+                              {video.durationSeconds}{localizeUi("ui.chat.chatgallery.sSceneVideo")}</div>
                             <div className="truncate text-[0.625rem] text-white/70">{video.model}</div>
                           </div>
                           <div className="flex shrink-0 gap-1">
                             <button
                               type="button"
                               onClick={() => handlePinVideo(video)}
-                              aria-label="Pin video to chat"
+                              aria-label={localizeUi("ui.chat.chatgallery.pinVideoToChat")}
                               className="pointer-events-auto rounded-md bg-white/20 p-1.5 text-white transition-colors hover:bg-white/30"
-                              title="Pin to chat"
+                              title={localizeUi("ui.chat.chatgallery.pinToChat")}
                             >
                               <Pin size="0.75rem" />
                             </button>
                             <a
                               href={video.url}
                               download={getSceneVideoDownloadName(video)}
-                              aria-label="Download scene video"
+                              aria-label={localizeUi("ui.chat.chatgallery.downloadSceneVideo")}
                               className="pointer-events-auto rounded-md bg-white/20 p-1.5 text-white transition-colors hover:bg-white/30"
-                              title="Download video"
+                              title={localizeUi("ui.chat.chatgallery.downloadVideo")}
                             >
                               <Download size="0.75rem" />
                             </a>
+                            <button
+                              type="button"
+                              onClick={() => void handleDeleteVideo(video)}
+                              disabled={deleteVideo.isPending}
+                              aria-label={localizeUi("ui.chat.chatgallery.deleteSceneVideo")}
+                              className="pointer-events-auto rounded-md bg-red-500/40 p-1.5 text-white transition-colors hover:bg-red-500/60 disabled:cursor-wait disabled:opacity-60"
+                              title={localizeUi("ui.chat.chatgallery.deleteSceneVideo")}
+                            >
+                              {deletingVideoId === video.id ? (
+                                <Loader2 size="0.75rem" className="animate-spin" />
+                              ) : (
+                                <Trash2 size="0.75rem" />
+                              )}
+                            </button>
                           </div>
                         </div>
                       </div>
@@ -810,20 +874,16 @@ export function ChatGallery({
             className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/50 backdrop-blur-sm max-md:pt-[env(safe-area-inset-top)]"
           >
             <div className="mx-4 rounded-xl bg-[var(--background)] p-5 shadow-2xl ring-1 ring-[var(--border)]">
-              <p className="mb-4 text-sm font-medium">Delete this image?</p>
+              <p className="mb-4 text-sm font-medium">{localizeUi("ui.chat.chatgallery.deleteThisImage")}</p>
               <div className="flex gap-2">
                 <button
                   onClick={() => setConfirmDeleteId(null)}
                   className="flex-1 rounded-lg bg-[var(--secondary)] px-4 py-2 text-xs transition-colors hover:bg-[var(--accent)]"
-                >
-                  Cancel
-                </button>
+                >{localizeUi("chat.delete.dialog.cancel")}</button>
                 <button
                   onClick={() => handleDelete(confirmDeleteId)}
                   className="flex-1 rounded-lg bg-red-500/20 px-4 py-2 text-xs text-red-400 transition-colors hover:bg-red-500/30"
-                >
-                  Delete
-                </button>
+                >{localizeUi("lorebook.editor.batch.delete")}</button>
               </div>
             </div>
           </div>,
@@ -832,7 +892,7 @@ export function ChatGallery({
 
       {/* Lightbox */}
       {lightbox && <ChatImageLightbox image={lightbox} onPin={handlePinImage} onClose={() => setLightbox(null)} />}
-      {videoLightbox && (
+      {sceneVideosEnabled && videoLightbox && (
         <ChatVideoLightbox video={videoLightbox} onPin={handlePinVideo} onClose={() => setVideoLightbox(null)} />
       )}
     </>

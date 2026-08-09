@@ -13,6 +13,7 @@ import {
   NEUTRAL_PANEL_TITLE,
   NEUTRAL_SURFACE_VARIABLES,
 } from "./neutral-surface-styles";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface ExpandedTextareaProps {
   open: boolean;
@@ -20,6 +21,7 @@ interface ExpandedTextareaProps {
   title: string;
   value: string;
   onChange: (value: string) => void;
+  readOnly?: boolean;
   placeholder?: string;
   surface?: "default" | "chat";
   closeLabel?: string;
@@ -33,12 +35,14 @@ export function ExpandedTextarea({
   title,
   value,
   onChange,
+  readOnly = false,
   placeholder,
   surface = "default",
   closeLabel = "Collapse",
   footer,
   overlayStyle,
 }: ExpandedTextareaProps) {
+  const { t: localizeUi } = useUiTranslation();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isChatSurface = surface === "chat";
 
@@ -90,9 +94,11 @@ export function ExpandedTextarea({
           >
             <h2 className={isChatSurface ? NEUTRAL_PANEL_TITLE : "text-sm font-semibold"}>{title}</h2>
             <div className="flex items-center gap-2">
-              <span className="text-[0.625rem] text-[var(--muted-foreground)]">{value.length} characters</span>
+              <span className="text-[0.625rem] text-[var(--muted-foreground)]">{value.length} {localizeUi("ui.noodle.noodlehome.characters")}</span>
               <button
                 onClick={onClose}
+                aria-label={closeLabel}
+                title={closeLabel}
                 className={cn(
                   "flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs transition-colors",
                   isChatSurface
@@ -112,13 +118,15 @@ export function ExpandedTextarea({
               ref={textareaRef}
               value={value}
               onChange={(e) => onChange(e.target.value)}
-              onKeyDown={handleTextareaTab}
+              readOnly={readOnly}
+              onKeyDown={readOnly ? undefined : handleTextareaTab}
               placeholder={placeholder}
               className={cn(
                 "h-full w-full resize-none rounded-xl p-5 text-sm leading-relaxed outline-none transition-colors",
                 isChatSurface
                   ? "border border-[var(--marinara-chat-chrome-input-border)] bg-[var(--marinara-chat-chrome-input-bg)] text-[var(--marinara-chat-chrome-panel-text)] placeholder:text-[var(--marinara-chat-chrome-panel-muted)] focus:border-[var(--marinara-chat-chrome-input-border-focus)] focus:ring-1 focus:ring-[var(--marinara-chat-chrome-focus-ring)]"
                   : "border border-[var(--border)] bg-[var(--secondary)] placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20",
+                readOnly && "cursor-text text-[var(--muted-foreground)]",
               )}
             />
           </div>

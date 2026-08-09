@@ -7,7 +7,7 @@ This guide shows the two ways to save a copy of everything in Marinara Engine, a
 Marinara gives you two save options. They live in different places and do different jobs.
 
 - **Download Backup** makes a full **.zip** archive of everything on disk. A **.zip** is a single compressed file that holds many files inside it. This is the most complete copy, and the best guard against data loss.
-- **Export Profile** makes a lighter file that holds your account data (characters, personas, chats, lorebooks, presets, agents, and themes). A profile is Marinara's portable copy of your account. You can restore it later inside Marinara.
+- **Export Profile** makes a lighter file that holds your account data (characters, personas, chats, lorebooks, presets, agents, themes, and Personal Extensions). A profile is Marinara's portable copy of your account. You can restore it later inside Marinara.
 
 If you just want one safe copy of everything, use **Download Backup**. Use **Export Profile** when you want a smaller file or a version other roleplay tools can read.
 
@@ -21,13 +21,13 @@ From a phone, tablet, or any other device, backup and restore need the **Admin A
 
 ## Download Backup
 
-**Download Backup** creates one **.zip** file with your database, your settings, and all your media folders (avatars, sprites, backgrounds, gallery images, fonts, and more).
+**Download Backup** creates one **.zip** file with your database, your settings, and all your media folders (avatars, sprites, backgrounds, gallery images, fonts, your custom notification sound, and more).
 
 1. Open **Settings**.
 2. Go to the **Advanced** tab.
 3. Find the **Backup & Export** section.
 4. Click **Download Backup**.
-5. The button shows **Creating backup...** while it works.
+5. The button shows **Creating backup…** while it works.
 6. On desktop Chrome or Edge, a **Save As** dialog opens so you pick where the file goes. Choose a folder and save.
 7. You should see **Backup saved!** or **Backup downloaded!** when it finishes.
 
@@ -37,9 +37,23 @@ This step matters most on Android and iOS. On those devices the app's own data f
 
 The **.zip** also contains a plain text file named `RESTORE.txt`. It explains how to recover your data by hand if you ever need to. Treat the backup as private: it can hold secret files used to unlock your saved API keys. To learn what each folder holds, see the data location guide linked below.
 
+## Automatic backups
+
+The **Backup & Export** section can also create a rotating automatic full backup on the device that runs Marinara.
+Turn on **Automatic Backups**, choose **Daily**, **Weekly**, or **Monthly**, and set **Automatic backups kept** from
+1 to 9999. Marinara creates the first backup shortly after you enable it. After each successful run, it keeps the
+newest configured number of automatic archives and deletes the oldest excess automatic archive. This retention limit
+never deletes manual backups or backups saved with **Download Backup**.
+
+Automatic backups are stored inside `backups/` in Marinara's data folder. The newest archive is
+`marinara-automatic-backup.zip`; retained older automatic archives use timestamped filenames. They use the same
+restorable, streamed archive format as **Download Backup**, including uploaded media and the encryption-key file when
+one exists. Keep a separate copy outside Marinara's data folder if you need protection from a lost disk, erased app
+storage, or a device reset.
+
 ## Export Profile
 
-**Export Profile** creates a smaller file with your account data. Media is included, so avatars and images come along too.
+**Export Profile** creates a smaller file with your account data. Media is included, so avatars, images, and your custom notification sound come along too.
 
 1. Open **Settings**.
 2. Go to the **Advanced** tab.
@@ -53,14 +67,16 @@ The dialog offers two formats:
 
 | Format | What it is | Restorable in Marinara? |
 | --- | --- | --- |
-| **Marinara Native** | Keeps Marinara fields, lorebook folders, character and persona data, presets, agents, themes, and inline media. | Yes |
+| **Marinara Native** | Keeps Marinara fields, lorebook folders, character and persona data, presets, agents, themes, Personal Extension drafts, and inline media. | Yes |
 | **Compatible JSON** | Plain character, persona, and lorebook files for other roleplay tools. | No |
 
-Choose **Marinara Native** to keep a copy you can restore in Marinara later. It downloads a file named `marinara-profile.json`.
+Choose **Marinara Native** to keep a copy you can restore in Marinara later. Smaller profiles download as
+`marinara-profile.json`; larger profiles are offered as a streamed `marinara-profile.zip` whose data is split into
+bounded table files so a large library does not have to fit into one in-memory JSON string.
+
+Personal Extension code is preserved in a native profile, but its enabled state and execution approval are not. Every restored extension arrives disabled and must be reviewed again in **Settings** > **Addons**.
 
 Choose **Compatible JSON** only when you want to move characters or lorebooks to another tool. It downloads a **.zip** of plain files. You cannot restore this file back into Marinara with **Import Profile**.
-
-If a **Marinara Native** file would be very large, Marinara cannot fit it into one JSON file. It then asks **Export profile as ZIP?**. Click to accept, and it downloads `marinara-profile.zip` with the same data instead.
 
 ## Restoring with Import Profile
 
@@ -104,7 +120,7 @@ Importing does not erase keys you have already set. If you re-import an old prof
 
 ## The Existing backups list
 
-The **Backup & Export** section can show an **Existing backups** list with a delete button. In normal use this list stays empty. **Download Backup** saves the file straight to your device. It does not leave a copy on the server, so nothing appears here. You do not need this list to make or keep a backup.
+The **Backup & Export** section can show an **Existing backups** list with a delete button. In normal use this list stays empty. **Download Backup** saves the file straight to your device. It does not leave a copy in this list, and the single rotating automatic archive is managed by the Automatic Backups control instead. You do not need this list to make or keep a downloaded backup.
 
 ## Related guides
 

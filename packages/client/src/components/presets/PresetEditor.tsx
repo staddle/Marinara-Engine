@@ -4,6 +4,7 @@
 // ──────────────────────────────────────────────
 import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef, type FC, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { useTranslation, useTranslation as useUiTranslation } from "react-i18next";
 import { useUIStore } from "../../stores/ui.store";
 import { toast } from "sonner";
 import { showConfirmDialog } from "../../lib/app-dialogs";
@@ -62,7 +63,8 @@ import { MacroTextarea } from "../ui/MacroTextarea";
 import { applyTextareaQuoteFormat } from "../../lib/textarea-quotes";
 import { api } from "../../lib/api-client";
 import { useAgentConfigs, type AgentConfigRow } from "../../hooks/use-agents";
-import { type WrapFormat, type MarkerType } from "@marinara-engine/shared";
+import { type MarkerType, type PromptSection, type WrapFormat } from "@marinara-engine/shared";
+import { useCapabilityAgentRegistry } from "../../hooks/use-capability-packages";
 import { useQuoteFormatter } from "../../hooks/use-quote-formatter";
 import { EditorTabRail } from "../ui/EditorTabRail";
 import { useTouchFolderDrag } from "../../hooks/use-touch-folder-drag";
@@ -144,6 +146,7 @@ const MARKER_LABELS: Record<MarkerType, string> = {
   persona: "Persona",
   chat_history: "Chat History",
   chat_summary: "Chat Summary",
+  id_macro_cards: "ID Macro Cards",
   world_info_before: "Lorebook Marker (Before)",
   world_info_after: "Lorebook Marker (After)",
   dialogue_examples: "Dialogue Examples",
@@ -231,6 +234,7 @@ function readMarkerConfig(value: unknown) {
 // ═══════════════════════════════════════════════
 
 export function PresetEditor() {
+  const { t: localizeUi } = useUiTranslation();
   const presetDetailId = useUIStore((s) => s.presetDetailId);
   const closePresetDetail = useUIStore((s) => s.closePresetDetail);
   const activeChatId = useChatStore((s) => s.activeChatId);
@@ -327,36 +331,38 @@ export function PresetEditor() {
     if (!presetDetailId) return;
     if (dirty) {
       const shouldSave = await showConfirmDialog({
-        title: "Save before exporting?",
-        message: "You have unsaved preset edits. Save them before exporting so the file includes the latest changes?",
-        confirmLabel: "Save and export",
+        title:localizeUi("ui.presets.preseteditor.saveBeforeExporting"),
+        message:localizeUi("ui.presets.preseteditor.youHaveUnsavedPresetEditsSaveThemBeforeExporting"),
+        confirmLabel:localizeUi("ui.presets.preseteditor.saveAndExport"),
         cancelLabel: "Cancel",
       });
       if (!shouldSave) return;
       try {
         await handleSave();
       } catch {
-        toast.error("Could not save preset before export.");
+        toast.error(localizeUi("ui.presets.preseteditor.couldNotSavePresetBeforeExport"));
         return;
       }
     }
     api.download(`/prompts/${presetDetailId}/export`);
-  }, [dirty, handleSave, presetDetailId]);
+  }, [dirty, handleSave, presetDetailId, localizeUi]);
 
   const handleDelete = useCallback(async () => {
     if (!presetDetailId) return;
     if (
       !(await showConfirmDialog({
-        title: "Delete Preset",
-        message: "Delete this preset?",
-        confirmLabel: "Delete",
+        title:localizeUi("ui.presets.preseteditor.deletePreset"),
+        message: localizeUi("dialog.delete.namedPermanent", {
+          name: (data?.preset as { name?: string } | undefined)?.name || localizeUi("chat.toolbar.preset"),
+        }),
+        confirmLabel:localizeUi("lorebook.editor.batch.delete"),
         tone: "destructive",
       }))
     ) {
       return;
     }
     deletePreset.mutate(presetDetailId, { onSuccess: () => closePresetDetail() });
-  }, [presetDetailId, deletePreset, closePresetDetail]);
+  }, [closePresetDetail, data?.preset, deletePreset, localizeUi, presetDetailId]);
 
   const markDirty = useCallback(() => setDirty(true), []);
 
@@ -430,7 +436,7 @@ export function PresetEditor() {
   if (!data) {
     return (
       <div className="mari-editor-shell flex flex-1 items-center justify-center">
-        <p className="mari-editor-empty px-4 py-3 text-sm">Preset not found</p>
+        <p className="mari-editor-empty px-4 py-3 text-sm">{localizeUi("ui.presets.preseteditor.presetNotFound")}</p>
       </div>
     );
   }
@@ -453,7 +459,7 @@ export function PresetEditor() {
             markDirty();
           }}
           className="mari-editor-title-input min-w-0 flex-1 placeholder:text-[var(--marinara-editor-muted)]"
-          placeholder="Preset name…"
+          placeholder={localizeUi("ui.presets.preseteditor.presetName")}
         />
         <div className="mari-editor-actions flex">
           <button
@@ -461,12 +467,11 @@ export function PresetEditor() {
             disabled={updatePreset.isPending}
             className="mari-editor-action mari-editor-action--primary inline-flex disabled:opacity-50"
           >
-            <Save size="0.8125rem" /> Save
-          </button>
+            <Save size="0.8125rem" /> {localizeUi("ui.noodle.noodlehome.save")}</button>
           <button
             onClick={handleExportPreset}
             className="mari-editor-action inline-flex"
-            title={dirty ? "Save current edits before exporting" : "Export preset"}
+            title={dirty ?localizeUi("ui.presets.preseteditor.saveCurrentEditsBeforeExporting") :localizeUi("ui.presets.preseteditor.exportPreset")}
           >
             <svg
               width="0.9375rem"
@@ -493,28 +498,22 @@ export function PresetEditor() {
 
       {/* Saved toast */}
       {showSaved && (
-        <div className="absolute left-1/2 top-14 z-50 -translate-x-1/2 animate-fade-in-up rounded-lg border border-emerald-500/30 bg-emerald-500/15 px-3 py-1.5 text-xs font-medium text-emerald-400 shadow-lg backdrop-blur-sm">
-          Changes saved
-        </div>
+        <div className="absolute left-1/2 top-14 z-50 -translate-x-1/2 animate-fade-in-up rounded-lg border border-emerald-500/30 bg-emerald-500/15 px-3 py-1.5 text-xs font-medium text-emerald-400 shadow-lg backdrop-blur-sm">{localizeUi("ui.presets.preseteditor.changesSaved")}</div>
       )}
 
       {/* Unsaved warning */}
       {showUnsavedWarning && (
         <div className="flex items-center justify-between bg-[var(--warning)]/10 px-4 py-2 text-xs text-[var(--warning)]">
-          <span>You have unsaved changes.</span>
+          <span>{localizeUi("ui.presets.preseteditor.youHaveUnsavedChanges")}</span>
           <div className="flex gap-2">
             <button
               onClick={() => setShowUnsavedWarning(false)}
               className="mari-editor-action mari-editor-action--compact px-3 py-1"
-            >
-              Keep editing
-            </button>
+            >{localizeUi("ui.presets.preseteditor.keepEditing")}</button>
             <button
               onClick={() => closePresetDetail()}
               className="rounded-lg px-3 py-1 text-[var(--destructive)] hover:bg-[var(--destructive)]/15"
-            >
-              Discard
-            </button>
+            >{localizeUi("ui.presets.preseteditor.discard")}</button>
             <button
               onClick={async () => {
                 try {
@@ -525,9 +524,7 @@ export function PresetEditor() {
                 }
               }}
               className="mari-editor-action mari-editor-action--primary mari-editor-action--compact px-3 py-1"
-            >
-              Save & close
-            </button>
+            >{localizeUi("ui.presets.preseteditor.saveClose")}</button>
           </div>
         </div>
       )}
@@ -613,6 +610,101 @@ export function PresetEditor() {
   );
 }
 
+export function QuickPresetSectionsEditor({
+  presetId,
+  parentChatHasLorebook = false,
+}: {
+  presetId: string;
+  parentChatHasLorebook?: boolean;
+}) {
+  const { t } = useTranslation();
+  const { data, isLoading } = usePresetFull(presetId);
+  const createSection = useCreateSection();
+  const updateSection = useUpdateSection();
+  const deleteSection = useDeleteSection();
+  const reorderSections = useReorderSections();
+  const createGroup = useCreateGroup();
+  const updateGroup = useUpdateGroup();
+  const deleteGroup = useDeleteGroup();
+  const createVariable = useCreateVariable();
+  const updateVariable = useUpdateVariable();
+  const deleteVariable = useDeleteVariable();
+  const reorderVariables = useReorderVariables();
+
+  const sectionOrder = useMemo<string[]>(() => {
+    const rawOrder = data?.preset?.sectionOrder;
+    try {
+      const parsed: unknown = typeof rawOrder === "string" ? JSON.parse(rawOrder) : (rawOrder ?? []);
+      return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+    } catch {
+      return [];
+    }
+  }, [data?.preset?.sectionOrder]);
+
+  const orderedSections = useMemo(() => {
+    const sections = data?.sections ?? [];
+    const byId = new Map(sections.map((section) => [section.id, section]));
+    return sectionOrder
+      .map((id: string) => byId.get(id))
+      .filter((section): section is PromptSection => section !== undefined);
+  }, [data?.sections, sectionOrder]);
+
+  const groupMap = useMemo(() => new Map((data?.groups ?? []).map((group) => [group.id, group])), [data?.groups]);
+  const hasLorebookMarker = useMemo(
+    () =>
+      orderedSections.some((section) => {
+        if (!readBoolFlag(section.enabled) || !readBoolFlag(section.isMarker)) return false;
+        const marker = readMarkerConfig(section.markerConfig);
+        return (
+          marker?.type === "lorebook" || marker?.type === "world_info_before" || marker?.type === "world_info_after"
+        );
+      }),
+    [orderedSections],
+  );
+
+  if (isLoading) {
+    return (
+      <div className="mari-editor-empty flex min-h-24 items-center justify-center px-3 py-6 text-xs">
+        {t("chat.settings.promptPreset.quickEdit.loading")}
+      </div>
+    );
+  }
+
+  if (!data) {
+    return (
+      <div className="mari-editor-empty flex min-h-24 items-center justify-center px-3 py-6 text-xs">
+        {t("chat.settings.promptPreset.quickEdit.missing")}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mari-editor-legacy-bridge mari-quick-preset-editor">
+      <SectionsTab
+        presetId={presetId}
+        sections={orderedSections}
+        groupMap={groupMap}
+        choiceBlocks={data.choiceBlocks ?? []}
+        wrapFormat={(data.preset.wrapFormat ?? "xml") as WrapFormat}
+        onCreateSection={createSection}
+        onUpdateSection={updateSection}
+        onDeleteSection={deleteSection}
+        onReorderSections={reorderSections}
+        onCreateGroup={createGroup}
+        onUpdateGroup={updateGroup}
+        onDeleteGroup={deleteGroup}
+        onCreateVariable={createVariable}
+        onUpdateVariable={updateVariable}
+        onDeleteVariable={deleteVariable}
+        onReorderVariables={reorderVariables}
+        hasLorebookMarker={hasLorebookMarker}
+        parentChatHasLorebook={parentChatHasLorebook}
+        compact
+      />
+    </div>
+  );
+}
+
 // ═══════════════════════════════════════════════
 //  Overview Tab
 // ═══════════════════════════════════════════════
@@ -640,33 +732,34 @@ function OverviewTab({
   sectionCount: number;
   groupCount: number;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   return (
     <>
-      <FieldGroup label="Name" help="The display name for this preset. Used in the Presets panel and chat settings.">
+      <FieldGroup label={localizeUi("ui.presets.overviewtab.name")} help={localizeUi("ui.presets.overviewtab.theDisplayNameForThisPresetUsedInThe")}>
         <input
           value={name}
           onChange={(e) => onNameChange(e.target.value)}
-          placeholder="Preset name…"
+          placeholder={localizeUi("ui.presets.preseteditor.presetName")}
           className="mari-editor-field w-full p-3 text-sm"
         />
       </FieldGroup>
 
       <FieldGroup
-        label="Description"
-        help="A short summary of what this preset is designed for. Helps you remember its purpose when choosing between presets."
+        label={localizeUi("chat.settings.inlineEditor.fields.description")}
+        help={localizeUi("ui.presets.overviewtab.aShortSummaryOfWhatThisPresetIsDesigned")}
       >
         <textarea
           value={description}
           onFocus={(e) => e.target.select()}
           onChange={(e) => onDescriptionChange(e.target.value)}
-          placeholder="What does this preset do?"
+          placeholder={localizeUi("ui.presets.overviewtab.whatDoesThisPresetDo")}
           className="mari-editor-field min-h-[5rem] w-full p-3 text-sm"
         />
       </FieldGroup>
 
       <FieldGroup
-        label="Wrap Format"
-        help="Controls how prompt sections are formatted when sent to the AI. XML uses <tags>, Markdown uses ## headings, None sends raw content."
+        label={localizeUi("ui.presets.overviewtab.wrapFormat")}
+        help={localizeUi("ui.presets.overviewtab.controlsHowPromptSectionsAreFormattedWhenSentTo")}
       >
         <div className="flex gap-2">
           {(["xml", "markdown", "none"] as const).map((fmt) => (
@@ -693,26 +786,26 @@ function OverviewTab({
         </div>
         <p className="mt-1.5 text-[0.6875rem] text-[var(--muted-foreground)]">
           {wrapFormat === "xml"
-            ? "Sections wrapped in <xml_tags>. Groups become parent tags."
+            ?localizeUi("ui.presets.overviewtab.sectionsWrappedInXmlTagsGroupsBecomeParentTags")
             : wrapFormat === "markdown"
-              ? "Sections wrapped with ## Headings. Groups become # Headings."
-              : "No automatic wrapping. Section content is sent as-is."}
+              ?localizeUi("ui.presets.overviewtab.sectionsWrappedWithHeadingsGroupsBecomeHeadings")
+              :localizeUi("ui.presets.overviewtab.noAutomaticWrappingSectionContentIsSentAsIs")}
         </p>
       </FieldGroup>
 
-      <FieldGroup label="Author" help="Optional creator name, useful if you share presets with others.">
+      <FieldGroup label={localizeUi("ui.presets.overviewtab.author")} help={localizeUi("ui.presets.overviewtab.optionalCreatorNameUsefulIfYouSharePresetsWith")}>
         <input
           value={author}
           onFocus={(e) => e.target.select()}
           onChange={(e) => onAuthorChange(e.target.value)}
-          placeholder="Your name (optional)"
+          placeholder={localizeUi("ui.presets.overviewtab.yourNameOptional")}
           className="mari-editor-field w-full p-2.5 text-sm"
         />
       </FieldGroup>
 
       <div className="flex gap-4">
-        <StatCard label="Sections" value={sectionCount} />
-        <StatCard label="Groups" value={groupCount} />
+        <StatCard label={localizeUi("editor.tabs.sections")} value={sectionCount} />
+        <StatCard label={localizeUi("ui.presets.overviewtab.groups")} value={groupCount} />
       </div>
     </>
   );
@@ -733,44 +826,44 @@ function PromptsTab({
   gamePrompt: string;
   onGamePromptChange: (v: string) => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const quoteFormat = useUIStore((s) => s.quoteFormat);
   const formatPrompt = useCallback(
-    (textarea: HTMLTextAreaElement) => applyTextareaQuoteFormat(textarea, quoteFormat),
+    (textarea: HTMLTextAreaElement, inputEvent: InputEvent) =>
+      applyTextareaQuoteFormat(textarea, quoteFormat, inputEvent),
     [quoteFormat],
   );
 
   return (
     <>
       <FieldGroup
-        label="Conversation Mode"
-        help="Used as the prompt preset's Conversation prompt in Chat Settings and the conversation setup wizard."
+        label={localizeUi("onboarding.conversation.title")}
+        help={localizeUi("ui.presets.promptstab.usedAsThePromptPresetSConversationPromptIn")}
       >
         <MacroTextarea
           value={conversationPrompt}
           onChange={onConversationPromptChange}
-          title="Edit Conversation Mode Prompt"
-          placeholder="Leave empty to use Marinara's built-in conversation prompt."
+          title={localizeUi("ui.presets.promptstab.editConversationModePrompt")}
+          placeholder={localizeUi("ui.presets.promptstab.leaveEmptyToUseMarinaraSBuiltInConversation")}
           className="mari-editor-field min-h-[12rem] w-full p-3 font-mono text-xs"
           formatOnChange={formatPrompt}
           spellCheck={false}
         />
       </FieldGroup>
 
-      <FieldGroup label="Roleplay Mode" help="Roleplay prompt structure continues to come from this preset's Sections.">
-        <div className="rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
-          Uses the assembled prompt from Sections.
-        </div>
+      <FieldGroup label={localizeUi("onboarding.roleplay.title")} help={localizeUi("ui.presets.promptstab.roleplayPromptStructureContinuesToComeFromThisPreset")}>
+        <div className="rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">{localizeUi("ui.presets.promptstab.usesTheAssembledPromptFromSections")}</div>
       </FieldGroup>
 
       <FieldGroup
-        label="Game Mode"
-        help="Used as the prompt preset's Game prompt in Chat Settings and the game setup wizard."
+        label={localizeUi("onboarding.game.title")}
+        help={localizeUi("ui.presets.promptstab.usedAsThePromptPresetSGamePromptIn")}
       >
         <MacroTextarea
           value={gamePrompt}
           onChange={onGamePromptChange}
-          title="Edit Game Mode Prompt"
-          placeholder="Leave empty to use Marinara's built-in game prompt."
+          title={localizeUi("ui.presets.promptstab.editGameModePrompt")}
+          placeholder={localizeUi("ui.presets.promptstab.leaveEmptyToUseMarinaraSBuiltInGame")}
           className="mari-editor-field min-h-[12rem] w-full p-3 font-mono text-xs"
           formatOnChange={formatPrompt}
           spellCheck={false}
@@ -803,6 +896,7 @@ function SectionsTab({
   onReorderVariables,
   hasLorebookMarker,
   parentChatHasLorebook,
+  compact = false,
 }: {
   presetId: string;
   sections: any[];
@@ -822,7 +916,9 @@ function SectionsTab({
   onReorderVariables: any;
   hasLorebookMarker: boolean;
   parentChatHasLorebook: boolean;
+  compact?: boolean;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set());
   const [showAddMenu, setShowAddMenu] = useState(false);
   const addMenuRef = useRef<HTMLDivElement>(null);
@@ -838,6 +934,8 @@ function SectionsTab({
       return false;
     }
   });
+  const markerLabel = (type: MarkerType) =>
+    type === "id_macro_cards" ? localizeUi("ui.presets.sectionstab.idMacroCards") : MARKER_LABELS[type];
 
   useEffect(() => {
     try {
@@ -877,13 +975,17 @@ function SectionsTab({
 
   // Fetch agent configs and filter to those with injectAsSection enabled
   const { data: agentConfigs } = useAgentConfigs();
+  const { data: capabilityAgents = [] } = useCapabilityAgentRegistry();
   const injectableAgents = useMemo(() => {
-    if (!agentConfigs) return [];
-    return (agentConfigs as AgentConfigRow[]).filter((a) => {
+    const configured = (agentConfigs ?? []).filter((a: AgentConfigRow) => {
       const settings = typeof a.settings === "string" ? JSON.parse(a.settings) : a.settings;
       return settings?.injectAsSection === true;
     });
-  }, [agentConfigs]);
+    const ltm = capabilityAgents.find((agent) => agent.id === "long-term-memory");
+    return ltm && !configured.some((agent) => agent.type === ltm.id)
+      ? [...configured, { id: ltm.id, type: ltm.id, name: ltm.name }]
+      : configured;
+  }, [agentConfigs, capabilityAgents]);
 
   const toggleExpanded = (id: string) => {
     setExpandedSections((prev) => {
@@ -916,7 +1018,7 @@ function SectionsTab({
       onCreateSection.mutate({
         presetId,
         identifier: opts?.isMarker ? opts.markerType : `section_${Date.now()}`,
-        name: opts?.isMarker ? MARKER_LABELS[opts.markerType!] : "New Section",
+        name: opts?.isMarker ? markerLabel(opts.markerType!) : "New Section",
         content: "",
         role: "system",
         isMarker: opts?.isMarker ?? false,
@@ -1065,37 +1167,41 @@ function SectionsTab({
         await onReorderSections.mutateAsync({ presetId, sectionIds });
         setExpandedSections((prev) => new Set(prev).add(created.id));
       }
-      toast.success(`Duplicated "${section.name}"`);
+      toast.success(localizeUi("ui.presets.sectionstab.duplicatedValue1", { value1: section.name }));
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to duplicate prompt block");
+      toast.error(error instanceof Error ? error.message :localizeUi("ui.presets.sectionstab.failedToDuplicatePromptBlock"));
     }
   };
 
   return (
     <>
       {/* ── Toolbar ── */}
-      <div className="mari-editor-toolbar flex flex-wrap items-center gap-2 p-2">
+      <div
+        className={cn(
+          "mari-editor-toolbar flex flex-wrap items-center",
+          compact ? "gap-1.5 px-1 pb-2 pt-1.5" : "gap-2 p-2",
+        )}
+      >
         <HelpTooltip
-          text="Everything we send to a model is just text. A prompt is a formatted, written instruction we send to the model. Each section below becomes part of the final prompt."
+          text={localizeUi("ui.presets.sectionstab.everythingWeSendToAModelIsJustText")}
           side="right"
+          buttonClassName={compact ? "p-1" : undefined}
         />
         <div ref={addMenuRef} className="relative">
           <button
             onClick={() => setShowAddMenu(!showAddMenu)}
             className="mari-editor-action mari-editor-action--primary inline-flex"
           >
-            <Plus size="0.8125rem" /> Add Section
-          </button>
+            <Plus size="0.8125rem" /> {localizeUi("ui.presets.sectionstab.addSection")}</button>
           {showAddMenu && (
             <div className="mari-editor-panel absolute left-0 top-full z-50 mt-1 max-h-80 w-56 overflow-y-auto p-1 shadow-xl">
               <button
                 onClick={() => handleAddSection()}
                 className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-xs text-[var(--marinara-editor-text)] hover:bg-[var(--marinara-editor-control-bg-hover)]"
               >
-                <MessageSquare size="0.8125rem" /> Prompt Block
-              </button>
+                <MessageSquare size="0.8125rem" /> {localizeUi("ui.presets.sectionstab.promptBlock")}</button>
               <div className="my-1 border-t border-[var(--border)]" />
-              <p className="px-3 py-1 text-[0.625rem] font-medium text-[var(--muted-foreground)]">Markers</p>
+              <p className="px-3 py-1 text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.presets.sectionstab.markers")}</p>
               {(Object.keys(MARKER_LABELS) as MarkerType[])
                 .filter((t) => t !== "agent_data")
                 .map((type) => (
@@ -1105,22 +1211,21 @@ function SectionsTab({
                     className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-xs text-[var(--marinara-editor-text)] hover:bg-[var(--marinara-editor-control-bg-hover)]"
                   >
                     <Layers size="0.8125rem" className="mari-chrome-accent-icon mari-accent-animated" />{" "}
-                    {MARKER_LABELS[type]}
+                    {markerLabel(type)}
                   </button>
                 ))}
               {injectableAgents.length > 0 && (
                 <>
                   <div className="my-1 border-t border-[var(--border)]" />
-                  <p className="px-3 py-1 text-[0.625rem] font-medium text-[var(--muted-foreground)]">Agent Sections</p>
+                  <p className="px-3 py-1 text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.presets.sectionstab.agentSections")}</p>
                   {injectableAgents.map((agent) => (
                     <button
                       key={agent.id}
                       onClick={() => handleAddSection({ agentType: agent.type, agentName: agent.name })}
-                      className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-xs text-[var(--marinara-editor-text)] hover:bg-[var(--marinara-editor-control-bg-hover)]"
+                      className="flex w-full items-center justify-start gap-2 rounded-lg px-3 py-2 text-left text-xs text-[var(--marinara-editor-text)] hover:bg-[var(--marinara-editor-control-bg-hover)]"
                     >
                       <Sparkles size="0.8125rem" className="mari-chrome-accent-icon mari-accent-animated" />{" "}
-                      {agent.name} (Agent)
-                    </button>
+                      {agent.name} {localizeUi("ui.presets.sectionstab.agent")}</button>
                   ))}
                 </>
               )}
@@ -1136,18 +1241,18 @@ function SectionsTab({
               : "mari-editor-action text-[var(--marinara-editor-muted)]",
           )}
         >
-          <FolderOpen size="0.8125rem" /> Groups ({groupMap.size})
+          <FolderOpen size="0.8125rem" /> {localizeUi("ui.presets.sectionstab.groups")}{groupMap.size})
         </button>
         {!hasLorebookMarker && parentChatHasLorebook && !lorebookWarningDismissed && (
           <div className="mari-editor-chip mari-editor-chip--warning shrink px-2.5 py-1.5 text-[0.6875rem]">
             <AlertTriangle size="0.75rem" className="shrink-0" />
-            <span>Add a lorebook marker when this preset should receive active lorebook entries.</span>
+            <span>{localizeUi("ui.presets.sectionstab.addALorebookMarkerWhenThisPresetShouldReceive")}</span>
             <button
               type="button"
               onClick={dismissLorebookWarning}
               className="ml-0.5 rounded-md p-0.5 text-[var(--marinara-editor-muted)] transition-colors hover:bg-[var(--warning)]/15 hover:text-[var(--warning)]"
-              title="Dismiss warning"
-              aria-label="Dismiss warning"
+              title={localizeUi("ui.presets.sectionstab.dismissWarning")}
+              aria-label={localizeUi("ui.presets.sectionstab.dismissWarning")}
             >
               <X size="0.6875rem" />
             </button>
@@ -1159,21 +1264,16 @@ function SectionsTab({
       {showGroupsPanel && (
         <div className="mari-editor-panel space-y-2 p-3">
           <div className="flex items-center justify-between">
-            <h4 className="text-xs font-semibold text-[var(--marinara-editor-text)]">Groups</h4>
+            <h4 className="text-xs font-semibold text-[var(--marinara-editor-text)]">{localizeUi("ui.presets.overviewtab.groups")}</h4>
             <button
               onClick={handleAddGroup}
               className="mari-editor-action mari-editor-action--compact flex items-center gap-1 px-2 py-1 text-[0.625rem]"
             >
-              <Plus size="0.625rem" /> New Group
-            </button>
+              <Plus size="0.625rem" /> {localizeUi("ui.presets.sectionstab.newGroup")}</button>
           </div>
-          <p className="text-[0.625rem] text-[var(--muted-foreground)]">
-            Groups wrap adjacent sections in a single XML/Markdown container. Assign sections to groups below.
-          </p>
+          <p className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.presets.sectionstab.groupsWrapAdjacentSectionsInASingleXmlMarkdown")}</p>
           {groupMap.size === 0 ? (
-            <p className="py-2 text-center text-[0.625rem] text-[var(--muted-foreground)]">
-              No groups yet. Create one to organize sections.
-            </p>
+            <p className="py-2 text-center text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.presets.sectionstab.noGroupsYetCreateOneToOrganizeSections")}</p>
           ) : (
             <div className="space-y-1">
               {[...groupMap.values()].map((g: any) => (
@@ -1205,21 +1305,20 @@ function SectionsTab({
                         setEditingGroupId(g.id);
                         setEditingGroupName(g.name);
                       }}
-                      title="Click to rename"
+                      title={localizeUi("ui.presets.sectionstab.clickToRename")}
                     >
                       {g.name}
                     </span>
                   )}
                   <span className="text-[0.5625rem] text-[var(--muted-foreground)]">
-                    {sections.filter((s: any) => s.groupId === g.id).length} sections
-                  </span>
+                    {sections.filter((s: any) => s.groupId === g.id).length} {localizeUi("ui.presets.sectionstab.sections")}</span>
                   <button
                     onClick={async () => {
                       if (
                         await showConfirmDialog({
-                          title: "Delete Group",
-                          message: `Delete group "${g.name}"? Sections will be ungrouped.`,
-                          confirmLabel: "Delete",
+                          title:localizeUi("ui.presets.sectionstab.deleteGroup"),
+                          message:localizeUi("ui.presets.sectionstab.deleteGroupValue1SectionsWillBeUngrouped", { value1: g.name }),
+                          confirmLabel:localizeUi("lorebook.editor.batch.delete"),
                           tone: "destructive",
                         })
                       ) {
@@ -1248,7 +1347,7 @@ function SectionsTab({
         {sections.length === 0 ? (
           <div className="mari-editor-empty flex flex-col items-center gap-2 py-10 text-center">
             <Layers size="1.5rem" className="text-[var(--muted-foreground)]" />
-            <p className="text-xs text-[var(--muted-foreground)]">No sections yet. Add one to get started.</p>
+            <p className="text-xs text-[var(--muted-foreground)]">{localizeUi("ui.presets.sectionstab.noSectionsYetAddOneToGetStarted")}</p>
           </div>
         ) : (
           sections.map((section: any, idx: number) => {
@@ -1272,6 +1371,7 @@ function SectionsTab({
                 <div
                   data-touch-reorder-item="preset-section"
                   data-touch-reorder-index={idx}
+                  data-preset-marker-section={compact && isMarker ? "true" : undefined}
                   draggable={dragReady === idx}
                   onDragStart={(e) => handleDragStart(idx, e)}
                   onDragOver={(e) => {
@@ -1295,11 +1395,11 @@ function SectionsTab({
                   )}
                 >
                   {/* Section header */}
-                  <div className="flex min-w-0 items-center gap-2 px-3 py-2.5">
+                  <div className={cn("flex min-w-0 items-center", compact ? "gap-1.5 px-2 py-2" : "gap-2 px-3 py-2.5")}>
                     <div className="flex shrink-0 items-center gap-0.5">
                       <div
                         className="cursor-grab rounded p-0.5 hover:bg-[var(--accent)] active:cursor-grabbing"
-                        title="Drag to reorder"
+                        title={localizeUi("ui.presets.sectionstab.dragToReorder")}
                         onMouseDown={() => setDragReady(idx)}
                         onMouseUp={() => setDragReady(null)}
                         onTouchStart={(event) => {
@@ -1319,8 +1419,8 @@ function SectionsTab({
                         onClick={() => moveSectionByOffset(idx, -1)}
                         disabled={idx === 0 || onReorderSections.isPending}
                         className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:pointer-events-none disabled:opacity-30"
-                        title="Move up"
-                        aria-label={`Move ${section.name} up`}
+                        title={localizeUi("ui.presets.sectionstab.moveUp")}
+                        aria-label={localizeUi("ui.presets.sectionstab.moveValue1Up", { value1: section.name })}
                       >
                         <ArrowUp size="0.75rem" />
                       </button>
@@ -1329,13 +1429,14 @@ function SectionsTab({
                         onClick={() => moveSectionByOffset(idx, 1)}
                         disabled={idx === sections.length - 1 || onReorderSections.isPending}
                         className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:pointer-events-none disabled:opacity-30"
-                        title="Move down"
-                        aria-label={`Move ${section.name} down`}
+                        title={localizeUi("ui.presets.sectionstab.moveDown")}
+                        aria-label={localizeUi("ui.presets.sectionstab.moveValue1Down", { value1: section.name })}
                       >
                         <ArrowDown size="0.75rem" />
                       </button>
                     </div>
                     <button
+                      data-preset-section-toggle
                       onClick={() => toggleExpanded(section.id)}
                       className="shrink-0 rounded p-0.5 hover:bg-[var(--accent)]"
                     >
@@ -1347,19 +1448,32 @@ function SectionsTab({
                     </button>
                     <RoleIcon size="0.875rem" className={cn("shrink-0", ROLE_COLORS[role])} />
                     <span
-                      className="min-w-0 flex-1 cursor-pointer truncate text-sm font-medium"
+                      className={cn(
+                        "min-w-0 flex-1 cursor-pointer truncate font-medium",
+                        compact ? "text-xs" : "text-sm",
+                      )}
                       onClick={() => toggleExpanded(section.id)}
                     >
                       {section.name}
                     </span>
 
                     {isMarker && (
-                      <span className="mari-chrome-accent-surface mari-accent-animated shrink-0 rounded px-1.5 py-0.5 text-[0.5625rem] font-medium">
-                        MARKER
-                      </span>
+                      <span
+                        data-preset-marker-badge
+                        className={cn(
+                          "mari-chrome-accent-surface mari-accent-animated shrink-0 rounded px-1.5 py-0.5 text-[0.5625rem] font-medium",
+                          compact && "max-sm:hidden",
+                        )}
+                      >{localizeUi("ui.presets.sectionstab.marker")}</span>
                     )}
                     {group && (
-                      <span className="mari-editor-chip shrink-0 whitespace-nowrap px-1.5 py-0.5 text-[0.5625rem]">
+                      <span
+                        data-preset-section-group-badge
+                        className={cn(
+                          "mari-editor-chip shrink-0 whitespace-nowrap px-1.5 py-0.5 text-[0.5625rem]",
+                          compact && "max-sm:hidden",
+                        )}
+                      >
                         {group.name}
                       </span>
                     )}
@@ -1373,8 +1487,8 @@ function SectionsTab({
                         onClick={() => void duplicateSection(section, idx)}
                         disabled={onCreateSection.isPending || onReorderSections.isPending}
                         className="rounded-lg p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:pointer-events-none disabled:opacity-30"
-                        title="Duplicate"
-                        aria-label={`Duplicate ${section.name}`}
+                        title={localizeUi("ui.presets.sectionstab.duplicate")}
+                        aria-label={localizeUi("ui.presets.sectionstab.duplicateValue1", { value1: section.name })}
                       >
                         <Copy size="0.75rem" />
                       </button>
@@ -1387,7 +1501,7 @@ function SectionsTab({
                           })
                         }
                         className="rounded-lg p-1 hover:bg-[var(--accent)]"
-                        title={isEnabled ? "Disable" : "Enable"}
+                        title={isEnabled ?localizeUi("ui.presets.sectionstab.disable") :localizeUi("ui.presets.sectionstab.enable")}
                       >
                         {isEnabled ? (
                           <Eye size="0.75rem" className="text-green-400" />
@@ -1398,7 +1512,7 @@ function SectionsTab({
                       <button
                         onClick={() => onDeleteSection.mutate({ presetId, sectionId: section.id })}
                         className="rounded-lg p-1 text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-                        title="Delete"
+                        title={localizeUi("lorebook.editor.batch.delete")}
                       >
                         <Trash2 size="0.75rem" />
                       </button>
@@ -1407,9 +1521,14 @@ function SectionsTab({
 
                   {/* Expanded content */}
                   {isExpanded && (
-                    <div className="space-y-3 border-t border-[var(--marinara-editor-divider)] px-3 py-3">
+                    <div
+                      className={cn(
+                        "space-y-3 border-t border-[var(--marinara-editor-divider)] px-3 py-3",
+                        compact && "max-sm:space-y-2 max-sm:px-2 max-sm:py-2",
+                      )}
+                    >
                       {/* Name & Role */}
-                      <div className="flex gap-2">
+                      <div className={cn("flex gap-2", compact && "flex-col max-sm:gap-1.5")}>
                         <SectionNameInput
                           value={section.name}
                           onCommit={(name) =>
@@ -1429,11 +1548,16 @@ function SectionsTab({
                               role: e.target.value,
                             })
                           }
-                          className="mari-editor-field px-2 py-1.5 text-xs"
+                          data-preset-section-role
+                          className={cn(
+                            "mari-editor-field px-2 py-1.5 text-xs",
+                            compact &&
+                              "max-sm:h-7 max-sm:w-fit max-sm:max-w-full max-sm:self-start max-sm:px-1.5 max-sm:py-1 max-sm:text-[0.6875rem]",
+                          )}
                         >
-                          <option value="system">System</option>
-                          <option value="user">User</option>
-                          <option value="assistant">Assistant</option>
+                          <option value="system">{localizeUi("ui.presets.sectionstab.system")}</option>
+                          <option value="user">{localizeUi("ui.presets.sectionstab.user")}</option>
+                          <option value="assistant">{localizeUi("ui.presets.sectionstab.assistant")}</option>
                         </select>
                       </div>
 
@@ -1463,16 +1587,16 @@ function SectionsTab({
                           const isAgentMarker = mc.type === "agent_data";
                           return isAgentMarker ? (
                             <div className="space-y-2">
-                              <div className="mari-editor-panel mari-editor-panel--soft p-3 text-xs text-[var(--marinara-editor-text)]">
-                                Agent section: <strong>{section.name}</strong>
-                                <p className="mt-1 text-[var(--muted-foreground)]">
-                                  The{" "}
+                              <div
+                                className={cn(
+                                  "mari-editor-panel mari-editor-panel--soft p-3 text-xs text-[var(--marinara-editor-text)]",
+                                  compact && "max-sm:p-2 max-sm:text-[0.6875rem]",
+                                )}
+                              >{localizeUi("ui.presets.sectionstab.agentSection")} <strong>{section.name}</strong>
+                                <p className="mt-1 text-[var(--muted-foreground)]">{localizeUi("ui.presets.sectionstab.the")}{" "}
                                   <code className="rounded bg-black/20 px-1 py-0.5 text-[0.625rem] font-mono text-[var(--marinara-chat-chrome-panel-text)]">
                                     {"{{agent::" + (mc.agentType ?? "agent") + "}}"}
-                                  </code>{" "}
-                                  macro will be replaced with the latest output from the agent at assembly time. You can
-                                  add additional instructions around it.
-                                </p>
+                                  </code>{" "}{localizeUi("ui.presets.sectionstab.macroWillBeReplacedWithTheLatestOutputFrom")}</p>
                               </div>
                               <SectionContentTextarea
                                 value={section.content || `{{agent::${mc.agentType ?? "agent"}}}`}
@@ -1487,25 +1611,34 @@ function SectionsTab({
                               />
                             </div>
                           ) : (
-                            <div className="mari-editor-panel mari-editor-panel--soft p-3 text-xs text-[var(--marinara-editor-text)]">
-                              Marker type: <strong>{MARKER_LABELS[mc.type as MarkerType] ?? "Unknown"}</strong>
+                            <div
+                              className={cn(
+                                "mari-editor-panel mari-editor-panel--soft p-3 text-xs text-[var(--marinara-editor-text)]",
+                                compact && "max-sm:p-2 max-sm:text-[0.6875rem]",
+                              )}
+                            >{localizeUi("ui.presets.sectionstab.markerType")} <strong>{markerLabel(mc.type as MarkerType) || "Unknown"}</strong>
                               <p className="mt-1 text-[var(--muted-foreground)]">
-                                {mc.type === "chat_summary"
-                                  ? "Renders the compiled Chat Summary for this chat, including enabled manual and automated summary entries."
-                                  : "Content is auto-generated at assembly time from your characters, lorebooks, etc."}
+                                {mc.type === "id_macro_cards"
+                                  ? localizeUi("ui.presets.sectionstab.idMacroCardsDescription")
+                                  : mc.type === "chat_summary"
+                                  ?localizeUi("ui.presets.sectionstab.rendersTheCompiledChatSummaryForThisChatIncluding")
+                                  :localizeUi("ui.presets.sectionstab.contentIsAutoGeneratedAtAssemblyTimeFromYour")}
                               </p>
                               {["lorebook", "world_info_before", "world_info_after"].includes(mc.type) && (
-                                <p className="mt-1 text-[var(--warning)]">
-                                  This is where active lorebook entries are inserted.
-                                </p>
+                                <p className="mt-1 text-[var(--warning)]">{localizeUi("ui.presets.sectionstab.thisIsWhereActiveLorebookEntriesAreInserted")}</p>
                               )}
                             </div>
                           );
                         })()}
 
                       {/* Position & Depth */}
-                      <div className="flex flex-wrap items-center gap-3 text-xs">
-                        <label className="text-[var(--muted-foreground)]">Position:</label>
+                      <div
+                        className={cn(
+                          "flex flex-wrap items-center gap-3 text-xs",
+                          compact && "max-sm:gap-x-1.5 max-sm:gap-y-1 max-sm:text-[0.6875rem]",
+                        )}
+                      >
+                        <label className={cn("text-[var(--muted-foreground)]", compact && "max-sm:text-[0.625rem]")}>{localizeUi("ui.presets.sectionstab.position")}</label>
                         <select
                           value={section.injectionPosition ?? "ordered"}
                           onChange={(e) =>
@@ -1515,14 +1648,21 @@ function SectionsTab({
                               injectionPosition: e.target.value,
                             })
                           }
-                          className="mari-editor-field px-2 py-1 text-xs"
+                          data-preset-section-position
+                          className={cn(
+                            "mari-editor-field px-2 py-1 text-xs",
+                            compact &&
+                              "max-sm:h-7 max-sm:min-w-0 max-sm:max-w-[12rem] max-sm:px-1.5 max-sm:py-1 max-sm:text-[0.6875rem]",
+                          )}
                         >
-                          <option value="ordered">Ordered (in sequence)</option>
-                          <option value="depth">Depth (from end of chat)</option>
+                          <option value="ordered">{localizeUi("ui.presets.sectionstab.orderedInSequence")}</option>
+                          <option value="depth">{localizeUi("ui.presets.sectionstab.depthFromEndOfChat")}</option>
                         </select>
                         {section.injectionPosition === "depth" && (
                           <>
-                            <label className="text-[var(--muted-foreground)]">Depth:</label>
+                            <label
+                              className={cn("text-[var(--muted-foreground)]", compact && "max-sm:text-[0.625rem]")}
+                            >{localizeUi("ui.presets.sectionstab.depth")}</label>
                             <DraftNumberInput
                               value={section.injectionDepth ?? 0}
                               min={0}
@@ -1534,16 +1674,29 @@ function SectionsTab({
                                   injectionDepth: nextValue,
                                 })
                               }
-                              className="mari-editor-field w-16 px-2 py-1 text-xs"
+                              className={cn(
+                                "mari-editor-field w-16 px-2 py-1 text-xs",
+                                compact && "max-sm:h-7 max-sm:w-12 max-sm:px-1.5 max-sm:text-[0.6875rem]",
+                              )}
                             />
-                            <span className="text-[var(--muted-foreground)]">(0 = after last message)</span>
+                            <span
+                              className={cn(
+                                "text-[var(--muted-foreground)]",
+                                compact && "max-sm:basis-full max-sm:text-[0.5625rem]",
+                              )}
+                            >{localizeUi("ui.presets.sectionstab.zeroMeansAfterLastMessage")}</span>
                           </>
                         )}
                       </div>
 
                       {/* Group assignment */}
-                      <div className="flex items-center gap-3 text-xs">
-                        <label className="text-[var(--muted-foreground)]">Group:</label>
+                      <div
+                        className={cn(
+                          "flex items-center gap-3 text-xs",
+                          compact && "max-sm:flex-wrap max-sm:gap-1.5 max-sm:text-[0.6875rem]",
+                        )}
+                      >
+                        <label className={cn("text-[var(--muted-foreground)]", compact && "max-sm:text-[0.625rem]")}>{localizeUi("ui.presets.sectionstab.group")}</label>
                         <select
                           value={section.groupId ?? ""}
                           onChange={(e) =>
@@ -1553,9 +1706,14 @@ function SectionsTab({
                               groupId: e.target.value || null,
                             })
                           }
-                          className="mari-editor-field px-2 py-1 text-xs"
+                          data-preset-section-group
+                          className={cn(
+                            "mari-editor-field px-2 py-1 text-xs",
+                            compact &&
+                              "max-sm:h-7 max-sm:min-w-0 max-sm:max-w-[12rem] max-sm:px-1.5 max-sm:py-1 max-sm:text-[0.6875rem]",
+                          )}
                         >
-                          <option value="">No group</option>
+                          <option value="">{localizeUi("ui.presets.sectionstab.noGroup")}</option>
                           {[...groupMap.values()].map((g: any) => (
                             <option key={g.id} value={g.id}>
                               {g.name}
@@ -1563,9 +1721,12 @@ function SectionsTab({
                           ))}
                         </select>
                         {groupMap.size === 0 && (
-                          <span className="text-[0.625rem] text-[var(--muted-foreground)]">
-                            (open Groups panel to create one)
-                          </span>
+                          <span
+                            className={cn(
+                              "text-[0.625rem] text-[var(--muted-foreground)]",
+                              compact && "max-sm:basis-full max-sm:text-[0.5625rem]",
+                            )}
+                          >{localizeUi("ui.presets.sectionstab.openGroupsPanelToCreateOne")}</span>
                         )}
                       </div>
                     </div>
@@ -1581,9 +1742,7 @@ function SectionsTab({
       </div>
 
       {sections.length > 0 && (
-        <p className="text-center text-[0.625rem] text-[var(--muted-foreground)]">
-          Click to expand · Sections are assembled top-to-bottom
-        </p>
+        <p className="text-center text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.presets.sectionstab.clickToExpandSectionsAreAssembledTopToBottom")}</p>
       )}
 
       {/* ── Preset Variables ── */}
@@ -1594,6 +1753,7 @@ function SectionsTab({
         onUpdateVariable={onUpdateVariable}
         onDeleteVariable={onDeleteVariable}
         onReorderVariables={onReorderVariables}
+        compact={compact}
       />
     </>
   );
@@ -1608,6 +1768,7 @@ function PresetVariablesEditor({
   onUpdateVariable,
   onDeleteVariable,
   onReorderVariables,
+  compact = false,
 }: {
   presetId: string;
   variables: any[];
@@ -1615,7 +1776,9 @@ function PresetVariablesEditor({
   onUpdateVariable: any;
   onDeleteVariable: any;
   onReorderVariables: any;
+  compact?: boolean;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [draggingIdx, setDraggingIdx] = useState<number | null>(null);
   const [dropIdx, setDropIdx] = useState<number | null>(null);
@@ -1705,12 +1868,21 @@ function PresetVariablesEditor({
   });
 
   return (
-    <div className="mari-editor-panel mt-6 space-y-3 p-3">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
+    <div className={cn("mari-editor-panel space-y-3", compact ? "mt-3 p-2" : "mt-6 p-3")}>
+      <div
+        data-preset-variables-header
+        className={cn(
+          "flex items-center justify-between gap-3",
+          compact && "max-sm:flex-wrap max-sm:gap-x-3 max-sm:gap-y-2",
+        )}
+      >
+        <div className="flex min-w-0 items-center gap-2">
           <Hash size="0.875rem" className="mari-chrome-accent-icon mari-accent-animated" />
-          <span className="text-sm font-semibold">Preset Variables</span>
-          <span className="mari-editor-chip mari-editor-chip--accent px-1.5 py-0.5 text-[0.5625rem]">
+          <span className="text-sm font-semibold">{localizeUi("ui.presets.presetvariableseditor.presetVariables")}</span>
+          <span
+            data-preset-variable-count
+            className="mari-editor-chip mari-editor-chip--accent px-1.5 py-0.5 text-[0.5625rem]"
+          >
             {variables.length}
           </span>
         </div>
@@ -1726,26 +1898,23 @@ function PresetVariablesEditor({
               ],
             })
           }
-          className="mari-editor-action mari-editor-action--primary mari-editor-action--compact flex items-center gap-1.5 px-2.5 py-1.5 text-[0.6875rem]"
+          className={cn(
+            "mari-editor-action mari-editor-action--primary mari-editor-action--compact flex items-center gap-1.5 px-2.5 py-1.5 text-[0.6875rem]",
+            compact && "max-sm:ml-auto",
+          )}
         >
-          <Plus size="0.6875rem" /> Add Variable
-        </button>
+          <Plus size="0.6875rem" /> {localizeUi("ui.presets.presetvariableseditor.addVariable")}</button>
       </div>
 
-      <p className="text-[0.625rem] text-[var(--muted-foreground)]">
-        Define variables that users select when assigning this preset to a chat. Use{" "}
+      <p className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.presets.presetvariableseditor.defineVariablesThatUsersSelectWhenAssigningThisPreset")}{" "}
         <code className="mari-editor-chip mari-editor-chip--accent rounded px-1 text-[0.625rem]">
           {"{{variable_name}}"}
-        </code>{" "}
-        in any section to insert the selected value.
-      </p>
+        </code>{" "}{localizeUi("ui.presets.presetvariableseditor.inAnySectionToInsertTheSelectedValue")}</p>
 
       {variables.length === 0 ? (
         <div className="mari-editor-empty flex flex-col items-center gap-2 py-6 text-center">
           <Hash size="1.25rem" className="text-[var(--muted-foreground)]" />
-          <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
-            No variables yet. Add one to let users customize prompts per chat.
-          </p>
+          <p className="text-[0.6875rem] text-[var(--muted-foreground)]">{localizeUi("ui.presets.presetvariableseditor.noVariablesYetAddOneToLetUsersCustomize")}</p>
         </div>
       ) : (
         <div data-preset-variable-root className="space-y-2" onDragOver={handleContainerDragOver} onDrop={commitDrop}>
@@ -1851,6 +2020,7 @@ function VariableCard({
   canMoveDown: boolean;
   isReordering: boolean;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   // Parse options
   const opts = useMemo<VariableOptionDraft[]>(() => {
     try {
@@ -1973,7 +2143,7 @@ function VariableCard({
         <div className="flex shrink-0 items-center gap-0.5">
           <div
             className="cursor-grab rounded p-0.5 hover:bg-[var(--accent)] active:cursor-grabbing"
-            title="Drag to reorder"
+            title={localizeUi("ui.presets.sectionstab.dragToReorder")}
             onMouseDown={onGripDown}
             onMouseUp={onGripUp}
             onTouchStart={onGripTouchStart}
@@ -1985,8 +2155,8 @@ function VariableCard({
             onClick={onMoveUp}
             disabled={!canMoveUp || isReordering}
             className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:pointer-events-none disabled:opacity-30"
-            title="Move up"
-            aria-label={`Move ${varName || "variable"} up`}
+            title={localizeUi("ui.presets.sectionstab.moveUp")}
+            aria-label={localizeUi("ui.presets.sectionstab.moveValue1Up", { value1: varName ||localizeUi("ui.presets.variablecard.variable") })}
           >
             <ArrowUp size="0.75rem" />
           </button>
@@ -1995,8 +2165,8 @@ function VariableCard({
             onClick={onMoveDown}
             disabled={!canMoveDown || isReordering}
             className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:pointer-events-none disabled:opacity-30"
-            title="Move down"
-            aria-label={`Move ${varName || "variable"} down`}
+            title={localizeUi("ui.presets.sectionstab.moveDown")}
+            aria-label={localizeUi("ui.presets.sectionstab.moveValue1Down", { value1: varName ||localizeUi("ui.presets.variablecard.variable") })}
           >
             <ArrowDown size="0.75rem" />
           </button>
@@ -2016,16 +2186,13 @@ function VariableCard({
           {varName}
         </span>
         <span className="mari-editor-chip mari-editor-chip--accent shrink-0 px-1.5 py-0.5 text-[0.5625rem]">
-          {opts.length} options
-        </span>
+          {opts.length} {localizeUi("ui.presets.variablecard.options")}</span>
         {opts.length === 1 && !isMultiSelect && (
-          <span className="mari-chrome-accent-surface mari-accent-animated shrink-0 rounded px-1.5 py-0.5 text-[0.5625rem] font-medium">
-            boolean
-          </span>
+          <span className="mari-chrome-accent-surface mari-accent-animated shrink-0 rounded px-1.5 py-0.5 text-[0.5625rem] font-medium">{localizeUi("ui.presets.variablecard.boolean")}</span>
         )}
         {isMultiSelect && (
           <span className="mari-chrome-accent-surface mari-accent-animated shrink-0 rounded px-1.5 py-0.5 text-[0.5625rem] font-medium">
-            {isRandomPick ? "random" : "multi"}
+            {isRandomPick ?localizeUi("ui.presets.variablecard.random") :localizeUi("ui.presets.variablecard.multi")}
           </span>
         )}
         <code className="hidden shrink-0 text-[0.625rem] text-[var(--muted-foreground)] sm:inline">{`{{${varName}}}`}</code>
@@ -2033,9 +2200,9 @@ function VariableCard({
           onClick={async () => {
             if (
               await showConfirmDialog({
-                title: "Delete Variable",
-                message: `Delete variable "${varName}"?`,
-                confirmLabel: "Delete",
+                title:localizeUi("ui.presets.variablecard.deleteVariable_8ceffd4"),
+                message:localizeUi("ui.presets.variablecard.deleteVariableValue1", { value1: varName }),
+                confirmLabel:localizeUi("lorebook.editor.batch.delete"),
                 tone: "destructive",
               })
             ) {
@@ -2043,7 +2210,7 @@ function VariableCard({
             }
           }}
           className="shrink-0 rounded-lg p-1 text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-          title="Delete variable"
+          title={localizeUi("ui.presets.variablecard.deleteVariable")}
         >
           <Trash2 size="0.75rem" />
         </button>
@@ -2054,19 +2221,14 @@ function VariableCard({
         <div className="space-y-3 border-t border-[var(--marinara-editor-divider)] px-3 py-3">
           {/* Variable Name */}
           <div className="space-y-1">
-            <label className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Variable Name</label>
+            <label className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.presets.variablecard.variableName")}</label>
             <VariableNameInput value={varName} onCommit={(v) => update({ variableName: v })} />
-            <p className="text-[0.5625rem] text-[var(--muted-foreground)]">
-              Use <code className="mari-chrome-accent-text mari-accent-animated">{`{{${varName}}}`}</code> in any prompt
-              section to insert the selected value. Must be alphanumeric/underscores only.
-            </p>
+            <p className="text-[0.5625rem] text-[var(--muted-foreground)]">{localizeUi("ui.presets.variablecard.use")} <code className="mari-chrome-accent-text mari-accent-animated">{`{{${varName}}}`}</code> {localizeUi("ui.presets.variablecard.inAnyPromptSectionToInsertTheSelectedValue")}</p>
           </div>
 
           {/* Question */}
           <div className="space-y-1">
-            <label className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
-              Question (shown to user)
-            </label>
+            <label className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.presets.variablecard.questionShownToUser")}</label>
             <VariableQuestionInput value={question} onCommit={(v) => update({ question: v })} />
           </div>
 
@@ -2075,21 +2237,16 @@ function VariableCard({
             <div className="mari-editor-panel mari-editor-panel--soft space-y-1.5 p-2.5">
               <div className="flex items-center gap-1.5">
                 <ListChecks size="0.75rem" className="mari-chrome-accent-icon mari-accent-animated" />
-                <span className="mari-chrome-accent-text mari-accent-animated text-[0.625rem] font-medium">
-                  Boolean Toggle
-                </span>
+                <span className="mari-chrome-accent-text mari-accent-animated text-[0.625rem] font-medium">{localizeUi("ui.presets.variablecard.booleanToggle")}</span>
               </div>
-              <p className="text-[0.5625rem] text-[var(--muted-foreground)]">
-                This variable has only one option, so it behaves as a Boolean toggle. Users can switch it on or off in
-                the Configure Preset Variables wizard.
-              </p>
+              <p className="text-[0.5625rem] text-[var(--muted-foreground)]">{localizeUi("ui.presets.variablecard.thisVariableHasOnlyOneOptionSoItBehaves")}</p>
             </div>
           ) : (
             <div className="mari-editor-panel mari-editor-panel--soft space-y-2 p-2.5">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5">
                   <ListChecks size="0.75rem" className="mari-chrome-accent-icon mari-accent-animated" />
-                  <span className="text-[0.625rem] font-medium text-[var(--foreground)]">Multi-Select</span>
+                  <span className="text-[0.625rem] font-medium text-[var(--foreground)]">{localizeUi("ui.presets.variablecard.multiSelect")}</span>
                 </div>
                 <SettingsSwitch
                   ariaLabel={isMultiSelect ? "Disable multi-select" : "Enable multi-select"}
@@ -2098,9 +2255,7 @@ function VariableCard({
                   className="p-0 hover:bg-transparent"
                 />
               </div>
-              <p className="text-[0.5625rem] text-[var(--muted-foreground)]">
-                Allow users to select multiple options instead of just one.
-              </p>
+              <p className="text-[0.5625rem] text-[var(--muted-foreground)]">{localizeUi("ui.presets.variablecard.allowUsersToSelectMultipleOptionsInsteadOfJust")}</p>
 
               {isMultiSelect && (
                 <div className="space-y-2 border-t border-[var(--border)] pt-2">
@@ -2108,7 +2263,7 @@ function VariableCard({
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-1.5">
                       <Shuffle size="0.75rem" className="mari-chrome-accent-icon mari-accent-animated" />
-                      <span className="text-[0.625rem] font-medium text-[var(--foreground)]">Random Pick</span>
+                      <span className="text-[0.625rem] font-medium text-[var(--foreground)]">{localizeUi("ui.presets.variablecard.randomPick")}</span>
                     </div>
                     <SettingsSwitch
                       ariaLabel={isRandomPick ? "Disable random pick" : "Enable random pick"}
@@ -2119,25 +2274,21 @@ function VariableCard({
                   </div>
                   <p className="text-[0.5625rem] text-[var(--muted-foreground)]">
                     {isRandomPick
-                      ? "One of the user's selected options will be randomly picked each generation."
-                      : "All selected options will be joined together with the separator below."}
+                      ?localizeUi("ui.presets.variablecard.oneOfTheUserSSelectedOptionsWillBe")
+                      :localizeUi("ui.presets.variablecard.allSelectedOptionsWillBeJoinedTogetherWithThe")}
                   </p>
 
                   {/* Separator (only shown when not random pick) */}
                   {!isRandomPick && (
                     <div className="flex items-center gap-2">
-                      <label className="shrink-0 text-[0.625rem] font-medium text-[var(--muted-foreground)]">
-                        Separator
-                      </label>
+                      <label className="shrink-0 text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.presets.variablecard.separator")}</label>
                       <OptionFieldInput
                         value={separatorValue}
                         onCommit={(value) => update({ separator: value })}
                         className="mari-editor-field w-20 px-1.5 py-0.5 text-center font-mono text-xs"
                         placeholder=", "
                       />
-                      <span className="text-[0.5625rem] text-[var(--muted-foreground)]">
-                        e.g. ", " becomes Romance, Fantasy, Action
-                      </span>
+                      <span className="text-[0.5625rem] text-[var(--muted-foreground)]">{localizeUi("ui.presets.variablecard.eGBecomesRomanceFantasyAction")}</span>
                     </div>
                   )}
                 </div>
@@ -2150,7 +2301,7 @@ function VariableCard({
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-1.5">
                 <ListChecks size="0.75rem" className="mari-chrome-accent-icon mari-accent-animated" />
-                <span className="text-[0.625rem] font-medium text-[var(--foreground)]">Presentation</span>
+                <span className="text-[0.625rem] font-medium text-[var(--foreground)]">{localizeUi("ui.presets.variablecard.presentation")}</span>
               </div>
               <div className="mari-editor-field flex p-0.5">
                 {(
@@ -2178,14 +2329,14 @@ function VariableCard({
             </div>
             <div className="flex items-center justify-between gap-2 border-t border-[var(--border)] pt-2">
               <div className="min-w-0">
-                <p className="text-[0.625rem] font-medium text-[var(--foreground)]">Alphabetical option display</p>
-                <p className="text-[0.5625rem] text-[var(--muted-foreground)]">
-                  Manual order is kept for editing and exports.
-                </p>
+                <p className="text-[0.625rem] font-medium text-[var(--foreground)]">{localizeUi("ui.presets.variablecard.alphabeticalOptionDisplay")}</p>
+                <p className="text-[0.5625rem] text-[var(--muted-foreground)]">{localizeUi("ui.presets.variablecard.manualOrderIsKeptForEditingAndExports")}</p>
               </div>
               <SettingsSwitch
                 ariaLabel={
-                  optionOrderIsAlphabetical ? "Use manual option display order" : "Use alphabetical option display order"
+                  optionOrderIsAlphabetical
+                    ? "Use manual option display order"
+                    : "Use alphabetical option display order"
                 }
                 checked={optionOrderIsAlphabetical}
                 onChange={(checked) => update({ optionSort: checked ? "alphabetical" : "manual" })}
@@ -2196,7 +2347,7 @@ function VariableCard({
 
           {/* Options */}
           <div className="space-y-1.5" data-preset-variable-option-root={variable.id}>
-            <label className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Options</label>
+            <label className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.presets.variablecard.options_6bf5da9")}</label>
             {opts.map((opt, oi) => {
               const valueIsBlank = !opt.value || !opt.value.trim();
               const showDropBefore =
@@ -2244,7 +2395,7 @@ function VariableCard({
                             : "cursor-grab hover:bg-[var(--accent)] active:cursor-grabbing",
                         )}
                         title={
-                          optionOrderIsAlphabetical ? "Disable alphabetical display to reorder" : "Drag to reorder"
+                          optionOrderIsAlphabetical ?localizeUi("ui.presets.variablecard.disableAlphabeticalDisplayToReorder") :localizeUi("ui.presets.sectionstab.dragToReorder")
                         }
                         onMouseDown={() => {
                           if (!optionOrderIsAlphabetical) setDragReadyOptIdx(oi);
@@ -2268,8 +2419,8 @@ function VariableCard({
                         onClick={() => moveOptionByOffset(oi, -1)}
                         disabled={optionOrderIsAlphabetical || oi === 0}
                         className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:pointer-events-none disabled:opacity-30"
-                        title="Move option up"
-                        aria-label={`Move ${opt.label || `option ${oi + 1}`} up`}
+                        title={localizeUi("ui.presets.variablecard.moveOptionUp")}
+                        aria-label={localizeUi("ui.presets.sectionstab.moveValue1Up", { value1: opt.label ||localizeUi("ui.presets.variablecard.optionValue1", { value1: oi + 1 }) })}
                       >
                         <ArrowUp size="0.625rem" />
                       </button>
@@ -2278,8 +2429,8 @@ function VariableCard({
                         onClick={() => moveOptionByOffset(oi, 1)}
                         disabled={optionOrderIsAlphabetical || oi === opts.length - 1}
                         className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:pointer-events-none disabled:opacity-30"
-                        title="Move option down"
-                        aria-label={`Move ${opt.label || `option ${oi + 1}`} down`}
+                        title={localizeUi("ui.presets.variablecard.moveOptionDown")}
+                        aria-label={localizeUi("ui.presets.sectionstab.moveValue1Down", { value1: opt.label ||localizeUi("ui.presets.variablecard.optionValue1", { value1: oi + 1 }) })}
                       >
                         <ArrowDown size="0.625rem" />
                       </button>
@@ -2291,36 +2442,34 @@ function VariableCard({
                       value={opt.label}
                       onCommit={(v) => updateOptionField(opt.id, "label", v)}
                       className="mari-editor-field min-w-[7rem] flex-[1_1_7rem] px-1.5 py-0.5 text-xs sm:min-w-0 sm:flex-1"
-                      placeholder="Label…"
+                      placeholder={localizeUi("ui.presets.variablecard.label")}
                     />
                     <OptionFieldInput
                       value={opt.value}
                       onCommit={(v) => updateOptionField(opt.id, "value", v)}
                       className="mari-editor-field min-w-[7rem] flex-[1_1_7rem] rounded px-1.5 py-0.5 font-mono text-xs focus:outline-none focus:ring-1 sm:min-w-0 sm:flex-1"
-                      placeholder="Value…"
+                      placeholder={localizeUi("ui.presets.variablecard.value")}
                     />
                     <button
                       onClick={() => setExpandedOptId(opt.id)}
                       className="shrink-0 rounded p-0.5 text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-                      title="Expand value editor"
+                      title={localizeUi("ui.presets.variablecard.expandValueEditor")}
                     >
                       <Maximize2 size="0.625rem" />
                     </button>
                     <button
                       onClick={() => {
-                        if (currentOpts().length <= 1) return toast.error("A variable needs at least 1 option.");
+                        if (currentOpts().length <= 1) return toast.error(localizeUi("ui.presets.variablecard.aVariableNeedsAtLeast1Option"));
                         updateOpts(currentOpts().filter((option) => option.id !== opt.id));
                       }}
                       className="shrink-0 rounded p-0.5 hover:bg-[var(--destructive)]/15"
-                      title="Remove option"
+                      title={localizeUi("ui.presets.variablecard.removeOption")}
                     >
                       <X size="0.625rem" className="text-[var(--destructive)]" />
                     </button>
                   </div>
                   {valueIsBlank && (
-                    <p className="mt-1 pl-6 text-[0.5625rem] text-[var(--muted-foreground)]">
-                      Blank value inserts nothing.
-                    </p>
+                    <p className="mt-1 pl-6 text-[0.5625rem] text-[var(--muted-foreground)]">{localizeUi("ui.presets.variablecard.blankValueInsertsNothing")}</p>
                   )}
                   {showDropAfter && (
                     <div className="mari-chrome-accent-progress mari-accent-animated mx-2 mt-1 h-0.5 rounded-full" />
@@ -2339,14 +2488,13 @@ function VariableCard({
               }}
               className="mari-editor-action mari-editor-action--compact flex items-center gap-1 px-2 py-1 text-[0.625rem]"
             >
-              <Plus size="0.625rem" /> Add Option
-            </button>
+              <Plus size="0.625rem" /> {localizeUi("ui.noodle.noodlehome.addOption")}</button>
           </div>
 
           {/* Expanded value editor for a single option */}
           {expandedOpt && (
             <ExpandedEditorModal
-              title={`Edit Value: ${expandedOpt.label || "Option"}`}
+              title={localizeUi("ui.presets.variablecard.editValueValue1", { value1: expandedOpt.label ||localizeUi("ui.presets.variablecard.option") })}
               value={expandedOpt.value}
               onChange={(v) => updateOptionField(expandedOpt.id, "value", v)}
               onClose={() => setExpandedOptId(null)}
@@ -2360,6 +2508,7 @@ function VariableCard({
 
 // ── Variable Name Input (local state, commits on blur/Enter) ──
 function VariableNameInput({ value, onCommit }: { value: string; onCommit: (v: string) => void }) {
+  const { t: localizeUi } = useUiTranslation();
   const [local, setLocal] = useState(value);
   const inputRef = useRef<HTMLInputElement>(null);
   const selectionRef = useRef<TextSelection | null>(null);
@@ -2393,7 +2542,7 @@ function VariableNameInput({ value, onCommit }: { value: string; onCommit: (v: s
         }
       }}
       className="mari-editor-field w-full px-2 py-1 font-mono text-xs"
-      placeholder="VARIABLE_NAME"
+      placeholder={localizeUi("ui.presets.variablenameinput.variableName")}
     />
   );
 }
@@ -2467,6 +2616,7 @@ function OptionFieldInput({
 
 // ── Variable Question Input (local state, commits on blur/Enter) ──
 function VariableQuestionInput({ value, onCommit }: { value: string; onCommit: (v: string) => void }) {
+  const { t: localizeUi } = useUiTranslation();
   const [local, setLocal] = useState(value);
   const inputRef = useRef<HTMLInputElement>(null);
   const selectionRef = useRef<TextSelection | null>(null);
@@ -2501,7 +2651,7 @@ function VariableQuestionInput({ value, onCommit }: { value: string; onCommit: (
         }
       }}
       className="mari-editor-field w-full px-2 py-1 text-xs"
-      placeholder="What should the user choose?"
+      placeholder={localizeUi("ui.presets.variablequestioninput.whatShouldTheUserChoose")}
     />
   );
 }
@@ -2516,10 +2666,10 @@ function SectionContentTextarea({
   sectionName?: string;
   onCommit: (v: string) => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const [local, setLocal] = useState(value);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const focusedRef = useRef(false);
-  const formatQuotes = useQuoteFormatter();
   const quoteFormat = useUIStore((s) => s.quoteFormat);
 
   // Only sync from parent when not actively editing
@@ -2537,7 +2687,7 @@ function SectionContentTextarea({
 
   // Debounced auto-save while typing (800ms)
   const handleChange = (nextRawValue: string) => {
-    const nextValue = formatQuotes(nextRawValue);
+    const nextValue = nextRawValue;
     setLocal(nextValue);
     if (timeoutRef.current) clearTimeout(timeoutRef.current);
     timeoutRef.current = setTimeout(() => {
@@ -2570,10 +2720,10 @@ function SectionContentTextarea({
       onBlur={handleBlur}
       onFocus={handleFocus}
       onExpandedClose={commit}
-      formatOnChange={(textarea) => applyTextareaQuoteFormat(textarea, quoteFormat)}
-      title={sectionName ? `Edit: ${sectionName}` : "Edit Prompt"}
+      formatOnChange={(textarea, inputEvent) => applyTextareaQuoteFormat(textarea, quoteFormat, inputEvent)}
+      title={sectionName ?localizeUi("ui.presets.sectioncontenttextarea.editValue1", { value1: sectionName }) :localizeUi("ui.presets.sectioncontenttextarea.editPrompt")}
       className="mari-editor-field min-h-[7.5rem] w-full p-2.5 font-mono text-xs"
-      placeholder="Prompt content… (supports {{user}}, {{char}}, {{// comment}}, {{trim}} macros)"
+      placeholder={localizeUi("ui.presets.sectioncontenttextarea.promptContentSupportsUserCharCommentTrimMacros")}
     />
   );
 }
@@ -2595,6 +2745,7 @@ function ExpandedEditorModal({
   onChange: (v: string) => void;
   onClose: () => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const selectionRef = useRef<TextSelection | null>(null);
   const [local, setLocal] = useState(value);
@@ -2651,13 +2802,15 @@ function ExpandedEditorModal({
       clearTimeout(timeoutRef.current);
       timeoutRef.current = null;
     }
-    if (local !== value) onChange(local);
     onClose();
   };
 
   return (
     <PresetModalPortal>
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-[max(0.75rem,env(safe-area-inset-top))] sm:p-6">
+      <div
+        data-chat-floating-panel
+        className="fixed inset-0 z-50 flex items-center justify-center p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-[max(0.75rem,env(safe-area-inset-top))] sm:p-6"
+      >
         <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={handleClose} />
         <div className="mari-editor-shell mari-editor-legacy-bridge relative flex h-[80vh] max-h-[calc(100vh-1.5rem)] w-full max-w-3xl flex-col rounded-2xl border border-[var(--marinara-editor-border)] bg-[var(--marinara-editor-surface-bg)] shadow-2xl shadow-black/50 supports-[height:100dvh]:h-[80dvh] supports-[height:100dvh]:max-h-[calc(100dvh-1.5rem)]">
           {/* Header */}
@@ -2673,20 +2826,25 @@ function ExpandedEditorModal({
               ref={textareaRef}
               value={local}
               onChange={handleChange}
+              onBlur={() => {
+                if (timeoutRef.current) {
+                  clearTimeout(timeoutRef.current);
+                  timeoutRef.current = null;
+                }
+                if (local !== value) onChange(local);
+              }}
               onKeyDown={handleTextareaTab}
               className="mari-editor-field h-full w-full resize-none p-4 font-mono text-sm"
-              placeholder="Prompt content… (supports macros like {{user}}, {{char}}, etc.)"
+              placeholder={localizeUi("ui.presets.expandededitormodal.promptContentSupportsMacrosLikeUserCharEtc")}
             />
           </div>
           {/* Footer */}
           <div className="flex items-center justify-between border-t border-[var(--border)] px-4 py-2.5">
-            <p className="text-[0.625rem] text-[var(--muted-foreground)]">Changes auto-save. Press Escape to close.</p>
+            <p className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.presets.expandededitormodal.changesAutoSavePressEscapeToClose")}</p>
             <button
               onClick={handleClose}
               className="mari-editor-action mari-editor-action--primary mari-editor-action--compact inline-flex px-4 py-1.5"
-            >
-              Done
-            </button>
+            >{localizeUi("lorebook.editor.batch.done")}</button>
           </div>
         </div>
       </div>
@@ -2696,6 +2854,7 @@ function ExpandedEditorModal({
 
 // ── Locally-controlled section name input (commits on blur / Enter) ──
 function SectionNameInput({ value, onCommit }: { value: string; onCommit: (v: string) => void }) {
+  const { t: localizeUi } = useUiTranslation();
   const [local, setLocal] = useState(value);
 
   // Sync when the external value changes (e.g. after refetch)
@@ -2722,7 +2881,7 @@ function SectionNameInput({ value, onCommit }: { value: string; onCommit: (v: st
         }
       }}
       className="mari-editor-field flex-1 px-2.5 py-1.5 text-xs"
-      placeholder="Section name"
+      placeholder={localizeUi("ui.presets.sectionnameinput.sectionName")}
     />
   );
 }

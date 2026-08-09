@@ -15,6 +15,7 @@ import {
   NEUTRAL_PANEL_SUBTITLE,
   NEUTRAL_PANEL_TITLE,
 } from "../ui/neutral-surface-styles";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 // ─── Step definitions ─────────────────────────
 
@@ -225,19 +226,19 @@ function TutorialCard({
   onNext: () => void;
   onSkip: () => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   return (
     <div className="flex min-h-0 flex-col">
       <div className={cn(NEUTRAL_PANEL_HEADER, "flex items-center justify-between gap-3 px-3 py-2.5")}>
         <div className="min-w-0">
           <div className={NEUTRAL_PANEL_TITLE}>
             <CircleHelp size="0.8rem" className="shrink-0 text-[var(--marinara-chat-chrome-button-text-active)]" />
-            <span className="truncate">Game Tutorial</span>
+            <span className="truncate">{localizeUi("ui.game.tutorialcard.gameTutorial")}</span>
           </div>
-          <div className={NEUTRAL_PANEL_SUBTITLE}>
-            Step {step + 1} of {STEPS.length}
+          <div className={NEUTRAL_PANEL_SUBTITLE}>{localizeUi("ui.game.tutorialcard.step")} {step + 1} {localizeUi("ui.noodle.noodlehome.of")} {STEPS.length}
           </div>
         </div>
-        <button type="button" onClick={onSkip} className={TUTORIAL_ICON_BUTTON} title="Close tutorial">
+        <button type="button" onClick={onSkip} className={TUTORIAL_ICON_BUTTON} title={localizeUi("ui.game.tutorialcard.closeTutorial")}>
           <X size={14} />
         </button>
       </div>
@@ -247,7 +248,7 @@ function TutorialCard({
           <div className="mb-3 flex justify-center">
             <img
               src={stepData.sprite.src}
-              alt="Professor Mari"
+              alt={localizeUi("ui.game.tutorialcard.professorMari")}
               className={cn(
                 "h-20 max-h-[12vh] w-auto object-contain drop-shadow-lg sm:h-28 sm:max-h-[14vh]",
                 stepData.sprite.flip && "-scale-x-100",
@@ -297,11 +298,9 @@ function TutorialCard({
       </div>
 
       <div className="flex items-center justify-between gap-2 border-t border-[var(--marinara-chat-chrome-panel-divider)] px-3 py-2.5">
-        <button type="button" onClick={onSkip} className={TUTORIAL_SECONDARY_BUTTON}>
-          Skip
-        </button>
+        <button type="button" onClick={onSkip} className={TUTORIAL_SECONDARY_BUTTON}>{localizeUi("onboarding.actions.skip")}</button>
         <button type="button" onClick={onNext} className={TUTORIAL_PRIMARY_BUTTON}>
-          {isLast ? "Got it" : "Next"}
+          {isLast ?localizeUi("ui.game.tutorialcard.gotIt") :localizeUi("onboarding.actions.next")}
           {!isLast && <ChevronRight size="0.75rem" />}
         </button>
       </div>

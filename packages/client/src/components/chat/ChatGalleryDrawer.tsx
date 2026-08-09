@@ -18,12 +18,18 @@ import type { ChatImage } from "../../hooks/use-gallery";
 import { useInstalledCapabilityPackages } from "../../hooks/use-capability-packages";
 import { isDesktopShellNavigationTarget } from "../../lib/chat-floating-ui-events";
 import { parseChatMetadata } from "../../lib/chat-display";
+import {
+  getChatFloatingPanelDesktopRight,
+  isChatToolbarPanelTrigger,
+  type ChatToolbarFloatingPanelAnchor,
+} from "./ChatToolbarControls";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface ChatGalleryDrawerProps {
   chat: Chat;
   open: boolean;
   onClose: () => void;
-  anchor?: { right: number; top: number } | null;
+  anchor?: ChatToolbarFloatingPanelAnchor;
   /** Manually trigger the Illustrator agent */
   onIllustrate?: () => void | Promise<void>;
   /** Generate an on-demand Conversation selfie. */
@@ -60,6 +66,7 @@ export function ChatGalleryDrawer({
   onGenerateVideo,
   onAnimateImage,
 }: ChatGalleryDrawerProps) {
+  const { t: localizeUi } = useUiTranslation();
   const panelRef = useRef<HTMLDivElement | null>(null);
   const chatMetadata = useMemo(
     () => parseChatMetadata(chat.metadata) as GalleryChatMetadata,
@@ -89,6 +96,7 @@ export function ChatGalleryDrawer({
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target;
       if (isDesktopShellNavigationTarget(target)) return;
+      if (isChatToolbarPanelTrigger(target, "gallery")) return;
       if (!(target instanceof Node)) return;
       if (panelRef.current?.contains(target)) return;
       if (target instanceof Element && target.closest("[data-chat-floating-panel]")) return;
@@ -101,10 +109,15 @@ export function ChatGalleryDrawer({
 
   if (!open) return null;
   const panelStyle: CSSProperties | undefined = anchor
-    ? {
-        right: `max(${anchor.right}px, calc(var(--mari-chat-ui-inset-right, 0px) + 0.75rem))`,
-        top: `${anchor.top}px`,
-      }
+    ? typeof window !== "undefined" && window.innerWidth < 768
+      ? {
+          right: `${anchor.right}px`,
+          top: `${anchor.top}px`,
+        }
+      : {
+          right: getChatFloatingPanelDesktopRight(anchor),
+          top: `${anchor.top}px`,
+        }
     : undefined;
 
   return (
@@ -123,10 +136,8 @@ export function ChatGalleryDrawer({
         {/* Header */}
         <div className={cn(ROLEPLAY_POPOVER_HEADER, "flex items-center justify-between")}>
           <h3 className={ROLEPLAY_POPOVER_TITLE}>
-            <Image size="0.8125rem" className="shrink-0 text-[var(--muted-foreground)]" />
-            Gallery
-          </h3>
-          <button type="button" onClick={onClose} aria-label="Close gallery" className={ROLEPLAY_POPOVER_CLOSE_BUTTON}>
+            <Image size="0.8125rem" className="shrink-0 text-[var(--muted-foreground)]" />{localizeUi("chat.toolbar.gallery")}</h3>
+          <button type="button" onClick={onClose} aria-label={localizeUi("ui.chat.chatgallerydrawer.closeGallery")} className={ROLEPLAY_POPOVER_CLOSE_BUTTON}>
             <X size={ROLEPLAY_POPOVER_CLOSE_ICON_SIZE} />
           </button>
         </div>
@@ -138,7 +149,7 @@ export function ChatGalleryDrawer({
             onIllustrate={illustratorAvailable ? onIllustrate : undefined}
             onGenerateSelfie={illustratorAvailable ? onGenerateSelfie : undefined}
             selfieCharacters={selfieCharacters}
-            onGenerateStoryboard={illustratorAvailable ? onGenerateStoryboard : undefined}
+            onGenerateStoryboard={onGenerateStoryboard}
             onViewStoryboard={onViewStoryboard}
             onGenerateVideo={illustratorAvailable ? onGenerateVideo : undefined}
             onAnimateImage={illustratorAvailable ? onAnimateImage : undefined}

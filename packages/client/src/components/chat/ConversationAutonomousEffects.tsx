@@ -7,6 +7,7 @@ import { playConfiguredNotificationPing } from "../../lib/notification-sound";
 import { generateClientId } from "../../lib/utils";
 import { useAutonomousMessaging } from "../../hooks/use-autonomous-messaging";
 import type { CharacterMap } from "./chat-area.types";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 type ConversationAutonomousEffectsProps = {
   chatId: string;
@@ -21,6 +22,7 @@ export function ConversationAutonomousEffects({
   characterMap,
   chatMeta,
 }: ConversationAutonomousEffectsProps) {
+  const { t: localizeUi } = useUiTranslation();
   const autonomousEnabled = !!chatMeta.autonomousMessages;
   const exchangesEnabled = !!chatMeta.characterExchanges;
   const [notification, setNotification] = useState<{ name: string; id: string } | null>(null);
@@ -94,7 +96,7 @@ export function ConversationAutonomousEffects({
           key={notification.id}
           className="pointer-events-auto absolute right-4 top-14 z-20 flex animate-slide-in-right items-center gap-2 rounded-lg bg-[var(--primary)] px-3 py-2 text-sm font-medium text-white shadow-lg"
         >
-          <span>{notification.name} messaged you!</span>
+          <span>{notification.name} {localizeUi("ui.chat.conversationautonomouseffects.messagedYou")}</span>
           <button
             onClick={() => setNotification(null)}
             className="ml-1 rounded p-0.5 transition-colors hover:bg-foreground/20"

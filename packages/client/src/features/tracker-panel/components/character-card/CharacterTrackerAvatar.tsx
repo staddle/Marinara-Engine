@@ -3,6 +3,7 @@ import type { PresentCharacter } from "@marinara-engine/shared";
 import { cn } from "../../../../lib/utils";
 import { visibleText } from "../../lib/tracker-display";
 import { InlineEdit } from "../controls/InlineControls";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 const AVATAR_BOTTOM_GLINT_CLASS =
   "pointer-events-none absolute -inset-[2px] z-[3] rounded-full bg-[conic-gradient(from_0deg_at_50%_50%,transparent_0deg,transparent_104deg,color-mix(in_srgb,var(--tracker-profile-dialogue-border)_58%,transparent)_148deg,color-mix(in_srgb,var(--tracker-profile-accent-solid)_46%,transparent)_192deg,transparent_226deg,transparent_360deg)] opacity-90 shadow-[0_1px_4px_color-mix(in_srgb,var(--tracker-profile-accent-solid)_28%,transparent)] [mask:radial-gradient(farthest-side,transparent_calc(100%-3px),black_calc(100%-2px),black_100%)] [transform:rotate(-8deg)]";
@@ -23,11 +24,12 @@ export function CharacterTrackerAvatar({
   avatarMedia: string | null;
   avatarSize: string;
   onUploadAvatar?: () => void;
-  onSaveEmoji?: (emoji: string) => void;
+  onSaveEmoji: (emoji: string) => void;
   emojiLocked?: boolean;
   lockMode?: boolean;
   onToggleEmojiLock?: () => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const characterName = visibleText(character.name, "character");
   return (
     <div className={cn("relative shrink-0", avatarSize)}>
@@ -35,11 +37,11 @@ export function CharacterTrackerAvatar({
         type="button"
         onClick={onUploadAvatar}
         disabled={!onUploadAvatar}
-        title={avatarMedia ? "Change avatar" : "Upload avatar"}
+        title={avatarMedia ?localizeUi("ui.panels.personaspanel.changeAvatar") :localizeUi("editor.avatar.upload")}
         aria-label={
           avatarMedia
-            ? `Change ${characterName} avatar`
-            : `Upload ${characterName} avatar`
+            ?localizeUi("ui.trackerPanel.charactertrackeravatar.changeValue1Avatar", { value1: characterName })
+            :localizeUi("ui.trackerPanel.charactertrackeravatar.uploadValue1Avatar", { value1: characterName })
         }
         className={cn(
           "group/avatar relative z-[1] flex aspect-square w-full shrink-0 items-center justify-center overflow-hidden rounded-full border border-[color-mix(in_srgb,var(--tracker-profile-nameplate-rule)_34%,transparent)] bg-[var(--muted)] text-xs text-[var(--foreground)] shadow-[0_4px_10px_rgba(0,0,0,0.24)] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--border)]",
@@ -59,23 +61,21 @@ export function CharacterTrackerAvatar({
         )}
         <span aria-hidden="true" className={AVATAR_SOFT_INNER_GLOW_CLASS} />
       </button>
-      {onSaveEmoji && (
-        <span className="absolute -bottom-0.5 -right-0.5 z-[4]">
-          <InlineEdit
-            value={character.emoji || "?"}
-            onSave={(emoji) => onSaveEmoji(emoji || "?")}
-            placeholder="?"
-            title={`${characterName} emoji`}
-            className="h-4 w-4 justify-center rounded-full border border-[color-mix(in_srgb,var(--tracker-profile-nameplate-rule)_45%,transparent)] bg-[color-mix(in_srgb,var(--background)_82%,var(--tracker-profile-accent-solid)_18%)] px-0 py-0 text-center text-[0.5625rem] leading-none text-[color:var(--tracker-profile-text)] shadow-[0_1px_4px_rgba(0,0,0,0.28)] hover:bg-[color-mix(in_srgb,var(--background)_70%,var(--tracker-profile-accent-solid)_30%)]"
-            showEditHint={false}
-            fitPreview
-            fitAlign="center"
-            locked={emojiLocked}
-            lockMode={lockMode}
-            onToggleLock={onToggleEmojiLock}
-          />
-        </span>
-      )}
+      <span className="absolute -bottom-0.5 -right-0.5 z-[4]">
+        <InlineEdit
+          value={character.emoji || "?"}
+          onSave={(emoji) => onSaveEmoji(emoji || "?")}
+          placeholder="?"
+          title={localizeUi("ui.trackerPanel.charactertrackeravatar.value1Emoji", { value1: characterName })}
+          className="h-4 w-4 justify-center rounded-full border border-[color-mix(in_srgb,var(--tracker-profile-nameplate-rule)_45%,transparent)] bg-[color-mix(in_srgb,var(--background)_82%,var(--tracker-profile-accent-solid)_18%)] px-0 py-0 text-center text-[0.5625rem] leading-none text-[color:var(--tracker-profile-text)] shadow-[0_1px_4px_rgba(0,0,0,0.28)] hover:bg-[color-mix(in_srgb,var(--background)_70%,var(--tracker-profile-accent-solid)_30%)]"
+          showEditHint={false}
+          fitPreview
+          fitAlign="center"
+          locked={emojiLocked}
+          lockMode={lockMode}
+          onToggleLock={onToggleEmojiLock}
+        />
+      </span>
       <span aria-hidden="true" className={AVATAR_BOTTOM_GLINT_CLASS} />
     </div>
   );

@@ -3,18 +3,22 @@
 // ──────────────────────────────────────────────
 import { logger } from "../../lib/logger.js";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { getEmbeddingRequestTimeoutMs, isProviderLocalUrlsEnabled } from "../../config/runtime-config.js";
+import {
+  getChatGenerationTimeoutMs,
+  getEmbeddingRequestTimeoutMs,
+  isProviderLocalUrlsEnabled,
+} from "../../config/runtime-config.js";
 import { requestHeadersWithIdentityEncoding, safeFetch, type SafeFetchOptions } from "../../utils/security.js";
 import type { GenerationParameterSendKey, GenerationParameterSendMap } from "@marinara-engine/shared";
 
 /**
- * Shared undici Agent with a 5-minute headers timeout (time to first byte)
- * and a finite inter-chunk body timeout to prevent half-open streams from
- * hanging indefinitely while still allowing long-running healthy streams.
+ * Shared undici Agent settings. The headers timeout (time to first byte) follows
+ * CHAT_GENERATION_TIMEOUT_MS so slow local models get the same budget on background
+ * generation (Noodle, agents) as on the chat routes. The inter-chunk body timeout
+ * stays finite so half-open streams cannot hang forever.
  */
-const LLM_HEADERS_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 const LLM_BODY_TIMEOUT = 120 * 1000; // 2 minutes between body chunks
-const llmAgentOptions = { bodyTimeout: LLM_BODY_TIMEOUT, headersTimeout: LLM_HEADERS_TIMEOUT };
+const llmAgentOptions = () => ({ bodyTimeout: LLM_BODY_TIMEOUT, headersTimeout: getChatGenerationTimeoutMs() });
 const llmRequestTimeout = new AsyncLocalStorage<number>();
 
 /** Scope a provider request timeout without changing background/agent generation behavior. */
@@ -47,7 +51,7 @@ export function llmFetch(
       init?.agentOptions ??
       (requestTimeoutMs
         ? { bodyTimeout: requestTimeoutMs, headersTimeout: requestTimeoutMs }
-        : llmAgentOptions),
+        : llmAgentOptions()),
     bufferResponse,
     decodeCompressedResponse: init?.decodeCompressedResponse ?? bufferResponse,
   });
@@ -120,6 +124,8 @@ export interface ChatOptions {
   stop?: string[];
   /** Tool/function definitions for function calling */
   tools?: LLMToolDefinition[];
+  /** OpenAI-compatible tool selection policy for the current provider round. */
+  toolChoice?: "auto" | "required";
   /** Enable provider-native prompt caching when supported */
   enableCaching?: boolean;
   /** Anthropic only: use 1-hour prompt-cache TTL instead of the default 5-minute TTL */
@@ -134,8 +140,12 @@ export interface ChatOptions {
   onToken?: (chunk: string) => void | Promise<void>;
   /** Enable extended thinking (reasoning models) */
   enableThinking?: boolean;
-  /** Reasoning effort level for models that support it */
-  reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max";
+  /**
+   * Reasoning effort level for models that support it.
+   * `none` is an explicit request to disable thinking; `undefined` leaves the
+   * provider/model default untouched.
+   */
+  reasoningEffort?: "none" | "low" | "medium" | "high" | "xhigh" | "max";
   /** When true, previous provider-native reasoning state is not reused. */
   excludePastReasoning?: boolean;
   /** Output verbosity for GPT-5+ models */
@@ -415,11 +425,21 @@ export function fitMessagesToContext(
       : Math.max(1, Math.min(requestedMaxTokens, Math.max(1, usableWindow - reservedInputFloor)));
   let inputBudget = Math.max(0, usableWindow - (maxTokens ?? 0));
 
+  // Single-shot prompts (Noodle refreshes, summarizers, other one-off builders) carry no
+  // messages marked as history, so there is nothing in them that is safe to drop: the trimmer
+  // below would delete the prompt body itself and leave only the trailing instruction. Give the
+  // output budget back instead, and let the later passes handle a prompt that still cannot fit.
+  const hasRemovableHistory = messages.some((message) => message.contextKind === "history");
+
   // If the requested output budget consumes nearly the whole context window,
   // make room for the prompt before trimming. Otherwise, prefer trimming old
   // history first so a large-but-valid response budget does not collapse to the
   // 128-token floor just because the prompt is slightly over budget.
-  if (estimatedTokensBefore > inputBudget && maxTokens !== undefined && inputBudget <= reservedInputFloor) {
+  if (
+    estimatedTokensBefore > inputBudget &&
+    maxTokens !== undefined &&
+    (inputBudget <= reservedInputFloor || !hasRemovableHistory)
+  ) {
     const minimumOutputBudget = Math.min(MIN_OUTPUT_BUDGET_TOKENS, Math.max(1, usableWindow - 1));
     const headroom = Math.min(OUTPUT_BUDGET_REDUCTION_HEADROOM_TOKENS, Math.max(0, usableWindow - 1));
     const maxTokensThatFitPrompt = Math.max(1, usableWindow - estimatedTokensBefore - headroom);
@@ -445,7 +465,7 @@ export function fitMessagesToContext(
 
   const fittedMessages = cloneMessages(messages);
   let estimatedTokensAfter = estimateMessagesTokens(fittedMessages);
-  const hasAnnotatedHistory = fittedMessages.some((message) => message.contextKind === "history");
+  const hasAnnotatedHistory = hasRemovableHistory;
 
   while (estimatedTokensAfter > inputBudget && fittedMessages.length > 1) {
     const block = findOldestRemovableConversationBlock(fittedMessages, "history");
@@ -682,23 +702,32 @@ export abstract class BaseLLMProvider {
 
     let result: IteratorResult<string, LLMUsage | void>;
     try {
-      result = await gen.next();
-    } catch (error) {
-      return returnPartialOnStreamFailure(error);
-    }
-    while (!result.done) {
-      content += result.value;
-      if (options.onToken) {
-        await options.onToken(result.value);
-      }
       try {
         result = await gen.next();
       } catch (error) {
         return returnPartialOnStreamFailure(error);
       }
+      while (!result.done) {
+        content += result.value;
+        if (options.onToken) {
+          await options.onToken(result.value);
+        }
+        try {
+          result = await gen.next();
+        } catch (error) {
+          return returnPartialOnStreamFailure(error);
+        }
+      }
+      const usage = result.value || undefined;
+      return { content, toolCalls: [], finishReason: usage?.finishReason ?? "stop", usage };
+    } finally {
+      // Close the generator on every exit. A manual `next()` loop does not forward an early
+      // return the way `yield*` would, so an `onToken` throw would leave the stream suspended
+      // and an admission wrapper around it would never run its finally, leaking the slot.
+      await gen.return(undefined).catch((closeError: unknown) => {
+        logger.warn(closeError, "Failed to close the completion stream");
+      });
     }
-    const usage = result.value || undefined;
-    return { content, toolCalls: [], finishReason: usage?.finishReason ?? "stop", usage };
   }
 
   /**

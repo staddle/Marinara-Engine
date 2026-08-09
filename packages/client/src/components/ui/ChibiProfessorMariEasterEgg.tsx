@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { X } from "lucide-react";
 import { toast } from "sonner";
 import { useUIStore } from "../../stores/ui.store";
+import { translate } from "../../localization/i18n";
 
 const CHIBI_PROFESSOR_MARI_IMAGE = "/sprites/mari/chibi-professor-mari.png";
 const CHIBI_PROFESSOR_MARI_SEEN_KEY = "marinara:chibi-professor-mari-toast-seen";
@@ -34,13 +35,13 @@ function showChibiProfessorMariToast() {
           type="button"
           onClick={() => toast.dismiss(toastId)}
           className="absolute right-0 top-0 rounded-full p-1 text-foreground/45 transition-colors hover:bg-foreground/10 hover:text-foreground focus:outline-none focus:ring-2 focus:ring-[var(--primary)]/60"
-          aria-label="Dismiss Mini Mari surprise visit toast"
+          aria-label={translate("ui.chibiProfessorMari.dismiss")}
         >
           <X className="h-3.5 w-3.5" aria-hidden="true" />
         </button>
         <img
           src={CHIBI_PROFESSOR_MARI_IMAGE}
-          alt="Chibi Professor Mari"
+          alt={translate("ui.chibiProfessorMari.alt")}
           className="h-24 w-20 shrink-0 self-center object-contain drop-shadow-[0_4px_10px_rgb(0_0_0/0.25)]"
           onError={(event) => {
             event.currentTarget.hidden = true;
@@ -48,11 +49,10 @@ function showChibiProfessorMariToast() {
         />
         <div className="space-y-2 text-sm leading-relaxed">
           <p>
-            If you see this image while scrolling through Marinara Engine, you've been visited by the rare Chibi
-            Professor Mari!
+            {translate("ui.chibiProfessorMari.visit")}
           </p>
-          <p>Good luck and fortune will come to you very soon. Make sure to say "thank you, Professor!"</p>
-          <p>Remember, you are loved and appreciated. Cheers!</p>
+          <p>{translate("ui.chibiProfessorMari.fortune")}</p>
+          <p>{translate("ui.chibiProfessorMari.loved")}</p>
         </div>
       </div>
     ),

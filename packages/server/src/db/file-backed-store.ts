@@ -12,6 +12,9 @@ import { logger } from "../lib/logger.js";
 import { getFileStorageDir } from "../config/runtime-config.js";
 import * as schema from "./schema/index.js";
 import { inArray, isFileCondition, isFileOrdering, type FileCondition, type FileOrdering } from "./file-query.js";
+import { migrateLegacyNoodleAccountRow } from "./noodle-platform-migration.js";
+import { migrateLegacyNoodlePostAccessRow } from "./noodle-access-migration.js";
+import { migrateRetiredChatModeRow, RETIRED_CHAT_MODE_TABLES } from "./retired-chat-mode-migration.js";
 import {
   getFileTableConfig,
   FileUniqueConstraintError,
@@ -169,6 +172,10 @@ export const FILE_BACKED_TABLES = [
   "noodle_account_subscriptions",
   "noodle_post_unlocks",
   "noodle_interactions",
+  "noodler_creator_reply_claims",
+  "noodler_prepared_posts",
+  "noodler_automatic_attempts",
+  "noodler_reserve_state",
   "noodle_activity_digests",
   "noodle_refresh_runs",
   "lorebooks",
@@ -188,6 +195,7 @@ export const FILE_BACKED_TABLES = [
   "custom_tools",
   "game_state_snapshots",
   "spatial_context_snapshots",
+  "capability_documents",
   "game_engine_state",
   "game_checkpoints",
   "game_scene_videos",
@@ -212,6 +220,7 @@ export const FILE_BACKED_TABLES = [
   "chat_presets",
   "prompt_overrides",
   "installed_extensions",
+  "library_folders",
 ] as const;
 
 type FileBackedTable = (typeof FILE_BACKED_TABLES)[number];
@@ -223,6 +232,18 @@ const warnedFlushFailures = new Set<string>();
 // Parent→child delete graph. Exported as the single source of truth: the Mari
 // DB CLI (services/mari-db) consumes it for cascade deletes and its
 // dangling-reference validator, so every new relation added here reaches both.
+/**
+ * Tables whose rows are claims against a provider budget: a commit that survives in memory
+ * but not on disk would hand back capacity that was already spent, so these flush durably
+ * at commit instead of on the batched timer.
+ */
+const DURABLE_ON_COMMIT_TABLES = new Set<string>([
+  "noodler_automatic_attempts",
+  "noodler_creator_reply_claims",
+  "noodler_reserve_state",
+  "noodler_prepared_posts",
+]);
+
 export const CASCADES: Array<{ parent: FileBackedTable; child: FileBackedTable; parentKey: string; childKey: string }> =
   [
     {
@@ -238,9 +259,18 @@ export const CASCADES: Array<{ parent: FileBackedTable; child: FileBackedTable; 
       childKey: "creatorAccountId",
     },
     { parent: "noodle_accounts", child: "noodle_post_unlocks", parentKey: "id", childKey: "viewerAccountId" },
-    { parent: "noodle_accounts", child: "noodle_accounts", parentKey: "id", childKey: "publicAccountId" },
+    { parent: "noodle_accounts", child: "noodle_accounts", parentKey: "id", childKey: "noodleAccountId" },
     { parent: "noodle_accounts", child: "noodle_posts", parentKey: "id", childKey: "authorAccountId" },
     { parent: "noodle_posts", child: "noodle_post_unlocks", parentKey: "id", childKey: "postId" },
+    { parent: "noodle_posts", child: "noodle_interactions", parentKey: "id", childKey: "postId" },
+    { parent: "noodle_posts", child: "noodler_creator_reply_claims", parentKey: "id", childKey: "postId" },
+    {
+      parent: "noodle_accounts",
+      child: "noodler_creator_reply_claims",
+      parentKey: "id",
+      childKey: "creatorAccountId",
+    },
+    { parent: "noodle_accounts", child: "noodler_prepared_posts", parentKey: "id", childKey: "creatorAccountId" },
     { parent: "chats", child: "messages", parentKey: "id", childKey: "chatId" },
     { parent: "chats", child: "conversation_call_sessions", parentKey: "id", childKey: "chatId" },
     { parent: "chats", child: "conversation_call_messages", parentKey: "id", childKey: "chatId" },
@@ -561,6 +591,27 @@ async function quarantineUnrecoverableFiles(paths: string[], context: string): P
     }
   }
   return quarantined;
+}
+
+function isRowRecord(value: unknown): value is Row {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+async function preserveMalformedRowSource(path: string, table: string): Promise<QuarantinedFile[]> {
+  if (!existsSync(path)) return [];
+  const to = quarantinePath(path, corruptionTimestamp());
+  try {
+    await copyFile(path, to);
+    return [{ from: path, to }];
+  } catch (err) {
+    logger.error(
+      err,
+      "[file-storage] Failed to preserve table %s source %s before removing malformed rows.",
+      table,
+      path,
+    );
+    return [];
+  }
 }
 
 function parseJsonFile<T>(path: string, fallback: T): ParseResult<T> {
@@ -945,7 +996,14 @@ class FileTableStore {
     this.activeTransactionCount++;
 
     try {
-      return await this.txContext.run(ctx, () => fn(tx));
+      const result = await this.txContext.run(ctx, () => fn(tx));
+      // Flush on commit only for tables whose durability the caller reasons about across a
+      // crash (attempt claims must never be replayed as free budget). Everything else keeps
+      // the batched flush: this runs on hot per-turn paths like setMemories.
+      if ([...ctx.dirtyTables].some((table) => DURABLE_ON_COMMIT_TABLES.has(table))) {
+        await this.txContext.run(ctx, () => this.flush(true, true));
+      }
+      return result;
     } catch (err) {
       for (const tableName of ctx.dirtyTables) {
         const snapshot = ctx.snapshots.get(tableName);
@@ -1284,9 +1342,52 @@ class FileTableStore {
         recoveredFromFallback,
         unreadablePaths,
       } = parseJsonFile<Row[]>(path, []);
-      const normalized = (Array.isArray(rows) ? rows : []).map((row) => normalizeRow(meta, row));
+      const parsedRows = Array.isArray(rows) ? rows : [];
+      const source = parsedRows.filter(isRowRecord);
+      const malformedRowCount = parsedRows.length - source.length;
+      if (malformedRowCount > 0) {
+        const sourcePath = recoveredFromBackup && existsSync(`${path}.bak`) ? `${path}.bak` : path;
+        const files = await preserveMalformedRowSource(sourcePath, table);
+        if (files.length > 0) this.quarantinedTables.push({ table, files });
+        logger.error(
+          { table, file: sourcePath, malformedRowCount, preservedFiles: files.map((file) => file.to) },
+          "[file-storage] Skipped malformed table rows and preserved the source file for manual recovery.",
+        );
+        this.backupRecoveredPaths.add(path);
+        this.dirtyTables.add(table);
+        this.dirty = true;
+      }
+      const migrate =
+        table === "noodle_accounts"
+          ? migrateLegacyNoodleAccountRow
+          : table === "noodle_posts"
+            ? migrateLegacyNoodlePostAccessRow
+            : (RETIRED_CHAT_MODE_TABLES as readonly string[]).includes(table)
+              ? migrateRetiredChatModeRow
+              : null;
+      const normalized = source.map((row) => normalizeRow(meta, migrate ? migrate(row) : row));
       this.tables.set(table, normalized);
       counts[table] = normalized.length;
+      if (source.some((row) => row.mode === "visual_novel")) {
+        // Persist the normalized mode so the rewrite happens once, not on every boot.
+        this.dirtyTables.add(table);
+        this.dirty = true;
+      }
+      const needsMigration =
+        table === "noodle_accounts"
+          ? source.some((row) => row.platform === undefined)
+          : table === "noodle_posts"
+            ? source.some(
+                (row) =>
+                  (row.access !== "public" && row.access !== "locked") || "ppvPrice" in row || "ppv_price" in row,
+              )
+            : false;
+      if (migrate && needsMigration) {
+        // Persist the renamed keys on the next flush, alongside the `visibility` /
+        // `publicAccountId` rollback mirrors the migration deliberately retains.
+        this.dirtyTables.add(table);
+        this.dirty = true;
+      }
       if (recoveredFromBackup || recoveredFromFallback) {
         this.backupRecoveredPaths.add(path);
         // Same self-heal: rewrite the corrupt main file from in-memory data on

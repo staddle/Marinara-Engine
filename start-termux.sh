@@ -131,12 +131,14 @@ case "$AUTO_UPDATE_ENABLED_NORMALIZED" in
 esac
 
 # ── Check pnpm ──
-PNPM_VERSION=$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).packageManager?.split('@')[1] || '10.33.2'")
+PNPM_VERSION=""
+PNPM_DESCRIPTOR=""
 PNPM_RUNNER="pnpm"
+CURRENT_PNPM_VERSION=""
 
 run_pnpm() {
     if [ "$PNPM_RUNNER" = "corepack" ]; then
-        corepack "pnpm@${PNPM_VERSION}" --config.trustPolicy=off --config.confirmModulesPurge=false "$@"
+        corepack "pnpm@${PNPM_DESCRIPTOR}" --config.trustPolicy=off --config.confirmModulesPurge=false "$@"
     elif [ "$PNPM_RUNNER" = "npx" ]; then
         npx --yes "pnpm@${PNPM_VERSION}" --config.trustPolicy=off --config.confirmModulesPurge=false "$@"
     else
@@ -157,37 +159,65 @@ prune_pnpm_store() {
 install_workspace_dependencies() {
     # Avoid --force here. On constrained Android devices it recreates the entire
     # virtual store and may download optional binaries for platforms we cannot run.
-    run_pnpm install --frozen-lockfile --prefer-offline
+    # Termux provides a global libvips but no Android NDK; Sharp must use its
+    # supported WebAssembly fallback rather than attempting a native source build.
+    SHARP_IGNORE_GLOBAL_LIBVIPS=1 run_pnpm install --frozen-lockfile --prefer-offline
 }
 
-if command -v corepack &> /dev/null; then
-    echo "  [..] Aligning pnpm to ${PNPM_VERSION} via Corepack..."
-    CURRENT_PNPM_VERSION=$(corepack "pnpm@${PNPM_VERSION}" --version 2>/dev/null || true)
-    if [ "$CURRENT_PNPM_VERSION" = "$PNPM_VERSION" ]; then
-        PNPM_RUNNER="corepack"
+resolve_pnpm_runner() {
+    PNPM_DESCRIPTOR=$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).packageManager?.replace(/^pnpm@/, '') || ''" 2>/dev/null || true)
+    if [ -z "$PNPM_DESCRIPTOR" ]; then
+        echo "  [ERROR] Could not read the pinned pnpm descriptor from package.json."
+        return 1
     fi
-fi
-
-if [ "$PNPM_RUNNER" = "pnpm" ]; then
-    CURRENT_PNPM_VERSION=$(pnpm --version 2>/dev/null || true)
-    if [ -n "$CURRENT_PNPM_VERSION" ]; then
-        echo "  [..] Using installed pnpm ${CURRENT_PNPM_VERSION}"
+    PNPM_VERSION=${PNPM_DESCRIPTOR%%+*}
+    if [ -z "$PNPM_VERSION" ]; then
+        echo "  [ERROR] The pinned pnpm descriptor in package.json has no version."
+        return 1
     fi
-fi
+    PNPM_RUNNER="pnpm"
+    CURRENT_PNPM_VERSION=""
 
-if [ -z "$CURRENT_PNPM_VERSION" ]; then
-    echo "  [..] Using temporary pnpm ${PNPM_VERSION} via npx..."
-    CURRENT_PNPM_VERSION=$(npx --yes "pnpm@${PNPM_VERSION}" --version 2>/dev/null || true)
-    if [ "$CURRENT_PNPM_VERSION" = "$PNPM_VERSION" ]; then
-        PNPM_RUNNER="npx"
+    if command -v corepack &> /dev/null; then
+        echo "  [..] Aligning pnpm to ${PNPM_VERSION} via Corepack..."
+        CURRENT_PNPM_VERSION=$(corepack "pnpm@${PNPM_DESCRIPTOR}" --version 2>/dev/null || true)
+        if [ "$CURRENT_PNPM_VERSION" = "$PNPM_VERSION" ]; then
+            PNPM_RUNNER="corepack"
+        else
+            CURRENT_PNPM_VERSION=""
+        fi
     fi
-fi
 
-if [ -z "$CURRENT_PNPM_VERSION" ]; then
-    echo "  [ERROR] Failed to make pnpm ${PNPM_VERSION} available."
-    exit 1
-fi
-echo "  [OK] pnpm ${CURRENT_PNPM_VERSION} ready"
+    if [ -z "$CURRENT_PNPM_VERSION" ] && command -v pnpm &> /dev/null; then
+        CURRENT_PNPM_VERSION=$(pnpm --version 2>/dev/null || true)
+        if [ "$CURRENT_PNPM_VERSION" = "$PNPM_VERSION" ]; then
+            echo "  [..] Using installed pnpm ${CURRENT_PNPM_VERSION}"
+        else
+            if [ -n "$CURRENT_PNPM_VERSION" ]; then
+                echo "  [..] Installed pnpm ${CURRENT_PNPM_VERSION} does not match required ${PNPM_VERSION}; trying a pinned temporary runner..."
+            fi
+            CURRENT_PNPM_VERSION=""
+        fi
+    fi
+
+    if [ -z "$CURRENT_PNPM_VERSION" ]; then
+        echo "  [..] Using temporary pnpm ${PNPM_VERSION} via npx..."
+        CURRENT_PNPM_VERSION=$(npx --yes "pnpm@${PNPM_VERSION}" --version 2>/dev/null || true)
+        if [ "$CURRENT_PNPM_VERSION" = "$PNPM_VERSION" ]; then
+            PNPM_RUNNER="npx"
+        else
+            CURRENT_PNPM_VERSION=""
+        fi
+    fi
+
+    if [ -z "$CURRENT_PNPM_VERSION" ]; then
+        echo "  [ERROR] Failed to make pnpm ${PNPM_VERSION} available."
+        return 1
+    fi
+    echo "  [OK] pnpm ${CURRENT_PNPM_VERSION} ready"
+}
+
+resolve_pnpm_runner || exit 1
 
 restore_stashed_changes() {
     if [ "$STASHED" != "1" ] || [ -z "$STASH_REF" ]; then
@@ -212,6 +242,19 @@ has_git_worktree_changes() {
         || ! git diff --cached --quiet 2>/dev/null \
         || [ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ]
 }
+
+# Drop untracked leftovers in the source trees (files a failed checkout could not
+# delete after a channel switch); they break tsc. This is working-tree repair,
+# not an update, so it runs even when auto-update is disabled -- and before
+# "stash push -u", which would otherwise capture the stale file and restore it
+# again after every update. Not quiet: git prints "Removing <path>" only when it
+# deletes something.
+CLEAN_FAILED=0
+if [ -d ".git" ]; then
+    if ! git clean -fd -- packages/shared/src packages/server/src packages/client/src 2>/dev/null; then
+        CLEAN_FAILED=1
+    fi
+fi
 
 # ── Auto-update from Git ──
 if [ "$SKIP_UPDATE" = "1" ]; then
@@ -247,7 +290,20 @@ elif [ -d ".git" ]; then
         STASHED=0
         STASH_REF=""
         SKIP_UPDATE_FOR_LOCAL_CHANGES=0
-        if has_git_worktree_changes; then
+        DATA_SNAPSHOT_READY=0
+        if node scripts/protect-launcher-data.mjs snapshot; then
+            DATA_SNAPSHOT_READY=1
+        else
+            SKIP_UPDATE_FOR_LOCAL_CHANGES=1
+            echo "  [WARN] Could not create an update snapshot. Skipping auto-update to protect your data."
+        fi
+        if [ "$SKIP_UPDATE_FOR_LOCAL_CHANGES" != "1" ] && [ "$CLEAN_FAILED" = "1" ]; then
+            # A leftover we could not delete would be captured by "stash push -u"
+            # and restored afterwards, making the broken tree permanent.
+            SKIP_UPDATE_FOR_LOCAL_CHANGES=1
+            echo "  [WARN] Could not clear stale files under packages/*/src. Skipping auto-update so they are not stashed and restored."
+        fi
+        if [ "$SKIP_UPDATE_FOR_LOCAL_CHANGES" != "1" ] && has_git_worktree_changes; then
             if git stash push -u -q -m "auto-stash before update" 2>/dev/null; then
                 STASHED=1
                 STASH_REF=$(git stash list -1 --format=%gd 2>/dev/null || true)
@@ -283,11 +339,15 @@ elif [ -d ".git" ]; then
                 echo "  [WARN] Update did not land on ${TARGET_REF}. Continuing with current version."
             else
                 echo "  [OK] Updated to $(git log -1 --format='%h %s' 2>/dev/null)"
-                prune_pnpm_store
-                echo "  [..] Refreshing dependencies..."
-                install_workspace_dependencies
-                rm -rf packages/shared/dist packages/server/dist packages/client/dist
-                rm -f packages/shared/tsconfig.tsbuildinfo packages/server/tsconfig.tsbuildinfo packages/client/tsconfig.tsbuildinfo
+                if ! resolve_pnpm_runner; then
+                    PNPM_RESOLUTION_FAILED=1
+                else
+                    prune_pnpm_store
+                    echo "  [..] Refreshing dependencies..."
+                    install_workspace_dependencies
+                    rm -rf packages/shared/dist packages/server/dist packages/client/dist
+                    rm -f packages/shared/tsconfig.tsbuildinfo packages/server/tsconfig.tsbuildinfo packages/client/tsconfig.tsbuildinfo
+                fi
             fi
         elif [ "$SKIP_UPDATE_FOR_LOCAL_CHANGES" != "1" ]; then
             echo "  [WARN] Could not update to ${TARGET_REF}. Continuing with current version."
@@ -301,6 +361,14 @@ elif [ -d ".git" ]; then
         fi
         rm -f "$UPDATE_LOG"
     fi
+fi
+
+if [ "${DATA_SNAPSHOT_READY:-0}" = "1" ] && ! node scripts/protect-launcher-data.mjs restore-if-missing; then
+    echo "  [ERROR] User data verification failed after the update attempt. Startup stopped to avoid creating empty data."
+    exit 1
+fi
+if [ "${PNPM_RESOLUTION_FAILED:-0}" = "1" ]; then
+    exit 1
 fi
 
 # ── Guard: validate workspace package.json files ──
@@ -362,7 +430,7 @@ if [ ! -d "packages/client/dist" ]; then
     if ! SKIP_PWA=1 run_pnpm --filter @marinara-engine/client exec vite build 2>&1; then
         echo "  [WARN] Vite build failed — native binaries may not match Node.js $(node -v)."
         echo "  [..] Ensuring WASM fallback for rollup is installed and retrying..."
-        run_pnpm install --filter @marinara-engine/client 2>/dev/null || true
+        run_pnpm install --frozen-lockfile --prefer-offline --filter @marinara-engine/client 2>/dev/null || true
         SKIP_PWA=1 run_pnpm --filter @marinara-engine/client exec vite build
     fi
 fi

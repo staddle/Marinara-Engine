@@ -17,8 +17,10 @@ import { showConfirmDialog } from "../../../lib/app-dialogs";
 import { cn } from "../../../lib/utils";
 import { HelpTooltip } from "../../ui/HelpTooltip";
 import { SettingsSwitch } from "./SettingControls";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 const PREFERRED_PROMPT_KEY = "conversation.selfie";
+const ROLEPLAY_GALLERY_VIDEO_DIRECTOR_PROMPT_KEY = "roleplay.galleryVideoDirector";
 
 type PromptOverridesEditorProps = {
   title?: string;
@@ -164,6 +166,7 @@ export function PromptOverridesEditor({
 }
 
 function PromptOverridesEditorBody({ keys, preferredKey }: { keys?: readonly string[]; preferredKey: string }) {
+  const { t: localizeUi } = useUiTranslation();
   const { data: entries = [], isLoading: loadingEntries, isError: listFailed } = usePromptOverrides();
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const keySet = useMemo(() => (keys ? new Set(keys) : null), [keys]);
@@ -175,6 +178,14 @@ function PromptOverridesEditorBody({ keys, preferredKey }: { keys?: readonly str
     () => filteredEntries.find((entry) => entry.key === selectedKey),
     [filteredEntries, selectedKey],
   );
+  const localizedEntryLabel = (entry: PromptOverrideSummary | null | undefined) =>
+    entry?.key === ROLEPLAY_GALLERY_VIDEO_DIRECTOR_PROMPT_KEY
+      ? localizeUi("settings.promptOverrides.roleplayGalleryVideoDirector.label")
+      : promptOverrideLabel(entry);
+  const selectedEntryDescription =
+    selectedEntry?.key === ROLEPLAY_GALLERY_VIDEO_DIRECTOR_PROMPT_KEY
+      ? localizeUi("settings.promptOverrides.roleplayGalleryVideoDirector.description")
+      : selectedEntry?.description;
   const detailQuery = usePromptOverride(selectedKey);
   const defaultQuery = usePromptOverrideDefault(selectedKey);
   const saveOverride = useSavePromptOverride();
@@ -250,7 +261,7 @@ function PromptOverridesEditorBody({ keys, preferredKey }: { keys?: readonly str
     try {
       setLastError(null);
       await saveOverride.mutateAsync({ key: selectedKey, template: draft, enabled });
-      toast.success("Prompt override saved.");
+      toast.success(localizeUi("ui.panels.promptoverrideseditorbody.promptOverrideSaved"));
     } catch (error) {
       const message = getPromptOverrideErrorMessage(error);
       setLastError(message);
@@ -268,9 +279,9 @@ function PromptOverridesEditorBody({ keys, preferredKey }: { keys?: readonly str
     }
 
     const confirmed = await showConfirmDialog({
-      title: "Reset prompt override?",
-      message: `${promptOverrideLabel(selectedEntry)} will use its built-in default again. Your custom template for this key will be removed.`,
-      confirmLabel: "Reset to Default",
+      title:localizeUi("ui.panels.promptoverrideseditorbody.resetPromptOverride"),
+      message:localizeUi("ui.panels.promptoverrideseditorbody.value1WillUseItsBuiltInDefaultAgainYour", { value1: localizedEntryLabel(selectedEntry) }),
+      confirmLabel:localizeUi("ui.panels.promptoverrideseditorbody.resetToDefault"),
       cancelLabel: "Cancel",
       tone: "destructive",
     });
@@ -281,7 +292,7 @@ function PromptOverridesEditorBody({ keys, preferredKey }: { keys?: readonly str
       await resetOverride.mutateAsync(selectedKey);
       setDraft(defaultTemplate);
       setEnabled(true);
-      toast.success("Prompt override reset to default.");
+      toast.success(localizeUi("ui.panels.promptoverrideseditorbody.promptOverrideResetToDefault"));
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to reset prompt override.";
       setLastError(message);
@@ -292,9 +303,7 @@ function PromptOverridesEditorBody({ keys, preferredKey }: { keys?: readonly str
   if (listFailed) {
     return (
       <div className="flex items-start gap-2 text-xs text-[var(--destructive)]">
-        <AlertTriangle size="0.875rem" className="mt-0.5 shrink-0" />
-        Could not load registered prompt overrides.
-      </div>
+        <AlertTriangle size="0.875rem" className="mt-0.5 shrink-0" />{localizeUi("ui.panels.promptoverrideseditorbody.couldNotLoadRegisteredPromptOverrides")}</div>
     );
   }
 
@@ -302,9 +311,9 @@ function PromptOverridesEditorBody({ keys, preferredKey }: { keys?: readonly str
     <div className="flex flex-col gap-2.5">
       <label className="flex flex-col gap-1">
         <span className="flex items-center justify-between gap-2">
-          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Registered prompt</span>
+          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.panels.promptoverrideseditorbody.registeredPrompt")}</span>
           <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[0.5625rem] font-semibold", status.className)}>
-            {loadingEntries ? "Loading" : status.label}
+            {loadingEntries ?localizeUi("ui.panels.promptoverrideseditorbody.loading") : status.label}
           </span>
         </span>
         <select
@@ -313,11 +322,11 @@ function PromptOverridesEditorBody({ keys, preferredKey }: { keys?: readonly str
           onChange={(event) => setSelectedKey(event.target.value)}
           className="w-full rounded-lg bg-[var(--background)] px-3 py-2 text-xs text-[var(--foreground)] outline-none ring-1 ring-[var(--border)] focus:ring-[var(--primary)] disabled:opacity-60"
         >
-          {loadingEntries && <option value="">Loading prompts...</option>}
-          {!loadingEntries && filteredEntries.length === 0 && <option value="">No registered prompts</option>}
+          {loadingEntries && <option value="">{localizeUi("ui.panels.promptoverrideseditorbody.loadingPrompts")}</option>}
+          {!loadingEntries && filteredEntries.length === 0 && <option value="">{localizeUi("ui.panels.promptoverrideseditorbody.noRegisteredPrompts")}</option>}
           {filteredEntries.map((entry) => (
             <option key={entry.key} value={entry.key}>
-              {promptOverrideLabel(entry)}
+              {localizedEntryLabel(entry)}
             </option>
           ))}
         </select>
@@ -325,20 +334,25 @@ function PromptOverridesEditorBody({ keys, preferredKey }: { keys?: readonly str
 
       {selectedEntry && (
         <p className="rounded-lg bg-[var(--background)]/50 px-2.5 py-2 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)] ring-1 ring-[var(--border)]/70">
-          {selectedEntry.description}
+          {selectedEntryDescription}
         </p>
       )}
 
       {variables.length > 0 && (
         <div className="flex flex-col gap-1">
-          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Available variables</span>
+          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.panels.promptoverrideseditorbody.availableVariables")}</span>
           <div className="flex flex-wrap gap-1.5">
             {variables.map((variable) => (
               <button
                 type="button"
                 key={variable.name}
                 onClick={() => insertVariable(variable.name)}
-                title={variable.description}
+                title={
+                  selectedEntry?.key === ROLEPLAY_GALLERY_VIDEO_DIRECTOR_PROMPT_KEY &&
+                  variable.name === "durationSeconds"
+                    ? localizeUi("settings.promptOverrides.roleplayGalleryVideoDirector.durationSeconds")
+                    : variable.description
+                }
                 className="inline-flex items-center gap-1 rounded-md bg-[var(--background)] px-2 py-1 font-mono text-[0.6rem] text-[var(--primary)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)]"
               >
                 <Code2 size="0.625rem" />
@@ -351,8 +365,8 @@ function PromptOverridesEditorBody({ keys, preferredKey }: { keys?: readonly str
 
       <label className="flex flex-col gap-1">
         <div className="flex items-center justify-between gap-2">
-          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Template</span>
-          <span className="text-[0.5625rem] text-[var(--muted-foreground)]">{draft.length} chars</span>
+          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.panels.promptoverrideseditorbody.template")}</span>
+          <span className="text-[0.5625rem] text-[var(--muted-foreground)]">{draft.length} {localizeUi("ui.panels.promptoverrideseditorbody.chars")}</span>
         </div>
         <textarea
           ref={textareaRef}
@@ -362,29 +376,31 @@ function PromptOverridesEditorBody({ keys, preferredKey }: { keys?: readonly str
             setDraft(event.target.value);
             setLastError(null);
           }}
-          placeholder={loadingPrompt ? "Loading template..." : "Write a prompt template..."}
+          placeholder={loadingPrompt ?localizeUi("ui.panels.promptoverrideseditorbody.loadingTemplate") :localizeUi("ui.panels.promptoverrideseditorbody.writeAPromptTemplate")}
           className="min-h-52 resize-y rounded-lg border border-[var(--border)] bg-[var(--background)] p-2.5 font-mono text-[0.6875rem] leading-relaxed text-[var(--foreground)] outline-none transition-colors placeholder:text-[var(--muted-foreground)]/45 focus:border-[var(--primary)]/50 disabled:cursor-wait disabled:opacity-60"
         />
       </label>
 
       <div className="rounded-lg bg-[var(--background)]/55 p-2.5 ring-1 ring-[var(--border)]/70">
         <div className="mb-1.5 flex items-center justify-between gap-2">
-          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Rendered preview</span>
-          <span className="text-[0.5625rem] text-[var(--muted-foreground)]">Example values</span>
+          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.panels.promptoverrideseditorbody.renderedPreview")}</span>
+          <span className="text-[0.5625rem] text-[var(--muted-foreground)]">{localizeUi("ui.panels.promptoverrideseditorbody.exampleValues")}</span>
         </div>
         <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md bg-[var(--secondary)]/70 p-2 font-mono text-[0.625rem] leading-relaxed text-[var(--foreground)]">
-          {loadingPrompt ? "Loading preview..." : renderedPreview.rendered || "Nothing to preview yet."}
+          {loadingPrompt
+            ? localizeUi("ui.panels.promptoverrideseditorbody.loadingPreview")
+            : renderedPreview.rendered ||
+              localizeUi("ui.panels.promptoverrideseditorbody.nothingToPreview")}
         </pre>
         {renderedPreview.unknownVariables.length > 0 && (
-          <p className="mt-1.5 text-[0.5625rem] text-amber-500">
-            Unknown variables: {renderedPreview.unknownVariables.join(", ")}
+          <p className="mt-1.5 text-[0.5625rem] text-amber-500">{localizeUi("ui.panels.promptoverrideseditorbody.unknownVariables")} {renderedPreview.unknownVariables.join(", ")}
           </p>
         )}
       </div>
 
       <SettingsSwitch
-        label="Apply this override"
-        description="Turn this off to keep the template saved without using it."
+        label={localizeUi("ui.panels.promptoverrideseditorbody.applyThisOverride")}
+        description={localizeUi("ui.panels.promptoverrideseditorbody.turnThisOffToKeepTheTemplateSavedWithout")}
         checked={enabled}
         disabled={loadingPrompt || !selectedKey}
         onChange={setEnabled}
@@ -410,9 +426,7 @@ function PromptOverridesEditorBody({ keys, preferredKey }: { keys?: readonly str
             canSave && "mari-chrome-control--selected",
           )}
         >
-          {saveOverride.isPending ? <Loader2 size="0.8125rem" className="animate-spin" /> : <Save size="0.8125rem" />}
-          Save
-        </button>
+          {saveOverride.isPending ? <Loader2 size="0.8125rem" className="animate-spin" /> : <Save size="0.8125rem" />}{localizeUi("ui.noodle.noodlehome.save")}</button>
         <button
           type="button"
           onClick={() => void handleReset()}
@@ -425,15 +439,12 @@ function PromptOverridesEditorBody({ keys, preferredKey }: { keys?: readonly str
             <RotateCcw size="0.8125rem" />
           ) : (
             <Sparkles size="0.8125rem" />
-          )}
-          Reset to Default
-        </button>
+          )}{localizeUi("ui.panels.promptoverrideseditorbody.resetToDefault")}</button>
       </div>
 
       {detail?.override && !isDirty && (
         <div className="flex items-center gap-1.5 text-[0.625rem] text-[var(--muted-foreground)]">
-          <Check size="0.6875rem" className="text-green-500" />
-          Saved {new Date(detail.override.updatedAt).toLocaleString()}
+          <Check size="0.6875rem" className="text-green-500" />{localizeUi("chat.settings.inlineEditor.saved")} {new Date(detail.override.updatedAt).toLocaleString()}
         </div>
       )}
     </div>

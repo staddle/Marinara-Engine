@@ -51,51 +51,9 @@ if !NODE_MAJOR! LSS 24 (
     exit /b 1
 )
 
-:: Resolve the repo-pinned pnpm version from package.json
-set "PNPM_VERSION=10.33.2"
-for /f "usebackq delims=" %%i in (`node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).packageManager?.split('@')[1] || '10.33.2'"`) do set "PNPM_VERSION=%%i"
-set "PNPM_RUNNER=pnpm"
-set "CURRENT_PNPM_VERSION="
-
-:: Ensure pnpm is available before any update/install path uses it
-where corepack >nul 2>&1
-if not errorlevel 1 (
-    echo  [..] Aligning pnpm to %PNPM_VERSION% via Corepack...
-    for /f "usebackq delims=" %%i in (`corepack pnpm@%PNPM_VERSION% --version 2^>nul`) do set "CURRENT_PNPM_VERSION=%%i"
-    if /I "!CURRENT_PNPM_VERSION!"=="%PNPM_VERSION%" (
-        set "PNPM_RUNNER=corepack"
-    ) else (
-        set "CURRENT_PNPM_VERSION="
-    )
-)
-
-if not defined CURRENT_PNPM_VERSION (
-    where pnpm >nul 2>&1
-    if not errorlevel 1 (
-        for /f "usebackq delims=" %%i in (`pnpm --version 2^>nul`) do set "CURRENT_PNPM_VERSION=%%i"
-        if /I "!CURRENT_PNPM_VERSION!"=="%PNPM_VERSION%" (
-            echo  [..] Using installed pnpm !CURRENT_PNPM_VERSION!
-        ) else (
-            if defined CURRENT_PNPM_VERSION echo  [..] Installed pnpm !CURRENT_PNPM_VERSION! does not match required %PNPM_VERSION%; trying a pinned temporary runner...
-            set "CURRENT_PNPM_VERSION="
-        )
-    )
-)
-
-if not defined CURRENT_PNPM_VERSION (
-    echo  [..] Using temporary pnpm %PNPM_VERSION% via npx...
-    for /f "usebackq delims=" %%i in (`npx --yes pnpm@%PNPM_VERSION% --version 2^>nul`) do set "CURRENT_PNPM_VERSION=%%i"
-    if /I "!CURRENT_PNPM_VERSION!"=="%PNPM_VERSION%" (
-        set "PNPM_RUNNER=npx"
-    ) else (
-        set "CURRENT_PNPM_VERSION="
-    )
-)
-
-if not defined CURRENT_PNPM_VERSION (
-    echo  [ERROR] Failed to make pnpm %PNPM_VERSION% available.
-    echo          Marinara can run without a global pnpm install, but Node.js must provide Corepack or npx/npm.
-    echo          Reinstall Node.js 24 LTS with npm enabled, or run: npm install -g pnpm
+:: Resolve the exact repo-pinned pnpm before any install path uses it.
+call :resolve_pnpm_runner
+if errorlevel 1 (
     pause
     exit /b 1
 )
@@ -120,6 +78,21 @@ goto :eof
 :after_restore_helper
 set "INSTALL_REQUIRED=0"
 set "BUILD_REQUIRED=0"
+set "DATA_SNAPSHOT_READY=0"
+set "PNPM_RESOLUTION_FAILED=0"
+
+:: Drop untracked leftovers in the source trees (e.g. files a failed Windows
+:: checkout could not delete after a channel switch); they break tsc. This is
+:: working-tree repair, not an update, so it runs even when auto-update is
+:: disabled -- and before "stash push -u", which would otherwise capture the
+:: stale file and restore it again after every update.
+:: Not quiet: git prints "Removing <path>" only when it actually deletes
+:: something, so a stray file of your own does not vanish without a trace.
+set "CLEAN_FAILED=0"
+if exist ".git" (
+    git clean -fd -- packages/shared/src packages/server/src packages/client/src 2>nul
+    if errorlevel 1 set "CLEAN_FAILED=1"
+)
 
 :: Auto-update from Git
 if defined SKIP_UPDATE (
@@ -157,6 +130,12 @@ if /I "!OLD_HEAD!"=="!TARGET_HEAD!" (
     echo  [OK] Already up to date
     goto :skip_update
 )
+node scripts\protect-launcher-data.mjs snapshot
+if errorlevel 1 (
+    echo  [WARN] Could not create an update snapshot. Skipping auto-update to protect your data.
+    goto :skip_update
+)
+set "DATA_SNAPSHOT_READY=1"
 :: Drop known-safe untracked files that older installer versions placed in
 :: $INSTDIR but are now also tracked in the repo. Without this, git merge
 :: --ff-only refuses to overwrite them and the auto-update silently fails.
@@ -179,7 +158,13 @@ if errorlevel 1 set "DIRTY=1"
 set "UNTRACKED="
 for /f "tokens=*" %%i in ('git ls-files --others --exclude-standard 2^>nul') do if not defined UNTRACKED set "UNTRACKED=1"
 if defined UNTRACKED set "DIRTY=1"
-if "!DIRTY!"=="1" (
+:: A leftover we could not delete would be captured by "stash push -u" and
+:: restored afterwards, making the broken tree permanent -- so a failed cleanup
+:: blocks the stash and, with it, the update.
+if "!CLEAN_FAILED!"=="1" (
+    echo  [WARN] Could not clear stale files under packages\*\src.
+    set "STASH_FAILED=1"
+) else if "!DIRTY!"=="1" (
     git stash push -u -q -m "auto-stash before update" >nul 2>&1 && set "STASHED=1"
     if not "!STASHED!"=="1" set "STASH_FAILED=1"
     if "!STASHED!"=="1" for /f "tokens=*" %%i in ('git stash list -1 --format^=%%gd 2^>nul') do set "STASH_REF=%%i"
@@ -232,10 +217,28 @@ if "!STASHED!"=="1" call :restore_stashed_changes
 if exist "!UPDATE_LOG!" del /q "!UPDATE_LOG!" >nul 2>&1
 echo  [OK] Updated to latest version
 echo  [..] Dependencies and build will be refreshed before startup.
-set "INSTALL_REQUIRED=1"
-set "BUILD_REQUIRED=1"
+call :resolve_pnpm_runner
+if errorlevel 1 (
+    set "PNPM_RESOLUTION_FAILED=1"
+) else (
+    set "INSTALL_REQUIRED=1"
+    set "BUILD_REQUIRED=1"
+)
 
 :skip_update
+if "!DATA_SNAPSHOT_READY!"=="1" (
+    node scripts\protect-launcher-data.mjs restore-if-missing
+    if errorlevel 1 (
+        echo  [ERROR] User data verification failed after the update attempt.
+        echo          Startup stopped to avoid creating empty data.
+        pause
+        exit /b 1
+    )
+)
+if "!PNPM_RESOLUTION_FAILED!"=="1" (
+    pause
+    exit /b 1
+)
 echo  [OK] Node.js found:
 node -v
 echo  [OK] pnpm !CURRENT_PNPM_VERSION! ready
@@ -269,7 +272,7 @@ echo.
 echo  [..] Installing dependencies...
 echo      This may take a few minutes.
 echo.
-call :run_pnpm install --force
+call :run_pnpm install --frozen-lockfile --prefer-offline
 if errorlevel 1 echo  [ERROR] Failed to install dependencies. & pause & exit /b 1
 
 :skip_install
@@ -367,7 +370,7 @@ goto :eof
 
 :run_pnpm
 if /I "%PNPM_RUNNER%"=="corepack" (
-    call corepack pnpm@%PNPM_VERSION% --config.trustPolicy=off --config.confirmModulesPurge=false %*
+    call corepack pnpm@%PNPM_DESCRIPTOR% --config.trustPolicy=off --config.confirmModulesPurge=false %*
 ) else (
     if /I "%PNPM_RUNNER%"=="npx" (
         call npx --yes pnpm@%PNPM_VERSION% --config.trustPolicy=off --config.confirmModulesPurge=false %*
@@ -376,3 +379,62 @@ if /I "%PNPM_RUNNER%"=="corepack" (
     )
 )
 exit /b %errorlevel%
+
+:resolve_pnpm_runner
+set "PNPM_DESCRIPTOR="
+for /f "usebackq delims=" %%i in (`node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).packageManager?.replace(/^^pnpm@/, '') || ''"`) do set "PNPM_DESCRIPTOR=%%i"
+if not defined PNPM_DESCRIPTOR (
+    echo  [ERROR] Could not read the pinned pnpm descriptor from package.json.
+    exit /b 1
+)
+set "PNPM_VERSION="
+for /f "tokens=1 delims=+" %%i in ("!PNPM_DESCRIPTOR!") do set "PNPM_VERSION=%%i"
+if not defined PNPM_VERSION (
+    echo  [ERROR] The pinned pnpm descriptor in package.json has no version.
+    exit /b 1
+)
+set "PNPM_RUNNER=pnpm"
+set "CURRENT_PNPM_VERSION="
+
+where corepack >nul 2>&1
+if not errorlevel 1 (
+    echo  [..] Aligning pnpm to !PNPM_VERSION! via Corepack...
+    for /f "usebackq delims=" %%i in (`corepack pnpm@!PNPM_DESCRIPTOR! --version 2^>nul`) do set "CURRENT_PNPM_VERSION=%%i"
+    if /I "!CURRENT_PNPM_VERSION!"=="!PNPM_VERSION!" (
+        set "PNPM_RUNNER=corepack"
+    ) else (
+        set "CURRENT_PNPM_VERSION="
+    )
+)
+
+if not defined CURRENT_PNPM_VERSION (
+    where pnpm >nul 2>&1
+    if not errorlevel 1 (
+        for /f "usebackq delims=" %%i in (`pnpm --version 2^>nul`) do set "CURRENT_PNPM_VERSION=%%i"
+        if /I "!CURRENT_PNPM_VERSION!"=="!PNPM_VERSION!" (
+            echo  [..] Using installed pnpm !CURRENT_PNPM_VERSION!
+        ) else (
+            if defined CURRENT_PNPM_VERSION echo  [..] Installed pnpm !CURRENT_PNPM_VERSION! does not match required !PNPM_VERSION!; trying a pinned temporary runner...
+            set "CURRENT_PNPM_VERSION="
+        )
+    )
+)
+
+if not defined CURRENT_PNPM_VERSION (
+    echo  [..] Using temporary pnpm !PNPM_VERSION! via npx...
+    for /f "usebackq delims=" %%i in (`npx --yes pnpm@!PNPM_VERSION! --version 2^>nul`) do set "CURRENT_PNPM_VERSION=%%i"
+    if /I "!CURRENT_PNPM_VERSION!"=="!PNPM_VERSION!" (
+        set "PNPM_RUNNER=npx"
+    ) else (
+        set "CURRENT_PNPM_VERSION="
+    )
+)
+
+if not defined CURRENT_PNPM_VERSION (
+    echo  [ERROR] Failed to make pnpm !PNPM_VERSION! available.
+    echo          Marinara can run without a global pnpm install, but Node.js must provide Corepack or npx/npm.
+    echo          Reinstall Node.js 24 LTS with npm enabled, or run: npm install -g pnpm@!PNPM_VERSION!
+    exit /b 1
+)
+echo  [OK] pnpm !CURRENT_PNPM_VERSION! ready
+exit /b 0

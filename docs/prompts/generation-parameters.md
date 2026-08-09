@@ -42,6 +42,8 @@ Together, **Frequency** and **Presence** are the repetition penalties.
 
 **Reasoning Effort** tells a thinking-capable model how much to reason before it answers. A thinking-capable model is one that works through a problem in hidden steps first. The choices are **None**, **Low**, **Medium**, **High**, **Xhigh**, and **Maximum**. If the model does not support the tier you pick, Marinara lowers it to the strongest tier that model allows.
 
+When the parameter switch is on, **None** asks the provider to disable thinking explicitly instead of merely leaving out the effort setting. Marinara sends the provider-specific off control only to models known to support it. Some reasoning-mandatory models cannot turn thinking off and may still return reasoning; choose a non-reasoning model when thinking must be absent. Turning the parameter switch itself off is different: it sends no reasoning preference and leaves the provider's default behavior unchanged.
+
 **Verbosity** controls how long and detailed replies should be. The choices are **None**, **Low**, **Medium**, and **High**. **Low** keeps replies short. **High** encourages longer, more descriptive replies. Only some models use this setting.
 
 ## The Send switch

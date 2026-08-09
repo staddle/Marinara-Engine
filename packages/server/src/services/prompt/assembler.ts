@@ -18,13 +18,15 @@ import type {
 import { DEFAULT_GENERATION_PARAMS, generationParametersSchema, resolveMacros } from "@marinara-engine/shared";
 import { wrapContent, wrapGroup } from "./format-engine.js";
 import { sanitizePromptLeaf } from "./prompt-escaping.js";
-import { expandMarker, type MarkerContext } from "./marker-expander.js";
+import { ensureLorebookScan, expandMarker, type MarkerContext } from "./marker-expander.js";
 import { mergeAdjacentMessages, squashLeadingSystemMessages } from "./merger.js";
 import { injectAtDepth } from "../lorebook/prompt-injector.js";
 import type { LorebookScanResult } from "../lorebook/index.js";
 import {
+  buildReferencedCharacterContext,
   buildPromptMacroContext,
   collectCharacterAdvancedPromptEntries,
+  MAX_REFERENCED_CHARACTERS,
   resolveMacrosWithVariableSnapshot,
 } from "./macro-context.js";
 
@@ -34,7 +36,7 @@ interface RuntimeAgentData {
   endToken?: string;
 }
 
-interface ChoiceOptionValue {
+export interface ChoiceOptionValue {
   value: string;
 }
 
@@ -66,6 +68,43 @@ function sanitizeChoiceSelection(
   }
 
   return candidates.find((value) => validValues.has(value));
+}
+
+function readChoiceFlag(value: unknown): boolean {
+  return value === true || value === "true" || value === 1 || value === "1";
+}
+
+export function resolveChoiceVariableValue(input: {
+  selected: string | string[] | undefined;
+  options: ChoiceOptionValue[];
+  multiSelect: unknown;
+  randomPick: unknown;
+  separator?: string | null;
+  random?: () => number;
+}): string {
+  const isRandom = readChoiceFlag(input.randomPick);
+  // Imported or legacy presets can carry Boolean/number flags, and a Random
+  // Pick selection is necessarily multi-valued even if its companion flag was
+  // normalized incorrectly during an older migration.
+  const isMulti = readChoiceFlag(input.multiSelect) || (isRandom && Array.isArray(input.selected));
+  const selected = sanitizeChoiceSelection(input.selected, input.options, isMulti);
+
+  if (isMulti && Array.isArray(selected)) {
+    if (selected.length === 0) return input.options[0]?.value ?? "";
+    if (isRandom) {
+      const random = input.random ?? Math.random;
+      const roll = random();
+      const unit = Number.isFinite(roll) ? Math.min(1, Math.max(0, roll)) : 0;
+      const index = Math.min(selected.length - 1, Math.floor(unit * selected.length));
+      return selected[index] ?? "";
+    }
+    return selected.join(input.separator || ", ");
+  }
+
+  if (selected !== undefined) {
+    return Array.isArray(selected) ? (selected[0] ?? "") : selected;
+  }
+  return input.options[0]?.value ?? "";
 }
 
 // ═══════════════════════════════════════════════
@@ -207,6 +246,10 @@ export interface AssemblerOutput {
   messages: ChatMLMessage[];
   /** Parsed generation parameters */
   parameters: GenerationParameters;
+  /** Final preset and choice-variable values available after section macro processing. */
+  macroVariables: Record<string, string>;
+  /** Agent outputs made available to {{agent::TYPE}} while assembling sections. */
+  macroAgentData: Record<string, string>;
   /** Any lorebook depth entries that were queued (already injected into messages) */
   lorebookDepthEntriesCount: number;
   /** Updated per-chat entry state overrides after ephemeral processing. Caller should persist to chat metadata. */
@@ -287,33 +330,14 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
   // Inject choice variable values into variableValues
   // chatChoices is { variableName: value | value[] } — resolve and merge into variables so {{varName}} resolves
   for (const cb of input.choiceBlocks) {
-    const isMulti = cb.multiSelect === "true";
-    const isRandom = cb.randomPick === "true";
-    const separator = cb.separator || ", ";
     const opts = parseChoiceOptions(cb.options);
-    const selected = sanitizeChoiceSelection(input.chatChoices[cb.variableName], opts, isMulti);
-
-    if (selected !== undefined) {
-      if (isMulti && Array.isArray(selected)) {
-        // Multi-select: either random-pick one or join all
-        if (selected.length === 0) {
-          // Fallback to first option
-          if (opts.length > 0 && opts[0]) variableValues[cb.variableName] = opts[0].value;
-        } else if (isRandom) {
-          // Random pick: select one at random each generation
-          variableValues[cb.variableName] = selected[Math.floor(Math.random() * selected.length)] ?? "";
-        } else {
-          // Join all selected values with the separator
-          variableValues[cb.variableName] = selected.join(separator);
-        }
-      } else {
-        // Single-select or legacy string value
-        variableValues[cb.variableName] = Array.isArray(selected) ? (selected[0] ?? "") : selected;
-      }
-    } else {
-      // Default to first option's value if no selection yet
-      if (opts.length > 0 && opts[0]) variableValues[cb.variableName] = opts[0].value;
-    }
+    variableValues[cb.variableName] = resolveChoiceVariableValue({
+      selected: input.chatChoices[cb.variableName],
+      options: opts,
+      multiSelect: cb.multiSelect,
+      randomPick: cb.randomPick,
+      separator: cb.separator,
+    });
   }
   // Build macro context (character names and primary card fields resolved from IDs)
   const macroCtx = await buildPromptMacroContext({
@@ -332,11 +356,95 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
     idleDuration: input.idleDuration,
     timeZone: input.timeZone,
   });
+  const enabledSectionContents = sectionOrder.flatMap((sectionId) => {
+    const section = sectionMap.get(sectionId);
+    if (!section || section.enabled !== "true") return [];
+    if (input.impersonate === true && input.preserveImpersonatePresetSections !== true && section.isMarker !== "true") {
+      return [];
+    }
+    if (section.groupId) {
+      const group = groupMap.get(section.groupId);
+      if (group && group.enabled !== "true") return [];
+    }
+    return [section.content];
+  });
+  const personaReferenceSources = Object.values(input.personaFields ?? {}).filter(
+    (value): value is string => typeof value === "string",
+  );
+  const referencedCharacterContext = await buildReferencedCharacterContext({
+    db: input.db,
+    activeCharacterIds: input.groupCharacterIds ?? input.characterIds,
+    sources: [
+      ...enabledSectionContents,
+      ...Object.values(variableValues),
+      input.chatSummary ?? "",
+      input.personaDescription,
+      ...personaReferenceSources,
+    ],
+    chatMessages: input.lorebookScanMessages ?? input.chatMessages,
+    macroCtx,
+    wrapFormat,
+    chatId: input.chatId,
+    gameState: input.gameState,
+    generationTriggers: input.generationTriggers,
+    includeLorebooks: input.disableLorebooks !== true,
+    excludedLorebookIds: input.excludedLorebookIds,
+    excludedLorebookSourceAgentIds: input.excludedLorebookSourceAgentIds,
+  });
+  macroCtx.characterReferences = referencedCharacterContext.references;
+  const referencedCharacterContextBlocks = referencedCharacterContext.content
+    ? [referencedCharacterContext.content]
+    : [];
 
   // Resolve macros inside variable values themselves (e.g. {{user}} in a choice value)
   for (const key of Object.keys(variableValues)) {
     variableValues[key] = resolveMacros(variableValues[key]!, macroCtx, deferAllMacroOptions);
   }
+
+  const addActivatedLorebookCharacterReferences = async (result: LorebookScanResult) => {
+    const existingReferenceIds = Object.keys(macroCtx.characterReferences ?? {});
+    const remainingReferenceSlots = Math.max(0, MAX_REFERENCED_CHARACTERS - existingReferenceIds.length);
+    if (remainingReferenceSlots === 0) return;
+
+    const extraContext = await buildReferencedCharacterContext({
+      db: input.db,
+      activeCharacterIds: [...(input.groupCharacterIds ?? input.characterIds), ...existingReferenceIds],
+      sources: result.activatedEntries.map((entry) => entry.content),
+      chatMessages: input.lorebookScanMessages ?? input.chatMessages,
+      macroCtx,
+      wrapFormat,
+      chatId: input.chatId,
+      gameState: input.gameState,
+      generationTriggers: input.generationTriggers,
+      includeLorebooks: input.disableLorebooks !== true,
+      excludedLorebookIds: input.excludedLorebookIds,
+      excludedLorebookSourceAgentIds: input.excludedLorebookSourceAgentIds,
+      maxReferences: remainingReferenceSlots,
+    });
+    if (Object.keys(extraContext.references).length === 0) return;
+
+    macroCtx.characterReferences = {
+      ...(macroCtx.characterReferences ?? {}),
+      ...extraContext.references,
+    };
+    if (extraContext.content) referencedCharacterContextBlocks.push(extraContext.content);
+
+    const resolveReferenceMacros = (value: string) =>
+      resolveMacros(value, { ...macroCtx, variables: { ...macroCtx.variables } }, deferNameMacroOptions);
+    result.worldInfoBefore = resolveReferenceMacros(result.worldInfoBefore);
+    result.worldInfoAfter = resolveReferenceMacros(result.worldInfoAfter);
+    result.depthEntries = result.depthEntries.map((entry) => ({
+      ...entry,
+      content: resolveReferenceMacros(entry.content),
+    }));
+    result.outlets = Object.fromEntries(
+      Object.entries(result.outlets).map(([name, content]) => [name, resolveReferenceMacros(content)]),
+    );
+    result.activatedEntries = result.activatedEntries.map((entry) => ({
+      ...entry,
+      content: resolveReferenceMacros(entry.content),
+    }));
+  };
 
   // Build marker context
   const markerCtx: MarkerContext = {
@@ -369,6 +477,7 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
     generationTriggers: input.generationTriggers ?? ["chat"],
     previewOnly: input.previewOnly === true,
     resolveLorebookContent: (value) => resolveMacrosWithVariableSnapshot(value, macroCtx, deferNameMacroOptions),
+    onLorebookScan: addActivatedLorebookCharacterReferences,
     groupScenarioOverrideText: input.groupScenarioOverrideText ?? null,
     hasDialogueExamplesMarker,
     macroCtx,
@@ -380,6 +489,8 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
   const depthSections: ResolvedSection[] = [];
   let lorebookDepthEntriesCount = 0;
   let hasChatSummaryMarker = false;
+  let outletScanAttempted = false;
+  let idMacroCardMarkerSection: ResolvedSection | null = null;
   const runtimeAgentTypesUsed = new Set<string>();
 
   for (const sectionId of sectionOrder) {
@@ -394,6 +505,20 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
     if (section.groupId) {
       const group = groupMap.get(section.groupId);
       if (group && group.enabled !== "true") continue;
+    }
+
+    // Outlet macros can appear before a lorebook marker, or without one. Scan
+    // immediately before the first eligible Outlet-bearing section so excluded
+    // impersonation sections and disabled groups cannot consume lorebook timing
+    // state or move scan side effects ahead of earlier prompt sections.
+    if (!outletScanAttempted && /\{\{\s*outlet\s*::/i.test(section.content)) {
+      outletScanAttempted = true;
+      try {
+        await ensureLorebookScan(markerCtx);
+      } catch (err) {
+        macroCtx.outlets = {};
+        logger.warn(err, "[prompt] Outlet lorebook scan failed");
+      }
     }
 
     // Track whether a chat_summary marker is present in the preset
@@ -422,12 +547,22 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
     }
 
     if (!resolved) continue;
+    if (resolved.isIdMacroCards && !idMacroCardMarkerSection) {
+      idMacroCardMarkerSection = resolved;
+    }
 
     if (!resolved.isChatHistory && section.injectionPosition === "depth" && section.injectionDepth >= 0) {
       depthSections.push(resolved);
     } else {
       orderedSections.push(resolved);
     }
+  }
+
+  const referencedCharacterContent = referencedCharacterContextBlocks.join("\n");
+  if (referencedCharacterContent && idMacroCardMarkerSection) {
+    idMacroCardMarkerSection.messages = [
+      { role: idMacroCardMarkerSection.role, content: referencedCharacterContent, contextKind: "prompt" },
+    ];
   }
 
   // ── Phase 2: Group wrapping ──
@@ -471,6 +606,13 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
         messages.push(...section.messages.map((message) => ({ ...message, contextKind: "prompt" as const })));
       }
     }
+  }
+  if (referencedCharacterContent && !idMacroCardMarkerSection) {
+    messages.unshift({
+      role: "system",
+      content: referencedCharacterContent,
+      contextKind: "prompt",
+    });
   }
 
   // ── Phase 3: Adjacent same-role merging ──
@@ -562,6 +704,8 @@ export async function assemblePrompt(input: AssemblerInput): Promise<AssemblerOu
   return {
     messages: finalMessages,
     parameters,
+    macroVariables: { ...macroCtx.variables },
+    macroAgentData: { ...(macroCtx.agentData ?? {}) },
     lorebookDepthEntriesCount,
     ...(markerCtx.updatedEntryStateOverrides
       ? { updatedEntryStateOverrides: markerCtx.updatedEntryStateOverrides }
@@ -591,6 +735,8 @@ interface ResolvedSection {
   messages: ChatMLMessage[];
   depth: number;
   isChatHistory?: boolean;
+  /** Placement placeholder for dynamically discovered character-ID macro cards. */
+  isIdMacroCards?: boolean;
 }
 
 interface ResolveSectionCtx {
@@ -623,6 +769,16 @@ async function resolveSection(
   // Handle marker sections
   if (section.isMarker === "true" && section.markerConfig) {
     const markerConfig = JSON.parse(section.markerConfig) as MarkerConfig;
+    if (markerConfig.type === "id_macro_cards") {
+      return {
+        id: section.id,
+        groupId: section.groupId,
+        role,
+        messages: [],
+        depth: section.injectionDepth,
+        isIdMacroCards: true,
+      };
+    }
     const runtimeAgentType =
       markerConfig.type === "agent_data" && markerConfig.agentType ? markerConfig.agentType : null;
     const runtimeAgentData = runtimeAgentType !== null ? ctx.runtimeAgentData[runtimeAgentType] : undefined;

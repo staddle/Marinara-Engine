@@ -23,6 +23,7 @@ import { api } from "../lib/api-client";
 import { normalizeConversationTimeZone } from "../lib/conversation-time-zone";
 import {
   normalizeTrackerPanelSizeProfile,
+  normalizeTrackerStatDisplayMode,
   normalizeTrackerTemperatureUnit,
   normalizeTrackerThoughtBubbleDisplay,
   normalizeScenePromptPreferences,
@@ -40,7 +41,13 @@ type SyncedSettingsObject = ReturnType<typeof pickSyncedSettings>;
 type ServerSettingsPayload = SyncedSettingsObject & { __updatedAt?: number };
 type ParsedSettings = Partial<SyncedSettingsObject> & Record<string, unknown>;
 
-const LOCAL_ONLY_SETTING_KEYS = ["fontSize", "chatFontSize", "trackerPanelOpen"] as const;
+const LOCAL_ONLY_SETTING_KEYS = [
+  "fontSize",
+  "chatFontSize",
+  "trackerPanelOpen",
+  "impersonatePromptTemplate",
+  "activeImpersonatePromptTemplateId",
+] as const;
 
 export function omitLocalOnlySettings(settings: ParsedSettings): ParsedSettings {
   const sanitized = { ...settings };
@@ -48,6 +55,10 @@ export function omitLocalOnlySettings(settings: ParsedSettings): ParsedSettings 
     delete sanitized[key];
   }
   return sanitized;
+}
+
+export function hasMissingSyncedSettings(settings: Record<string, unknown>, expectedKeys: readonly string[]): boolean {
+  return expectedKeys.some((key) => !(key in settings));
 }
 
 function readLocalUpdatedAt(): number | null {
@@ -167,6 +178,7 @@ export function useSettingsSync() {
             const parsed = parseServerSettingsValue(data.value);
             if (parsed.settings && typeof parsed.settings === "object") {
               const hadLocalOnlySettings = LOCAL_ONLY_SETTING_KEYS.some((key) => key in parsed.settings);
+              const hadMissingSyncedSettings = hasMissingSyncedSettings(parsed.settings, Object.keys(localSettings));
               parsed.settings = omitLocalOnlySettings(parsed.settings);
 
               // Migrate old flat gradient fields → per-scheme nested (v10 → v11).
@@ -192,6 +204,9 @@ export function useSettingsSync() {
               delete parsed.settings.trackerPanelWidth;
               parsed.settings.trackerPanelThoughtBubbleDisplay = normalizeTrackerThoughtBubbleDisplay(
                 parsed.settings.trackerPanelThoughtBubbleDisplay,
+              );
+              parsed.settings.trackerStatDisplayMode = normalizeTrackerStatDisplayMode(
+                parsed.settings.trackerStatDisplayMode,
               );
               parsed.settings.trackerPanelDockedThoughtsAlwaysVisible =
                 parsed.settings.trackerPanelDockedThoughtsAlwaysVisible === true;
@@ -221,17 +236,17 @@ export function useSettingsSync() {
                 useUIStore.setState(parsed.settings);
                 lastPushed = serialize();
                 if (serverUpdatedAt !== null) writeLocalUpdatedAt(serverUpdatedAt);
-                if (hadLocalOnlySettings) {
+                if (hadLocalOnlySettings || hadMissingSyncedSettings) {
                   try {
+                    const rewriteUpdatedAt = hadMissingSyncedSettings ? Date.now() : (serverUpdatedAt ?? Date.now());
                     await api.put(SETTINGS_PATH, {
-                      value: buildServerSettingsValue(
-                        pickSyncedSettings(useUIStore.getState()),
-                        serverUpdatedAt ?? Date.now(),
-                      ),
+                      value: buildServerSettingsValue(pickSyncedSettings(useUIStore.getState()), rewriteUpdatedAt),
                     });
+                    writeLocalUpdatedAt(rewriteUpdatedAt);
                   } catch {
-                    // Cleanup is best-effort; this browser still ignores
-                    // legacy local-only values from the server blob.
+                    // Rewriting legacy/incomplete blobs is best-effort. This
+                    // browser still ignores removed keys and retains local
+                    // values for newly synced preferences.
                   }
                 }
               }

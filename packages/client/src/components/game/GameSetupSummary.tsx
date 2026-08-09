@@ -9,6 +9,7 @@ import {
   formatGameSetupShareText,
   type GameSetupShareLabels,
 } from "../../lib/game-setup-share";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 export interface GameSetupSummaryProps {
   gameName: string;
@@ -46,16 +47,15 @@ export function GameSetupSummary({
   currentPersonaName,
   embedded = false,
 }: GameSetupSummaryProps) {
+  const { t: localizeUi } = useUiTranslation();
   const config = snapshot?.config ?? fallbackConfig ?? null;
 
   if (!config) {
     return (
       <div className="flex min-h-48 flex-col items-center justify-center gap-2 px-6 py-10 text-center">
         <Info size={18} className="text-[var(--marinara-chat-chrome-panel-muted)]" />
-        <p className="text-sm font-semibold text-[var(--marinara-chat-chrome-panel-text)]">No setup saved</p>
-        <p className="max-w-sm text-xs leading-relaxed text-[var(--marinara-chat-chrome-panel-muted)]">
-          This campaign does not have enough creation data to build a settings summary.
-        </p>
+        <p className="text-sm font-semibold text-[var(--marinara-chat-chrome-panel-text)]">{localizeUi("ui.game.gamesetupsummary.noSetupSaved")}</p>
+        <p className="max-w-sm text-xs leading-relaxed text-[var(--marinara-chat-chrome-panel-muted)]">{localizeUi("ui.game.gamesetupsummary.thisCampaignDoesNotHaveEnoughCreationDataTo")}</p>
       </div>
     );
   }
@@ -107,8 +107,8 @@ export function GameSetupSummary({
 
   const handleCopy = async () => {
     const copied = await copyToClipboard(shareText);
-    if (copied) toast.success("Initial Game Mode setup copied.");
-    else toast.error("Could not copy the Game Mode setup.");
+    if (copied) toast.success(localizeUi("ui.game.gamesetupsummary.initialGameModeSetupCopied"));
+    else toast.error(localizeUi("ui.game.gamesetupsummary.couldNotCopyTheGameModeSetup"));
   };
 
   const handleDownload = () => {
@@ -116,7 +116,7 @@ export function GameSetupSummary({
       buildGameSetupShareFile(source),
       `${sanitizeExportFilenamePart(gameName, "game")}.marinara-game-setup.json`,
     );
-    toast.success("Reusable Game Mode setup downloaded.");
+    toast.success(localizeUi("ui.game.gamesetupsummary.reusableGameModeSetupDownloaded"));
   };
 
   return (
@@ -124,14 +124,14 @@ export function GameSetupSummary({
       <div className="flex flex-col gap-3 border-b border-[var(--marinara-chat-chrome-panel-divider)] p-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="min-w-0">
           <p className="text-xs font-semibold text-[var(--marinara-chat-chrome-panel-text)]">
-            {snapshot ? "Initial game setup" : "Available setup"}
+            {snapshot ?localizeUi("ui.game.gamesetupsummary.initialGameSetup") :localizeUi("ui.game.gamesetupsummary.availableSetup")}
           </p>
           <p className="mt-0.5 max-w-md text-[0.6875rem] leading-relaxed text-[var(--marinara-chat-chrome-panel-muted)]">
             {snapshot
               ? createdAt
-                ? `Saved ${createdAt}. Copy a readable summary or download a reusable setup file.`
-                : "Saved when this campaign was created. Download it to reuse these settings in a new game."
-              : "Reconstructed from the campaign's earliest saved setup."}
+                ?localizeUi("ui.game.gamesetupsummary.savedValue1CopyAReadableSummaryOrDownloadA", { value1: createdAt })
+                :localizeUi("ui.game.gamesetupsummary.savedWhenThisCampaignWasCreatedDownloadItTo")
+              :localizeUi("ui.game.gamesetupsummary.reconstructedFromTheCampaignSEarliestSavedSetup")}
           </p>
         </div>
         <div className="flex shrink-0 gap-2">
@@ -140,27 +140,20 @@ export function GameSetupSummary({
             onClick={() => void handleCopy()}
             className="flex min-h-11 flex-1 items-center justify-center gap-1.5 rounded-lg border border-[var(--marinara-chat-chrome-button-border)] bg-[var(--marinara-chat-chrome-button-bg)] px-3 text-xs font-medium text-[var(--marinara-chat-chrome-button-text)] transition-colors hover:border-[var(--marinara-chat-chrome-button-border-hover)] hover:bg-[var(--marinara-chat-chrome-highlight-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--marinara-chat-chrome-focus-ring)] sm:flex-none"
           >
-            <Copy size={13} />
-            Copy setup
-          </button>
+            <Copy size={13} />{localizeUi("ui.game.gamesetupsummary.copySetup")}</button>
           <button
             type="button"
             onClick={handleDownload}
             className="flex min-h-11 flex-1 items-center justify-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 text-xs font-semibold text-[var(--primary-foreground)] transition-[filter,transform] hover:brightness-105 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--marinara-chat-chrome-focus-ring)] sm:flex-none"
           >
-            <Download size={13} />
-            Download setup
-          </button>
+            <Download size={13} />{localizeUi("ui.game.gamesetupsummary.downloadSetup")}</button>
         </div>
       </div>
 
       {!snapshot && (
         <div className="m-3 mb-0 flex gap-2 rounded-lg border border-[var(--marinara-chat-chrome-panel-divider)] bg-[var(--marinara-chat-chrome-highlight-bg)] px-3 py-2 text-[0.6875rem] leading-relaxed text-[var(--marinara-chat-chrome-panel-muted)]">
           <Info size={13} className="mt-0.5 shrink-0" />
-          <span>
-            This older campaign predates creation snapshots. Party, model, or parameter values may reflect later
-            changes.
-          </span>
+          <span>{localizeUi("ui.game.gamesetupsummary.thisOlderCampaignPredatesCreationSnapshotsPartyModelOr")}</span>
         </div>
       )}
 

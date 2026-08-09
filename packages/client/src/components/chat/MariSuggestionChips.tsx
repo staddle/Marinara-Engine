@@ -15,6 +15,7 @@ import {
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import type { MariChipEntity, MariSuggestionChip } from "@marinara-engine/shared";
 import { cn } from "../../lib/utils";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface MariSuggestionChipsProps {
   chips: MariSuggestionChip[];
@@ -59,6 +60,7 @@ function inferChipEntity(chip: MariSuggestionChip): MariChipEntity | undefined {
 // (see GameSetupWizard.tsx / ChatSetupWizard.tsx step transitions), reused here so a new
 // suggestion set reads as "the next step" rather than an abrupt content swap.
 export function MariSuggestionChips({ chips, onSelect, disabled = false, compact = false }: MariSuggestionChipsProps) {
+  const { t: localizeUi } = useUiTranslation();
   const reducedMotion = useReducedMotion();
   const setKey = chips.map((chip) => chip.id).join("|");
 
@@ -68,7 +70,7 @@ export function MariSuggestionChips({ chips, onSelect, disabled = false, compact
         <motion.div
           key={setKey}
           role="group"
-          aria-label="Suggested replies"
+          aria-label={localizeUi("ui.chat.marisuggestionchips.suggestedReplies")}
           className={cn("mari-suggestion-chips", compact && "mari-suggestion-chips--compact")}
           initial={reducedMotion ? false : { opacity: 0, y: 12, scale: 0.97 }}
           animate={{ opacity: 1, y: 0, scale: 1 }}

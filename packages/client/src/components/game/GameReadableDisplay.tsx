@@ -9,6 +9,7 @@ import { useMemo } from "react";
 import { X } from "lucide-react";
 import DOMPurify from "dompurify";
 import { cn } from "../../lib/utils";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface GameReadableDisplayProps {
   type: "note" | "book";
@@ -123,6 +124,7 @@ function simpleHash(str: string): number {
 }
 
 export function GameReadableDisplay({ type, content, onClose }: GameReadableDisplayProps) {
+  const { t: localizeUi } = useUiTranslation();
   const style = useMemo(() => {
     const styles = type === "note" ? NOTE_STYLES : BOOK_STYLES;
     return styles[simpleHash(content) % styles.length]!;
@@ -165,7 +167,7 @@ export function GameReadableDisplay({ type, content, onClose }: GameReadableDisp
         {/* Type label */}
         <div className={cn("px-6 pt-5 pb-2", style.accent)}>
           <span className={cn("text-[0.65rem] font-semibold uppercase tracking-[0.15em]", style.heading)}>
-            {type === "note" ? "Note" : "Book"}
+            {type === "note" ?localizeUi("ui.game.libraryview.note") :localizeUi("ui.game.libraryview.book")}
           </span>
         </div>
 

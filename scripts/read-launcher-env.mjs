@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { parseEnv } from "node:util";
-import { fileURLToPath } from "node:url";
+import { pathToFileURL } from "node:url";
 
 export const LAUNCHER_ENV_KEYS = [
   "AUTO_UPDATE_ENABLED",
@@ -39,6 +39,8 @@ function main() {
   }
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === fileURLToPath(new URL(process.argv[1], "file:"))) {
+// pathToFileURL handles Windows drive letters; new URL(path, "file:") parses
+// "D:" as a URL scheme and crashes fileURLToPath with ERR_INVALID_URL_SCHEME.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main();
 }

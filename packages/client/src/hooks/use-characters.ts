@@ -1,8 +1,10 @@
 // ──────────────────────────────────────────────
 // React Query: Character, Group & Persona hooks
 // ──────────────────────────────────────────────
-import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQueries, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMemo } from "react";
 import { api } from "../lib/api-client";
+import type { ChatGalleryIndex } from "../lib/card-asset-links";
 import { useUIStore } from "../stores/ui.store";
 import {
   collectAllPaginatedItems,
@@ -24,6 +26,14 @@ import type { CustomKind, CustomTagPatch } from "../lib/custom-emoji";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+type TrackerCardPaintConfig = Omit<TrackerCardColorConfig, "statIcons">;
+
+function cleanTrackerCardPaintConfig(config: TrackerCardPaintConfig): TrackerCardPaintConfig {
+  const paint = cleanTrackerCardColorConfig(config);
+  delete paint.statIcons;
+  return paint;
 }
 
 export const characterKeys = {
@@ -196,11 +206,11 @@ export function useUpdateCharacter() {
       versionSource?: string;
       versionReason?: string;
       skipVersionSnapshot?: boolean;
-      trackerCardPaint?: TrackerCardColorConfig;
+      trackerCardPaint?: TrackerCardPaintConfig;
     }) =>
       trackerCardPaint !== undefined
         ? api.patch(`/characters/${id}/tracker-card-colors`, {
-            paint: cleanTrackerCardColorConfig(trackerCardPaint),
+            paint: cleanTrackerCardPaintConfig(trackerCardPaint),
           })
         : api.patch(`/characters/${id}`, data),
     onSuccess: (updatedCharacter, variables) => {
@@ -257,6 +267,29 @@ export function useDeleteCharacterVersion() {
       api.delete(`/characters/${id}/versions/${versionId}`),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: characterKeys.versions(variables.id) });
+    },
+  });
+}
+
+export function useRenameCharacterVersion() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, versionId, version }: { id: string; versionId: string; version: string }) =>
+      api.patch<CharacterCardVersion>(`/characters/${id}/versions/${versionId}`, { version }),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: characterKeys.versions(variables.id) });
+    },
+  });
+}
+
+export function useResetCharacterVersions() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.post(`/characters/${id}/versions/reset`, {}),
+    onSuccess: (_data, id) => {
+      qc.invalidateQueries({ queryKey: characterKeys.list() });
+      qc.invalidateQueries({ queryKey: characterKeys.detail(id) });
+      qc.invalidateQueries({ queryKey: characterKeys.versions(id) });
     },
   });
 }
@@ -507,6 +540,44 @@ export function useCharacterGalleryImages(characterId: string | null) {
   });
 }
 
+/**
+ * Chat-wide gallery filename index for card://self fallback resolution: which
+ * chat character owns which gallery filenames, in chat order. Only fetches for
+ * group chats (2+ characters) — with a single character the speaker-first
+ * rewrite already covers everything. Shares the per-character gallery cache
+ * with the editor. Identity is stable between refetches so render memos that
+ * depend on it don't churn.
+ */
+export function useChatGalleryFilenameIndex(characterIds: string[] | undefined): ChatGalleryIndex | null {
+  const ids = useMemo(() => characterIds ?? [], [characterIds]);
+  const enabled = ids.length >= 2;
+  const results = useQueries({
+    queries: ids.map((id) => ({
+      queryKey: characterKeys.gallery(id),
+      queryFn: () => api.get<CharacterGalleryImage[]>(`/characters/${id}/gallery`),
+      enabled,
+      staleTime: 5 * 60_000,
+    })),
+  });
+  const idsKey = ids.join(",");
+  const dataFingerprint = results.map((r) => r.dataUpdatedAt).join(",");
+  return useMemo(() => {
+    if (!enabled) return null;
+    const byCharacter = new Map<string, Set<string>>();
+    let any = false;
+    ids.forEach((id, i) => {
+      const data = results[i]?.data;
+      if (!data) return;
+      any = true;
+      byCharacter.set(id, new Set(data.map((img) => img.filePath.split("/").pop() ?? "").filter(Boolean)));
+    });
+    return any ? { order: [...ids], byCharacter } : null;
+    // ids/results are captured via idsKey/dataFingerprint so the index identity
+    // stays stable between refetches (render memos depend on it).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, idsKey, dataFingerprint]);
+}
+
 export function useCharacterGalleryClips(characterId: string | null) {
   return useQuery({
     queryKey: characterKeys.galleryClips(characterId ?? ""),
@@ -712,6 +783,18 @@ export function useDeleteCharacterGalleryImage(characterId: string) {
   });
 }
 
+export function useSetCharacterGalleryImageAsAvatar(characterId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (imageId: string) => api.post(`/characters/${characterId}/gallery/${imageId}/avatar`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: characterKeys.detail(characterId) });
+      qc.invalidateQueries({ queryKey: characterKeys.list() });
+      qc.invalidateQueries({ queryKey: characterKeys.listWithBuiltIns() });
+    },
+  });
+}
+
 export function useTagCharacterGalleryImage(characterId: string) {
   const qc = useQueryClient();
   return useMutation({
@@ -843,6 +926,18 @@ export function useDeletePersonaGalleryImage(personaId: string) {
     mutationFn: (imageId: string) => api.delete(`/characters/personas/${personaId}/gallery/${imageId}`),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: characterKeys.personaGallery(personaId) });
+    },
+  });
+}
+
+export function useSetPersonaGalleryImageAsAvatar(personaId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (imageId: string) => api.post(`/characters/personas/${personaId}/gallery/${imageId}/avatar`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: characterKeys.personaDetail(personaId) });
+      qc.invalidateQueries({ queryKey: characterKeys.personas });
+      qc.invalidateQueries({ queryKey: characterKeys.personaActive() });
     },
   });
 }
@@ -1001,7 +1096,7 @@ export function useUpdatePersona() {
       aboutMe?: string;
       convoBehavior?: string;
       avatarCrop?: string;
-      trackerCardPaint?: TrackerCardColorConfig;
+      trackerCardPaint?: TrackerCardPaintConfig;
       trackerCardPortrait?: {
         portraitFocusX: number;
         portraitFocusY: number;
@@ -1012,7 +1107,7 @@ export function useUpdatePersona() {
         ? api.patch<Persona | null>(
             `/characters/personas/${id}/tracker-card-colors`,
             trackerCardPaint
-              ? { paint: cleanTrackerCardColorConfig(trackerCardPaint) }
+              ? { paint: cleanTrackerCardPaintConfig(trackerCardPaint) }
               : { portrait: trackerCardPortrait },
             keepalive ? { keepalive: true } : undefined,
           )
@@ -1075,6 +1170,30 @@ export function useDeletePersonaVersion() {
       api.delete(`/characters/personas/${id}/versions/${versionId}`),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: characterKeys.personaVersions(variables.id) });
+    },
+  });
+}
+
+export function useRenamePersonaVersion() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, versionId, version }: { id: string; versionId: string; version: string }) =>
+      api.patch<PersonaCardVersion>(`/characters/personas/${id}/versions/${versionId}`, { version }),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: characterKeys.personaVersions(variables.id) });
+    },
+  });
+}
+
+export function useResetPersonaVersions() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.post(`/characters/personas/${id}/versions/reset`, {}),
+    onSuccess: (_data, id) => {
+      qc.invalidateQueries({ queryKey: characterKeys.personas });
+      qc.invalidateQueries({ queryKey: characterKeys.personaActive() });
+      qc.invalidateQueries({ queryKey: characterKeys.personaDetail(id) });
+      qc.invalidateQueries({ queryKey: characterKeys.personaVersions(id) });
     },
   });
 }

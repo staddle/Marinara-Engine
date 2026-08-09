@@ -1,5 +1,6 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { Search, X } from "lucide-react";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface PickerDropdownProps {
   search: string;
@@ -18,6 +19,7 @@ export function PickerDropdown({
   children,
   footer,
 }: PickerDropdownProps) {
+  const { t: localizeUi } = useUiTranslation();
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -45,7 +47,7 @@ export function PickerDropdown({
         />
         <button
           type="button"
-          aria-label="Close picker"
+          aria-label={localizeUi("ui.chatSettings.pickerdropdown.closePicker")}
           onClick={onClose}
           className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
         >

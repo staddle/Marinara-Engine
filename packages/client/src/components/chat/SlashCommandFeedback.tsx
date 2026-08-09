@@ -8,6 +8,7 @@ import {
   NEUTRAL_PANEL_SHELL,
   NEUTRAL_PANEL_TITLE,
 } from "../ui/neutral-surface-styles";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface SlashCommandFeedbackProps {
   feedback: string;
@@ -77,6 +78,7 @@ function renderLine(line: string, index: number) {
 }
 
 export function SlashCommandFeedback({ feedback, onDismiss, className }: SlashCommandFeedbackProps) {
+  const { t: localizeUi } = useUiTranslation();
   const lines = feedback.split(/\r?\n/);
   const firstContentIndex = lines.findIndex((line) => line.trim().length > 0);
   const title = firstContentIndex >= 0 ? lines[firstContentIndex]!.trim().replace(/:$/, "") : "Slash command";
@@ -95,7 +97,7 @@ export function SlashCommandFeedback({ feedback, onDismiss, className }: SlashCo
           type="button"
           onClick={onDismiss}
           className={cn(NEUTRAL_PANEL_CLOSE_BUTTON, "shrink-0")}
-          aria-label="Dismiss"
+          aria-label={localizeUi("ui.chat.slashcommandfeedback.dismiss")}
         >
           <X size={NEUTRAL_PANEL_CLOSE_ICON_SIZE} />
         </button>

@@ -10,13 +10,15 @@ export interface NoodleImagePostCtx extends Record<string, string | number | und
   draftPrompt: string;
   userInstructions: string;
   characterDescription: string;
+  characterImageInstructions: string;
+  characterPersonality: string;
 }
 
 export const NOODLE_IMAGE_POST: PromptOverrideKeyDef<NoodleImagePostCtx> = {
   key: "noodle.imagePost",
   label: "Noodle Post Image",
   description:
-    "Template that assembles the final image-generation prompt. The default sends the visual idea, appearance notes, and Noodle image directions without the post text or meta-instructions.",
+    "Template that assembles the final image-generation prompt. Everything this produces is sent to the image model verbatim — no LLM pass runs after it. The default sends the visual idea, appearance notes, and character image habits, without the post text or your Noodle image instructions (those are given to the timeline model instead).",
   variables: [
     { name: "authorName", description: "Display name of the Noodle account posting.", example: "Dottore" },
     {
@@ -31,7 +33,8 @@ export const NOODLE_IMAGE_POST: PromptOverrideKeyDef<NoodleImagePostCtx> = {
     },
     {
       name: "userInstructions",
-      description: "Noodle-specific image instructions from Noodle Settings.",
+      description:
+        "Noodle image instructions from Noodle Settings. These go to the timeline model when it writes the visual idea, so the default template no longer appends them to the image prompt. Still available for custom templates.",
       example:
         "Create either a social-media-ready character image or a meme. Mention build, clothing, appearance, pose, expression, setting, lighting, mood, composition, meme format, and short visible meme text when relevant.",
     },
@@ -40,9 +43,26 @@ export const NOODLE_IMAGE_POST: PromptOverrideKeyDef<NoodleImagePostCtx> = {
       description: "Optional character appearance or description notes included by Noodle Settings.",
       example: "Character appearance notes:\nDottore's Appearance: tall, slim build, blue hair, red eyes, mask.",
     },
+    {
+      name: "characterPersonality",
+      description: "The current posting character's personality and traits.",
+      example: "precise, arrogant, intensely curious, impatient with staged sentimentality",
+    },
+    {
+      name: "characterImageInstructions",
+      description: "Opted-in image habits and preferences from the current posting character's card.",
+      example: "Shares stark lab photography with cold lighting and deliberately clinical framing.",
+    },
   ],
   defaultBuilder: (ctx) =>
-    [ctx.draftPrompt.trim() || `A social-media-ready image posted by ${ctx.authorName}.`, ctx.characterDescription, ctx.userInstructions]
+    [
+      ctx.draftPrompt.trim() || `A social-media-ready image posted by ${ctx.authorName}.`,
+      ctx.characterDescription,
+      // Bare values only: labels and "let these traits influence..." framing are instructions to a
+      // language model, and nothing downstream re-reads this string — it goes to the image model.
+      ctx.characterPersonality,
+      ctx.characterImageInstructions,
+    ]
       .map((part) => part.trim())
       .filter(Boolean)
       .join("\n\n"),
@@ -55,6 +75,8 @@ export const NOODLE_IMAGE_POST: PromptOverrideKeyDef<NoodleImagePostCtx> = {
       "Create either a social-media-ready character image or a meme. Mention build, clothing, appearance, pose, expression, setting, lighting, mood, composition, meme format, and short visible meme text when relevant.",
     characterDescription:
       "Character appearance notes:\nDottore's Appearance: tall, slim build, blue hair, red eyes, mask.",
+    characterPersonality: "precise, arrogant, intensely curious, impatient with staged sentimentality",
+    characterImageInstructions: "Shares stark lab photography with cold lighting and clinical framing.",
   },
 };
 

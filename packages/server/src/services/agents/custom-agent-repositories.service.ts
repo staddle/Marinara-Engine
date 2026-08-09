@@ -6,6 +6,9 @@ import AdmZip from "adm-zip";
 import { z } from "zod";
 import {
   APP_VERSION,
+  CUSTOM_AGENT_IMPORT_SOURCE_SETTING,
+  CUSTOM_AGENT_PERMISSIONS_EXPLICIT_SETTING,
+  normalizeCustomAgentCapabilities,
   packagedAgentDefinitionsSchema,
   parseAgentSettingsRecord,
   type CreateAgentConfigInput,
@@ -151,7 +154,7 @@ export function parseCustomAgentRepositoryArchive(archive: Buffer): PackagedAgen
   const ids = new Set<string>();
   for (const definition of definitions) {
     if (ids.has(definition.id)) throw new Error(`agents.json contains duplicate agent id ${definition.id}`);
-    if (definition.execution === "feature") {
+    if (definition.execution === "feature" || definition.execution === "host") {
       throw new Error(`Agent ${definition.id} requires a package runtime and cannot be imported as a custom agent`);
     }
     ids.add(definition.id);
@@ -220,7 +223,7 @@ export function buildRepositoryAgentInput(
   repository: RepositoryIdentity,
   definition: PackagedAgentDefinition,
 ): CreateAgentConfigInput {
-  const settings: Record<string, unknown> = {
+  const requestedSettings: Record<string, unknown> = {
     ...(definition.defaultSettings ?? {}),
     ...(definition.author ? { author: definition.author } : {}),
     ...(definition.defaultTools ? { enabledTools: [...definition.defaultTools] } : {}),
@@ -232,6 +235,16 @@ export function buildRepositoryAgentInput(
     ...(definition.resultType !== undefined ? { resultType: definition.resultType } : {}),
     ...(definition.modeAllowlist ? { modeAllowlist: [...definition.modeAllowlist] } : {}),
     category: definition.category,
+  };
+  const requestedCapabilities = normalizeCustomAgentCapabilities({
+    ...requestedSettings,
+    [CUSTOM_AGENT_PERMISSIONS_EXPLICIT_SETTING]: false,
+  });
+  const settings: Record<string, unknown> = {
+    ...requestedSettings,
+    customCapabilities: requestedCapabilities,
+    [CUSTOM_AGENT_PERMISSIONS_EXPLICIT_SETTING]: true,
+    [CUSTOM_AGENT_IMPORT_SOURCE_SETTING]: "repository",
     [SOURCE_SETTINGS_KEY]: {
       repositoryId: repository.id,
       repositoryUrl: repository.url,
@@ -328,7 +341,8 @@ export function createCustomAgentRepositoriesService(db: DB) {
         await storage.create(desired);
       }
     }
-    // A definition removed upstream becomes an ordinary local custom agent.
+    // A definition removed upstream is detached from repository management, but
+    // keeps its external-import provenance so the Danger Zone gate still applies.
     // This honors the remote list without deleting the user's runs or memory.
     for (const agent of managed.values()) {
       await storage.update(agent.id, { settings: withoutSource(agent.settings) });

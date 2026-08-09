@@ -11,6 +11,7 @@ import { createPortal } from "react-dom";
 import type { MessageReaction } from "@marinara-engine/shared";
 import { cn } from "../../lib/utils";
 import { USER_REACTOR, customEmojiReactionName } from "../../lib/reactions";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface MessageReactionsProps {
   reactions: MessageReaction[];
@@ -50,6 +51,7 @@ function ReactionPill({
   who: string;
   onToggle: () => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const [show, setShow] = useState(false);
   const wrapRef = useRef<HTMLButtonElement>(null);
   const tipRef = useRef<HTMLDivElement>(null);
@@ -83,7 +85,7 @@ function ReactionPill({
         }}
         onMouseEnter={() => setShow(true)}
         onMouseLeave={() => setShow(false)}
-        aria-label={`${who} reacted with ${name ? `:${name}:` : reaction.emoji}`}
+        aria-label={localizeUi("ui.chat.reactionpill.value1ReactedWithValue2", { value1: who, value2: name ?localizeUi("ui.chat.conversationinput.value1", { value1: name }) : reaction.emoji })}
         aria-pressed={mine}
         className={cn(
           "flex items-center gap-1 rounded-md border px-1.5 py-0.5 leading-none transition-colors",
@@ -121,10 +123,10 @@ function ReactionPill({
             <span className="leading-snug">
               {name ? (
                 <>
-                  <span className="font-semibold text-[var(--foreground)]">:{name}:</span> reacted by {who}
+                  <span className="font-semibold text-[var(--foreground)]">:{name}:</span> {localizeUi("ui.chat.reactionpill.reactedBy")} {who}
                 </>
               ) : (
-                <>reacted by {who}</>
+                <>{localizeUi("ui.chat.reactionpill.reactedBy")} {who}</>
               )}
             </span>
           </div>,

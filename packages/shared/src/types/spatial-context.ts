@@ -33,6 +33,14 @@ export interface SpatialLocation {
   modelMemory?: string;
   awarenessSummary?: string;
   icon?: string;
+  /** Chat Gallery image used as the visual identity for this location. */
+  referenceImageId?: string;
+  /** Whether visual generation may send the location image to the configured provider. */
+  useReferenceImage?: boolean;
+  /** Chat Gallery image displayed behind this location's child map. */
+  mapBackgroundImageId?: string;
+  /** Saved focal point used to position the child map background. */
+  mapBackgroundPosition?: SpatialLocationPlacement;
   /** Stable lorebook entry IDs activated only while this exact location is current. */
   lorebookEntryIds: string[];
   childPresentation: SpatialChildPresentation;
@@ -99,9 +107,13 @@ export interface ResolvedOwnerSpatialProjection {
   breadcrumb: Array<{ id: string; name: string }>;
   description: string;
   modelMemory: string | null;
+  referenceImageId: string | null;
+  useReferenceImage: boolean;
   lorebookEntryIds: string[];
   destinations: SpatialDestination[];
   omittedDestinationCount: number;
+  /** Active map locations exposed as name-only breadcrumb paths for narrated travel. */
+  knownLocations?: Array<{ id: string; path: string }>;
 }
 
 export type SpatialDefinitionIssueCode =

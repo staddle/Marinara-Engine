@@ -4,6 +4,7 @@
 import { useState, useCallback, type ReactNode } from "react";
 import { cn } from "../../lib/utils";
 import type { GameMap } from "@marinara-engine/shared";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface GameNodeMapProps {
   map: GameMap;
@@ -29,6 +30,7 @@ export function GameNodeMap({
   topRightAction,
   compactFit,
 }: GameNodeMapProps) {
+  const { t: localizeUi } = useUiTranslation();
   const nodes = map.nodes || [];
   const edges = map.edges || [];
   const currentNodeId = showPartyPosition && typeof map.partyPosition === "string" ? map.partyPosition : null;
@@ -49,9 +51,7 @@ export function GameNodeMap({
   // Guard against empty nodes — no SVG to render
   if (nodes.length === 0) {
     return (
-      <div className="flex items-center justify-center rounded-lg border border-[var(--marinara-chat-chrome-input-border)] bg-[var(--marinara-chat-chrome-input-bg)] p-4 text-xs text-[var(--marinara-chat-chrome-panel-muted)]">
-        No map nodes available
-      </div>
+      <div className="flex items-center justify-center rounded-lg border border-[var(--marinara-chat-chrome-input-border)] bg-[var(--marinara-chat-chrome-input-bg)] p-4 text-xs text-[var(--marinara-chat-chrome-panel-muted)]">{localizeUi("ui.game.gamenodemap.noMapNodesAvailable")}</div>
     );
   }
 

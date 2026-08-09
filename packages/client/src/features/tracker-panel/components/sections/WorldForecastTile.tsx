@@ -8,6 +8,7 @@ import {
   WorldRenderedEdit,
   WorldValueText,
 } from "./WorldEditableTile";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 const WORLD_FORECAST_PROFILE_STYLES: Record<
   TrackerPanelSizeProfile,
@@ -61,6 +62,7 @@ export function WorldForecastTile({
   temperatureLockKey?: string;
   sizeProfile: TrackerPanelSizeProfile;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const weatherLock = useTrackerFieldLock(weatherLockKey);
   const temperatureLock = useTrackerFieldLock(temperatureLockKey);
   const style = WORLD_FORECAST_PROFILE_STYLES[sizeProfile];
@@ -69,10 +71,10 @@ export function WorldForecastTile({
     <div className={cn("relative z-[1] min-h-16 min-w-0 overflow-hidden rounded-sm py-1", style.shell)}>
       <div className="relative z-[1] grid min-h-14 min-w-0 grid-cols-1 grid-rows-[auto_auto] content-center">
         <WorldRenderedEdit
-          label="Temperature"
+          label={localizeUi("ui.trackerPanel.worldforecasttile.temperature")}
           value={temperatureValue}
           onSave={onSaveTemperature}
-          placeholder="Set temperature"
+          placeholder={localizeUi("ui.trackerPanel.worldforecasttile.setTemperature")}
           className={cn("row-start-1 w-full min-w-0 self-center rounded-sm py-0.5 text-right", style.edit)}
           inputClassName={cn("text-right", WORLD_INSTRUMENT_TEXT_STYLE, style.primary)}
           {...temperatureLock}
@@ -98,10 +100,10 @@ export function WorldForecastTile({
           </span>
         </WorldRenderedEdit>
         <WorldRenderedEdit
-          label="Weather"
+          label={localizeUi("ui.trackerPanel.worldforecasttile.weather")}
           value={weatherText}
           onSave={onSaveWeather}
-          placeholder="Set weather"
+          placeholder={localizeUi("ui.trackerPanel.worldforecasttile.setWeather")}
           className={cn("row-start-2 w-full min-w-0 rounded-sm py-0.5 text-right", style.edit)}
           inputClassName={cn("text-right", WORLD_INSTRUMENT_TEXT_STYLE, style.secondary)}
           {...weatherLock}

@@ -14,31 +14,50 @@ import {
   packagedAgentDefinitionsSchema,
   type CapabilityCatalog,
   type CapabilityCatalogPackage,
+  type PackagedAgentDefinition,
+  type CapabilityPackageUpdate,
   type InstalledCapabilityPackage,
 } from "@marinara-engine/shared";
 import { DATA_DIR } from "../../utils/data-dir.js";
 import { safeFetch } from "../../utils/security.js";
 import { logger } from "../../lib/logger.js";
+import { getBuildBranch } from "../../config/build-info.js";
 import { sidecarSpeechService } from "../sidecar/sidecar-speech.service.js";
 
 const ROOT = join(DATA_DIR, "capability-packages");
 const VERSIONS = join(ROOT, "versions");
 const REGISTRY = join(ROOT, "installed.json");
+const UPDATE_DECISIONS = join(ROOT, "update-decisions-v1.json");
 const AVAILABILITY_MIGRATION = join(ROOT, "availability-migration-v1.json");
 const HIERARCHICAL_MAPS_SELECTION_CORRECTION = join(ROOT, "hierarchical-maps-selection-correction-v1.json");
 const NON_DOWNLOADABLE_CORE_PACKAGE_IDS = new Set(["about-me-keeper"]);
-const OFFICIAL_CATALOG_ROOT = "https://raw.githubusercontent.com/Pasta-Devs/Marinara-Agents/main/catalog";
+const OFFICIAL_AGENT_RAW_ROOT = "https://raw.githubusercontent.com/Pasta-Devs/Marinara-Agents";
+type OfficialAgentBranch = "main" | "staging";
+export function resolveOfficialAgentBranch(engineBranch: string | null = getBuildBranch()): OfficialAgentBranch {
+  return engineBranch === "staging" || engineBranch?.startsWith("release/") ? "staging" : "main";
+}
+function officialCatalogRoot(branch: OfficialAgentBranch): string {
+  return `${OFFICIAL_AGENT_RAW_ROOT}/${branch}/catalog`;
+}
+function officialArtifactRoot(branch: OfficialAgentBranch): string {
+  return `${OFFICIAL_AGENT_RAW_ROOT}/${branch}/artifacts`;
+}
+function officialArtworkRoot(branch: OfficialAgentBranch): string {
+  return `${OFFICIAL_AGENT_RAW_ROOT}/${branch}/artwork/agent-covers`;
+}
 const ENGINE_RELEASE_VERSION_PATTERN = /^v?(\d+)\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u;
 export function resolveCapabilityCatalogUrl(
   engineVersion: string = APP_VERSION,
   configuredUrl: string | undefined = process.env.MARINARA_AGENT_CATALOG_URL,
+  branch: OfficialAgentBranch = resolveOfficialAgentBranch(),
 ): string {
   const override = configuredUrl?.trim();
   if (override) return override;
   const match = ENGINE_RELEASE_VERSION_PATTERN.exec(engineVersion.trim());
+  const catalogRoot = officialCatalogRoot(branch);
   return match
-    ? `${OFFICIAL_CATALOG_ROOT}/v${Number(match[1])}/catalog.json`
-    : `${OFFICIAL_CATALOG_ROOT}/catalog.json`;
+    ? `${catalogRoot}/v${Number(match[1])}/catalog.json`
+    : `${catalogRoot}/catalog.json`;
 }
 const CATALOG_URL = resolveCapabilityCatalogUrl();
 const MAX_ARTIFACT_BYTES = 100 * 1024 * 1024;
@@ -49,10 +68,12 @@ const KNOWN_INCOMPATIBLE_RUNTIMES = new Map<string, string>([
     (version) =>
       [
         `hierarchical-maps@${version}`,
-        `Hierarchical Maps ${version} is incompatible with file-native storage. Update the package before using maps.`,
+        `World Maps ${version} is incompatible with file-native storage. Update the package before using maps.`,
       ] as const,
   ),
 ]);
+
+export class CapabilityPackageVersionMismatchError extends Error {}
 
 export function normalizeArchivePath(value: string): string {
   if (!value || value.includes("\\") || value.startsWith("/") || value.includes("\0")) {
@@ -121,6 +142,53 @@ async function writeRegistry(packages: InstalledCapabilityPackage[]) {
   const temporary = `${REGISTRY}.tmp-${process.pid}-${Date.now()}`;
   await writeFile(temporary, JSON.stringify({ schemaVersion: 1, packages }, null, 2), { mode: 0o600 });
   await rename(temporary, REGISTRY);
+}
+
+interface CapabilityPackageUpdateDecisions {
+  schemaVersion: 1;
+  declined: Record<string, { version: string; declinedAt: string }>;
+}
+
+function emptyUpdateDecisions(): CapabilityPackageUpdateDecisions {
+  return { schemaVersion: 1, declined: {} };
+}
+
+async function readUpdateDecisions(): Promise<CapabilityPackageUpdateDecisions> {
+  try {
+    const parsed = JSON.parse(await readFile(UPDATE_DECISIONS, "utf8")) as Record<string, unknown>;
+    if (parsed.schemaVersion !== 1 || !parsed.declined || typeof parsed.declined !== "object") {
+      return emptyUpdateDecisions();
+    }
+    const declined: CapabilityPackageUpdateDecisions["declined"] = {};
+    for (const [id, value] of Object.entries(parsed.declined as Record<string, unknown>)) {
+      if (!value || typeof value !== "object") continue;
+      const decision = value as Record<string, unknown>;
+      if (
+        typeof decision.version === "string" &&
+        typeof decision.declinedAt === "string" &&
+        Number.isFinite(Date.parse(decision.declinedAt))
+      ) {
+        declined[id] = { version: decision.version, declinedAt: decision.declinedAt };
+      }
+    }
+    return { schemaVersion: 1, declined };
+  } catch {
+    return emptyUpdateDecisions();
+  }
+}
+
+async function writeUpdateDecisions(decisions: CapabilityPackageUpdateDecisions) {
+  await mkdir(ROOT, { recursive: true });
+  const temporary = `${UPDATE_DECISIONS}.tmp-${process.pid}-${Date.now()}`;
+  await writeFile(temporary, JSON.stringify(decisions, null, 2), { mode: 0o600 });
+  await rename(temporary, UPDATE_DECISIONS);
+}
+
+async function clearDeclinedUpdate(packageId: string) {
+  const decisions = await readUpdateDecisions();
+  if (!decisions.declined[packageId]) return;
+  delete decisions.declined[packageId];
+  await writeUpdateDecisions(decisions);
 }
 
 async function writeAvailabilityMigration(kind: "fresh" | "legacy") {
@@ -196,7 +264,59 @@ export function getCapabilityPackageInstallIssue(manifest: CapabilityCatalogPack
   if (manifest.kind.includes("turn-game") && !manifest.entrypoints.server) {
     return "Turn-game packages require a server entrypoint";
   }
+  if (manifest.permissions.includes("routes") && !manifest.restartRequired) {
+    return "Packages with privileged routes must require a restart";
+  }
   return null;
+}
+
+export function getCapabilityAgentDetailDefinitionIssue(
+  agentId: string,
+  agentDefinitions: readonly PackagedAgentDefinition[],
+): string | null {
+  const definition = agentDefinitions.find((agent) => agent.id === agentId);
+  return definition && (definition.execution === "feature" || definition.execution === "host")
+    ? null
+    : `Agent detail contribution ${agentId} must identify a feature or host agent from this package`;
+}
+
+export function getCapabilityPackageArtifactSourceIssue(
+  entry: CapabilityCatalogPackage,
+  catalogUrl = CATALOG_URL,
+): string | null {
+  const branch = getOfficialAgentBranchFromCatalogUrl(catalogUrl);
+  if (!branch) return null;
+  const artifactName = `${entry.manifest.id}-${entry.manifest.version}.zip`;
+  const stableUrl = `${officialArtifactRoot("main")}/${artifactName}`;
+  const channelUrl = `${officialArtifactRoot(branch)}/${artifactName}`;
+  return entry.artifact.url === stableUrl || entry.artifact.url === channelUrl
+    ? null
+    : `Official package ${entry.manifest.id} must use its canonical Marinara-Agents artifact URL`;
+}
+
+function getOfficialAgentBranchFromCatalogUrl(catalogUrl: string): OfficialAgentBranch | null {
+  for (const branch of ["main", "staging"] as const) {
+    if (catalogUrl.startsWith(`${officialCatalogRoot(branch)}/`)) return branch;
+  }
+  return null;
+}
+
+export function resolveCapabilityPackageArtifactUrl(
+  entry: CapabilityCatalogPackage,
+  catalogUrl = CATALOG_URL,
+): string {
+  const branch = getOfficialAgentBranchFromCatalogUrl(catalogUrl);
+  if (!branch) return entry.artifact.url;
+  return `${officialArtifactRoot(branch)}/${entry.manifest.id}-${entry.manifest.version}.zip`;
+}
+
+export function resolveCapabilityPackageIconUrl(
+  entry: CapabilityCatalogPackage,
+  catalogUrl = CATALOG_URL,
+): string | undefined {
+  const branch = getOfficialAgentBranchFromCatalogUrl(catalogUrl);
+  if (!branch || !entry.iconUrl) return entry.iconUrl;
+  return `${officialArtworkRoot(branch)}/${entry.manifest.id}.png`;
 }
 
 async function readInstalledAgentDefinitions(installed: InstalledCapabilityPackage) {
@@ -230,6 +350,23 @@ export function findCompatibleCapabilityPackageUpdates(
     if (getCapabilityApiCompatibilityIssue(entry.manifest) || !supportsEngineVersion(entry, engineVersion)) return [];
     return [{ installed, entry }];
   });
+}
+
+export function findPendingCapabilityPackageUpdates(
+  installedPackages: InstalledCapabilityPackage[],
+  catalog: CapabilityCatalog,
+  declinedVersions: Readonly<Record<string, string>> = {},
+  engineVersion = APP_VERSION,
+): CapabilityPackageUpdate[] {
+  return findCompatibleCapabilityPackageUpdates(installedPackages, catalog, engineVersion)
+    .filter(({ installed, entry }) => declinedVersions[installed.id] !== entry.manifest.version)
+    .map(({ installed, entry }) => ({
+      id: installed.id,
+      name: entry.manifest.name,
+      installedVersion: installed.version,
+      version: entry.manifest.version,
+      restartRequired: entry.manifest.restartRequired,
+    }));
 }
 
 async function installCatalogPackage(entry: CapabilityCatalogPackage, activateDuringStartup = false) {
@@ -293,10 +430,8 @@ async function installCatalogPackage(entry: CapabilityCatalogPackage, activateDu
     if (!agentsFile) throw new Error("Package agent definitions are missing");
     const agentDefinitions = packagedAgentDefinitionsSchema.parse(JSON.parse(agentsFile.toString("utf8")));
     for (const agentId of agentDetailIds) {
-      const definition = agentDefinitions.find((agent) => agent.id === agentId);
-      if (!definition || definition.execution !== "feature") {
-        throw new Error(`Agent detail contribution ${agentId} must identify a feature agent from this package`);
-      }
+      const detailIssue = getCapabilityAgentDetailDefinitionIssue(agentId, agentDefinitions);
+      if (detailIssue) throw new Error(detailIssue);
     }
   }
 
@@ -330,6 +465,11 @@ async function installCatalogPackage(entry: CapabilityCatalogPackage, activateDu
       ...(previous && previous.version !== manifest.version ? { previousVersion: previous.version } : {}),
     };
     await writeRegistry([...registry.packages.filter((item) => item.id !== manifest.id), installed]);
+    try {
+      await clearDeclinedUpdate(manifest.id);
+    } catch (error) {
+      logger.warn(error, "Could not clear the deferred update marker for capability package %s", manifest.id);
+    }
     return installed;
   } finally {
     await rm(temporary, { recursive: true, force: true });
@@ -337,8 +477,8 @@ async function installCatalogPackage(entry: CapabilityCatalogPackage, activateDu
 }
 
 export const capabilityPackageManager = {
-  async catalog(): Promise<CapabilityCatalog> {
-    const response = await safeFetch(CATALOG_URL, {
+  async catalog(fetchCatalog: typeof safeFetch = safeFetch): Promise<CapabilityCatalog> {
+    const response = await fetchCatalog(CATALOG_URL, {
       policy: { allowedProtocols: ["https:"] },
       maxResponseBytes: 2 * 1024 * 1024,
       allowedContentTypes: ["application/json", "text/plain"],
@@ -355,9 +495,22 @@ export const capabilityPackageManager = {
     });
     if (!response.ok) throw new Error(`Catalog request failed with HTTP ${response.status}`);
     const catalog = capabilityCatalogSchema.parse(await response.json());
+    for (const entry of catalog.packages) {
+      const sourceIssue = getCapabilityPackageArtifactSourceIssue(entry, CATALOG_URL);
+      if (sourceIssue) throw new Error(sourceIssue);
+    }
     return {
       ...catalog,
-      packages: catalog.packages.filter((entry) => !NON_DOWNLOADABLE_CORE_PACKAGE_IDS.has(entry.manifest.id)),
+      packages: catalog.packages
+        .filter((entry) => !NON_DOWNLOADABLE_CORE_PACKAGE_IDS.has(entry.manifest.id))
+        .map((entry) => ({
+          ...entry,
+          iconUrl: resolveCapabilityPackageIconUrl(entry, CATALOG_URL),
+          artifact: {
+            ...entry.artifact,
+            url: resolveCapabilityPackageArtifactUrl(entry, CATALOG_URL),
+          },
+        })),
     };
   },
 
@@ -401,7 +554,7 @@ export const capabilityPackageManager = {
       for (const definition of parsed) {
         if (ids.has(definition.id)) throw new Error(`Agent ${definition.id} is provided by more than one package`);
         ids.add(definition.id);
-        definitions.push(definition);
+        definitions.push({ ...definition, packageId: installed.id });
       }
     }
     return definitions;
@@ -530,33 +683,39 @@ export const capabilityPackageManager = {
     await writeHierarchicalMapsSelectionCorrection();
   },
 
-  async updateInstalledPackagesToLatest() {
+  async pendingUpdates(): Promise<CapabilityPackageUpdate[]> {
     const installedPackages = await this.installed();
-    if (installedPackages.length === 0) return { checked: 0, updated: [], failures: [] };
+    if (installedPackages.length === 0) return [];
     const catalog = await this.catalog();
-    const candidates = findCompatibleCapabilityPackageUpdates(installedPackages, catalog);
-    const updated: Array<{ id: string; previousVersion: string; version: string }> = [];
-    const failures: Array<{ id: string; previousVersion: string; version: string; error: unknown }> = [];
-    for (const { installed, entry } of candidates) {
-      try {
-        const next = await installCatalogPackage(entry, true);
-        updated.push({ id: next.id, previousVersion: installed.version, version: next.version });
-      } catch (error) {
-        failures.push({
-          id: installed.id,
-          previousVersion: installed.version,
-          version: entry.manifest.version,
-          error,
-        });
-      }
-    }
-    return { checked: installedPackages.length, updated, failures };
+    const decisions = await readUpdateDecisions();
+    const declinedVersions = Object.fromEntries(
+      Object.entries(decisions.declined).map(([id, decision]) => [id, decision.version]),
+    );
+    return findPendingCapabilityPackageUpdates(installedPackages, catalog, declinedVersions);
   },
 
-  async install(packageId: string) {
+  async declineUpdate(packageId: string, version: string) {
+    const installedPackages = await this.installed();
+    const catalog = await this.catalog();
+    const candidate = findCompatibleCapabilityPackageUpdates(installedPackages, catalog).find(
+      ({ installed, entry }) => installed.id === packageId && entry.manifest.version === version,
+    );
+    if (!candidate) return false;
+    const decisions = await readUpdateDecisions();
+    decisions.declined[packageId] = { version, declinedAt: new Date().toISOString() };
+    await writeUpdateDecisions(decisions);
+    return true;
+  },
+
+  async install(packageId: string, expectedVersion?: string) {
     const catalog = await this.catalog();
     const entry = catalog.packages.find((candidate) => candidate.manifest.id === packageId);
     if (!entry) throw new Error("Package is not present in the official catalog");
+    if (expectedVersion && entry.manifest.version !== expectedVersion) {
+      throw new CapabilityPackageVersionMismatchError(
+        `This Agent update is no longer available; ${entry.manifest.id} now offers version ${entry.manifest.version}`,
+      );
+    }
     return installCatalogPackage(entry);
   },
 
@@ -570,6 +729,11 @@ export const capabilityPackageManager = {
     }
     await writeRegistry(registry.packages.filter((item) => item.id !== packageId));
     await rm(join(VERSIONS, packageId), { recursive: true, force: true });
+    try {
+      await clearDeclinedUpdate(packageId);
+    } catch (error) {
+      logger.warn(error, "Could not clear the deferred update marker for removed capability package %s", packageId);
+    }
     return { ...existing, agentIds };
   },
 };

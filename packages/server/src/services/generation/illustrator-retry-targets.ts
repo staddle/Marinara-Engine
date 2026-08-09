@@ -20,3 +20,10 @@ export function shouldRetryIllustratorTarget(
 ): boolean {
   return targets === undefined || targets.includes(target);
 }
+
+export function isExclusiveIllustratorRetryTarget(
+  targets: IllustratorRetryTarget[] | undefined,
+  target: IllustratorRetryTarget,
+): boolean {
+  return targets?.length === 1 && targets[0] === target;
+}

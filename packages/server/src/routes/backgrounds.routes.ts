@@ -14,6 +14,7 @@ import { buildAssetManifest, GAME_ASSETS_DIR, getAssetManifest } from "../servic
 import {
   moveBackgroundAssignment,
   normalizeBackgroundLibraryOrganization,
+  pruneBackgroundLibraryOrganization,
   removeBackgroundFolder,
   type BackgroundLibraryOrganization,
 } from "../services/background-library-organization.js";
@@ -27,6 +28,7 @@ import { buildBackgroundProviderPrompt, generateChatBackground } from "../servic
 import { resolveConnectionImageDefaults } from "../services/image/image-generation-defaults.js";
 import { loadImageGenerationUserSettings } from "../services/image/image-generation-settings.js";
 import { resolveImagePromptReviewSize } from "../services/image/image-prompt-review.js";
+import { parseThumbnailWidth, resolveThumbPath } from "../services/image/image-thumbnail.js";
 import { resolveImageConnectionFallback } from "../services/generation/media-connection-fallback.js";
 import { resolveGameSetupArtStylePrompt } from "@marinara-engine/shared";
 
@@ -42,7 +44,6 @@ function ensureDir() {
 }
 
 interface BgMeta {
-  originalName?: string;
   tags: string[];
 }
 type MetaMap = Record<string, BgMeta>;
@@ -64,11 +65,11 @@ function writeMeta(meta: MetaMap) {
 
 function readOrganization(): BackgroundLibraryOrganization {
   ensureDir();
-  if (!existsSync(ORGANIZATION_PATH)) return { folders: [], assignments: {} };
+  if (!existsSync(ORGANIZATION_PATH)) return { folders: [], assignments: {}, favorites: [] };
   try {
     return normalizeBackgroundLibraryOrganization(JSON.parse(readFileSync(ORGANIZATION_PATH, "utf-8")));
   } catch {
-    return { folders: [], assignments: {} };
+    return { folders: [], assignments: {}, favorites: [] };
   }
 }
 
@@ -83,6 +84,18 @@ function writeOrganization(organization: BackgroundLibraryOrganization) {
   }
 }
 
+/** Every background id the library can currently show, so organization writes can't reference ghosts. */
+function knownBackgroundIds(): Set<string> {
+  ensureDir();
+  const userIds = readdirSync(BG_DIR)
+    .filter((filename) => ALLOWED_EXTS.has(extname(filename).toLowerCase()))
+    .map((filename) => `user:${filename}`);
+  const gameIds = (getAssetManifest().byCategory.backgrounds ?? [])
+    .filter((entry) => !entry.path.startsWith("__user_bg__/"))
+    .map((entry) => `game:${entry.tag}`);
+  return new Set([...userIds, ...gameIds]);
+}
+
 function fileCreatedAt(filePath: string): string {
   try {
     const stats = statSync(filePath);
@@ -95,7 +108,7 @@ function fileCreatedAt(filePath: string): string {
 
 const ALLOWED_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"]);
 const BACKGROUND_UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
-const SCENE_BACKGROUND_MODES = new Set(["roleplay", "visual_novel", "game"]);
+const SCENE_BACKGROUND_MODES = new Set(["roleplay", "game"]);
 
 const generateSceneBackgroundSchema = z.object({
   chatId: z.string().min(1),
@@ -123,6 +136,11 @@ const backgroundFolderNameSchema = z.object({
 const backgroundAssignmentSchema = z.object({
   backgroundId: z.string().trim().min(1).max(500),
   folderId: z.string().trim().min(1).max(100).nullable(),
+});
+
+const backgroundFavoriteSchema = z.object({
+  backgroundId: z.string().trim().min(1).max(500),
+  favorite: z.boolean(),
 });
 
 /** Sanitise a filename: keep alphanumeric, spaces, hyphens, underscores, dots. */
@@ -184,6 +202,8 @@ async function resolveSceneBackgroundImageConnection(
 
   if (mode === "game") {
     pushCandidate(readTrimmedString(metadata.gameImageConnectionId));
+  } else {
+    pushCandidate(readTrimmedString(metadata.illustratorImageConnectionId));
   }
   pushCandidate(await readIllustratorImageConnectionId(agents));
 
@@ -210,6 +230,7 @@ export async function backgroundsRoutes(app: FastifyInstance) {
     ensureDir();
     const meta = readMeta();
     const organization = readOrganization();
+    const favorites = new Set(organization.favorites);
     const files = readdirSync(BG_DIR).filter((f) => {
       const ext = extname(f).toLowerCase();
       return ALLOWED_EXTS.has(ext);
@@ -220,7 +241,6 @@ export async function backgroundsRoutes(app: FastifyInstance) {
         id,
         filename,
         url: `/api/backgrounds/file/${encodeURIComponent(filename)}`,
-        originalName: meta[filename]?.originalName ?? null,
         tags: meta[filename]?.tags ?? [],
         source: "user" as const,
         editable: true,
@@ -228,6 +248,7 @@ export async function backgroundsRoutes(app: FastifyInstance) {
         renameable: true,
         createdAt: fileCreatedAt(join(BG_DIR, filename)),
         folderId: organization.assignments[id] ?? null,
+        favorite: favorites.has(id),
       };
     });
 
@@ -239,7 +260,6 @@ export async function backgroundsRoutes(app: FastifyInstance) {
           id,
           filename: `${entry.name}${entry.ext}`,
           url: `/api/game-assets/file/${encodeAssetPath(entry.path)}`,
-          originalName: entry.tag,
           tags: entry.subcategory ? [entry.subcategory] : [],
           source: "game_asset" as const,
           tag: entry.tag,
@@ -248,6 +268,7 @@ export async function backgroundsRoutes(app: FastifyInstance) {
           renameable: false,
           createdAt: fileCreatedAt(join(GAME_ASSETS_DIR, entry.path)),
           folderId: organization.assignments[id] ?? null,
+          favorite: favorites.has(id),
         };
       });
 
@@ -271,7 +292,8 @@ export async function backgroundsRoutes(app: FastifyInstance) {
 
   app.post("/folders", async (req, reply) => {
     const parsed = backgroundFolderNameSchema.safeParse(req.body);
-    if (!parsed.success) return reply.status(400).send({ error: "Folder name is required and must be 80 characters or fewer" });
+    if (!parsed.success)
+      return reply.status(400).send({ error: "Folder name is required and must be 80 characters or fewer" });
     const organization = readOrganization();
     const now = new Date().toISOString();
     const folder = { id: randomUUID(), name: parsed.data.name, createdAt: now, updatedAt: now };
@@ -283,7 +305,8 @@ export async function backgroundsRoutes(app: FastifyInstance) {
   app.patch("/folders/:id", async (req, reply) => {
     const { id } = req.params as { id: string };
     const parsed = backgroundFolderNameSchema.safeParse(req.body);
-    if (!parsed.success) return reply.status(400).send({ error: "Folder name is required and must be 80 characters or fewer" });
+    if (!parsed.success)
+      return reply.status(400).send({ error: "Folder name is required and must be 80 characters or fewer" });
     const organization = readOrganization();
     const folder = organization.folders.find((candidate) => candidate.id === id);
     if (!folder) return reply.status(404).send({ error: "Folder not found" });
@@ -311,20 +334,32 @@ export async function backgroundsRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "Folder not found" });
     }
 
-    const userBackgroundIds = readdirSync(BG_DIR)
-      .filter((filename) => ALLOWED_EXTS.has(extname(filename).toLowerCase()))
-      .map((filename) => `user:${filename}`);
-    const gameBackgroundIds = (getAssetManifest().byCategory.backgrounds ?? [])
-      .filter((entry) => !entry.path.startsWith("__user_bg__/"))
-      .map((entry) => `game:${entry.tag}`);
-    if (!new Set([...userBackgroundIds, ...gameBackgroundIds]).has(parsed.data.backgroundId)) {
+    const knownIds = knownBackgroundIds();
+    if (!knownIds.has(parsed.data.backgroundId)) {
       return reply.status(404).send({ error: "Background not found" });
     }
 
     if (parsed.data.folderId) organization.assignments[parsed.data.backgroundId] = parsed.data.folderId;
     else delete organization.assignments[parsed.data.backgroundId];
-    writeOrganization(organization);
+    writeOrganization(pruneBackgroundLibraryOrganization(organization, knownIds));
     return { success: true, folderId: parsed.data.folderId };
+  });
+
+  app.patch("/favorite", async (req, reply) => {
+    const parsed = backgroundFavoriteSchema.safeParse(req.body);
+    if (!parsed.success)
+      return reply.status(400).send({ error: "A valid backgroundId and favorite flag are required" });
+    const knownIds = knownBackgroundIds();
+    if (!knownIds.has(parsed.data.backgroundId)) {
+      return reply.status(404).send({ error: "Background not found" });
+    }
+
+    const organization = readOrganization();
+    const favorites = new Set(organization.favorites);
+    if (parsed.data.favorite) favorites.add(parsed.data.backgroundId);
+    else favorites.delete(parsed.data.backgroundId);
+    writeOrganization(pruneBackgroundLibraryOrganization({ ...organization, favorites: [...favorites] }, knownIds));
+    return { success: true, favorite: parsed.data.favorite };
   });
 
   // Upload a new background (preserves original filename)
@@ -360,7 +395,7 @@ export async function backgroundsRoutes(app: FastifyInstance) {
 
     // Store metadata
     const meta = readMeta();
-    meta[safeName] = { originalName: data.filename, tags: [] };
+    meta[safeName] = { tags: [] };
     writeMeta(meta);
 
     // Rebuild game asset manifest so scene analysis picks up new backgrounds
@@ -369,13 +404,15 @@ export async function backgroundsRoutes(app: FastifyInstance) {
     return {
       success: true,
       filename: safeName,
-      originalName: data.filename,
       url: `/api/backgrounds/file/${encodeURIComponent(safeName)}`,
       tags: [],
     };
   });
 
-  async function resolveSceneBackgroundRequest(input: z.infer<typeof generateSceneBackgroundSchema>, reply: FastifyReply) {
+  async function resolveSceneBackgroundRequest(
+    input: z.infer<typeof generateSceneBackgroundSchema>,
+    reply: FastifyReply,
+  ) {
     const debugOverrideEnabled = input.debugMode === true || isDebugAgentsEnabled();
     const debugLog = (message: string, ...args: any[]) => {
       logDebugOverride(debugOverrideEnabled, message, ...args);
@@ -387,7 +424,9 @@ export async function backgroundsRoutes(app: FastifyInstance) {
     const mode = String(chat.mode ?? "");
     if (!SCENE_BACKGROUND_MODES.has(mode)) {
       return {
-        response: reply.status(400).send({ error: "Scene background generation is available in Roleplay and Game modes." }),
+        response: reply
+          .status(400)
+          .send({ error: "Scene background generation is available in Roleplay and Game modes." }),
       };
     }
 
@@ -398,7 +437,8 @@ export async function backgroundsRoutes(app: FastifyInstance) {
     if (!imgConn) {
       return {
         response: reply.status(400).send({
-          error: "Choose an image generation connection for the Illustrator agent, or mark one as the default image connection.",
+          error:
+            "Choose an image generation connection for the Illustrator agent, or mark one as the default image connection.",
         }),
       };
     }
@@ -415,7 +455,9 @@ export async function backgroundsRoutes(app: FastifyInstance) {
     const styleProfileId =
       readTrimmedString(setupConfig.imageStyleProfileId) ?? readTrimmedString(metadata.imageStyleProfileId);
     const locationSlug = input.locationSlug?.trim() || input.reason?.trim() || chat.name || "current-scene";
-    const promptOverride = (input.promptOverrides ?? []).find((item) => item.id === sceneBackgroundPromptReviewId(input));
+    const promptOverride = (input.promptOverrides ?? []).find(
+      (item) => item.id === sceneBackgroundPromptReviewId(input),
+    );
 
     return {
       context: {
@@ -509,7 +551,7 @@ export async function backgroundsRoutes(app: FastifyInstance) {
       worldOverview: readTrimmedString(context.metadata.gameWorldOverview),
       artStyle: resolveGameSetupArtStylePrompt(context.setupConfig) || undefined,
       reason: input.reason?.trim() || "Manual Gallery background request",
-      sourceMode: context.mode === "game" ? "game" : context.mode === "visual_novel" ? "visual_novel" : "roleplay",
+      sourceMode: context.mode === "game" ? "game" : "roleplay",
       imgModel: context.imgConn.model || "",
       imgBaseUrl: context.imgConn.baseUrl || "https://image.pollinations.ai",
       imgApiKey: context.imgConn.apiKey || "",
@@ -623,11 +665,7 @@ export async function backgroundsRoutes(app: FastifyInstance) {
     }
     writeMeta(meta);
 
-    const organization = moveBackgroundAssignment(
-      readOrganization(),
-      `user:${filename}`,
-      `user:${newFilename}`,
-    );
+    const organization = moveBackgroundAssignment(readOrganization(), `user:${filename}`, `user:${newFilename}`);
     writeOrganization(organization);
 
     // Rebuild game asset manifest
@@ -645,6 +683,7 @@ export async function backgroundsRoutes(app: FastifyInstance) {
   app.get("/file/:filename", async (req, reply) => {
     ensureDir();
     const { filename } = req.params as { filename: string };
+    const requestedWidth = parseThumbnailWidth((req.query as { w?: string }).w);
 
     // Prevent path traversal
     if (filename.includes("..") || filename.includes("/")) {
@@ -666,10 +705,13 @@ export async function backgroundsRoutes(app: FastifyInstance) {
       ".avif": "image/avif",
     };
 
+    // Downscaled variant when asked for one; falls back to the original on any miss.
+    const thumbPath = requestedWidth ? await resolveThumbPath(filePath, requestedWidth) : null;
+
     const { createReadStream } = await import("fs");
-    const stream = createReadStream(filePath);
+    const stream = createReadStream(thumbPath ?? filePath);
     return reply
-      .header("Content-Type", mimeMap[ext] ?? "application/octet-stream")
+      .header("Content-Type", thumbPath ? "image/webp" : (mimeMap[ext] ?? "application/octet-stream"))
       .header("Cache-Control", "public, max-age=31536000, immutable")
       .send(stream);
   });

@@ -19,6 +19,7 @@ export function isClaudeAdaptiveOnlyNoSamplingModel(model: string): boolean {
   const normalized = model.toLowerCase();
   return (
     CLAUDE_ADAPTIVE_ONLY_OPUS_RE.test(normalized) ||
+    /claude-(?:opus|sonnet)-5(?:$|[-.])/u.test(normalized) ||
     normalized.includes("claude-fable-5") ||
     normalized.includes("claude-mythos-5")
   );
@@ -47,7 +48,7 @@ export function resolveOpenAIGpt56ModelForRequest(model: string): string {
   return isOpenAIGpt56SolProAlias(model) ? "gpt-5.6-sol" : model;
 }
 
-export type StoredReasoningEffort = "low" | "medium" | "high" | "xhigh" | "maximum" | "max" | null;
+export type StoredReasoningEffort = "none" | "low" | "medium" | "high" | "xhigh" | "maximum" | "max" | null;
 export type ProviderReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max" | null;
 
 export function resolveProviderReasoningEffort(args: {
@@ -55,7 +56,7 @@ export function resolveProviderReasoningEffort(args: {
   model: string;
   reasoningEffort: StoredReasoningEffort | undefined;
 }): ProviderReasoningEffort {
-  if (!args.reasoningEffort) return null;
+  if (!args.reasoningEffort || args.reasoningEffort === "none") return null;
   const modelLower = args.model.toLowerCase();
   const providerLower = args.provider.toLowerCase();
 
@@ -201,6 +202,8 @@ export const OPENAI_MODELS: KnownModel[] = [
 // ── Anthropic / Claude (from #model_claude_select) ──
 
 export const ANTHROPIC_MODELS: KnownModel[] = [
+  { id: "claude-opus-5", name: "claude-opus-5", context: 1000000, maxOutput: 128000 },
+  { id: "claude-sonnet-5", name: "claude-sonnet-5", context: 1000000, maxOutput: 128000 },
   { id: "claude-fable-5", name: "claude-fable-5", context: 1000000, maxOutput: 128000 },
   { id: "claude-mythos-5", name: "claude-mythos-5 (limited access)", context: 1000000, maxOutput: 128000 },
   { id: "claude-opus-4-8", name: "claude-opus-4-8", context: 1000000, maxOutput: 128000 },
@@ -237,6 +240,8 @@ export const ANTHROPIC_MODELS: KnownModel[] = [
 // to the current tool-eligible families to avoid offering retired aliases that
 // the subscription path no longer accepts.
 export const CLAUDE_SUBSCRIPTION_MODELS: KnownModel[] = [
+  { id: "claude-opus-5", name: "Claude Opus 5", context: 1000000, maxOutput: 128000 },
+  { id: "claude-sonnet-5", name: "Claude Sonnet 5", context: 1000000, maxOutput: 128000 },
   { id: "claude-fable-5", name: "Claude Fable 5", context: 1000000, maxOutput: 128000 },
   { id: "claude-opus-4-8", name: "Claude Opus 4.8", context: 1000000, maxOutput: 128000 },
   { id: "claude-opus-4-7", name: "Claude Opus 4.7", context: 1000000, maxOutput: 128000 },
@@ -270,6 +275,8 @@ export const OPENAI_CHATGPT_MODELS: KnownModel[] = [
 // ── Google AI Studio (from #model_google_select) ──
 
 export const GOOGLE_MODELS: KnownModel[] = [
+  // Gemini 3.6
+  { id: "gemini-3.6-flash", name: "gemini-3.6-flash", context: 1000000, maxOutput: 65536 },
   // Gemini 3.5
   { id: "gemini-3.5-flash", name: "gemini-3.5-flash", context: 1000000, maxOutput: 65536 },
   // Gemini 3.1
@@ -377,6 +384,10 @@ export const GOOGLE_MODELS: KnownModel[] = [
   { id: "gemini-2.0-flash-lite-preview", name: "gemini-2.0-flash-lite-preview", context: 1000000, maxOutput: 8192 },
   { id: "gemini-2.0-flash-lite", name: "gemini-2.0-flash-lite", context: 1000000, maxOutput: 8192 },
   // Gemma
+  { id: "gemma-4-31b-it", name: "gemma-4-31b-it", context: 256000, maxOutput: 8192 },
+  { id: "gemma-4-26b-a4b-it", name: "gemma-4-26b-a4b-it", context: 256000, maxOutput: 8192 },
+  { id: "gemma-4-12b-it", name: "gemma-4-12b-it", context: 256000, maxOutput: 8192 },
+  { id: "gemma-4-4b-it", name: "gemma-4-4b-it", context: 131072, maxOutput: 8192 },
   { id: "gemma-3n-e4b-it", name: "gemma-3n-e4b-it", context: 32768, maxOutput: 8192 },
   { id: "gemma-3n-e2b-it", name: "gemma-3n-e2b-it", context: 32768, maxOutput: 8192 },
   { id: "gemma-3-27b-it", name: "gemma-3-27b-it", context: 32768, maxOutput: 8192 },
@@ -599,6 +610,13 @@ export const VIDEO_GENERATION_SOURCES: VideoGenSource[] = [
     requiresApiKey: true,
   },
   {
+    id: "atlas",
+    name: "Atlas Cloud",
+    description: "Atlas Cloud image and video models through its asynchronous media API.",
+    defaultBaseUrl: "https://api.atlascloud.ai/api/v1",
+    requiresApiKey: true,
+  },
+  {
     id: "seedance",
     name: "Seedance 2.0",
     description: "Seedance 2.0 video generation with text, first-frame, and first/last-frame modes.",
@@ -665,6 +683,20 @@ export const IMAGE_GENERATION_SOURCES: ImageGenSource[] = [
     requiresApiKey: true,
   },
   {
+    id: "zai",
+    name: "Z.AI",
+    description: "GLM-Image and CogView image generation through Z.AI's native API.",
+    defaultBaseUrl: "https://api.z.ai/api/paas/v4",
+    requiresApiKey: true,
+  },
+  {
+    id: "atlas",
+    name: "Atlas Cloud",
+    description: "Image generation across Atlas Cloud's model catalog.",
+    defaultBaseUrl: "https://api.atlascloud.ai/api/v1",
+    requiresApiKey: true,
+  },
+  {
     id: "pollinations",
     name: "Pollinations",
     description: "Free, no-key-needed image generation via Pollinations AI.",
@@ -723,6 +755,39 @@ export const IMAGE_GENERATION_SOURCES: ImageGenSource[] = [
 ];
 
 // Known image generation models (grouped by service)
+export const ATLAS_CLOUD_IMAGE_MODELS: KnownModel[] = [
+  { id: "google/nano-banana/text-to-image", name: "Nano Banana (Atlas Cloud)", context: 0, maxOutput: 0 },
+  {
+    id: "google/gemini-2.5-flash-image/text-to-image",
+    name: "Gemini 2.5 Flash Image (Atlas Cloud)",
+    context: 0,
+    maxOutput: 0,
+  },
+  { id: "black-forest-labs/flux-1.1-pro", name: "FLUX 1.1 Pro (Atlas Cloud)", context: 0, maxOutput: 0 },
+];
+
+export const ZAI_IMAGE_MODELS: KnownModel[] = [
+  { id: "glm-image", name: "GLM-Image", context: 0, maxOutput: 0 },
+  { id: "cogview-4-250304", name: "CogView 4", context: 0, maxOutput: 0 },
+];
+
+export const ATLAS_CLOUD_VIDEO_MODELS: KnownModel[] = [
+  { id: "google/veo3.1/text-to-video", name: "Veo 3.1 Text to Video (Atlas Cloud)", context: 0, maxOutput: 0 },
+  { id: "google/veo3.1/image-to-video", name: "Veo 3.1 Image to Video (Atlas Cloud)", context: 0, maxOutput: 0 },
+  {
+    id: "bytedance/seedance-2.0-fast/text-to-video",
+    name: "Seedance 2.0 Fast Text to Video (Atlas Cloud)",
+    context: 0,
+    maxOutput: 0,
+  },
+  {
+    id: "bytedance/seedance-2.0-fast/image-to-video",
+    name: "Seedance 2.0 Fast Image to Video (Atlas Cloud)",
+    context: 0,
+    maxOutput: 0,
+  },
+];
+
 const IMAGE_GEN_MODELS: KnownModel[] = [
   // OpenAI
   { id: "gpt-image-2", name: "GPT Image 2", context: 0, maxOutput: 0 },
@@ -763,6 +828,12 @@ const IMAGE_GEN_MODELS: KnownModel[] = [
     context: 0,
     maxOutput: 0,
   },
+  {
+    id: "bytedance-seed/seedream-4.5",
+    name: "Seedream 4.5 (OpenRouter)",
+    context: 0,
+    maxOutput: 0,
+  },
   // xAI / Grok Imagine
   { id: "grok-4.1-fast-image", name: "Grok 4.1 Fast Image", context: 0, maxOutput: 0 },
   { id: "grok-imagine-image", name: "Grok Imagine Image", context: 0, maxOutput: 0 },
@@ -771,6 +842,8 @@ const IMAGE_GEN_MODELS: KnownModel[] = [
   { id: "chroma", name: "Chroma (Venice)", context: 0, maxOutput: 0 },
   { id: "flux-2-pro", name: "FLUX 2 Pro (Venice)", context: 0, maxOutput: 0 },
   { id: "venice-sd35", name: "Venice SD3.5", context: 0, maxOutput: 0 },
+  ...ZAI_IMAGE_MODELS,
+  ...ATLAS_CLOUD_IMAGE_MODELS,
   // NovelAI
   { id: "nai-diffusion-4-curated-preview", name: "NAI Diffusion 4 Curated", context: 0, maxOutput: 0 },
   { id: "nai-diffusion-4-5-full", name: "NAI Diffusion 4.5 Full", context: 0, maxOutput: 0 },
@@ -792,12 +865,14 @@ const VIDEO_GEN_MODELS: KnownModel[] = [
   { id: "alibaba/wan-2.7", name: "Alibaba WAN 2.7 (OpenRouter)", context: 0, maxOutput: 0 },
   { id: "seedance-2-0", name: "Seedance 2.0", context: 0, maxOutput: 0 },
   { id: "seedance-2-0-fast", name: "Seedance 2.0 Fast", context: 0, maxOutput: 0 },
+  ...ATLAS_CLOUD_VIDEO_MODELS,
 ];
 
 export function inferVideoSource(model: string, baseUrl: string): string {
   const m = model.toLowerCase();
   const u = baseUrl.toLowerCase();
   if (m === "comfyui" || u.includes(":8188") || u.includes("comfyui")) return "comfyui";
+  if (m === "atlas" || u.includes("atlascloud.ai")) return "atlas";
   if (m === "seedance" || m.startsWith("seedance-") || u.includes("seedance2.ai")) return "seedance";
   if (m === "openrouter" || u.includes("openrouter.ai")) return "openrouter";
   if (m.includes("/") && (m.includes("veo") || m.includes("wan"))) return "openrouter";
@@ -825,6 +900,8 @@ export function inferImageSource(model: string, baseUrl: string): string {
     m === "openrouter" ||
     m === "xai" ||
     m === "venice" ||
+    m === "zai" ||
+    m === "atlas" ||
     m === "comfyui" ||
     m === "automatic1111" ||
     m === "runpod_comfyui" ||
@@ -837,6 +914,9 @@ export function inferImageSource(model: string, baseUrl: string): string {
   if (u.includes("openrouter.ai")) return "openrouter";
   if (u.includes("api.x.ai") || u.includes("x.ai")) return "xai";
   if (u.includes("venice.ai")) return "venice";
+  if (u.includes("api.z.ai")) return "zai";
+  if (u.includes("atlascloud.ai")) return "atlas";
+  if (m === "glm-image" || m.startsWith("cogview")) return "zai";
   if (m.startsWith("grok-") && m.includes("image")) return "xai";
   if (m.includes("grok") && m.includes("imagine")) return "xai";
   if (m.startsWith("dall-e") || m.startsWith("gpt-image") || u.includes("openai.com")) return "openai";

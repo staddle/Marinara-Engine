@@ -2,7 +2,18 @@
 // Professor Mari Workspace Agent Contracts
 // ──────────────────────────────────────────────
 
-export type MariWorkspaceToolName = "read" | "grep" | "find" | "ls" | "edit" | "write" | "bash" | "app_data";
+export type MariWorkspaceToolName =
+  | "docs_search"
+  | "docs_read"
+  | "read"
+  | "grep"
+  | "find"
+  | "ls"
+  | "edit"
+  | "write"
+  | "bash"
+  | "dependency"
+  | "app_data";
 
 export type MariChipEntity =
   | "characters"
@@ -303,6 +314,44 @@ export interface MariDbPendingApproval {
   diffTruncated: boolean;
 }
 
+export type MariDependencyTarget = "root" | "client" | "server" | "shared";
+
+export interface MariDependencyInstallApproval {
+  kind: "dependency_install";
+  id: string;
+  sessionId: string;
+  packageName: string;
+  version: string;
+  target: MariDependencyTarget;
+  dependencyType: "dependency" | "devDependency";
+  integrity: string;
+  tarballUrl: string;
+  directDependencies: Array<{ name: string; range: string }>;
+  reason: string | null;
+  requestedAt: string;
+  expiresAt: string;
+}
+
+export interface MariSensitiveFileApproval {
+  kind: "sensitive_file";
+  id: string;
+  sessionId: string;
+  path: string;
+  changeType: "create" | "update";
+  beforeHash: string | null;
+  afterHash: string;
+  preview: string;
+  previewTruncated: boolean;
+  reason: string | null;
+  requestedAt: string;
+  expiresAt: string;
+}
+
+export type MariWorkspacePendingApproval =
+  | MariDbPendingApproval
+  | MariDependencyInstallApproval
+  | MariSensitiveFileApproval;
+
 export interface MariDbHistoryEntry {
   id: string;
   sessionId: string;
@@ -334,12 +383,17 @@ export interface MariWorkspaceStatus {
   workspace: string;
   dataDir: string;
   tools: MariWorkspaceToolName[];
+  shellSandbox: {
+    available: boolean;
+    backend: "macos-seatbelt" | "linux-bubblewrap" | null;
+    reason?: string;
+  };
   dbAccess: "server-managed";
   connection: MariWorkspaceConnectionSummary | null;
   skills: MariWorkspaceSkillSummary[];
   skillDiagnostics: string[];
   active: boolean;
-  pendingApprovals: MariDbPendingApproval[];
+  pendingApprovals: MariWorkspacePendingApproval[];
   history: MariDbHistoryEntry[];
   error?: string | null;
 }
@@ -361,7 +415,7 @@ export type MariWorkspacePromptEvent =
   | { type: "tool_start"; data: { id?: string; name: string; input?: unknown } }
   | { type: "tool_update"; data: { id?: string; name?: string; output?: string } }
   | { type: "tool_end"; data: { id?: string; name?: string; isError?: boolean; output?: string } }
-  | { type: "approval_pending"; data: MariDbPendingApproval }
+  | { type: "approval_pending"; data: MariWorkspacePendingApproval }
   | { type: "metadata"; data: Record<string, unknown> }
   | { type: "suggestions"; data: MariSuggestionChip[] }
   | { type: "plan"; data: MariGuidedPlanStep[] }

@@ -1,16 +1,8 @@
-import {
-  createElement,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-  type CSSProperties,
-} from "react";
+import { createElement, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useTranslation } from "react-i18next";
 import { AlertTriangle, RefreshCw, X } from "lucide-react";
-import {
-  retryCapabilityClientModule,
-  useCapabilityClientModuleState,
-} from "../../hooks/use-capability-packages";
+import type { CapabilityLocalizationContext } from "@marinara-engine/shared";
+import { retryCapabilityClientModule, useCapabilityClientModuleState } from "../../hooks/use-capability-packages";
 import { cn } from "../../lib/utils";
 
 type CapabilityElementNode = HTMLElement & {
@@ -20,9 +12,10 @@ type CapabilityElementNode = HTMLElement & {
 
 interface CapabilityElementProps {
   packageId: string;
-  view: "surface" | "setup" | "settings" | "toolbar" | "detail" | "workspace" | "runtime" | "world-map";
+  view: "surface" | "setup" | "setup-apply" | "settings" | "toolbar" | "detail" | "workspace" | "runtime" | "world-map";
   capabilityProps?: Record<string, unknown>;
   className?: string;
+  onHostError?: (message: string) => void;
 }
 
 function capabilityTag(packageId: string) {
@@ -55,8 +48,9 @@ function CapabilityLoadingState({
   name?: string | null;
   onClose?: () => void;
 }) {
+  const { t } = useTranslation();
   const displayName = capabilityName(packageId, name);
-  const statusCopy = `Loading ${displayName}`;
+  const statusCopy = t("capabilities.loading", { name: displayName });
   if (view === "surface") {
     return (
       <span
@@ -105,7 +99,7 @@ function CapabilityLoadingState({
               onClick={onClose}
               className="inline-flex min-h-11 items-center gap-1.5 rounded-md px-3 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]/60"
             >
-              <X size="0.75rem" /> Close
+              <X size="0.75rem" /> {t("capabilities.actions.close")}
             </button>
           ) : null}
         </div>
@@ -134,7 +128,7 @@ function CapabilityLoadingState({
               onClick={onClose}
               className="inline-flex min-h-11 items-center gap-1.5 rounded-md px-3 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]/60"
             >
-              <X size="0.75rem" /> Back to Agents
+              <X size="0.75rem" /> {t("capabilities.actions.backToAgents")}
             </button>
           ) : null}
         </div>
@@ -174,12 +168,13 @@ function CapabilityFailureState({
   onClose?: () => void;
   name?: string | null;
 }) {
+  const { t } = useTranslation();
   const displayName = capabilityName(packageId, name);
-  const title = kind === "load" ? `${displayName} didn't load` : `${displayName} stopped`;
+  const title = t(kind === "load" ? "capabilities.failure.load.title" : "capabilities.failure.runtime.title", {
+    name: displayName,
+  });
   const description =
-    kind === "load"
-      ? "The downloaded interface could not start. Your chat and saved data are unchanged."
-      : "The downloaded interface hit an error. Your chat and saved data are unchanged.";
+    kind === "load" ? t("capabilities.failure.load.description") : t("capabilities.failure.runtime.description");
   if (view === "toolbar") {
     return (
       <button
@@ -189,7 +184,11 @@ function CapabilityFailureState({
           className === "contents" ? undefined : className,
           "inline-flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--destructive)]/30 bg-[var(--destructive)]/10 text-[var(--destructive)] transition-colors hover:bg-[var(--destructive)]/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]/60",
         )}
-        aria-label={`Try loading ${displayName} again`}
+        aria-label={
+          kind === "load"
+            ? t("capabilities.failure.load.retryLabel", { name: displayName })
+            : t("capabilities.actions.tryAgain")
+        }
         title={title}
         data-capability-client-state="error"
         data-capability-package-id={packageId}
@@ -223,7 +222,7 @@ function CapabilityFailureState({
             onClick={onRetry}
             className="inline-flex min-h-11 items-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-3 text-xs font-medium text-[var(--foreground)] transition-colors hover:bg-[var(--accent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]/60"
           >
-            <RefreshCw size="0.75rem" /> Try again
+            <RefreshCw size="0.75rem" /> {t("capabilities.actions.tryAgain")}
           </button>
           {onClose ? (
             <button
@@ -231,7 +230,7 @@ function CapabilityFailureState({
               onClick={onClose}
               className="inline-flex min-h-11 items-center gap-1.5 rounded-md px-3 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]/60"
             >
-              <X size="0.75rem" /> Close
+              <X size="0.75rem" /> {t("capabilities.actions.close")}
             </button>
           ) : null}
         </div>
@@ -256,7 +255,106 @@ function CapabilityFailureState({
   );
 }
 
-export function CapabilityElement({ packageId, view, capabilityProps, className }: CapabilityElementProps) {
+function CapabilityRefreshState({
+  packageId,
+  view,
+  className,
+  style,
+  onClose,
+  name,
+}: Pick<CapabilityElementProps, "packageId" | "view" | "className"> & {
+  style?: CSSProperties;
+  onClose?: () => void;
+  name?: string | null;
+}) {
+  const { t } = useTranslation();
+  const displayName = capabilityName(packageId, name);
+  const title = t("capabilities.refresh.title", { name: displayName });
+  const refresh = () => window.location.reload();
+  if (view === "toolbar") {
+    return (
+      <button
+        type="button"
+        onClick={refresh}
+        className={cn(
+          className === "contents" ? undefined : className,
+          "inline-flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--primary)]/30 bg-[var(--primary)]/10 text-[var(--primary)] transition-colors hover:bg-[var(--primary)]/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]/60",
+        )}
+        aria-label={t("capabilities.refresh.actionLabel", { name: displayName })}
+        title={title}
+        data-capability-client-state="refresh-required"
+        data-capability-package-id={packageId}
+      >
+        <RefreshCw size="0.875rem" />
+      </button>
+    );
+  }
+  const notice = (
+    <div
+      role="status"
+      style={style}
+      className={cn(
+        className === "contents" ? undefined : className,
+        "flex w-full items-start gap-3 rounded-lg border border-[var(--primary)]/25 bg-[var(--primary)]/10 p-3 text-left",
+      )}
+      data-capability-client-state="refresh-required"
+      data-capability-package-id={packageId}
+    >
+      <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--primary)]/10 text-[var(--primary)]">
+        <RefreshCw size="0.875rem" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="text-xs font-semibold text-[var(--foreground)]">{title}</p>
+        <p className="mt-1 max-w-[65ch] text-[0.6875rem] leading-relaxed text-[var(--muted-foreground)]">
+          {t("capabilities.refresh.description")}
+        </p>
+        <div className="mt-2 flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={refresh}
+            className="inline-flex min-h-11 items-center gap-1.5 rounded-md bg-[var(--primary)] px-3 text-xs font-medium text-[var(--primary-foreground)] transition-opacity hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]/60"
+          >
+            <RefreshCw size="0.75rem" /> {t("capabilities.actions.refreshNow")}
+          </button>
+          {onClose ? (
+            <button
+              type="button"
+              onClick={onClose}
+              className="inline-flex min-h-11 items-center gap-1.5 rounded-md px-3 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]/60"
+            >
+              <X size="0.75rem" /> {t("capabilities.actions.close")}
+            </button>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+  if (view === "detail") {
+    return (
+      <div className={cn(className === "contents" ? undefined : className, "flex min-h-0 flex-1 items-center px-5")}>
+        <div className="mx-auto w-full max-w-3xl">{notice}</div>
+      </div>
+    );
+  }
+  if (view !== "workspace" && view !== "setup") return notice;
+  return (
+    <div
+      data-chat-floating-panel
+      className="fixed inset-0 z-[10020] flex min-h-0 items-center justify-center bg-[var(--background)] px-5"
+    >
+      <div className="w-full max-w-lg">{notice}</div>
+    </div>
+  );
+}
+
+export function CapabilityElement({
+  packageId,
+  view,
+  capabilityProps,
+  className,
+  onHostError,
+}: CapabilityElementProps) {
+  const { i18n: localization } = useTranslation();
   const ref = useRef<CapabilityElementNode | null>(null);
   const clientModule = useCapabilityClientModuleState(packageId);
   const [runtimeError, setRuntimeError] = useState<string | null>(null);
@@ -264,10 +362,27 @@ export function CapabilityElement({ packageId, view, capabilityProps, className 
   const registered = typeof customElements !== "undefined" && Boolean(customElements.get(tag));
   const close = capabilityProps?.onClose;
   const onClose = typeof close === "function" ? (close as () => void) : undefined;
+  const locale = localization.resolvedLanguage ?? localization.language;
+  const direction = localization.dir(locale);
+  const localizedCapabilityProps = useMemo(
+    () => ({
+      ...(capabilityProps ?? {}),
+      localization: {
+        locale,
+        direction,
+      } satisfies CapabilityLocalizationContext,
+    }),
+    [capabilityProps, direction, locale],
+  );
 
   useEffect(() => {
     setRuntimeError(null);
   }, [clientModule.version, packageId]);
+
+  useEffect(() => {
+    const message = runtimeError ?? (clientModule.status === "error" ? clientModule.error : null);
+    if (message) onHostError?.(message);
+  }, [clientModule.error, clientModule.status, onHostError, runtimeError]);
 
   useLayoutEffect(() => {
     if (!ref.current) return;
@@ -278,10 +393,10 @@ export function CapabilityElement({ packageId, view, capabilityProps, className 
     };
     node.addEventListener("marinara-capability-runtime-error", onRuntimeError);
     if (node.capabilityRuntimeError) setRuntimeError(node.capabilityRuntimeError);
-    node.capabilityProps = capabilityProps;
+    node.capabilityProps = localizedCapabilityProps;
     node.dispatchEvent(new CustomEvent("marinara-capability-props"));
     return () => node.removeEventListener("marinara-capability-runtime-error", onRuntimeError);
-  }, [capabilityProps, clientModule.attempt, clientModule.status, runtimeError, tag]);
+  }, [clientModule.attempt, clientModule.status, localizedCapabilityProps, runtimeError, tag]);
 
   if (clientModule.status === "error") {
     return (
@@ -293,6 +408,18 @@ export function CapabilityElement({ packageId, view, capabilityProps, className 
         name={clientModule.name}
         kind="load"
         onRetry={() => retryCapabilityClientModule(packageId)}
+        onClose={onClose}
+      />
+    );
+  }
+  if (clientModule.status === "refresh-required") {
+    return (
+      <CapabilityRefreshState
+        packageId={packageId}
+        view={view}
+        className={className}
+        style={capabilityStyle(capabilityProps)}
+        name={clientModule.name}
         onClose={onClose}
       />
     );
@@ -327,6 +454,8 @@ export function CapabilityElement({ packageId, view, capabilityProps, className 
   return createElement(tag, {
     ref,
     view,
+    lang: locale,
+    dir: direction,
     class: className,
     key: `${packageId}:${clientModule.version ?? "registered"}:${clientModule.attempt}:${runtimeError ?? "ready"}`,
   });

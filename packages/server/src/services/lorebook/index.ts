@@ -33,6 +33,7 @@ export interface LorebookScanResult {
   worldInfoBefore: string;
   worldInfoAfter: string;
   depthEntries: Array<{ content: string; role: "system" | "user" | "assistant"; depth: number; order: number }>;
+  outlets: Record<string, string>;
   totalEntries: number;
   totalTokensEstimate: number;
   activatedEntryIds: string[];
@@ -1127,6 +1128,7 @@ export async function processLorebooks(
       worldInfoBefore: "",
       worldInfoAfter: "",
       depthEntries: [],
+      outlets: {},
       totalEntries: 0,
       totalTokensEstimate: 0,
       activatedEntryIds: [],

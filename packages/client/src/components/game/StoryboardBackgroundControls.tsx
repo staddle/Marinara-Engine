@@ -4,6 +4,7 @@ import {
   getChatToolbarButtonClass,
 } from "../chat/ChatToolbarControls";
 import { cn } from "../../lib/utils";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface StoryboardBackgroundControlsProps {
   mobile?: boolean;
@@ -22,6 +23,7 @@ export function StoryboardBackgroundControls({
   onTogglePlayback,
   onToggleMute,
 }: StoryboardBackgroundControlsProps) {
+  const { t: localizeUi } = useUiTranslation();
   const controlClassName = getChatToolbarButtonClass({ compact: mobile });
 
   return (
@@ -33,14 +35,14 @@ export function StoryboardBackgroundControls({
         mobile ? "" : "rounded-lg bg-black/45 p-1 shadow-sm ring-1 ring-white/10",
       )}
       role="group"
-      aria-label="Storyboard background animation"
+      aria-label={localizeUi("ui.game.storyboardbackgroundcontrols.storyboardBackgroundAnimation")}
     >
       <button
         type="button"
         onClick={onReplay}
         className={controlClassName}
-        title="Replay background animation"
-        aria-label="Replay background animation"
+        title={localizeUi("ui.game.storyboardbackgroundcontrols.replayBackgroundAnimation")}
+        aria-label={localizeUi("ui.game.storyboardbackgroundcontrols.replayBackgroundAnimation")}
       >
         <RotateCcw size={14} />
       </button>
@@ -48,8 +50,8 @@ export function StoryboardBackgroundControls({
         type="button"
         onClick={onTogglePlayback}
         className={controlClassName}
-        title={playing ? "Pause background animation" : "Play background animation"}
-        aria-label={playing ? "Pause background animation" : "Play background animation"}
+        title={playing ?localizeUi("ui.game.storyboardbackgroundcontrols.pauseBackgroundAnimation") :localizeUi("ui.game.storyboardbackgroundcontrols.playBackgroundAnimation")}
+        aria-label={playing ?localizeUi("ui.game.storyboardbackgroundcontrols.pauseBackgroundAnimation") :localizeUi("ui.game.storyboardbackgroundcontrols.playBackgroundAnimation")}
       >
         {playing ? <Pause size={14} /> : <Play size={14} />}
       </button>
@@ -57,8 +59,8 @@ export function StoryboardBackgroundControls({
         type="button"
         onClick={onToggleMute}
         className={controlClassName}
-        title={muted ? "Unmute background animation" : "Mute background animation"}
-        aria-label={muted ? "Unmute background animation" : "Mute background animation"}
+        title={muted ?localizeUi("ui.game.storyboardbackgroundcontrols.unmuteBackgroundAnimation") :localizeUi("ui.game.storyboardbackgroundcontrols.muteBackgroundAnimation")}
+        aria-label={muted ?localizeUi("ui.game.storyboardbackgroundcontrols.unmuteBackgroundAnimation") :localizeUi("ui.game.storyboardbackgroundcontrols.muteBackgroundAnimation")}
       >
         {muted ? <VolumeX size={14} /> : <Volume2 size={14} />}
       </button>

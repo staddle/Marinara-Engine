@@ -11,7 +11,9 @@ import {
   type HudWidgetType,
 } from "@marinara-engine/shared";
 import { cn } from "../../lib/utils";
+import { translate } from "../../localization/i18n";
 import { DraftNumberInput } from "../ui/DraftNumberInput";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 export const MAX_GAME_SETUP_WIDGETS = 4;
 const GAME_WIDGET_EXPORT_KIND = "marinara-game-hud-widgets";
@@ -298,10 +300,6 @@ function getImportedWidgetSource(value: unknown): unknown {
   return [];
 }
 
-function formatWidgetCount(count: number) {
-  return count === 1 ? "1 widget" : `${count} widgets`;
-}
-
 function buildWidgetExportFilename(filename?: string) {
   const stem =
     filename
@@ -329,7 +327,11 @@ function exportGameHudWidgets(widgets: readonly HudWidget[], filename?: string) 
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
-  toast.success(`Exported ${formatWidgetCount(normalizedWidgets.length)}.`);
+  toast.success(
+    translate("ui.game.gamewidgetsetupeditor.exportedWidgets", {
+      count: normalizedWidgets.length,
+    }),
+  );
 }
 
 async function importGameHudWidgetsFromFile(file: File) {
@@ -359,6 +361,7 @@ export function GameWidgetFileControls({
   exportFilename,
   importSuccessMessage,
 }: GameWidgetFileControlsProps) {
+  const { t: localizeUi } = useUiTranslation();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const normalizedWidgets = useMemo(() => normalizeGameHudWidgets(widgets, { mode: "draft" }), [widgets]);
   const canExport = normalizedWidgets.length > 0 && !disabled;
@@ -369,10 +372,13 @@ export function GameWidgetFileControls({
       const importedWidgets = await importGameHudWidgetsFromFile(file);
       onImport(importedWidgets);
       toast.success(
-        importSuccessMessage?.(importedWidgets.length) ?? `Imported ${formatWidgetCount(importedWidgets.length)}.`,
+        importSuccessMessage?.(importedWidgets.length) ??
+          localizeUi("ui.game.gamewidgetsetupeditor.importedWidgets", {
+            count: importedWidgets.length,
+          }),
       );
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to import game widgets.");
+      toast.error(error instanceof Error ? error.message :localizeUi("ui.game.gamewidgetfilecontrols.failedToImportGameWidgets"));
     } finally {
       if (inputRef.current) inputRef.current.value = "";
     }
@@ -394,7 +400,7 @@ export function GameWidgetFileControls({
         className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-50"
       >
         <Download size="0.75rem" />
-        <span>Import Widgets</span>
+        <span>{localizeUi("ui.game.gamewidgetfilecontrols.importWidgets")}</span>
       </button>
       <button
         type="button"
@@ -403,7 +409,7 @@ export function GameWidgetFileControls({
         className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-50"
       >
         <Upload size="0.75rem" />
-        <span>Export Widgets</span>
+        <span>{localizeUi("ui.game.gamewidgetfilecontrols.exportWidgets")}</span>
       </button>
     </div>
   );
@@ -417,6 +423,7 @@ interface GameWidgetSetupEditorProps {
 }
 
 export function GameWidgetSetupEditor({ widgets, onChange, disabled, className }: GameWidgetSetupEditorProps) {
+  const { t: localizeUi } = useUiTranslation();
   const [newWidgetType, setNewWidgetType] = useState<HudWidgetType>("progress_bar");
   const normalizedWidgets = useMemo(() => normalizeGameHudWidgets(widgets), [widgets]);
   const canAddWidget = normalizedWidgets.length < MAX_GAME_SETUP_WIDGETS;
@@ -455,8 +462,7 @@ export function GameWidgetSetupEditor({ widgets, onChange, disabled, className }
     <div className={cn("space-y-3", className)}>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
-          {normalizedWidgets.length}/{MAX_GAME_SETUP_WIDGETS} widgets
-        </span>
+          {normalizedWidgets.length}/{MAX_GAME_SETUP_WIDGETS} {localizeUi("ui.game.gamewidgetsetupeditor.widgets")}</span>
         <div className="flex min-w-0 items-center gap-2">
           <select
             value={newWidgetType}
@@ -477,22 +483,20 @@ export function GameWidgetSetupEditor({ widgets, onChange, disabled, className }
             className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-1.5 text-xs font-medium text-[var(--primary-foreground)] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Plus size="0.75rem" />
-            <span>Add</span>
+            <span>{localizeUi("ui.characters.metadatatab.add")}</span>
           </button>
         </div>
       </div>
 
       {normalizedWidgets.length === 0 ? (
-        <div className="rounded-lg border border-dashed border-[var(--border)] px-3 py-3 text-center text-[0.6875rem] text-[var(--muted-foreground)]">
-          No widgets selected.
-        </div>
+        <div className="rounded-lg border border-dashed border-[var(--border)] px-3 py-3 text-center text-[0.6875rem] text-[var(--muted-foreground)]">{localizeUi("ui.game.gamewidgetsetupeditor.noWidgetsSelected")}</div>
       ) : (
         <div className="space-y-2">
           {normalizedWidgets.map((widget) => (
             <div key={widget.id} className="rounded-lg bg-[var(--background)]/75 p-3 ring-1 ring-[var(--border)]">
               <div className="grid gap-2 sm:grid-cols-[3.25rem_minmax(0,1fr)_9rem_auto] sm:items-end">
                 <label className="space-y-1">
-                  <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Icon</span>
+                  <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.game.gamewidgetsetupeditor.icon")}</span>
                   <input
                     value={widget.icon ?? ""}
                     maxLength={8}
@@ -502,7 +506,7 @@ export function GameWidgetSetupEditor({ widgets, onChange, disabled, className }
                   />
                 </label>
                 <label className="space-y-1">
-                  <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Label</span>
+                  <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.game.gamewidgetsetupeditor.label")}</span>
                   <input
                     value={widget.label}
                     disabled={disabled}
@@ -511,7 +515,7 @@ export function GameWidgetSetupEditor({ widgets, onChange, disabled, className }
                   />
                 </label>
                 <label className="space-y-1">
-                  <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Type</span>
+                  <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.panels.gameassetssettings.type")}</span>
                   <select
                     value={widget.type}
                     disabled={disabled}
@@ -530,7 +534,7 @@ export function GameWidgetSetupEditor({ widgets, onChange, disabled, className }
                   onClick={() => onChange(normalizedWidgets.filter((entry) => entry.id !== widget.id))}
                   disabled={disabled}
                   className="inline-flex h-9 items-center justify-center rounded-lg border border-[var(--destructive)]/25 px-3 text-[var(--destructive)] transition-colors hover:bg-[var(--destructive)]/10 disabled:opacity-50"
-                  aria-label={`Remove ${widget.label.trim() || formatWidgetTypeLabel(widget.type)}`}
+                  aria-label={localizeUi("ui.game.gamewidgetsetupeditor.removeValue1", { value1: widget.label.trim() || formatWidgetTypeLabel(widget.type) })}
                 >
                   <Trash2 size="0.875rem" />
                 </button>
@@ -538,7 +542,7 @@ export function GameWidgetSetupEditor({ widgets, onChange, disabled, className }
 
               <div className="mt-2 grid gap-2 sm:grid-cols-2">
                 <label className="space-y-1">
-                  <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Side</span>
+                  <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.game.gamewidgetsetupeditor.side")}</span>
                   <select
                     value={widget.position}
                     disabled={disabled}
@@ -549,12 +553,12 @@ export function GameWidgetSetupEditor({ widgets, onChange, disabled, className }
                     }
                     className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-2 text-xs text-[var(--foreground)]"
                   >
-                    <option value="hud_left">Left HUD</option>
-                    <option value="hud_right">Right HUD</option>
+                    <option value="hud_left">{localizeUi("ui.game.gamewidgetsetupeditor.leftHud")}</option>
+                    <option value="hud_right">{localizeUi("ui.game.gamewidgetsetupeditor.rightHud")}</option>
                   </select>
                 </label>
                 <label className="space-y-1">
-                  <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Accent</span>
+                  <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.game.gamewidgetsetupeditor.accent")}</span>
                   <input
                     type="color"
                     value={/^#[0-9a-f]{6}$/i.test(widget.accent ?? "") ? widget.accent : DEFAULT_ACCENTS[widget.type]}
@@ -587,13 +591,14 @@ function WidgetConfigFields({
   disabled?: boolean;
   onConfigChange: (patch: Partial<HudWidgetConfig>) => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   if (widget.type === "progress_bar" || widget.type === "gauge" || widget.type === "relationship_meter") {
     const value = parseNumber(widget.config.value ?? widget.config.startingValue, 0, 0);
     const max = parseNumber(widget.config.max, 100, 1);
     return (
       <div className="mt-2 grid gap-2 sm:grid-cols-2">
         <label className="space-y-1">
-          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Value</span>
+          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.game.widgeteditormodal.value")}</span>
           <DraftNumberInput
             min={0}
             value={value}
@@ -606,7 +611,7 @@ function WidgetConfigFields({
           />
         </label>
         <label className="space-y-1">
-          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Max</span>
+          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.agents.regexscripteditor.max")}</span>
           <DraftNumberInput
             min={1}
             value={max}
@@ -623,7 +628,7 @@ function WidgetConfigFields({
   if (widget.type === "counter") {
     return (
       <label className="mt-2 block space-y-1">
-        <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Count</span>
+        <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.game.widgeteditormodal.count")}</span>
         <DraftNumberInput
           value={parseNumber(widget.config.count, 0)}
           disabled={disabled}
@@ -650,7 +655,7 @@ function WidgetConfigFields({
                 );
                 onConfigChange({ stats: next });
               }}
-              placeholder="Stat"
+              placeholder={localizeUi("ui.game.widgeteditormodal.stat")}
               className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-2 text-xs text-[var(--foreground)]"
             />
             <input
@@ -662,7 +667,7 @@ function WidgetConfigFields({
                 );
                 onConfigChange({ stats: next });
               }}
-              placeholder="Value"
+              placeholder={localizeUi("ui.game.widgeteditormodal.value")}
               className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-2 text-xs text-[var(--foreground)]"
             />
             <button
@@ -670,7 +675,7 @@ function WidgetConfigFields({
               onClick={() => onConfigChange({ stats: stats.filter((_, entryIndex) => entryIndex !== index) })}
               disabled={disabled}
               className="inline-flex h-9 items-center justify-center rounded-lg border border-[var(--destructive)]/25 px-3 text-[var(--destructive)] transition-colors hover:bg-[var(--destructive)]/10 disabled:opacity-50"
-              aria-label="Remove stat"
+              aria-label={localizeUi("ui.game.widgetconfigfields.removeStat")}
             >
               <Trash2 size="0.75rem" />
             </button>
@@ -683,7 +688,7 @@ function WidgetConfigFields({
           className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs text-[var(--foreground)] transition-colors hover:bg-[var(--accent)] disabled:opacity-50"
         >
           <Plus size="0.75rem" />
-          <span>Add Stat</span>
+          <span>{localizeUi("ui.game.widgeteditormodal.addStat")}</span>
         </button>
       </div>
     );
@@ -701,7 +706,7 @@ function WidgetConfigFields({
     return (
       <div className="mt-2 grid gap-2 sm:grid-cols-[7rem_minmax(0,1fr)]">
         <label className="space-y-1">
-          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Slots</span>
+          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.game.widgetconfigfields.slots")}</span>
           <DraftNumberInput
             min={1}
             value={parseNumber(widget.config.slots, 8, 1)}
@@ -712,7 +717,7 @@ function WidgetConfigFields({
           />
         </label>
         <label className="space-y-1">
-          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Contents</span>
+          <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.game.widgetconfigfields.contents")}</span>
           <textarea
             value={contents.map((item) => item.name).join("\n")}
             disabled={disabled}
@@ -732,7 +737,7 @@ function WidgetConfigFields({
   return (
     <div className="mt-2 grid gap-2 sm:grid-cols-2">
       <label className="space-y-1">
-        <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Seconds</span>
+        <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.game.widgetconfigfields.seconds")}</span>
         <DraftNumberInput
           min={0}
           value={parseNumber(widget.config.seconds, 60, 0)}
@@ -749,9 +754,7 @@ function WidgetConfigFields({
           disabled={disabled}
           onChange={(event) => onConfigChange({ running: event.target.checked })}
           className="h-4 w-4 rounded border-[var(--border)]"
-        />
-        Running
-      </label>
+        />{localizeUi("ui.game.widgetconfigfields.running")}</label>
     </div>
   );
 }
@@ -765,6 +768,7 @@ function ListItemsField({
   disabled?: boolean;
   onConfigChange: (patch: Partial<HudWidgetConfig>) => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const externalValue = items.join("\n");
   const [draft, setDraft] = useState(externalValue);
 
@@ -774,7 +778,7 @@ function ListItemsField({
 
   return (
     <label className="mt-2 block space-y-1">
-      <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Items</span>
+      <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.game.widgeteditormodal.items")}</span>
       <textarea
         value={draft}
         disabled={disabled}

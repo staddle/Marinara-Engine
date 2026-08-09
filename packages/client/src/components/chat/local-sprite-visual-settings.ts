@@ -1,4 +1,4 @@
-import type { SpriteSide } from "@marinara-engine/shared";
+import type { SpriteCharacterVisualSettings, SpriteSide } from "@marinara-engine/shared";
 import { normalizeSpritePlacements, type SpritePlacementMap } from "./sprite-placement";
 import {
   SPRITE_DISPLAY_OPACITY_MAX,
@@ -18,6 +18,7 @@ export type LocalSpriteVisualSettings = {
   expressionSpriteOpacity?: number;
   fullBodySpriteOpacity?: number;
   expressionAvatarsEnabled?: boolean;
+  characterOverrides?: Record<string, SpriteCharacterVisualSettings>;
 };
 
 function canUseLocalStorage(): boolean {
@@ -28,6 +29,63 @@ function clampFiniteNumber(value: unknown, min: number, max: number): number | u
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return undefined;
   return Math.max(min, Math.min(max, numeric));
+}
+
+function normalizeSpriteCharacterVisualSettings(raw: unknown): SpriteCharacterVisualSettings {
+  if (!raw || typeof raw !== "object") return {};
+
+  const record = raw as Record<string, unknown>;
+  const next: SpriteCharacterVisualSettings = {};
+
+  if (record.spritePosition === "left" || record.spritePosition === "right") {
+    next.spritePosition = record.spritePosition;
+  }
+
+  const expressionSpriteScale = clampFiniteNumber(
+    record.expressionSpriteScale,
+    SPRITE_DISPLAY_SCALE_MIN,
+    SPRITE_DISPLAY_SCALE_MAX,
+  );
+  if (expressionSpriteScale !== undefined) next.expressionSpriteScale = expressionSpriteScale;
+
+  const fullBodySpriteScale = clampFiniteNumber(
+    record.fullBodySpriteScale,
+    SPRITE_DISPLAY_SCALE_MIN,
+    SPRITE_DISPLAY_SCALE_MAX,
+  );
+  if (fullBodySpriteScale !== undefined) next.fullBodySpriteScale = fullBodySpriteScale;
+
+  const expressionSpriteOpacity = clampFiniteNumber(
+    record.expressionSpriteOpacity,
+    SPRITE_DISPLAY_OPACITY_MIN,
+    SPRITE_DISPLAY_OPACITY_MAX,
+  );
+  if (expressionSpriteOpacity !== undefined) next.expressionSpriteOpacity = expressionSpriteOpacity;
+
+  const fullBodySpriteOpacity = clampFiniteNumber(
+    record.fullBodySpriteOpacity,
+    SPRITE_DISPLAY_OPACITY_MIN,
+    SPRITE_DISPLAY_OPACITY_MAX,
+  );
+  if (fullBodySpriteOpacity !== undefined) next.fullBodySpriteOpacity = fullBodySpriteOpacity;
+
+  return next;
+}
+
+export function normalizeSpriteCharacterVisualSettingsMap(raw: unknown): Record<string, SpriteCharacterVisualSettings> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+
+  return Object.fromEntries(
+    Object.entries(raw as Record<string, unknown>)
+      .map(([characterId, value]) => {
+        const normalizedId = characterId.trim();
+        if (!normalizedId) return null;
+        const settings = normalizeSpriteCharacterVisualSettings(value);
+        if (Object.keys(settings).length === 0) return null;
+        return [normalizedId, settings] as const;
+      })
+      .filter((entry): entry is readonly [string, SpriteCharacterVisualSettings] => entry !== null),
+  );
 }
 
 function normalizeLocalSpriteVisualSettings(raw: unknown): LocalSpriteVisualSettings {
@@ -74,6 +132,10 @@ function normalizeLocalSpriteVisualSettings(raw: unknown): LocalSpriteVisualSett
 
   if (typeof record.expressionAvatarsEnabled === "boolean") {
     next.expressionAvatarsEnabled = record.expressionAvatarsEnabled;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(record, "characterOverrides")) {
+    next.characterOverrides = normalizeSpriteCharacterVisualSettingsMap(record.characterOverrides);
   }
 
   return next;

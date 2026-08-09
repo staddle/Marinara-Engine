@@ -1,11 +1,14 @@
 import type { ReactNode } from "react";
 import { cn } from "../../lib/utils";
 import { EmojiPicker } from "../ui/EmojiPicker";
+import { KaomojiPicker } from "../ui/KaomojiPicker";
 import { GifPicker } from "../ui/GifPicker";
 import { StickerPicker } from "./StickerPicker";
 import { CustomEmojiTab } from "./CustomEmojiTab";
+import { useTranslation } from "react-i18next";
+import { rememberRecentMedia } from "../../hooks/use-recent-media";
 
-export type ConversationMediaPickerTabId = "emoji" | "gifs" | "stickers" | "tools";
+export type ConversationMediaPickerTabId = "emoji" | "kaomoji" | "gifs" | "stickers" | "tools";
 export type ConversationMediaPickerTab = { id: ConversationMediaPickerTabId; label: string };
 
 interface ConversationMediaPickerPanelProps {
@@ -31,8 +34,16 @@ export function ConversationMediaPickerPanel({
   toolsContent,
   className,
 }: ConversationMediaPickerPanelProps) {
+  const { t } = useTranslation();
   return (
     <div
+      data-conversation-media-picker
+      onPointerDown={(event) => {
+        // This panel lives inside the composer shell. Empty-space and native
+        // scrollbar presses must not bubble to the shell's focus handler,
+        // which focuses the textarea and closes the picker.
+        event.stopPropagation();
+      }}
       className={cn(
         "flex h-[22rem] max-h-[60vh] flex-col overflow-hidden rounded-xl border border-foreground/10 bg-[var(--card)] shadow-xl",
         className,
@@ -51,7 +62,7 @@ export function ConversationMediaPickerPanel({
                 : "text-foreground/45 hover:bg-foreground/10 hover:text-foreground/70",
             )}
           >
-            {tab.label}
+            {t(`ui.noodle.media.tabs.${tab.id}`, { defaultValue: tab.label })}
           </button>
         ))}
       </div>
@@ -64,14 +75,30 @@ export function ConversationMediaPickerPanel({
             onSelect={onEmojiSelect}
             customTab={{
               icon: "⭐",
-              label: "Custom emojis",
-              render: (query) => <CustomEmojiTab onInsert={onEmojiSelect} query={query} />,
+              label: t("ui.noodle.media.customEmojis"),
+              render: (query) => (
+                <CustomEmojiTab
+                  onInsert={(token) => {
+                    rememberRecentMedia("emoji", { value: token, label: token });
+                    onEmojiSelect(token);
+                  }}
+                  query={query}
+                />
+              ),
               renderSearch: (query) => (
-                <CustomEmojiTab onInsert={onEmojiSelect} query={query} searchResultsOnly />
+                <CustomEmojiTab
+                  onInsert={(token) => {
+                    rememberRecentMedia("emoji", { value: token, label: token });
+                    onEmojiSelect(token);
+                  }}
+                  query={query}
+                  searchResultsOnly
+                />
               ),
             }}
           />
         )}
+        {activeTab === "kaomoji" && <KaomojiPicker embedded open onClose={onClose} onSelect={onEmojiSelect} />}
         {activeTab === "gifs" && <GifPicker embedded open onClose={onClose} onSelect={onGifSelect} />}
         {activeTab === "stickers" && <StickerPicker embedded open onClose={onClose} onSelect={onStickerSelect} />}
         {activeTab === "tools" && toolsContent}

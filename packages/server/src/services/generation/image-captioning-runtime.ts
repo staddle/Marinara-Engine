@@ -1,4 +1,7 @@
-import { LOCAL_SIDECAR_CONNECTION_ID } from "@marinara-engine/shared";
+import {
+  LOCAL_SIDECAR_CONNECTION_ID,
+  parseConnectionImageCaptioningDefaults,
+} from "@marinara-engine/shared";
 
 import { isDebugAgentsEnabled } from "../../config/runtime-config.js";
 import { logger, logDebugOverride } from "../../lib/logger.js";
@@ -90,12 +93,37 @@ export async function resolveImageCaptioningRuntime(args: {
   };
 }): Promise<ImageCaptioningRuntime> {
   const { chatMeta, connections } = args;
-  if (chatMeta.imageCaptioningEnabled !== true) return DISABLED_IMAGE_CAPTIONING;
   try {
-    const configuredConnectionId =
-      typeof chatMeta.imageCaptioningConnectionId === "string" && chatMeta.imageCaptioningConnectionId.trim()
-        ? chatMeta.imageCaptioningConnectionId.trim()
+    const hasChatEnabledOverride = typeof chatMeta.imageCaptioningEnabled === "boolean";
+    const hasChatConnectionOverride = Object.prototype.hasOwnProperty.call(
+      chatMeta,
+      "imageCaptioningConnectionId",
+    );
+    let activeConnection: ImageCaptionConnection | null = null;
+    if (
+      (!hasChatEnabledOverride || !hasChatConnectionOverride) &&
+      args.fallbackConnectionId &&
+      args.fallbackConnectionId !== "random" &&
+      args.fallbackConnectionId !== LOCAL_SIDECAR_CONNECTION_ID
+    ) {
+      activeConnection = await connections.getWithKey(args.fallbackConnectionId);
+    }
+    const connectionDefaults = parseConnectionImageCaptioningDefaults(activeConnection?.defaultParameters);
+    const captioningEnabled = hasChatEnabledOverride
+      ? chatMeta.imageCaptioningEnabled === true
+      : connectionDefaults.imageCaptioningEnabled === true;
+    if (!captioningEnabled) return DISABLED_IMAGE_CAPTIONING;
+
+    const inheritedConnectionId =
+      typeof connectionDefaults.imageCaptioningConnectionId === "string"
+        ? connectionDefaults.imageCaptioningConnectionId
         : null;
+    const configuredConnectionId =
+      hasChatConnectionOverride
+        ? typeof chatMeta.imageCaptioningConnectionId === "string" && chatMeta.imageCaptioningConnectionId.trim()
+          ? chatMeta.imageCaptioningConnectionId.trim()
+          : null
+        : inheritedConnectionId;
     const fallbackCaptionConnectionId = configuredConnectionId ?? args.fallbackConnectionId;
     if (!fallbackCaptionConnectionId) return DISABLED_IMAGE_CAPTIONING;
     let captionConnectionId = fallbackCaptionConnectionId;
@@ -116,7 +144,9 @@ export async function resolveImageCaptioningRuntime(args: {
     const captionConnection =
       captionConnectionId === LOCAL_SIDECAR_CONNECTION_ID
         ? createLocalSidecarGenerationConnection()
-        : await connections.getWithKey(captionConnectionId);
+        : activeConnection?.id === captionConnectionId
+          ? activeConnection
+          : await connections.getWithKey(captionConnectionId);
     if (!captionConnection?.model) {
       logger.warn("[image-captioning] Captioning connection %s was not found", captionConnectionId);
       return DISABLED_IMAGE_CAPTIONING;

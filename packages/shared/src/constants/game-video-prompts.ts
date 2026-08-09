@@ -3,6 +3,7 @@ import type { AgentPromptTemplateOption } from "../types/agent.js";
 export const GAME_VIDEO_PROMPT_TEMPLATE_ID = "cinematic-scene-video";
 export const ANIME_GAME_VIDEO_PROMPT_TEMPLATE_ID = "anime-game-video";
 export const COMIC_PAGE_GAME_VIDEO_PROMPT_TEMPLATE_ID = "comic-page-game-video";
+export const LTX_DIRECTOR_GAME_VIDEO_PROMPT_TEMPLATE_ID = "ltx-director-video";
 
 export const GAME_VIDEO_PROMPT_TEMPLATE_VARIABLES = [
   "sceneTitle",
@@ -72,6 +73,8 @@ export const ANIME_GAME_VIDEO_PROMPT_TEMPLATE = [
   "- Avoid unrelated movement, new characters, duplicated subjects, morphing, costume changes, distorted anatomy, subtitles, captions, speech bubbles, UI, logos, and watermarks.",
 ].join("\n");
 
+export const LTX_DIRECTOR_GAME_VIDEO_PROMPT_TEMPLATE = "${narrationSummary}";
+
 export const GAME_VIDEO_BUILT_IN_PROMPT_TEMPLATES: AgentPromptTemplateOption[] = [
   {
     id: GAME_VIDEO_PROMPT_TEMPLATE_ID,
@@ -93,5 +96,12 @@ export const GAME_VIDEO_BUILT_IN_PROMPT_TEMPLATES: AgentPromptTemplateOption[] =
     description:
       "Interprets comic or manga panels as duration-aware ordered animation beats without changing ordinary scene videos.",
     promptTemplate: COMIC_PAGE_GAME_VIDEO_PROMPT_TEMPLATE,
+  },
+  {
+    id: LTX_DIRECTOR_GAME_VIDEO_PROMPT_TEMPLATE_ID,
+    name: "LTX Director Video",
+    description:
+      "Passes the Storyboard planner's complete image-to-video direction through the universal video prompt contract.",
+    promptTemplate: LTX_DIRECTOR_GAME_VIDEO_PROMPT_TEMPLATE,
   },
 ];

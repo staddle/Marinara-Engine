@@ -102,21 +102,29 @@ async function getPipeline(): Promise<any> {
   return loadingPromise;
 }
 
+function isAborted(signal?: AbortSignal) {
+  return signal?.aborted === true;
+}
+
 /**
  * Generate embeddings for one or more texts using the local model.
  * Returns an array of float vectors, or null if local embedding is unavailable.
  */
-export async function localEmbed(texts: string[]): Promise<number[][] | null> {
+export async function localEmbed(texts: string[], signal?: AbortSignal): Promise<number[][] | null> {
   if (texts.length === 0) return [];
+  if (isAborted(signal)) return null;
 
   const p = await getPipeline();
   if (!p) return null;
+  if (isAborted(signal)) return null;
 
   try {
     const results: number[][] = [];
     // Process one at a time to keep memory usage predictable
     for (const text of texts) {
+      if (isAborted(signal)) return null;
       const output = await p(text, { pooling: "mean", normalize: true });
+      if (isAborted(signal)) return null;
       // output.tolist() returns [[...floats]]
       const arr: number[][] = output.tolist();
       results.push(arr[0]!);

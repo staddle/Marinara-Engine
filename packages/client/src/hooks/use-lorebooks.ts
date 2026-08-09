@@ -3,7 +3,7 @@
 // ──────────────────────────────────────────────
 import { useInfiniteQuery, useQuery, useQueries, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "../lib/api-client";
-import type { Lorebook, LorebookEntry, LorebookFolder } from "@marinara-engine/shared";
+import type { BulkUpdateLorebookEntriesInput, Lorebook, LorebookEntry, LorebookFolder } from "@marinara-engine/shared";
 import { characterKeys } from "./use-characters";
 import { achievementKeys, trackAchievementEvent } from "./use-achievements";
 import {
@@ -35,10 +35,13 @@ export type LorebookListItem = Lorebook & {
 
 // ── Lorebooks ──
 
-export function useLorebooks(category?: string) {
+export function useLorebooks(category?: string, options: { includeHidden?: boolean } = {}) {
   return useQuery({
     queryKey: category ? lorebookKeys.byCategory(category) : lorebookKeys.list(),
     queryFn: () => api.get<Lorebook[]>(category ? `/lorebooks?category=${category}` : "/lorebooks"),
+    select: options.includeHidden
+      ? undefined
+      : (lorebooks) => lorebooks.filter((lorebook) => !lorebook.hiddenFromLibrary),
     staleTime: 5 * 60_000,
   });
 }
@@ -315,7 +318,7 @@ export function useBulkUpdateLorebookEntries() {
     }: {
       lorebookId: string;
       entryIds: string[];
-      changes: Record<string, boolean>;
+      changes: BulkUpdateLorebookEntriesInput["changes"];
     }) => api.patch<{ updated: number }>(`/lorebooks/${lorebookId}/entries/bulk`, { entryIds, changes }),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: lorebookKeys.entries(variables.lorebookId) });

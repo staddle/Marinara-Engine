@@ -9,6 +9,7 @@ import {
   WorldRenderedEdit,
   WorldValueText,
 } from "./WorldEditableTile";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 const WORLD_DATE_TIME_PROFILE_STYLES: Record<
   TrackerPanelSizeProfile,
@@ -72,6 +73,7 @@ export function WorldDateTimeTile({
   timeLockKey?: string;
   sizeProfile: TrackerPanelSizeProfile;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const dateLock = useTrackerFieldLock(dateLockKey);
   const timeLock = useTrackerFieldLock(timeLockKey);
   const style = WORLD_DATE_TIME_PROFILE_STYLES[sizeProfile];
@@ -97,10 +99,10 @@ export function WorldDateTimeTile({
           />
         )}
         <WorldRenderedEdit
-          label="Time"
+          label={localizeUi("ui.trackerPanel.worlddatetimetile.time")}
           value={timeDisplay.raw}
           onSave={onSaveTime}
-          placeholder="Set time"
+          placeholder={localizeUi("ui.trackerPanel.worlddatetimetile.setTime")}
           className={cn("col-start-2 row-start-1 w-full min-w-0 self-center rounded-sm py-0.5 text-left", style.edit)}
           inputClassName={cn(
             "text-left text-[var(--tracker-world-time-accent)]",
@@ -123,10 +125,10 @@ export function WorldDateTimeTile({
           />
         </WorldRenderedEdit>
         <WorldRenderedEdit
-          label="Date"
+          label={localizeUi("ui.agents.tooleditor.date")}
           value={dateText}
           onSave={onSaveDate}
-          placeholder="Set date"
+          placeholder={localizeUi("ui.trackerPanel.worlddatetimetile.setDate")}
           className={cn(
             "col-start-2 row-start-2 w-full min-w-0 justify-self-start overflow-hidden rounded-sm py-0.5 text-left",
             style.edit,

@@ -20,6 +20,7 @@ import { useAchievements } from "../../hooks/use-achievements";
 import { useUIStore } from "../../stores/ui.store";
 import { cn } from "../../lib/utils";
 import { Modal } from "../ui/Modal";
+import { useTranslation } from "react-i18next";
 
 const ICONS: Record<AchievementDefinition["icon"], LucideIcon> = {
   graduation: GraduationCap,
@@ -84,9 +85,10 @@ function AchievementCard({
   achievement: AchievementDefinition;
   progress: AchievementProgress | null;
 }) {
+  const { t } = useTranslation();
   const locked = !progress?.unlocked;
   const title = locked ? "?????" : achievement.rankLabel ? `${achievement.title} ${achievement.rankLabel}` : achievement.title;
-  const description = locked ? "Unlock this achievement to reveal its title and badge." : achievement.description;
+  const description = locked ? t("home.achievements.lockedDescription") : achievement.description;
   const target = progress?.target ?? null;
 
   return (
@@ -104,12 +106,14 @@ function AchievementCard({
           <div className="min-w-0">
             <h4 className="truncate text-xs font-semibold text-[var(--foreground)] sm:text-sm">{title}</h4>
             <p className="mt-0.5 text-[0.65rem] uppercase tracking-wide text-[var(--muted-foreground)]">
-              {CATEGORY_LABELS[achievement.category]}
+              {t(`home.achievements.category.${achievement.category}`, {
+                defaultValue: CATEGORY_LABELS[achievement.category],
+              })}
             </p>
           </div>
           {progress?.unlockedAt && (
             <span className="mari-chrome-text-muted shrink-0 rounded-full border border-[var(--border)] bg-[var(--secondary)]/50 px-2 py-0.5 text-[0.6rem]">
-              unlocked
+              {t("home.achievements.unlocked")}
             </span>
           )}
         </div>
@@ -117,7 +121,7 @@ function AchievementCard({
         {target !== null && (
           <div className="mt-3 space-y-1">
             <div className="mari-chrome-text-muted flex items-center justify-between text-[0.65rem]">
-              <span>Progress</span>
+              <span>{t("home.achievements.progress")}</span>
               <span>
                 {Math.min(progress?.progress ?? 0, target)} / {target}
               </span>
@@ -142,6 +146,7 @@ export function HomeAchievements({
   attached?: boolean;
   className?: string;
 }) {
+  const { t } = useTranslation();
   const achievementsEnabled = useUIStore((s) => s.achievementsEnabled);
   const [open, setOpen] = useState(false);
   const achievements = useAchievements(achievementsEnabled);
@@ -166,7 +171,7 @@ export function HomeAchievements({
           attached ? "-mt-px !rounded-b-xl !rounded-t-none !border-t-0" : "!rounded-xl",
           className,
         )}
-        aria-label="Open achievements"
+        aria-label={t("home.achievements.open")}
       >
         <span className="flex min-w-0 items-center gap-2.5 sm:gap-3">
           <span
@@ -176,22 +181,26 @@ export function HomeAchievements({
             <Trophy size="1.15rem" strokeWidth={2.25} />
           </span>
           <span className="min-w-0">
-            <span className="block text-sm font-semibold text-[var(--foreground)]">Achievements</span>
+            <span className="block text-sm font-semibold text-[var(--foreground)]">
+              {t("home.achievements.title")}
+            </span>
             <span className="mari-chrome-text-muted block truncate text-xs">
-              {achievements.isLoading ? "Checking the collection..." : `${unlockedCount} of ${totalCount} unlocked`}
+              {achievements.isLoading
+                ? t("home.achievements.checking")
+                : t("home.achievements.summary", { unlocked: unlockedCount, total: totalCount })}
             </span>
           </span>
         </span>
       </button>
 
-      <Modal open={open} onClose={() => setOpen(false)} title="Achievements" width="max-w-5xl">
+      <Modal open={open} onClose={() => setOpen(false)} title={t("home.achievements.title")} width="max-w-5xl">
         <div className="space-y-3 sm:space-y-4">
           <div className="mari-chrome-text-muted rounded-xl border border-[var(--border)] bg-[var(--secondary)]/25 px-3 py-2 text-xs">
-            {unlockedCount} of {totalCount} achievements unlocked in this profile.
+            {t("home.achievements.profileSummary", { unlocked: unlockedCount, total: totalCount })}
           </div>
           {achievements.isError ? (
             <p className="rounded-xl border border-[var(--destructive)]/35 bg-[var(--destructive)]/10 px-3 py-2 text-xs text-[var(--destructive)]">
-              Achievements could not be loaded right now.
+              {t("home.achievements.loadError")}
             </p>
           ) : (
             <div className="grid gap-3 md:grid-cols-2">

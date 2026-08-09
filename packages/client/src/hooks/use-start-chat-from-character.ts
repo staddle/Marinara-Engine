@@ -6,7 +6,7 @@ import { chatKeys, useCreateChat } from "./use-chats";
 import { useApplyChatPreset, useChatPresets } from "./use-chat-presets";
 import { addSilentGreetingSwipes } from "../lib/message-swipes";
 
-type ChatMode = "roleplay" | "conversation";
+type ChatMode = "roleplay" | "conversation" | "game";
 
 interface StartChatFromCharacterOptions {
   characterId: string;
@@ -14,6 +14,8 @@ interface StartChatFromCharacterOptions {
   mode: ChatMode;
   firstMessage?: string;
   alternateGreetings?: string[];
+  shortcutMode?: boolean;
+  onSuccess?: (chatId: string) => void;
 }
 
 export function useStartChatFromCharacter() {
@@ -23,11 +25,21 @@ export function useStartChatFromCharacter() {
   const applyChatPreset = useApplyChatPreset();
 
   const startChatFromCharacter = useCallback(
-    ({ characterId, characterName, mode, firstMessage, alternateGreetings }: StartChatFromCharacterOptions) => {
-      const label = mode === "conversation" ? "Conversation" : "Roleplay";
+    ({
+      characterId,
+      characterName,
+      mode,
+      firstMessage,
+      alternateGreetings,
+      shortcutMode = true,
+      onSuccess,
+    }: StartChatFromCharacterOptions) => {
+      const label = mode === "conversation" ? "Conversation" : mode === "game" ? "Game" : "Roleplay";
       const presets = chatPresetsData ?? [];
-      const presetMode = mode === "conversation" ? "conversation" : "roleplay";
-      const starred = presets.find((preset) => preset.mode === presetMode && preset.isActive && !preset.isDefault);
+      const presetMode = mode === "conversation" || mode === "roleplay" ? mode : null;
+      const starred = presetMode
+        ? presets.find((preset) => preset.mode === presetMode && preset.isActive && !preset.isDefault)
+        : null;
 
       createChat.mutate(
         {
@@ -43,7 +55,8 @@ export function useStartChatFromCharacter() {
             store.setActiveChatId(chat.id);
             store.setShouldOpenSettings(true);
             store.setShouldOpenWizard(true);
-            store.setShouldOpenWizardInShortcutMode(true);
+            store.setShouldOpenWizardInShortcutMode(shortcutMode && mode === "roleplay");
+            onSuccess?.(chat.id);
 
             void (async () => {
               if (starred) {
@@ -54,7 +67,7 @@ export function useStartChatFromCharacter() {
                 }
               }
 
-              if (mode === "roleplay" && firstMessage?.trim()) {
+              if (shortcutMode && mode === "roleplay" && firstMessage?.trim()) {
                 try {
                   const msg = await api.post<{ id: string }>(`/chats/${chat.id}/messages`, {
                     role: "assistant",

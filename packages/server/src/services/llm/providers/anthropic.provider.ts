@@ -75,6 +75,10 @@ function applyAdaptiveThinkingConfig(
   }
 }
 
+export function supportsAnthropicThinkingDisable(model: string): boolean {
+  return /claude-(?:opus|sonnet)-5(?:$|[-.])/u.test(model.toLowerCase());
+}
+
 type AnthropicRole = "user" | "assistant";
 type AnthropicContentBlock = Record<string, unknown> & {
   type: string;
@@ -342,9 +346,18 @@ export class AnthropicProvider extends BaseLLMProvider {
 
     const modelLower = options.model.toLowerCase();
     const isAdaptiveOnly = isClaudeAdaptiveOnlyNoSamplingModel(options.model);
+    const shouldDisableThinking =
+      this.shouldSendParameter(options, "reasoningEffort") &&
+      options.reasoningEffort === "none" &&
+      supportsAnthropicThinkingDisable(options.model);
     if (isAdaptiveOnly) stripAnthropicSamplingParameters(body);
 
-    if (this.shouldSendParameter(options, "reasoningEffort") && options.enableThinking) {
+    if (shouldDisableThinking) {
+      body.thinking = { type: "disabled" };
+    } else if (
+      this.shouldSendParameter(options, "reasoningEffort") &&
+      (options.enableThinking || (isAdaptiveOnly && options.captureReasoning))
+    ) {
       if (isAdaptiveOnly) {
         applyAdaptiveThinkingConfig(body, options, maxTokens);
       } else {
@@ -364,7 +377,11 @@ export class AnthropicProvider extends BaseLLMProvider {
     this.applyCustomParameters(body, options);
     if (isAdaptiveOnly) {
       stripAnthropicSamplingParameters(body);
-      if (this.shouldSendParameter(options, "reasoningEffort") && options.enableThinking) {
+      if (
+        !shouldDisableThinking &&
+        this.shouldSendParameter(options, "reasoningEffort") &&
+        (options.enableThinking || options.captureReasoning)
+      ) {
         applyAdaptiveThinkingConfig(body, options);
       }
     }
@@ -499,12 +516,23 @@ export class AnthropicProvider extends BaseLLMProvider {
     // Strip temperature, top_k, top_p regardless of thinking mode.
     const modelLower = options.model.toLowerCase();
     const isAdaptiveOnly = isClaudeAdaptiveOnlyNoSamplingModel(options.model);
+    const shouldDisableThinking =
+      !suppressModelParameters &&
+      this.shouldSendParameter(options, "reasoningEffort") &&
+      options.reasoningEffort === "none" &&
+      supportsAnthropicThinkingDisable(options.model);
     if (isAdaptiveOnly && !suppressModelParameters) {
       stripAnthropicSamplingParameters(body);
     }
 
     // Enable extended thinking for reasoning models
-    if (!suppressModelParameters && this.shouldSendParameter(options, "reasoningEffort") && options.enableThinking) {
+    if (shouldDisableThinking) {
+      body.thinking = { type: "disabled" };
+    } else if (
+      !suppressModelParameters &&
+      this.shouldSendParameter(options, "reasoningEffort") &&
+      (options.enableThinking || (isAdaptiveOnly && options.captureReasoning))
+    ) {
       const outputMaxTokens = maxTokens ?? 4096;
       if (isAdaptiveOnly) {
         // Adaptive-only Claude models use adaptive thinking (budget_tokens removed).
@@ -532,7 +560,11 @@ export class AnthropicProvider extends BaseLLMProvider {
     this.applyCustomParameters(body, options);
     if (isAdaptiveOnly && !suppressModelParameters) {
       stripAnthropicSamplingParameters(body);
-      if (this.shouldSendParameter(options, "reasoningEffort") && options.enableThinking) {
+      if (
+        !shouldDisableThinking &&
+        this.shouldSendParameter(options, "reasoningEffort") &&
+        (options.enableThinking || options.captureReasoning)
+      ) {
         applyAdaptiveThinkingConfig(body, options);
       }
     }

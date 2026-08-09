@@ -1,6 +1,7 @@
 import { ArrowLeft, Box, MessageSquare, Puzzle, Settings2 } from "lucide-react";
 import type { BuiltInAgentManifest, InstalledCapabilityPackage } from "@marinara-engine/shared";
 import { CapabilityElement } from "../capabilities/CapabilityElement";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface ActiveFeatureChat {
   id: string;
@@ -23,7 +24,6 @@ interface FeatureAgentDetailHostProps {
 const MODE_LABELS: Record<string, string> = {
   conversation: "Conversation",
   roleplay: "Roleplay",
-  visual_novel: "Visual Novel",
   game: "Game",
 };
 
@@ -42,6 +42,7 @@ export function FeatureAgentDetailHost({
   onManagePackage,
   capabilityProps,
 }: FeatureAgentDetailHostProps) {
+  const { t: localizeUi } = useUiTranslation();
   const contributedAgentIds = installedPackage?.manifest.contributions?.agentDetail?.agentIds ?? [];
   const hasDetailContribution =
     Boolean(installedPackage?.manifest.entrypoints.client) && contributedAgentIds.includes(agent.id);
@@ -67,6 +68,7 @@ export function FeatureAgentDetailHost({
             id: agent.id,
             name: agent.name,
             description: agent.description,
+            author: agent.author ?? null,
             modeAllowlist: agent.modeAllowlist ? [...agent.modeAllowlist] : [],
           },
           chatId: activeChatSupported ? (activeChat?.id ?? null) : null,
@@ -102,7 +104,7 @@ export function FeatureAgentDetailHost({
         <button
           type="button"
           onClick={onClose}
-          aria-label="Back to Agents"
+          aria-label={localizeUi("capabilities.actions.backToAgents")}
           className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
         >
           <ArrowLeft size="1rem" />
@@ -114,7 +116,7 @@ export function FeatureAgentDetailHost({
           <h1 id="feature-agent-detail-title" className="truncate text-sm font-semibold">
             {agent.name}
           </h1>
-          <p className="text-[0.625rem] uppercase tracking-[0.12em] text-[var(--muted-foreground)]">Feature</p>
+          <p className="text-[0.625rem] uppercase tracking-[0.12em] text-[var(--muted-foreground)]">{localizeUi("ui.agents.featureagentdetailhost.feature")}</p>
         </div>
       </header>
 
@@ -122,7 +124,7 @@ export function FeatureAgentDetailHost({
         <div>
           <p className="text-sm leading-relaxed text-[var(--muted-foreground)]">{agent.description}</p>
           {supportedModes.length > 0 ? (
-            <div className="mt-3 flex flex-wrap gap-2" aria-label="Supported chat modes">
+            <div className="mt-3 flex flex-wrap gap-2" aria-label={localizeUi("ui.agents.featureagentdetailhost.supportedChatModes")}>
               {supportedModes.map((mode) => (
                 <span
                   key={mode}
@@ -140,9 +142,9 @@ export function FeatureAgentDetailHost({
             <div className="flex items-start gap-3">
               <Box size="1rem" className="mt-0.5 shrink-0 text-[var(--primary)]" />
               <div className="min-w-0">
-                <h2 className="text-xs font-semibold">Package</h2>
+                <h2 className="text-xs font-semibold">{localizeUi("ui.agents.featureagentdetailhost.package")}</h2>
                 <p className="mt-1 text-[0.6875rem] text-[var(--muted-foreground)]">
-                  {installedPackage ? `Version ${installedPackage.version} · ${packageState}` : packageState}
+                  {installedPackage ?localizeUi("ui.agents.featureagentdetailhost.versionValue1Value2", { value1: installedPackage.version, value2: packageState }) : packageState}
                 </p>
               </div>
             </div>
@@ -151,13 +153,13 @@ export function FeatureAgentDetailHost({
             <div className="flex items-start gap-3">
               <MessageSquare size="1rem" className="mt-0.5 shrink-0 text-[var(--primary)]" />
               <div className="min-w-0">
-                <h2 className="text-xs font-semibold">Current chat</h2>
+                <h2 className="text-xs font-semibold">{localizeUi("ui.agents.featureagentdetailhost.currentChat")}</h2>
                 <p className="mt-1 text-[0.6875rem] text-[var(--muted-foreground)]">
                   {!activeChat
-                    ? "Open a supported chat to use this feature."
+                    ?localizeUi("ui.agents.featureagentdetailhost.openASupportedChatToUseThisFeature")
                     : activeChatSupported
-                      ? `${activeChat.name} · ${enabledForChat ? "Active" : "Not active"}`
-                      : `${activeChat.name} is not a supported mode.`}
+                      ?localizeUi("ui.agents.featureagentdetailhost.value1Value2", { value1: activeChat.name, value2: enabledForChat ?localizeUi("ui.characters.lorebooktab.active") :localizeUi("ui.agents.featureagentdetailhost.notActive") })
+                      :localizeUi("ui.agents.featureagentdetailhost.value1IsNotASupportedMode", { value1: activeChat.name })}
                 </p>
               </div>
             </div>
@@ -165,11 +167,8 @@ export function FeatureAgentDetailHost({
         </div>
 
         <div className="rounded-xl border border-dashed border-[var(--border)] bg-[var(--secondary)]/35 p-4">
-          <h2 className="text-xs font-semibold">Feature-managed settings</h2>
-          <p className="mt-1 text-[0.6875rem] leading-relaxed text-[var(--muted-foreground)]">
-            This feature does not use pipeline prompts, tools, or run-frequency settings. Manage its downloaded package
-            or open a supported chat to access its controls.
-          </p>
+          <h2 className="text-xs font-semibold">{localizeUi("ui.agents.featureagentdetailhost.featureManagedSettings")}</h2>
+          <p className="mt-1 text-[0.6875rem] leading-relaxed text-[var(--muted-foreground)]">{localizeUi("ui.agents.featureagentdetailhost.thisFeatureDoesNotUsePipelinePromptsToolsOr")}</p>
         </div>
 
         <div className="flex flex-wrap gap-2">
@@ -178,8 +177,7 @@ export function FeatureAgentDetailHost({
             onClick={onManagePackage}
             className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-4 text-xs font-medium transition-colors hover:bg-[var(--accent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
           >
-            <Settings2 size="0.875rem" /> Manage package
-          </button>
+            <Settings2 size="0.875rem" /> {localizeUi("ui.agents.featureagentdetailhost.managePackage")}</button>
         </div>
       </div>
     </section>

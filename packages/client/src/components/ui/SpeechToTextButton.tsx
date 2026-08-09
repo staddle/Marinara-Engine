@@ -7,6 +7,7 @@ import {
   readBrowserSpeechRecognitionTranscript,
   type BrowserSpeechRecognition,
 } from "../../lib/browser-speech-recognition";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface SpeechToTextButtonProps {
   disabled?: boolean;
@@ -16,6 +17,7 @@ interface SpeechToTextButtonProps {
 }
 
 export function SpeechToTextButton({ disabled, onTranscript, className, iconSize = 16 }: SpeechToTextButtonProps) {
+  const { t: localizeUi } = useUiTranslation();
   const [supported, setSupported] = useState(false);
   const [listening, setListening] = useState(false);
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
@@ -51,7 +53,7 @@ export function SpeechToTextButton({ disabled, onTranscript, className, iconSize
 
     const Recognition = getBrowserSpeechRecognitionCtor();
     if (!Recognition) {
-      toast.error("Speech recognition is not supported in this browser.");
+      toast.error(localizeUi("ui.ui.speechtotextbutton.speechRecognitionIsNotSupportedInThisBrowser"));
       return;
     }
 
@@ -73,7 +75,7 @@ export function SpeechToTextButton({ disabled, onTranscript, className, iconSize
       const error = event.error ?? "unknown";
       setListening(false);
       if (!["aborted", "no-speech"].includes(error)) {
-        toast.error(`Speech recognition failed: ${error}`);
+        toast.error(localizeUi("ui.ui.speechtotextbutton.speechRecognitionFailedValue1", { value1: error }));
       }
     };
     recognition.onend = () => {
@@ -91,9 +93,9 @@ export function SpeechToTextButton({ disabled, onTranscript, className, iconSize
     } catch {
       recognitionRef.current = null;
       setListening(false);
-      toast.error("Could not start speech recognition.");
+      toast.error(localizeUi("ui.ui.speechtotextbutton.couldNotStartSpeechRecognition"));
     }
-  }, [listening, onTranscript, stopListening]);
+  }, [listening, onTranscript, stopListening, localizeUi]);
 
   return (
     <button
@@ -112,13 +114,13 @@ export function SpeechToTextButton({ disabled, onTranscript, className, iconSize
       )}
       title={
         listening
-          ? "Stop dictation"
+          ?localizeUi("ui.ui.speechtotextbutton.stopDictation")
           : supported
-            ? "Dictate message"
-            : "Speech recognition is not supported in this browser"
+            ?localizeUi("ui.ui.speechtotextbutton.dictateMessage")
+            :localizeUi("ui.ui.speechtotextbutton.speechRecognitionIsNotSupportedInThisBrowser_d6f5969")
       }
       aria-pressed={listening}
-      aria-label={listening ? "Stop dictation" : "Dictate message"}
+      aria-label={listening ?localizeUi("ui.ui.speechtotextbutton.stopDictation") :localizeUi("ui.ui.speechtotextbutton.dictateMessage")}
     >
       {supported ? <Mic size={iconSize} /> : <MicOff size={iconSize} />}
     </button>

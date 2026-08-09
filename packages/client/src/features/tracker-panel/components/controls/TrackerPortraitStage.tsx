@@ -19,6 +19,7 @@ import {
   type TrackerProfileSide,
 } from "../../lib/tracker-profile-layout";
 import { TrackerPortraitStageBackdrop } from "./TrackerProfileChrome";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 export type TrackerPortraitStageMediaKind = "expression" | "art";
 type TrackerPortraitStageFrameTone = "featured" | "persona";
@@ -155,6 +156,7 @@ export function TrackerPortraitStage({
   uploadAction?: TrackerPortraitStageUploadAction;
   view?: TrackerPortraitStageView;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const dragStateRef = useRef<PortraitDragState | null>(null);
   const isArt = mediaKind === "art";
   const isExpression = mediaKind === "expression";
@@ -244,7 +246,7 @@ export function TrackerPortraitStage({
           onPointerMove={handlePointerMove}
           onPointerCancel={endDrag}
           onPointerUp={endDrag}
-          title={canAdjustView ? "Drag to reposition portrait" : undefined}
+          title={canAdjustView ?localizeUi("ui.trackerPanel.trackerportraitstage.dragToRepositionPortrait") : undefined}
         >
           <div className={PORTRAIT_MEDIA_OFFSET_CLASS} style={mediaOffsetStyle}>
             <img
@@ -279,8 +281,8 @@ export function TrackerPortraitStage({
               event.stopPropagation();
               updateZoom(-TRACKER_PORTRAIT_ZOOM_STEP);
             }}
-            title="Zoom portrait out"
-            aria-label="Zoom portrait out"
+            title={localizeUi("ui.trackerPanel.trackerportraitstage.zoomPortraitOut")}
+            aria-label={localizeUi("ui.trackerPanel.trackerportraitstage.zoomPortraitOut")}
             className={PORTRAIT_VIEW_BUTTON_CLASS}
           >
             <ZoomOut size="0.75rem" />
@@ -291,8 +293,8 @@ export function TrackerPortraitStage({
               event.stopPropagation();
               updateZoom(TRACKER_PORTRAIT_ZOOM_STEP);
             }}
-            title="Zoom portrait in"
-            aria-label="Zoom portrait in"
+            title={localizeUi("ui.trackerPanel.trackerportraitstage.zoomPortraitIn")}
+            aria-label={localizeUi("ui.trackerPanel.trackerportraitstage.zoomPortraitIn")}
             className={PORTRAIT_VIEW_BUTTON_CLASS}
           >
             <ZoomIn size="0.75rem" />
@@ -303,13 +305,13 @@ export function TrackerPortraitStage({
               event.stopPropagation();
               resetPortraitView();
             }}
-            title="Reset portrait view"
-            aria-label="Reset portrait view"
+            title={localizeUi("ui.trackerPanel.trackerportraitstage.resetPortraitView")}
+            aria-label={localizeUi("ui.trackerPanel.trackerportraitstage.resetPortraitView")}
             className={PORTRAIT_VIEW_BUTTON_CLASS}
           >
             <RotateCcw size="0.6875rem" />
           </button>
-          <span className="sr-only">Portrait zoom {zoomPercent}%</span>
+          <span className="sr-only">{localizeUi("ui.trackerPanel.trackerportraitstage.portraitZoom")} {zoomPercent}%</span>
         </div>
       )}
       <div className={cn(PORTRAIT_TOP_GLEAM_BASE_CLASS, PORTRAIT_TOP_GLEAM_CLASS_BY_SIDE[outsideSide])} />

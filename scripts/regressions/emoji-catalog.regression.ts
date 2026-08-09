@@ -4,6 +4,7 @@ import {
   resolveStandardEmojiShortcode,
   searchStandardEmojiShortcodes,
 } from "../../packages/client/src/lib/emoji-shortcodes.js";
+import { matchesEmojiQuery } from "../../packages/client/src/lib/emoji-search.js";
 
 const allEmoji = EMOJI_CATEGORIES.flatMap((category) => [...category.emojis]);
 assert.ok(allEmoji.length >= 1_900, `Expected the full base emoji catalog, received ${allEmoji.length}`);
@@ -24,5 +25,33 @@ assert.equal(
   searchStandardEmojiShortcodes("cry").some((entry) => entry.name === "crying"),
   true,
 );
+
+// Search: users type nicknames, not Unicode names (issue report: "apple"/"star"
+// found nothing while the emoji were visible in the grid).
+const findsEmoji = (query: string, emoji: string) =>
+  assert.ok(matchesEmojiQuery(query, emoji), `Expected "${query}" to find ${emoji}`);
+
+findsEmoji("apple", "🍎");
+findsEmoji("star", "⭐");
+findsEmoji("beach", "🏖️");
+findsEmoji("hug", "🫂");
+findsEmoji("happy", "😀");
+findsEmoji("lol", "😂");
+findsEmoji("thumbsup", "👍");
+findsEmoji("celebrate", "🎉");
+findsEmoji("travel", "✈️");
+// Word order must not matter, and pasting the emoji itself finds it.
+findsEmoji("face grinning", "😀");
+findsEmoji("🧪", "🧪");
+// Prefix-per-word matching, so a query is not a blind substring of the name.
+assert.equal(matchesEmojiQuery("tick", "🥢"), false, "'tick' must not match chopsticks");
+assert.equal(matchesEmojiQuery("apple", "🍮"), false);
+// Ambiguous single-word synonyms must not leak: "cross" → "no wrong" once made
+// every cross-named emoji a hit for "wrong".
+assert.equal(matchesEmojiQuery("wrong", "✝️"), false, "'wrong' must not match the latin cross");
+assert.equal(matchesEmojiQuery("", "🍎"), false);
+
+assert.ok(searchStandardEmojiShortcodes("celebrate").some((entry) => entry.emoji === "🎉"));
+assert.ok(searchStandardEmojiShortcodes("apple").some((entry) => entry.emoji === "🍎"));
 
 process.stdout.write("Emoji catalog regression passed.\n");

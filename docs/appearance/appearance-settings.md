@@ -43,7 +43,7 @@ Two toggles change how the Accent Color behaves:
 - **Accent Pulse** (default off) gently animates your Accent Color. Solid colors brighten and darken. Gradients cycle through their colors.
 - **RGB Mode** (default off) cycles the accent through a rainbow palette while it is on. Your saved Accent Color is not changed.
 
-You can only use one of these at a time. Turning on **RGB Mode** turns off **Accent Pulse**, and turning on **Accent Pulse** turns off **RGB Mode**. If your device is set to reduce motion, both animations are skipped.
+You can only use one of these at a time. Turning on **RGB Mode** turns off **Accent Pulse**, and turning on **Accent Pulse** turns off **RGB Mode**. Accent Pulse previews live while the Appearance tab is open. If your device is set to reduce motion, both animations are skipped.
 
 ## Custom Mouse Pointer
 
@@ -60,9 +60,10 @@ The **Font** dropdown lives in this same section. To add your own fonts or downl
 
 ## Chat text colors and outline
 
-Also in the **Text & Scale** section, three controls change how chat text reads over your background.
+Also in the **Text & Scale** section, four controls change how chat text reads over your background.
 
 - **Chat Text Color** sets the main chat message text color. The default is `#d4d4d4` in Dark mode and `#1a1025` in Light mode.
+- **Default Dialogue Color** colors quoted dialogue when a Character or Persona card does not define its own Dialogue Highlight Color. It is always active; card-specific colors take priority.
 - **Chat Chrome Text Color** sets ordinary text in tracker widgets, folder labels, and settings descriptions. It uses the same defaults as **Chat Text Color**.
 - **Text Outline / Stroke** adds an outline around chat text so it stays readable over busy backgrounds. Set the outline color and a **Width** from 0px to 5px. The default width is 0.5px. Set the width to 0 to turn the outline off.
 

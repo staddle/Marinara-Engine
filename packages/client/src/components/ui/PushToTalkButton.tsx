@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { cn } from "../../lib/utils";
 import { useMicRecorder } from "../../hooks/use-mic-recorder";
 import { useTranscribeAudio } from "../../hooks/use-stt";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface PushToTalkButtonProps {
   disabled?: boolean;
@@ -18,6 +19,7 @@ interface PushToTalkButtonProps {
  * configured self-hosted Whisper server, and hand the transcript back for the caller to send.
  */
 export function PushToTalkButton({ disabled, onTranscribed, className, iconSize = 16 }: PushToTalkButtonProps) {
+  const { t: localizeUi } = useUiTranslation();
   const { state, start, stop } = useMicRecorder();
   const transcribeAudio = useTranscribeAudio();
   const recording = state === "recording";
@@ -33,7 +35,7 @@ export function PushToTalkButton({ disabled, onTranscribed, className, iconSize 
         if (text.trim()) {
           onTranscribed(text.trim());
         } else {
-          toast.info("Didn't catch any speech in that recording.");
+          toast.info(localizeUi("ui.ui.pushtotalkbutton.didnTCatchAnySpeechInThatRecording"));
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : "Transcription failed.";
@@ -45,7 +47,7 @@ export function PushToTalkButton({ disabled, onTranscribed, className, iconSize 
     try {
       await start();
     } catch {
-      toast.error("Could not access the microphone.");
+      toast.error(localizeUi("ui.ui.pushtotalkbutton.couldNotAccessTheMicrophone"));
     }
   }, [busy, disabled, onTranscribed, recording, start, stop, transcribeAudio]);
 
@@ -62,9 +64,17 @@ export function PushToTalkButton({ disabled, onTranscribed, className, iconSize 
         disabled && "cursor-not-allowed opacity-50",
         className,
       )}
-      title={recording ? "Stop recording and send" : "Talk to character"}
+      title={
+        recording
+          ? localizeUi("ui.ui.pushtotalkbutton.stopRecordingAndSend")
+          : localizeUi("ui.ui.pushtotalkbutton.talkToCharacter")
+      }
       aria-pressed={recording}
-      aria-label={recording ? "Stop recording and send" : "Talk to character"}
+      aria-label={
+        recording
+          ? localizeUi("ui.ui.pushtotalkbutton.stopRecordingAndSend")
+          : localizeUi("ui.ui.pushtotalkbutton.talkToCharacter")
+      }
     >
       {busy ? (
         <Loader2 size={iconSize} className="animate-spin" />

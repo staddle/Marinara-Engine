@@ -12,6 +12,7 @@ import { chatKeys, useUpdateMessageExtra } from "../../hooks/use-chats";
 import { useGenerate } from "../../hooks/use-generate";
 import { HelpTooltip } from "../ui/HelpTooltip";
 import type { AgentConfigRow } from "../../hooks/use-agents";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 const CACHED_INJECTIONS_HELP =
   "Troubleshooting view for text that certain writer agents added before the current reply, usually Prose Guardian, Narrative Director, or custom injected text. Edits and re-runs are only used if you regenerate this same assistant message. Re-runs use the original transcript slice and tracker snapshot, not newer chat.";
@@ -77,6 +78,7 @@ export function ContextInjectionPanel({
   agentConfigs?: AgentConfigRow[];
   enabledAgentTypes?: Set<string>;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const qc = useQueryClient();
   const { retryAgents } = useGenerate();
   const updateExtra = useUpdateMessageExtra(chatId);
@@ -158,9 +160,7 @@ export function ContextInjectionPanel({
             size="0.75rem"
             className={cn("shrink-0 text-[var(--primary)] transition-transform", open && "rotate-180")}
           />
-          <span className="min-w-0 truncate font-semibold text-[var(--popover-foreground)]/75 group-hover:text-[var(--popover-foreground)]">
-            Cached prompt injections
-          </span>
+          <span className="min-w-0 truncate font-semibold text-[var(--popover-foreground)]/75 group-hover:text-[var(--popover-foreground)]">{localizeUi("ui.agents.contextinjectionpanel.cachedPromptInjections")}</span>
         </button>
         <span className="flex shrink-0 items-center gap-1.5">
           <HelpTooltip
@@ -182,27 +182,17 @@ export function ContextInjectionPanel({
           {showDirectorPushStoryNote && (
             <div className="mb-1 rounded-lg border border-[var(--border)] bg-[var(--card)]/55 px-2 py-1.5">
               <div className="flex min-w-0 items-center gap-1.5">
-                <span className="truncate text-[0.625rem] font-semibold text-[var(--popover-foreground)]">
-                  Narrative Director
-                </span>
-                <span className="shrink-0 rounded-full bg-[var(--primary)]/15 px-1.5 py-px text-[0.5rem] font-semibold text-[var(--primary)] ring-1 ring-[var(--primary)]/25">
-                  Push Story
-                </span>
+                <span className="truncate text-[0.625rem] font-semibold text-[var(--popover-foreground)]">{localizeUi("ui.agents.contextinjectionpanel.narrativeDirector")}</span>
+                <span className="shrink-0 rounded-full bg-[var(--primary)]/15 px-1.5 py-px text-[0.5rem] font-semibold text-[var(--primary)] ring-1 ring-[var(--primary)]/25">{localizeUi("ui.agents.contextinjectionpanel.pushStory")}</span>
               </div>
-              <p className="mt-0.5 text-[0.5625rem] leading-snug text-[var(--muted-foreground)]">
-                Narrative Director runs only when Push Story is armed above the chat input.
-              </p>
+              <p className="mt-0.5 text-[0.5625rem] leading-snug text-[var(--muted-foreground)]">{localizeUi("ui.agents.contextinjectionpanel.narrativeDirectorRunsOnlyWhenPushStoryIsArmed")}</p>
             </div>
           )}
           {!target && (
-            <p className="py-2 text-center text-[0.625rem] text-[var(--muted-foreground)]">
-              No assistant message loaded yet.
-            </p>
+            <p className="py-2 text-center text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.agents.contextinjectionpanel.noAssistantMessageLoadedYet")}</p>
           )}
           {target && injections.length === 0 && (
-            <p className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/35 px-3 py-2 text-center text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
-              No cached injections on this assistant message yet.
-            </p>
+            <p className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/35 px-3 py-2 text-center text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">{localizeUi("ui.agents.contextinjectionpanel.noCachedInjectionsOnThisAssistantMessageYet")}</p>
           )}
           {target &&
             injections.map((inj) => {
@@ -222,7 +212,7 @@ export function ContextInjectionPanel({
                       type="button"
                       onClick={() => setExpandedInjections((m) => ({ ...m, [inj.agentType]: !m[inj.agentType] }))}
                       className="flex min-h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--ring)]"
-                      title={expanded ? "Collapse output" : "Expand output"}
+                      title={expanded ?localizeUi("ui.agents.contextinjectionpanel.collapseOutput") :localizeUi("ui.agents.contextinjectionpanel.expandOutput")}
                       aria-expanded={expanded}
                     >
                       <ChevronDown
@@ -236,7 +226,7 @@ export function ContextInjectionPanel({
                         {agentLabel(inj.agentType, inj.agentName)}
                       </span>
                       {dirty && (
-                        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--primary)]" title="Unsaved edit" />
+                        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--primary)]" title={localizeUi("ui.agents.contextinjectionpanel.unsavedEdit")} />
                       )}
                     </button>
                     <div className="flex shrink-0 items-center gap-1">
@@ -246,8 +236,8 @@ export function ContextInjectionPanel({
                           disabled={isGenerationBusy || !!rerollingType || updateExtra.isPending}
                           onClick={() => handleReroll(inj.agentType)}
                           className="inline-flex h-6 w-6 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)]/55 hover:text-[var(--accent-foreground)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--ring)] disabled:opacity-40 max-md:h-7 max-md:w-7"
-                          title={`Re-run ${agentLabel(inj.agentType, inj.agentName)} injection`}
-                          aria-label={`Re-run ${agentLabel(inj.agentType, inj.agentName)} injection`}
+                          title={localizeUi("ui.agents.contextinjectionpanel.reRunValue1Injection", { value1: agentLabel(inj.agentType, inj.agentName) })}
+                          aria-label={localizeUi("ui.agents.contextinjectionpanel.reRunValue1Injection", { value1: agentLabel(inj.agentType, inj.agentName) })}
                         >
                           <RefreshCw size="0.625rem" className={cn(rerollBusy && "animate-spin")} />
                         </button>
@@ -259,13 +249,13 @@ export function ContextInjectionPanel({
                         className="inline-flex h-6 w-6 items-center justify-center rounded-md text-[var(--primary)] transition-colors hover:bg-[var(--primary)]/15 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--ring)] disabled:opacity-40 max-md:h-7 max-md:w-7"
                         title={
                           saved
-                            ? `${agentLabel(inj.agentType, inj.agentName)} injection saved`
-                            : `Save ${agentLabel(inj.agentType, inj.agentName)} injection`
+                            ?localizeUi("ui.agents.contextinjectionpanel.value1InjectionSaved", { value1: agentLabel(inj.agentType, inj.agentName) })
+                            :localizeUi("ui.agents.contextinjectionpanel.saveValue1Injection", { value1: agentLabel(inj.agentType, inj.agentName) })
                         }
                         aria-label={
                           saved
-                            ? `${agentLabel(inj.agentType, inj.agentName)} injection saved`
-                            : `Save ${agentLabel(inj.agentType, inj.agentName)} injection`
+                            ?localizeUi("ui.agents.contextinjectionpanel.value1InjectionSaved", { value1: agentLabel(inj.agentType, inj.agentName) })
+                            :localizeUi("ui.agents.contextinjectionpanel.saveValue1Injection", { value1: agentLabel(inj.agentType, inj.agentName) })
                         }
                       >
                         {saved ? (

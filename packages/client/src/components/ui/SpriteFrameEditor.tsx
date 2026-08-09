@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Crop, Loader2, RotateCcw, X } from "lucide-react";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface SpriteFrameAdjustments {
   top: number;
@@ -79,6 +80,7 @@ export function cropSpriteDataUrl(dataUrl: string, frame: SpriteFrameAdjustments
 }
 
 export function SpriteFrameEditor({ imageUrl, label, applying = false, onApply, onClose }: SpriteFrameEditorProps) {
+  const { t: localizeUi } = useUiTranslation();
   const [frame, setFrame] = useState<SpriteFrameAdjustments>(DEFAULT_FRAME_ADJUSTMENTS);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -147,14 +149,14 @@ export function SpriteFrameEditor({ imageUrl, label, applying = false, onApply, 
           <div className="flex items-center justify-between gap-3">
             <span className="inline-flex min-w-0 items-center gap-1.5 text-xs font-semibold text-[var(--foreground)]">
               <Crop size="0.875rem" className="shrink-0 text-[var(--primary)]" />
-              <span className="truncate capitalize">Frame {label}</span>
+              <span className="truncate capitalize">{localizeUi("ui.characters.spritestab.frame")} {label}</span>
             </span>
             <button
               type="button"
               onClick={onClose}
               className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-              aria-label="Close frame editor"
-              title="Close"
+              aria-label={localizeUi("ui.ui.spriteframeeditor.closeFrameEditor")}
+              title={localizeUi("capabilities.actions.close")}
             >
               <X size="0.875rem" />
             </button>
@@ -188,18 +190,14 @@ export function SpriteFrameEditor({ imageUrl, label, applying = false, onApply, 
               onClick={() => setFrame(DEFAULT_FRAME_ADJUSTMENTS)}
               className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[0.6875rem] text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:text-[var(--foreground)]"
             >
-              <RotateCcw size="0.75rem" />
-              Reset
-            </button>
+              <RotateCcw size="0.75rem" />{localizeUi("ui.characters.charactercliptrimmodal.reset")}</button>
             <button
               type="button"
               onClick={() => void handleApply()}
               disabled={applying}
               className="inline-flex items-center gap-1 rounded-lg bg-[var(--primary)] px-2.5 py-1 text-[0.6875rem] font-medium text-[var(--primary-foreground)] transition-colors hover:opacity-90 disabled:opacity-50"
             >
-              {applying ? <Loader2 size="0.75rem" className="animate-spin" /> : <Crop size="0.75rem" />}
-              Apply Frame
-            </button>
+              {applying ? <Loader2 size="0.75rem" className="animate-spin" /> : <Crop size="0.75rem" />}{localizeUi("ui.ui.spriteframeeditor.applyFrame")}</button>
           </div>
         </div>
       </div>

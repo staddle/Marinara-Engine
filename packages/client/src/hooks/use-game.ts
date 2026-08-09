@@ -3,6 +3,7 @@
 // ──────────────────────────────────────────────
 import { useEffect, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { api, isJsonRepairApiError } from "../lib/api-client";
 import { chatKeys } from "./use-chats";
@@ -34,6 +35,7 @@ import type {
   TacticalCombatState,
   TacticalAction,
   TacticalEvent,
+  RPGStatPool,
 } from "@marinara-engine/shared";
 import type { Chat } from "@marinara-engine/shared";
 
@@ -102,6 +104,24 @@ interface RecruitPartyMemberResponse {
   added: boolean;
   characterName: string;
   cardCreated: boolean;
+}
+
+interface RegenerateCharacterSheetResponse {
+  characterName: string;
+  gameCard: {
+    name: string;
+    shortDescription: string;
+    class: string;
+    abilities: string[];
+    strengths: string[];
+    weaknesses: string[];
+    extra: Record<string, string>;
+    rpgStats?: {
+      attributes: Array<{ name: string; value: number }>;
+      hp: { value: number; max: number };
+      pools?: RPGStatPool[];
+    };
+  };
 }
 
 interface RemovePartyMemberResponse {
@@ -478,6 +498,27 @@ export function useRecruitPartyMember() {
   });
 }
 
+export function useRegenerateCharacterSheet() {
+  const { t } = useTranslation();
+
+  return useMutation({
+    mutationFn: (data: {
+      chatId: string;
+      characterId: string;
+      characterName: string;
+      connectionId?: string;
+      debugMode?: boolean;
+    }) => api.post<RegenerateCharacterSheetResponse>("/game/character-sheet/regenerate", data),
+    onSuccess: (res) => {
+      toast.success(t("game.characterSheet.regenerate.ready", { name: res.characterName }));
+    },
+    onError: (err) => {
+      console.error("[regenerateCharacterSheet] Error:", err);
+      toast.error(err.message || t("game.characterSheet.regenerate.error"));
+    },
+  });
+}
+
 export function useRemovePartyMember() {
   const qc = useQueryClient();
 
@@ -716,6 +757,8 @@ export function useSyncGameState(activeChatId: string, chatMeta: Record<string, 
       useGameModeStore.getState().setMaps(metadataMaps, activeMapId);
     } else if (chatMeta.gameMap && chatMeta.gameMap !== state.currentMap) {
       useGameModeStore.getState().setCurrentMap(chatMeta.gameMap as GameMap);
+    } else if (!chatMeta.gameMap) {
+      useGameModeStore.getState().setMaps([], null);
     }
     if (Array.isArray(chatMeta.gameNpcs)) {
       useGameModeStore.getState().setNpcs(chatMeta.gameNpcs as any[]);

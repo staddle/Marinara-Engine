@@ -10,6 +10,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useMotionValue } from "framer-motion";
 import { Lock, Unlock } from "lucide-react";
 import { cn } from "../../lib/utils";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 const STORAGE_PREFIX = "marinara-game-panel:";
 const MIN_VISIBLE_PANEL_PX = 96;
@@ -130,6 +131,7 @@ interface PanelLockButtonProps {
 
 /** Small lock toggle styled to match collapse/chevron buttons in HUD panels. */
 export function PanelLockButton({ locked, onToggle, onReset, size = 10, className }: PanelLockButtonProps) {
+  const { t: localizeUi } = useUiTranslation();
   const title = onReset
     ? locked
       ? "Unlock to move. Double-click or press R to reset position"
@@ -158,7 +160,7 @@ export function PanelLockButton({ locked, onToggle, onReset, size = 10, classNam
       }}
       onPointerDown={(event) => event.stopPropagation()}
       title={title}
-      aria-label={locked ? "Unlock panel" : "Lock panel"}
+      aria-label={locked ?localizeUi("ui.game.panellockbutton.unlockPanel") :localizeUi("ui.game.panellockbutton.lockPanel")}
       aria-pressed={!locked}
       className={cn(
         "flex shrink-0 items-center justify-center rounded-md text-[var(--marinara-chat-chrome-panel-muted)]",

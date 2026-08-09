@@ -1,6 +1,7 @@
 import { FileJson, ImageDown, Layers, X } from "lucide-react";
 import { Modal } from "./Modal";
 import { cn } from "../../lib/utils";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 export type ExportFormatChoice = "native" | "compatible" | "compatible-png";
 
@@ -27,6 +28,7 @@ export function ExportFormatDialog({
   onClose,
   onSelect,
 }: ExportFormatDialogProps) {
+  const { t: localizeUi } = useUiTranslation();
   const options: Array<{
     id: ExportFormatChoice;
     label: string;
@@ -77,9 +79,7 @@ export function ExportFormatDialog({
             onClick={onClose}
             className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
           >
-            <X size="0.875rem" />
-            Cancel
-          </button>
+            <X size="0.875rem" />{localizeUi("chat.delete.dialog.cancel")}</button>
         </div>
       </div>
     </Modal>

@@ -15,7 +15,7 @@ import {
   isUpdatesApplyEnabled,
   isUpdatesRemoteApplyAllowed,
 } from "../config/runtime-config.js";
-import { getBuildCommit, getBuildLabel } from "../config/build-info.js";
+import { getBuildBranch, getBuildCommit, getBuildLabel } from "../config/build-info.js";
 import { requirePrivilegedAccess } from "../middleware/privileged-gate.js";
 import { isLoopbackIp } from "../middleware/ip-allowlist.js";
 import { isGitUpdateApplyAllowed } from "../services/updates/update-apply-policy.js";
@@ -54,10 +54,22 @@ const UPDATE_CHANNELS: Record<UpdateChannel, UpdateChannelInfo> = {
     warning: "Staging builds are pre-release tester builds. Back up your app data before applying them.",
   },
 };
-const DEFAULT_PNPM_VERSION = "10.33.2";
+const DEFAULT_PNPM_DESCRIPTOR =
+  "10.34.5+sha512.a4ee05f2f73658255bd6a89859c065a45c28a57daefae2c893a168ee2b73168c37b91e83e57ea67654ad03f03031746430e8bce38e362e042605fb8abc80192e";
+const DEFAULT_PNPM_VERSION = DEFAULT_PNPM_DESCRIPTOR.slice(0, DEFAULT_PNPM_DESCRIPTOR.indexOf("+"));
 const PNPM_NONINTERACTIVE_ARGS = ["--config.trustPolicy=off", "--config.confirmModulesPurge=false"];
 const PNPM_UPDATE_INSTALL_ARGS = ["install", "--force", "--frozen-lockfile"];
-const MANUAL_PNPM_COMMAND = `corepack pnpm@${DEFAULT_PNPM_VERSION}`;
+// A forced reinstall is verbose; the execFile default (1 MiB) can abort an
+// otherwise healthy install with a maxBuffer error.
+const PNPM_OUTPUT_MAX_BUFFER = 32 * 1024 * 1024;
+// Termux on Android runs on slow flash storage without prebuilt-binary
+// caches, so channel switches (full dependency purge + reinstall) routinely
+// need far longer than desktop installs.
+const UPDATE_STEP_TIMEOUT_MULTIPLIER = process.platform === "android" ? 4 : 1;
+function updateStepTimeout(baseMs: number): number {
+  return baseMs * UPDATE_STEP_TIMEOUT_MULTIPLIER;
+}
+const MANUAL_PNPM_COMMAND = `corepack pnpm@${DEFAULT_PNPM_DESCRIPTOR}`;
 const DOCKER_IMAGE = "ghcr.io/pasta-devs/marinara-engine";
 const MANUAL_GIT_UPDATE_COMMAND =
   `git fetch origin +refs/heads/main:refs/remotes/origin/main && (git merge --ff-only origin/main || git checkout --detach origin/main) && ${MANUAL_PNPM_COMMAND} --config.trustPolicy=off --config.confirmModulesPurge=false install --force --frozen-lockfile && ${MANUAL_PNPM_COMMAND} --filter @marinara-engine/shared build && ${MANUAL_PNPM_COMMAND} --filter @marinara-engine/server --filter @marinara-engine/client --parallel run build && ${MANUAL_PNPM_COMMAND} start`;
@@ -167,6 +179,11 @@ async function getUpdateChannelForCheckout(root: string, branch: string | null |
   return UPDATE_CHANNELS.stable;
 }
 
+// Only tracked source belongs here, so untracked files are always leftovers.
+// Kept narrow on purpose: user data, .env, config, and node_modules must never
+// be in range of a clean.
+const STALE_SOURCE_CLEAN_PATHS = ["packages/shared/src", "packages/server/src", "packages/client/src"];
+
 function getManualGitApplyCommand(
   channel = UPDATE_CHANNELS.stable,
   platform: ServerPlatform = "unknown",
@@ -176,11 +193,15 @@ function getManualGitApplyCommand(
     channel.id === "staging"
       ? `git show-ref --verify --quiet refs/heads/${channel.branch} && (git checkout ${channel.branch} && git merge --ff-only ${channel.targetRef}) || git checkout -b ${channel.branch} ${channel.targetRef}`
       : `(git merge --ff-only ${channel.targetRef} || git checkout --detach ${channel.targetRef})`;
+  // Same scoped cleanup cleanStaleSourceFiles performs, so a manual apply (the
+  // only path available when UPDATES_APPLY_ENABLED is false) cannot build with
+  // stale untracked sources left behind by a failed checkout.
+  const cleanCommand = `git clean -fd -- ${STALE_SOURCE_CLEAN_PATHS.join(" ")}`;
   const buildCommand =
     platform === "android-termux"
       ? `${pnpmCommand} --filter @marinara-engine/shared build && ${pnpmCommand} --filter @marinara-engine/server build && ${pnpmCommand} --filter @marinara-engine/client build`
       : `${pnpmCommand} --filter @marinara-engine/shared build && ${pnpmCommand} --filter @marinara-engine/server --filter @marinara-engine/client --parallel run build`;
-  return `git fetch ${UPDATE_REMOTE} ${channel.fetchRef} && ${checkoutCommand} && ${pnpmCommand} --config.trustPolicy=off --config.confirmModulesPurge=false ${PNPM_UPDATE_INSTALL_ARGS.join(" ")} && ${buildCommand}`;
+  return `git fetch ${UPDATE_REMOTE} ${channel.fetchRef} && ${checkoutCommand} && ${cleanCommand} && ${pnpmCommand} --config.trustPolicy=off --config.confirmModulesPurge=false ${PNPM_UPDATE_INSTALL_ARGS.join(" ")} && ${buildCommand}`;
 }
 
 function getManualUpdateCommand(installType: InstallType, platform: ServerPlatform, channel = UPDATE_CHANNELS.stable) {
@@ -239,6 +260,22 @@ async function getCurrentBranch(root: string): Promise<string | null> {
   return stdout.trim() || null;
 }
 
+// Untracked leftovers in the source trees (e.g. files a failed Windows checkout
+// could not delete) break tsc, so drop them after a channel switch. Scoped to
+// packages/*/src so user data, config, and node_modules are never touched.
+// A locked file can make the clean itself fail; that must not fail the update,
+// because the launcher retries this same clean on the next start.
+async function cleanStaleSourceFiles(root: string): Promise<void> {
+  try {
+    await execFileAsync("git", ["clean", "-fdq", "--", ...STALE_SOURCE_CLEAN_PATHS], {
+      cwd: root,
+      timeout: 30_000,
+    });
+  } catch (err) {
+    logger.warn(err, "[Update] Could not clean stale untracked source files after channel switch");
+  }
+}
+
 async function checkoutOrCreateUpdateBranch(root: string, channel: UpdateChannelInfo, targetHead: string): Promise<void> {
   const branchRef = `refs/heads/${channel.branch}`;
   const branchExists = await gitCommandSucceeds(root, ["show-ref", "--verify", "--quiet", branchRef]);
@@ -251,12 +288,14 @@ async function checkoutOrCreateUpdateBranch(root: string, channel: UpdateChannel
       cwd: root,
       timeout: 60_000,
     });
+    await cleanStaleSourceFiles(root);
     return;
   }
   await execFileAsync("git", ["checkout", "-b", channel.branch, targetHead], {
     cwd: root,
     timeout: 60_000,
   });
+  await cleanStaleSourceFiles(root);
 }
 
 type UpdateStash = { oid: string; marker: string };
@@ -421,15 +460,20 @@ function buildRequestHeaders() {
   };
 }
 
-function getPinnedPnpmVersion(root: string): string {
+function getPinnedPnpmDescriptor(root: string): string {
   try {
     const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf-8")) as {
       packageManager?: string;
     };
-    return pkg.packageManager?.split("@")[1] || DEFAULT_PNPM_VERSION;
+    const descriptor = pkg.packageManager?.replace(/^pnpm@/u, "");
+    return descriptor || DEFAULT_PNPM_DESCRIPTOR;
   } catch {
-    return DEFAULT_PNPM_VERSION;
+    return DEFAULT_PNPM_DESCRIPTOR;
   }
+}
+
+function getPinnedPnpmVersion(root: string): string {
+  return getPinnedPnpmDescriptor(root).split("+")[0] || DEFAULT_PNPM_VERSION;
 }
 
 type PnpmRunner = {
@@ -437,18 +481,38 @@ type PnpmRunner = {
   prefixArgs: string[];
 };
 
+function commandInvocation(command: string, args: string[]) {
+  if (process.platform !== "win32") {
+    return { command, args };
+  }
+
+  const commandLine = [command, ...args]
+    .map((part) => {
+      if (!/^[A-Za-z0-9@._/:=+-]+$/u.test(part)) {
+        throw new Error(`Unsupported character in update command argument: ${part}`);
+      }
+      return part;
+    })
+    .join(" ");
+  return {
+    command: process.env.ComSpec ?? "cmd.exe",
+    args: ["/d", "/s", "/c", commandLine],
+  };
+}
+
 async function resolvePinnedPnpmRunner(root: string): Promise<PnpmRunner> {
+  const pnpmDescriptor = getPinnedPnpmDescriptor(root);
   const pnpmVersion = getPinnedPnpmVersion(root);
-  const shell = process.platform === "win32";
 
   try {
-    const { stdout } = await execFileAsync("corepack", [`pnpm@${pnpmVersion}`, "--version"], {
+    const invocation = commandInvocation("corepack", [`pnpm@${pnpmDescriptor}`, "--version"]);
+    const { stdout } = await execFileAsync(invocation.command, invocation.args, {
       cwd: root,
-      timeout: 20_000,
-      shell,
+      // First run downloads the pinned pnpm; slow devices need extra headroom.
+      timeout: updateStepTimeout(20_000),
     });
     if (stdout.trim() === pnpmVersion) {
-      return { command: "corepack", prefixArgs: [`pnpm@${pnpmVersion}`] };
+      return { command: "corepack", prefixArgs: [`pnpm@${pnpmDescriptor}`] };
     }
   } catch {
     // Fall through to an already-installed pnpm. Some older Corepack builds
@@ -457,10 +521,10 @@ async function resolvePinnedPnpmRunner(root: string): Promise<PnpmRunner> {
   }
 
   try {
-    const { stdout } = await execFileAsync("pnpm", ["--version"], {
+    const invocation = commandInvocation("pnpm", ["--version"]);
+    const { stdout } = await execFileAsync(invocation.command, invocation.args, {
       cwd: root,
-      timeout: 10_000,
-      shell,
+      timeout: updateStepTimeout(10_000),
     });
     if (stdout.trim() === pnpmVersion) {
       return { command: "pnpm", prefixArgs: [] };
@@ -470,10 +534,10 @@ async function resolvePinnedPnpmRunner(root: string): Promise<PnpmRunner> {
   }
 
   try {
-    const { stdout } = await execFileAsync("npx", ["--yes", `pnpm@${pnpmVersion}`, "--version"], {
+    const invocation = commandInvocation("npx", ["--yes", `pnpm@${pnpmVersion}`, "--version"]);
+    const { stdout } = await execFileAsync(invocation.command, invocation.args, {
       cwd: root,
-      timeout: 60_000,
-      shell,
+      timeout: updateStepTimeout(60_000),
     });
     if (stdout.trim() === pnpmVersion) {
       return { command: "npx", prefixArgs: ["--yes", `pnpm@${pnpmVersion}`] };
@@ -487,13 +551,48 @@ async function resolvePinnedPnpmRunner(root: string): Promise<PnpmRunner> {
   );
 }
 
-async function runPinnedPnpm(root: string, args: string[], timeout: number) {
+function describePnpmFailure(err: unknown, args: string[], timeout: number): Error {
+  const execError = err as NodeJS.ErrnoException & {
+    killed?: boolean;
+    signal?: string | null;
+    code?: number | string | null;
+    stderr?: string;
+    stdout?: string;
+  };
+  const step = `pnpm ${args.join(" ")}`;
+  const parts: string[] = [];
+  if (execError?.killed || execError?.signal) {
+    parts.push(
+      `"${step}" was stopped after ${Math.round(timeout / 1000)}s (signal ${execError.signal ?? "unknown"}). Slow devices can need this long for a full reinstall; try again or run the update manually.`,
+    );
+  } else {
+    parts.push(`"${step}" failed${execError?.code != null ? ` with code ${String(execError.code)}` : ""}.`);
+  }
+  const outputTail = [execError?.stderr, execError?.stdout]
+    .filter((value): value is string => Boolean(value))
+    .flatMap((value) => value.trim().split(/\r?\n/).slice(-8))
+    .join("\n")
+    .slice(-600)
+    .trim();
+  if (outputTail) {
+    parts.push(`Output: ${outputTail}`);
+  }
+  return new Error(parts.join(" "));
+}
+
+async function runPinnedPnpm(root: string, args: string[], baseTimeout: number) {
   const runner = await resolvePinnedPnpmRunner(root);
-  await execFileAsync(runner.command, [...runner.prefixArgs, ...PNPM_NONINTERACTIVE_ARGS, ...args], {
-    cwd: root,
-    timeout,
-    shell: process.platform === "win32",
-  });
+  const timeout = updateStepTimeout(baseTimeout);
+  const invocation = commandInvocation(runner.command, [...runner.prefixArgs, ...PNPM_NONINTERACTIVE_ARGS, ...args]);
+  try {
+    await execFileAsync(invocation.command, invocation.args, {
+      cwd: root,
+      timeout,
+      maxBuffer: PNPM_OUTPUT_MAX_BUFFER,
+    });
+  } catch (err) {
+    throw describePnpmFailure(err, args, timeout);
+  }
   return { runner, pnpmVersion: getPinnedPnpmVersion(root) };
 }
 
@@ -654,8 +753,8 @@ export async function updatesRoutes(app: FastifyInstance) {
     const serverPlatform = getServerPlatform();
     const clientPlatform = getClientPlatform(req.headers["user-agent"]);
     const root = getMonorepoRoot();
-    const currentBranch = gitInstall ? await getCurrentBranch(root).catch(() => null) : null;
-    const currentChannel = gitInstall ? await getUpdateChannelForCheckout(root, currentBranch) : UPDATE_CHANNELS.stable;
+    const currentBranch = gitInstall ? await getCurrentBranch(root).catch(() => null) : getBuildBranch();
+    const currentChannel = await getUpdateChannelForCheckout(root, currentBranch);
     const channel = await resolveUpdateChannel(
       root,
       (req.query as { channel?: unknown } | undefined)?.channel,
@@ -941,8 +1040,9 @@ export async function updatesRoutes(app: FastifyInstance) {
         // Otherwise, source differs from running build — need to rebuild
       }
 
-      // Step 2: pnpm install
-      await runPinnedPnpm(root, PNPM_UPDATE_INSTALL_ARGS, 180_000);
+      // Step 2: pnpm install. Channel switches (stable <-> staging) force a
+      // near-full dependency reinstall, so this step gets a generous budget.
+      await runPinnedPnpm(root, PNPM_UPDATE_INSTALL_ARGS, 300_000);
 
       // Step 3: Rebuild all packages
       await runPinnedBuild(root);
@@ -981,8 +1081,9 @@ export async function updatesRoutes(app: FastifyInstance) {
       return result;
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
+      const pnpmDescriptor = getPinnedPnpmDescriptor(root);
       const pnpmVersion = getPinnedPnpmVersion(root);
-      const manualPnpmCommand = `corepack pnpm@${pnpmVersion}`;
+      const manualPnpmCommand = `corepack pnpm@${pnpmDescriptor}`;
       return reply.status(500).send({
         error: `Update failed: ${message}`,
         hint: `You can try running the update manually: ${getManualGitApplyCommand(channel, serverPlatform, manualPnpmCommand)}. If Corepack cannot launch pnpm ${pnpmVersion}, install the pinned version with npm install -g pnpm@${pnpmVersion} and rerun the command.`,

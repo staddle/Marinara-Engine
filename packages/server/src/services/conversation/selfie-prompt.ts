@@ -7,11 +7,15 @@ export async function resolveConversationSelfieSystemPrompt(input: {
   chatPromptTemplate?: string | null;
   appearance: string;
   charName: string;
+  characterImageInstructions?: string;
+  personality?: string;
   selfieTagsBlock?: string;
 }): Promise<string> {
   const promptContext: ConversationSelfieCtx = {
     appearance: input.appearance,
     charName: input.charName,
+    characterImageInstructions: input.characterImageInstructions?.trim() ?? "",
+    personality: input.personality?.trim() ?? "",
     selfieTagsBlock: input.selfieTagsBlock ?? "",
   };
   const chatPromptTemplate = input.chatPromptTemplate?.trim() ?? "";

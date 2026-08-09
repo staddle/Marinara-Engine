@@ -4,6 +4,8 @@
 import { useState, useRef, useEffect, useCallback, useLayoutEffect } from "react";
 import { createPortal } from "react-dom";
 import { Search, Loader2, ImageOff, ExternalLink } from "lucide-react";
+import { useTranslation as useUiTranslation } from "react-i18next";
+import { rememberRecentMedia, useRecentMedia } from "../../hooks/use-recent-media";
 
 interface GifResult {
   id: string;
@@ -29,6 +31,7 @@ type GifErrorCode = "missing_giphy_api_key";
 type GifFetchError = Error & { code?: GifErrorCode };
 
 export function GifPicker({ open, onClose, onSelect, anchorRef, containerRef, embedded }: GifPickerProps) {
+  const { t: localizeUi } = useUiTranslation();
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<GifResult[]>([]);
   const [loading, setLoading] = useState(false);
@@ -39,6 +42,7 @@ export function GifPicker({ open, onClose, onSelect, anchorRef, containerRef, em
   const scrollRef = useRef<HTMLDivElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fetchingRef = useRef(false);
+  const recentGifs = useRecentMedia("gif");
 
   // Position state for portal
   const [pos, setPos] = useState<{ bottom: number; right?: number; left?: number; maxHeight?: number }>({ bottom: 0 });
@@ -188,10 +192,25 @@ export function GifPicker({ open, onClose, onSelect, anchorRef, containerRef, em
 
   const handleSelect = useCallback(
     (gif: GifResult) => {
+      rememberRecentMedia("gif", {
+        value: gif.url,
+        label: gif.title,
+        previewUrl: gif.preview || gif.url,
+      });
       onSelect(gif.url);
       onClose();
     },
     [onSelect, onClose],
+  );
+
+  const handleRecentSelect = useCallback(
+    (value: string) => {
+      const item = recentGifs.find((entry) => entry.value === value);
+      if (item) rememberRecentMedia("gif", item);
+      onSelect(value);
+      onClose();
+    },
+    [onSelect, onClose, recentGifs],
   );
 
   if (!open) return null;
@@ -209,12 +228,41 @@ export function GifPicker({ open, onClose, onSelect, anchorRef, containerRef, em
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search for GIFs"
+            placeholder={localizeUi("ui.ui.gifpicker.searchForGifs")}
             className="flex-1 bg-transparent text-xs outline-none placeholder:text-foreground/35"
             autoFocus={!embedded}
           />
         </div>
       </div>
+
+      {!query.trim() && recentGifs.length > 0 && (
+        <section
+          data-recent-media="gif"
+          className="max-h-40 shrink-0 overflow-y-auto border-b border-foreground/10 px-2 py-2"
+        >
+          <p className="mb-1 px-1 text-[0.625rem] font-semibold uppercase tracking-wide text-foreground/45">
+            {localizeUi("ui.mediaPicker.recentlyUsed")}
+          </p>
+          <div className="columns-2 gap-1.5">
+            {recentGifs.map((item) => (
+              <button
+                key={item.value}
+                type="button"
+                onClick={() => handleRecentSelect(item.value)}
+                className="mb-1.5 block w-full overflow-hidden rounded-lg transition-transform hover:scale-[1.02] active:scale-100 break-inside-avoid"
+                title={item.label ?? localizeUi("ui.noodle.media.tabs.gifs")}
+              >
+                <img
+                  src={item.previewUrl ?? item.value}
+                  alt={item.label ?? localizeUi("ui.noodle.media.tabs.gifs")}
+                  className="w-full rounded-lg object-cover"
+                  loading="lazy"
+                />
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* Error state */}
       {error && (
@@ -223,18 +271,22 @@ export function GifPicker({ open, onClose, onSelect, anchorRef, containerRef, em
           {missingGiphyKey ? (
             <div className="space-y-3">
               <div>
-                <p className="text-xs font-semibold text-foreground/85">GIF search needs a GIPHY API key.</p>
+                <p className="text-xs font-semibold text-foreground/85">
+                  {localizeUi("ui.ui.gifpicker.gifSearchNeedsAGiphyApiKey")}
+                </p>
                 <p className="mt-1 text-[0.6875rem] leading-relaxed text-foreground/55">
-                  Create a free key, paste it into <code className={setupCodeClass}>GIPHY_API_KEY</code> in your{" "}
-                  <code className={setupCodeClass}>.env</code> file, then restart Marinara.
+                  {localizeUi("ui.ui.gifpicker.createAFreeKeyPasteItInto")}{" "}
+                  <code className={setupCodeClass}>GIPHY_API_KEY</code> {localizeUi("ui.ui.gifpicker.inYour")}{" "}
+                  <code className={setupCodeClass}>.env</code> {localizeUi("ui.ui.gifpicker.fileThenRestartMarinara")}
                 </p>
               </div>
               <ol className="space-y-1 text-left text-[0.6875rem] leading-relaxed text-foreground/55">
-                <li>1. Open the GIPHY Developer Dashboard.</li>
-                <li>2. Create an API key for a web app.</li>
+                <li>{localizeUi("ui.ui.gifpicker.text1OpenTheGiphyDeveloperDashboard")}</li>
+                <li>{localizeUi("ui.ui.gifpicker.text2CreateAnApiKeyForAWebApp")}</li>
                 <li>
-                  3. Add <code className={setupCodeClass}>GIPHY_API_KEY=your_key_here</code> to{" "}
-                  <code className={setupCodeClass}>.env</code>.
+                  {localizeUi("ui.ui.gifpicker.text3Add")}{" "}
+                  <code className={setupCodeClass}>GIPHY_API_KEY=your_key_here</code>{" "}
+                  {localizeUi("ui.noodle.wizardfooter.to")} <code className={setupCodeClass}>.env</code>.
                 </li>
               </ol>
               <a
@@ -243,7 +295,7 @@ export function GifPicker({ open, onClose, onSelect, anchorRef, containerRef, em
                 rel="noreferrer"
                 className="inline-flex items-center gap-1.5 rounded-md border border-foreground/15 px-2.5 py-1.5 text-[0.6875rem] font-semibold text-foreground/75 transition-colors hover:bg-foreground/10 hover:text-foreground"
               >
-                Open GIPHY dashboard
+                {localizeUi("ui.ui.gifpicker.openGiphyDashboard")}
                 <ExternalLink size="0.75rem" />
               </a>
             </div>
@@ -258,7 +310,7 @@ export function GifPicker({ open, onClose, onSelect, anchorRef, containerRef, em
         <div ref={scrollRef} className="flex-1 overflow-y-auto px-2 py-2" onScroll={handleScroll}>
           {results.length === 0 && !loading && (
             <p className="py-8 text-center text-xs text-foreground/45">
-              {query ? "No GIFs found" : "Loading trending..."}
+              {query ? localizeUi("ui.ui.gifpicker.noGifsFound") : localizeUi("ui.ui.gifpicker.loadingTrending")}
             </p>
           )}
 
@@ -292,7 +344,7 @@ export function GifPicker({ open, onClose, onSelect, anchorRef, containerRef, em
 
       {/* GIPHY attribution */}
       <div className="flex items-center justify-center border-t border-foreground/10 px-3 py-1.5">
-        <span className="text-[0.5625rem] text-foreground/45">Powered by GIPHY</span>
+        <span className="text-[0.5625rem] text-foreground/45">{localizeUi("ui.ui.gifpicker.poweredByGiphy")}</span>
       </div>
     </>
   );

@@ -390,6 +390,12 @@ Users can create custom themes. Theme definitions are stored on the Marinara ser
 
 Synced theme CSS can request the built-in Accent Pulse engine with `--marinara-theme-accent-pulse: enabled`. Add `--marinara-theme-accent-pulse-source: #a78bfa` (or a gradient) when the pulse should use a specific theme accent instead of the current Appearance accent.
 
+### Personal Extensions
+
+Personal Extensions are server-stored, exact-hash-approved sandboxed code. The Addons UI uses `use-personal-extensions.ts`; `PersonalExtensionInjector.tsx` hosts approved Browser code in a dedicated Worker inside an opaque-origin sandboxed iframe and brokers immutable active-chat context snapshots. The context fields are always present; outside an active chat, `chatId` and `characterId` are `null` and `characterIds` is empty. Bounded active Character-card and selected-Persona fields require separately declared, hash-bound permissions. Server extensions run in a separate Node process inside macOS Seatbelt or Linux Bubblewrap and fail closed when neither backend is available. External sources require the `.env` gate plus the Danger Zone opt-in at listing, approval, and runtime boundaries.
+
+See [Personal Extension Architecture](personal-extensions.md) before changing this feature.
+
 ## Shared package (`packages/shared`)
 
 The frontend imports types, schemas, and constants from `@marinara-engine/shared`.
@@ -417,8 +423,9 @@ All input validation uses Zod schemas from `packages/shared/src/schemas/`. Repre
 | `lorebook.schema.ts`    | Lorebook and entry create/update, activation conditions, schedules |
 | `prompt.schema.ts`      | Preset, section, group, choice block, generation parameters        |
 | `regex.schema.ts`       | Regex script create and update                                     |
+| `personal-extension.schema.ts` | Personal Extension drafts, exact-hash approval, rollback, and private storage |
 
-The folder also holds schemas for app settings, chat presets, conversation calls, custom emojis and stickers, Noodle, and themes.
+The folder also holds schemas for app settings, chat settings profiles, conversation calls, custom emojis and stickers, Noodle, and themes.
 
 ### Types
 
@@ -434,6 +441,7 @@ Entity type definitions live in `packages/shared/src/types/`. A sample of the ke
 | `game-state.ts`       | `GameState`, `PresentCharacter`, `PlayerStats`, `QuestProgress`, `InventoryItem`                            |
 | `lorebook.ts`         | `Lorebook`, `LorebookEntry`, `ActivationCondition`, `LorebookSchedule`, `QuestData`                         |
 | `persona.ts`          | `Persona`, `PersonaStatsConfig`                                                                             |
+| `personal-extension.ts` | `PersonalExtension`, runtime metadata, revisions, source, and server runtime state                         |
 | `prompt.ts`           | `PromptPreset`, `PromptSection`, `PromptGroup`, `ChoiceBlock`, `GenerationParameters`                       |
 | `scene.ts`            | `SceneMeta`, `SceneFullPlan`                                                                                |
 | `haptic.ts`           | `HapticDevice`, `HapticStatus`, `HapticDeviceCommand`                                                       |
@@ -526,9 +534,10 @@ Agent memory tools use `/api/agents/memory/:agentType/:chatId`, where `agentType
 | `/api/import/*`                 | SillyTavern and Marinara profile import |
 | `/api/admin/clear-all`          | Full data clear                         |
 | `/api/themes`                   | Synced custom themes                    |
+| `/api/personal-extensions`      | Sandboxed extension policy, drafts, approval, runtime, and private storage |
 | `/api/app-settings`             | Server-side app settings                |
 | `/api/sidecar`                  | Local model runtime                     |
-| `/api/chat-presets`             | Chat settings presets                   |
+| `/api/chat-presets`             | Chat settings profiles (legacy endpoint name) |
 | `/api/connection-folders`       | Connection folders                      |
 | `/api/prompt-overrides`         | Built-in prompt overrides               |
 | `/api/achievements`             | Achievement unlocks                     |

@@ -8,32 +8,27 @@ import { useChats } from "../../hooks/use-chats";
 import { useCharacterSummaries } from "../../hooks/use-characters";
 import { useChatStore } from "../../stores/chat.store";
 import { compareChatsByActivityDesc } from "../../lib/chat-recency";
-import { cn, getAvatarCropStyle, type AvatarCropValue } from "../../lib/utils";
-import type { Chat } from "@marinara-engine/shared";
+import { normalizeAvatarCrop, type AvatarCrop, type Chat } from "@marinara-engine/shared";
+import { cn, getAvatarCropStyle } from "../../lib/utils";
+import { useLocalizedUiText } from "../../localization/use-localized-ui-text";
 
-const MODE_BADGE: Record<string, { icon: React.ReactNode; label: string; logoModeClass: string }> =
-  {
-    conversation: {
-      icon: <MessageSquare size="0.375rem" />,
-      label: "Conversation",
-      logoModeClass: "mari-chat-logo-mode--conversation",
-    },
-    roleplay: {
-      icon: <BookOpen size="0.375rem" />,
-      label: "Roleplay",
-      logoModeClass: "mari-chat-logo-mode--roleplay",
-    },
-    visual_novel: {
-      icon: <BookOpen size="0.375rem" />,
-      label: "Roleplay",
-      logoModeClass: "mari-chat-logo-mode--roleplay",
-    },
-    game: {
-      icon: <Theater size="0.375rem" />,
-      label: "Game",
-      logoModeClass: "mari-chat-logo-mode--game",
-    },
-  };
+const MODE_BADGE: Record<string, { icon: React.ReactNode; label: string; logoModeClass: string }> = {
+  conversation: {
+    icon: <MessageSquare size="0.375rem" />,
+    label: "Conversation",
+    logoModeClass: "mari-chat-logo-mode--conversation",
+  },
+  roleplay: {
+    icon: <BookOpen size="0.375rem" />,
+    label: "Roleplay",
+    logoModeClass: "mari-chat-logo-mode--roleplay",
+  },
+  game: {
+    icon: <Theater size="0.375rem" />,
+    label: "Game",
+    logoModeClass: "mari-chat-logo-mode--game",
+  },
+};
 
 function parseRecentChatCharacterIds(value: Chat["characterIds"]): string[] {
   let rawIds: unknown = [];
@@ -46,6 +41,7 @@ function parseRecentChatCharacterIds(value: Chat["characterIds"]): string[] {
 }
 
 export function RecentChats() {
+  const localize = useLocalizedUiText();
   const { data: chats } = useChats();
   const setActiveChatId = useChatStore((s) => s.setActiveChatId);
 
@@ -62,13 +58,13 @@ export function RecentChats() {
   }, [recentChats]);
   const { data: characterSummaries } = useCharacterSummaries(recentCharacterIds);
   const charLookup = useMemo(() => {
-    const map = new Map<string, { name: string; avatarUrl: string | null; avatarCrop?: AvatarCropValue | null }>();
+    const map = new Map<string, { name: string; avatarUrl: string | null; avatarCrop?: AvatarCrop | null }>();
     if (!characterSummaries) return map;
     for (const character of characterSummaries) {
       map.set(character.id, {
         name: character.name,
         avatarUrl: character.avatarUrl,
-        avatarCrop: (character.avatarCrop as AvatarCropValue | undefined) ?? null,
+        avatarCrop: normalizeAvatarCrop(character.avatarCrop),
       });
     }
     return map;
@@ -81,20 +77,18 @@ export function RecentChats() {
     >
       {recentChats.length === 0 ? (
         <p className="rounded-lg border border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-panel-bg)] px-3 py-1.5 text-xs text-[var(--marinara-chat-chrome-panel-muted)]">
-          No chats yet
+          {localize("No chats yet")}
         </p>
       ) : (
-        <div className="w-full overflow-x-auto">
-          <div className="mx-auto flex w-max items-center justify-center gap-1.5 px-1">
-            {recentChats.map((chat) => (
-              <RecentChatChip
-                key={chat.id}
-                chat={chat}
-                charLookup={charLookup}
-                onClick={() => setActiveChatId(chat.id)}
-              />
-            ))}
-          </div>
+        <div className="mx-auto flex w-full flex-nowrap items-center justify-center gap-1.5 px-1">
+          {recentChats.map((chat) => (
+            <RecentChatChip
+              key={chat.id}
+              chat={chat}
+              charLookup={charLookup}
+              onClick={() => setActiveChatId(chat.id)}
+            />
+          ))}
         </div>
       )}
     </div>
@@ -107,9 +101,10 @@ function RecentChatChip({
   onClick,
 }: {
   chat: Chat;
-  charLookup: Map<string, { name: string; avatarUrl: string | null; avatarCrop?: AvatarCropValue | null }>;
+  charLookup: Map<string, { name: string; avatarUrl: string | null; avatarCrop?: AvatarCrop | null }>;
   onClick: () => void;
 }) {
+  const localize = useLocalizedUiText();
   const mode = MODE_BADGE[chat.mode] ?? MODE_BADGE.conversation;
 
   const charIds = useMemo(() => parseRecentChatCharacterIds(chat.characterIds), [chat.characterIds]);
@@ -126,9 +121,10 @@ function RecentChatChip({
     <button
       onClick={onClick}
       className={cn(
-        "mari-chrome-control mari-chrome-control--small group relative max-w-[8rem] shrink-0 px-2 py-1.5",
+        "mari-chrome-control mari-chrome-control--small group relative h-8 w-0 min-w-0 max-w-[8rem] flex-1 basis-0 border-[var(--marinara-chat-chrome-button-border-active)] px-2 py-0 text-[var(--marinara-chat-chrome-button-text-active)] hover:border-[var(--marinara-chat-chrome-button-border-hover)] hover:text-[var(--marinara-chat-chrome-button-text-hover)]",
         "cursor-pointer",
       )}
+      title={chat.name}
     >
       {/* Small avatar with mode dot */}
       <div className="relative flex-shrink-0">
@@ -162,14 +158,14 @@ function RecentChatChip({
             "mari-chat-mode-badge absolute -top-0.5 -left-0.5 flex h-3 w-3 items-center justify-center rounded-full ring-1 ring-[var(--card)]",
             mode.logoModeClass,
           )}
-          title={mode.label}
+          title={localize(mode.label)}
         >
           {mode.icon}
         </div>
       </div>
 
       {/* Chat name only */}
-      <span className="mari-chrome-text truncate text-[0.625rem] font-medium">{chat.name}</span>
+      <span className="mari-chrome-text min-w-0 flex-1 truncate text-[0.625rem] font-medium">{chat.name}</span>
     </button>
   );
 }

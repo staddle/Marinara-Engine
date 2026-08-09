@@ -167,6 +167,7 @@ function parseLorebookRow(row: Record<string, unknown>) {
     vectorMaxResults: normalizeLorebookVectorMaxResults(row.vectorMaxResults),
     isGlobal: row.isGlobal === "true",
     enabled: row.enabled === "true",
+    hiddenFromLibrary: row.hiddenFromLibrary === "true",
     scope: parseLorebookScope(row.scope),
     imagePath: row.imagePath || null,
     generatedBy: row.generatedBy || null,
@@ -402,7 +403,7 @@ export function createLorebooksStorage(db: DB) {
     },
 
     async listPage(options: LorebookListPageOptions) {
-      const clauses = [];
+      const clauses = [eq(lorebooks.hiddenFromLibrary, "false")];
       if (options.category) clauses.push(eq(lorebooks.category, options.category));
       const pattern = likePattern(options.search);
       if (pattern) {
@@ -516,6 +517,7 @@ export function createLorebooksStorage(db: DB) {
           chatId: input.chatId ?? null,
           isGlobal: String(input.isGlobal ?? false),
           enabled: String(input.enabled ?? true),
+          hiddenFromLibrary: String(input.hiddenFromLibrary ?? false),
           scope: JSON.stringify(parseLorebookScope(input.scope)),
           tags: input.tags ? JSON.stringify(input.tags) : "[]",
           generatedBy: input.generatedBy ?? null,
@@ -562,6 +564,7 @@ export function createLorebooksStorage(db: DB) {
       if (input.chatId !== undefined) updates.chatId = input.chatId;
       if (input.isGlobal !== undefined) updates.isGlobal = String(input.isGlobal);
       if (input.enabled !== undefined) updates.enabled = String(input.enabled);
+      if (input.hiddenFromLibrary !== undefined) updates.hiddenFromLibrary = String(input.hiddenFromLibrary);
       if (input.scope !== undefined) updates.scope = JSON.stringify(parseLorebookScope(input.scope));
       if (input.tags !== undefined) updates.tags = JSON.stringify(input.tags);
       if (input.generatedBy !== undefined) updates.generatedBy = input.generatedBy;
@@ -809,6 +812,7 @@ export function createLorebooksStorage(db: DB) {
         generationTriggerFilters: JSON.stringify(input.generationTriggerFilters ?? []),
         additionalMatchingSources: JSON.stringify(input.additionalMatchingSources ?? []),
         position: input.position ?? 0,
+        outletName: input.outletName ?? "",
         depth: input.depth ?? 0,
         order: input.order ?? 100,
         role: input.role ?? "system",
@@ -892,6 +896,7 @@ export function createLorebooksStorage(db: DB) {
       if (input.additionalMatchingSources !== undefined)
         updates.additionalMatchingSources = JSON.stringify(input.additionalMatchingSources);
       if (input.position !== undefined) updates.position = input.position;
+      if (input.outletName !== undefined) updates.outletName = input.outletName;
       if (input.depth !== undefined) updates.depth = input.depth;
       if (input.order !== undefined) updates.order = input.order;
       if (input.role !== undefined) updates.role = input.role;
@@ -933,10 +938,51 @@ export function createLorebooksStorage(db: DB) {
         throw new Error("One or more selected entries do not belong to this lorebook");
       }
 
-      const updates: Record<string, unknown> = { updatedAt: now() };
-      for (const [field, value] of Object.entries(changes)) {
-        if (value !== undefined) updates[field] = String(value);
+      if (changes.folderId !== undefined) {
+        await assertFolderBelongsToLorebook(lorebookId, changes.folderId);
       }
+
+      const updates: Record<string, unknown> = { updatedAt: now() };
+      if (changes.enabled !== undefined) updates.enabled = String(changes.enabled);
+      if (changes.constant !== undefined) updates.constant = String(changes.constant);
+      if (changes.selective !== undefined) updates.selective = String(changes.selective);
+      if (changes.selectiveLogic !== undefined) updates.selectiveLogic = changes.selectiveLogic;
+      if (changes.probability !== undefined) updates.probability = changes.probability;
+      if (changes.scanDepth !== undefined) updates.scanDepth = changes.scanDepth;
+      if (changes.matchWholeWords !== undefined) updates.matchWholeWords = String(changes.matchWholeWords);
+      if (changes.caseSensitive !== undefined) updates.caseSensitive = String(changes.caseSensitive);
+      if (changes.useRegex !== undefined) updates.useRegex = String(changes.useRegex);
+      if (changes.characterFilterMode !== undefined) updates.characterFilterMode = changes.characterFilterMode;
+      if (changes.characterFilterIds !== undefined)
+        updates.characterFilterIds = JSON.stringify(changes.characterFilterIds);
+      if (changes.characterTagFilterMode !== undefined) updates.characterTagFilterMode = changes.characterTagFilterMode;
+      if (changes.characterTagFilters !== undefined)
+        updates.characterTagFilters = JSON.stringify(changes.characterTagFilters);
+      if (changes.generationTriggerFilterMode !== undefined)
+        updates.generationTriggerFilterMode = changes.generationTriggerFilterMode;
+      if (changes.generationTriggerFilters !== undefined)
+        updates.generationTriggerFilters = JSON.stringify(changes.generationTriggerFilters);
+      if (changes.additionalMatchingSources !== undefined)
+        updates.additionalMatchingSources = JSON.stringify(changes.additionalMatchingSources);
+      if (changes.position !== undefined) updates.position = changes.position;
+      if (changes.outletName !== undefined) updates.outletName = changes.outletName;
+      if (changes.depth !== undefined) updates.depth = changes.depth;
+      if (changes.order !== undefined) updates.order = changes.order;
+      if (changes.role !== undefined) updates.role = changes.role;
+      if (changes.sticky !== undefined) updates.sticky = changes.sticky;
+      if (changes.cooldown !== undefined) updates.cooldown = changes.cooldown;
+      if (changes.delay !== undefined) updates.delay = changes.delay;
+      if (changes.ephemeral !== undefined) updates.ephemeral = changes.ephemeral;
+      if (changes.group !== undefined) updates.group = changes.group;
+      if (changes.groupWeight !== undefined) updates.groupWeight = changes.groupWeight;
+      if (changes.folderId !== undefined) updates.folderId = changes.folderId;
+      if (changes.tag !== undefined) updates.tag = changes.tag;
+      if (changes.locked !== undefined) updates.locked = String(changes.locked);
+      if (changes.preventRecursion !== undefined) updates.preventRecursion = String(changes.preventRecursion);
+      if (changes.excludeRecursion !== undefined) updates.excludeRecursion = String(changes.excludeRecursion);
+      if (changes.delayUntilRecursion !== undefined) updates.delayUntilRecursion = String(changes.delayUntilRecursion);
+      if (changes.excludeFromVectorization !== undefined)
+        updates.excludeFromVectorization = String(changes.excludeFromVectorization);
       if (changes.excludeFromVectorization === true) updates.embedding = null;
 
       await db

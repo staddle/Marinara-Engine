@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import { api, type JsonRepairRequest } from "../../lib/api-client";
 import { cn } from "../../lib/utils";
 import { Modal } from "../ui/Modal";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 type GameJsonRepairModalProps = {
   request: JsonRepairRequest | null;
@@ -31,6 +32,7 @@ function validateJson(raw: string): { valid: true; parsed: unknown } | { valid: 
 }
 
 export function GameJsonRepairModal({ request, onClose, onApplied }: GameJsonRepairModalProps) {
+  const { t: localizeUi } = useUiTranslation();
   const [draft, setDraft] = useState("");
   const [isApplying, setIsApplying] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
@@ -52,7 +54,7 @@ export function GameJsonRepairModal({ request, onClose, onApplied }: GameJsonRep
   const handleFormat = () => {
     const next = validateJson(draft);
     if (!next.valid) {
-      toast.error("JSON is still invalid, so I cannot format it yet.");
+      toast.error(localizeUi("ui.game.gamejsonrepairmodal.jsonIsStillInvalidSoICannotFormatIt"));
       return;
     }
     setDraft(JSON.stringify(next.parsed, null, 2));
@@ -67,7 +69,7 @@ export function GameJsonRepairModal({ request, onClose, onApplied }: GameJsonRep
         ...(request.applyBody ?? {}),
         rawJson: draft,
       });
-      toast.success("Repaired JSON applied.");
+      toast.success(localizeUi("ui.game.gamejsonrepairmodal.repairedJsonApplied"));
       onApplied(result, request);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to apply repaired JSON.";
@@ -90,10 +92,7 @@ export function GameJsonRepairModal({ request, onClose, onApplied }: GameJsonRep
           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--accent)] text-[var(--foreground)]/75">
             <Braces size="1rem" />
           </div>
-          <div className="min-w-0 text-sm text-[var(--muted-foreground)]">
-            The model returned JSON that Marinara could not apply. Fix the brackets, commas, or fields here, then apply
-            it without regenerating the whole response.
-          </div>
+          <div className="min-w-0 text-sm text-[var(--muted-foreground)]">{localizeUi("ui.game.gamejsonrepairmodal.theModelReturnedJsonThatMarinaraCouldNotApply")}</div>
         </div>
 
         <div
@@ -105,7 +104,7 @@ export function GameJsonRepairModal({ request, onClose, onApplied }: GameJsonRep
           )}
         >
           {validation.valid ? <CheckCircle2 size="0.95rem" /> : <AlertTriangle size="0.95rem" />}
-          <span>{validation.valid ? "JSON is valid." : validation.error}</span>
+          <span>{validation.valid ?localizeUi("ui.game.gamejsonrepairmodal.jsonIsValid") : validation.error}</span>
         </div>
 
         {serverError && (
@@ -144,27 +143,21 @@ export function GameJsonRepairModal({ request, onClose, onApplied }: GameJsonRep
             onClick={onClose}
             disabled={isApplying}
             className="rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            Cancel
-          </button>
+          >{localizeUi("chat.delete.dialog.cancel")}</button>
           <button
             type="button"
             onClick={handleFormat}
             disabled={!validation.valid || isApplying}
             className="inline-flex items-center justify-center gap-2 rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs font-medium text-[var(--foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <Wand2 size="0.95rem" />
-            Format
-          </button>
+            <Wand2 size="0.95rem" />{localizeUi("ui.game.gamejsonrepairmodal.format")}</button>
           <button
             type="button"
             onClick={handleApply}
             disabled={!validation.valid || isApplying}
             className="inline-flex items-center justify-center gap-2 rounded-lg bg-[var(--primary)] px-3 py-2 text-xs font-semibold text-[var(--primary-foreground)] transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {isApplying ? <Loader2 size="0.95rem" className="animate-spin" /> : <CheckCircle2 size="0.95rem" />}
-            Apply Repaired JSON
-          </button>
+            {isApplying ? <Loader2 size="0.95rem" className="animate-spin" /> : <CheckCircle2 size="0.95rem" />}{localizeUi("ui.game.gamejsonrepairmodal.applyRepairedJson")}</button>
         </div>
       </div>
     </Modal>

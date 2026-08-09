@@ -1,14 +1,13 @@
 // ──────────────────────────────────────────────
 // Fastify App Factory
 // ──────────────────────────────────────────────
-import Fastify from "fastify";
+import Fastify, { LogController } from "fastify";
 import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
 import fastifyStatic from "@fastify/static";
 import { getDB, closeDB, type DB } from "./db/connection.js";
 import { registerRoutes } from "./routes/index.js";
 import { errorHandler } from "./middleware/error-handler.js";
-import { logger } from "./lib/logger.js";
 import { ipAllowlistHook } from "./middleware/ip-allowlist.js";
 import { basicAuthHook } from "./middleware/basic-auth.js";
 import { csrfProtectionHook } from "./middleware/csrf-protection.js";
@@ -40,7 +39,9 @@ import { corsDelegate } from "./config/cors-config.js";
 import { sidecarProcessService } from "./services/sidecar/sidecar-process.service.js";
 import { startServerAutonomousScheduler } from "./services/conversation/server-autonomous-scheduler.service.js";
 import { startNoodleRefreshScheduler } from "./services/noodle/noodle-refresh-scheduler.service.js";
-import { purgeRetiredExtensionData } from "./services/setup/retired-extension-cleanup.js";
+import { startNoodleAutoPostScheduler } from "./services/noodle/noodle-autopost-scheduler.service.js";
+import { preparePersonalExtensionTrust } from "./services/setup/personal-extension-trust.js";
+import { personalServerExtensionRuntime } from "./services/extensions/personal-server-extension-runtime.js";
 import { runWithGenerationFallbackNotifier } from "./services/generation/fallback-notification.js";
 import { createReplyFallbackNotifier } from "./routes/generate/fallback-notification.js";
 import { initializeCapabilityAgentRegistry } from "./services/capability-packages/capability-agent-registry.service.js";
@@ -48,6 +49,7 @@ import { capabilityPackageManager } from "./services/capability-packages/package
 import { capabilityModuleRuntime } from "./services/capability-packages/capability-module-runtime.service.js";
 import { migrateLegacyCapabilities } from "./services/capability-packages/legacy-capability-migration.js";
 import { createClientStaticOptions } from "./config/client-static-config.js";
+import { hostValidationHook } from "./middleware/host-validation.js";
 
 const isLite = process.env.MARINARA_LITE === "true" || process.env.MARINARA_LITE === "1";
 const MAX_UPLOAD_BYTES = 256 * 1024 * 1024;
@@ -59,10 +61,14 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
       level: getLogLevel(),
       transport: getNodeEnv() !== "production" ? { target: "pino-pretty", options: { colorize: true } } : undefined,
     },
-    disableRequestLogging: isRequestLoggingDisabled(),
+    logController: new LogController({ disableRequestLogging: isRequestLoggingDisabled() }),
     bodyLimit: MAX_UPLOAD_BYTES, // Large profile imports can include many base64 avatars.
     ...(https && { https }),
   });
+
+  // Reject attacker-controlled DNS names before CORS or loopback trust can
+  // treat a rebound browser request as same-origin local traffic.
+  app.addHook("onRequest", hostValidationHook);
 
   // ── Plugins ──
   // CORS uses a per-request delegator so the trusted set is re-read each
@@ -86,6 +92,7 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
     try {
       const stopResults = await Promise.allSettled([
         capabilityModuleRuntime.stop(),
+        personalServerExtensionRuntime.stop(),
         sidecarProcessService.stop(),
       ]);
       for (const result of stopResults) {
@@ -98,43 +105,17 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
     }
   });
 
-  // Existing installations retain their selected capabilities and receive compatible package updates.
-  // Fresh installs stay empty.
-  let migratedLegacyCapabilities = false;
+  // Existing installations retain their selected capabilities. Downloadable
+  // package updates are offered in the client and never applied at startup.
   if (getNodeEnv() !== "test") {
     try {
       const removedCorePackages = await capabilityPackageManager.pruneNonDownloadableCorePackages();
       if (removedCorePackages.length > 0) {
         app.log.info("Removed obsolete downloadable copies of core features: %s", removedCorePackages.join(", "));
       }
-      const migration = await migrateLegacyCapabilities(db, hadUserStateBeforeStartup);
-      migratedLegacyCapabilities = migration.migrated && migration.complete;
+      await migrateLegacyCapabilities(db, hadUserStateBeforeStartup);
     } catch (error) {
       app.log.warn(error, "Optional package availability migration did not complete; it will retry next startup");
-    }
-    if (!migratedLegacyCapabilities) {
-      try {
-        const packageUpdates = await capabilityPackageManager.updateInstalledPackagesToLatest();
-        for (const update of packageUpdates.updated) {
-          app.log.info(
-            "Automatically updated capability package %s from %s to %s",
-            update.id,
-            update.previousVersion,
-            update.version,
-          );
-        }
-        for (const failure of packageUpdates.failures) {
-          app.log.warn(
-            failure.error,
-            "Could not automatically update capability package %s from %s to %s; keeping the installed version",
-            failure.id,
-            failure.previousVersion,
-            failure.version,
-          );
-        }
-      } catch (error) {
-        app.log.warn(error, "Automatic capability package update check failed; installed versions remain available");
-      }
     }
   }
   resetTurnGameRegistry();
@@ -159,6 +140,22 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
 
   // ── Recover orphaned gallery images (files on disk without DB records) ──
   await recoverGalleryImages(db);
+
+  // Legacy extension payloads and any out-of-band code changes are retained as
+  // disabled drafts. Execution always requires approval of the exact hash.
+  const personalExtensionTrust = await preparePersonalExtensionTrust(db);
+  if (personalExtensionTrust.legacyRecordsQuarantined > 0) {
+    app.log.info(
+      "Quarantined %d legacy extension record(s) as Personal Extension drafts",
+      personalExtensionTrust.legacyRecordsQuarantined,
+    );
+  }
+  if (personalExtensionTrust.changedRecordsDisabled > 0) {
+    app.log.warn(
+      "Disabled %d Personal Extension record(s) because stored code changed outside the approval flow",
+      personalExtensionTrust.changedRecordsDisabled,
+    );
+  }
 
   // Keep fallback reporting attached to the originating request even when
   // generation passes through nested services. Streamed routes emit an SSE
@@ -206,26 +203,29 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
 
   // Trusted downloaded server capabilities register while Fastify is still mutable.
   await capabilityModuleRuntime.start(app);
+  // A package can install its own art during activate(), which runs AFTER the boot-time scan above, so
+  // without this its assets stay invisible to everything reading the manifest until the NEXT restart.
+  // Idempotent — the same scan the upload routes already re-run. Guarded because it walks files a package
+  // just wrote: a stale manifest costs that package its art, failing to boot costs the user everything.
+  try {
+    buildAssetManifest();
+  } catch (error) {
+    app.log.warn({ err: error }, "[capability] post-activation asset rescan failed; manifest may be stale");
+  }
+  await personalServerExtensionRuntime.start(db);
   // Server-backed agent definitions are visible only after their runtime reaches
   // functional readiness. Packages without a server entrypoint remain available
   // as soon as their verified files are installed.
   await initializeCapabilityAgentRegistry();
-
-  // Permanently erase payload-bearing records left by the removed extension system.
-  const retiredExtensionCleanup = await purgeRetiredExtensionData(db);
-  if (retiredExtensionCleanup.extensionRecordsRemoved > 0 || retiredExtensionCleanup.extensionSettingsRemoved > 0) {
-    logger.info(
-      "Permanently removed %d retired extension record(s) and %d extension setting(s)",
-      retiredExtensionCleanup.extensionRecordsRemoved,
-      retiredExtensionCleanup.extensionSettingsRemoved,
-    );
-  }
 
   // ── Server-side autonomous conversation scheduler ──
   startServerAutonomousScheduler(app);
 
   // ── Automatic Noodle timeline refresh scheduler ──
   startNoodleRefreshScheduler(app);
+
+  // ── NoodleR per-creator automatic-posting scheduler ──
+  startNoodleAutoPostScheduler(app);
 
   // ── Sidecar bootstrap (background, skipped in lite mode) ──
   if (!isLite) {

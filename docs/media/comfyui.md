@@ -172,6 +172,7 @@ This can produce more consistent results than one generic workflow, but each con
 
 - [Image Generation Providers and Setup](image-providers.md) covers all supported image services and shared image settings.
 - [Scene Video Generation](scene-video.md) covers video connections and every scene-video surface.
+- [LTX 2.3 Storyboards in Game Mode](../game/ltx-2-3-storyboards.md) covers an LTX Director API workflow, placeholders, and the recommended Game settings.
 - [Image Style Profiles](style-profiles.md) explains Marinara's reusable prompt styles.
 - [Illustrator Agent](illustrator-agent.md) covers automatic scene illustration.
 - [Server Configuration Reference](../CONFIGURATION.md) documents local-network access and ComfyUI timeouts.

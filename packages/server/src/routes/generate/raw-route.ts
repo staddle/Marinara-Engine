@@ -12,7 +12,12 @@ import { createConnectionsStorage } from "../../services/storage/connections.sto
 import { createLLMProvider } from "../../services/llm/provider-registry.js";
 import { withConnectionFallbackProvider } from "../../services/llm/connection-fallback-provider.js";
 import { getLocalSidecarProvider, LOCAL_SIDECAR_MODEL } from "../../services/llm/local-sidecar.js";
-import { yieldToEventLoop, type BaseLLMProvider, type ChatMessage } from "../../services/llm/base-provider.js";
+import {
+  yieldToEventLoop,
+  type BaseLLMProvider,
+  type ChatMessage,
+  type ChatOptions,
+} from "../../services/llm/base-provider.js";
 import { mergeAdjacentMessages } from "../../services/prompt/merger.js";
 import {
   fitMessagesForModelAccess,
@@ -157,6 +162,7 @@ export async function registerRawRoute(app: FastifyInstance) {
     let serviceTier: "flex" | "priority" | null = null;
     let customParameters: Record<string, unknown> = {};
     let enabledParameters: GenerationParameterSendMap | undefined;
+    let reasoningEffortConfigured = false;
 
     const applyParameterOverrides = (params: RawParameters | ReturnType<typeof parseStoredGenerationParameters>) => {
       if (!params) return;
@@ -167,7 +173,10 @@ export async function registerRawRoute(app: FastifyInstance) {
       if (params.minP !== undefined) minP = params.minP;
       if (params.frequencyPenalty !== undefined) frequencyPenalty = params.frequencyPenalty;
       if (params.presencePenalty !== undefined) presencePenalty = params.presencePenalty;
-      if (params.reasoningEffort !== undefined) reasoningEffort = params.reasoningEffort;
+      if (params.reasoningEffort !== undefined) {
+        reasoningEffort = params.reasoningEffort;
+        reasoningEffortConfigured = true;
+      }
       if (params.verbosity !== undefined) verbosity = params.verbosity;
       if (params.serviceTier !== undefined) serviceTier = normalizeServiceTier(params.serviceTier);
       if (params.customParameters) customParameters = mergeCustomParameters(customParameters, params.customParameters);
@@ -195,6 +204,12 @@ export async function registerRawRoute(app: FastifyInstance) {
       reasoningEffort,
     });
     const enableThinking = !!resolvedEffort;
+    const providerReasoningEffort: ChatOptions["reasoningEffort"] =
+      enabledParameters?.reasoningEffort === false
+        ? undefined
+        : reasoningEffortConfigured && reasoningEffort === null
+          ? "none"
+          : (resolvedEffort ?? undefined);
 
     const modelLower = conn.model.toLowerCase();
     const isClaudeNoSampling = isClaudeAdaptiveOnlyNoSamplingModel(modelLower);
@@ -278,7 +293,7 @@ export async function registerRawRoute(app: FastifyInstance) {
           presencePenalty: suppressModelParameters ? undefined : presencePenalty || undefined,
           minP: minP || undefined,
           enableThinking: suppressModelParameters ? undefined : enableThinking || undefined,
-          reasoningEffort: suppressModelParameters ? undefined : resolvedEffort || undefined,
+          reasoningEffort: suppressModelParameters ? undefined : providerReasoningEffort,
           verbosity: verbosity || undefined,
           serviceTier: serviceTier || undefined,
           customParameters: Object.keys(customParameters).length > 0 ? customParameters : undefined,
@@ -308,7 +323,7 @@ export async function registerRawRoute(app: FastifyInstance) {
       presencePenalty: presencePenalty || undefined,
       minP: minP || undefined,
       enableThinking,
-      reasoningEffort: resolvedEffort ?? undefined,
+      reasoningEffort: providerReasoningEffort,
       verbosity: verbosity ?? undefined,
       serviceTier,
       customParameters,

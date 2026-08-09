@@ -30,11 +30,30 @@ export function normalizeSpritePlacements(raw: unknown): SpritePlacementMap {
   return Object.fromEntries(entries);
 }
 
-export function mirrorSpritePlacements(placements: SpritePlacementMap): SpritePlacementMap {
+export function mirrorSpritePlacements(
+  placements: SpritePlacementMap,
+  excludedCharacterIds: readonly string[] = [],
+): SpritePlacementMap {
   return Object.fromEntries(
-    Object.entries(placements).map(([characterId, placement]) => [
-      characterId,
-      clampSpritePlacement({ x: 100 - placement.x, y: placement.y }),
+    Object.entries(placements).map(([placementKey, placement]) => {
+      const excluded = excludedCharacterIds.some(
+        (characterId) => placementKey === characterId || placementKey.startsWith(`${characterId}:`),
+      );
+      return [placementKey, excluded ? placement : clampSpritePlacement({ x: 100 - placement.x, y: placement.y })];
+    }),
+  );
+}
+
+export function mirrorCharacterSpritePlacements(
+  placements: SpritePlacementMap,
+  characterId: string,
+): SpritePlacementMap {
+  return Object.fromEntries(
+    Object.entries(placements).map(([placementKey, placement]) => [
+      placementKey,
+      placementKey === characterId || placementKey.startsWith(`${characterId}:`)
+        ? clampSpritePlacement({ x: 100 - placement.x, y: placement.y })
+        : placement,
     ]),
   );
 }

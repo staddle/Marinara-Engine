@@ -12,6 +12,7 @@ import {
   readChatToolbarFloatingPanelAnchor,
   type ChatToolbarFloatingPanelAnchor,
 } from "./ChatToolbarControls";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 const ActiveLorebookEntriesPanel = lazy(async () => {
   const module = await import("./ChatRoleplayPanels");
@@ -52,11 +53,10 @@ function getMobileActiveContextPanelStyle(anchor: NonNullable<ChatToolbarFloatin
 }
 
 function ActiveLorebookEntriesLoadingFallback() {
+  const { t: localizeUi } = useUiTranslation();
   return (
     <div className="flex items-center gap-2 py-4 text-xs text-[var(--muted-foreground)]">
-      <Loader2 size="0.75rem" className="animate-spin" />
-      Loading active context...
-    </div>
+      <Loader2 size="0.75rem" className="animate-spin" />{localizeUi("ui.chat.activelorebookentriesloadingfallback.loadingActiveContext")}</div>
   );
 }
 
@@ -112,9 +112,10 @@ export function ActiveLorebookEntriesButton({
   chatId,
   buttonClassName,
   iconSize = "0.875rem",
-  title = "Active Context",
+  title,
   onOpen,
 }: ActiveLorebookEntriesButtonProps) {
+  const { t: localizeUi } = useUiTranslation();
   const [open, setOpen] = useState(false);
   const [mobileAnchor, setMobileAnchor] = useState<ChatToolbarFloatingPanelAnchor>(null);
   const { data, isLoading } = useActiveLorebookEntries(chatId, true);
@@ -122,6 +123,7 @@ export function ActiveLorebookEntriesButton({
   const buttonRef = useRef<HTMLButtonElement>(null);
   const isMobile = typeof window !== "undefined" && window.innerWidth < 768;
   const compact = useUIStore((s) => s.centerCompact);
+  const resolvedTitle = title ?? localizeUi("chat.toolbar.activeContext");
 
   useEffect(() => {
     if (!open) return;
@@ -194,8 +196,8 @@ export function ActiveLorebookEntriesButton({
           setOpen(nextOpen);
         }}
         className={resolvedButtonClassName}
-        title={title}
-        aria-label={title}
+        title={resolvedTitle}
+        aria-label={resolvedTitle}
       >
         <BookOpen size={iconSize} />
       </button>

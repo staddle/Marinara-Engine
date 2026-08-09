@@ -5,6 +5,11 @@ import {
   removeUniformSpriteBackgroundPng,
   selectSpriteChromaMatte,
 } from "../../packages/server/src/services/image/sprite-background.service.js";
+import {
+  buildFullBodyReferenceContract,
+  resolveSpriteNativeTransparency,
+  resolveSpriteSheetCanvas,
+} from "../../packages/server/src/routes/sprites.routes.js";
 
 // Resolve the optional native dependency from the server package where it is
 // declared instead of from this root-level regression script.
@@ -24,6 +29,51 @@ assert.match(prompt, /transparent PNG/iu);
 assert.match(prompt, /chroma magenta #FF00FF/iu);
 assert.doesNotMatch(prompt, /pure white #ffffff/iu);
 assert.equal(prompt.match(/transparent PNG format/giu)?.length, 1);
+
+const chromaOnlyPrompt = applySpriteBackgroundInstruction("full-body character on a solid white background", {
+  matte: selectSpriteChromaMatte("black hair, red coat"),
+  nativeTransparentPng: false,
+  removeBackground: true,
+});
+assert.match(chromaOnlyPrompt, /chroma green #00FF00/iu);
+assert.doesNotMatch(chromaOnlyPrompt, /solid white background/iu);
+assert.match(chromaOnlyPrompt, /never a painted transparency checkerboard/iu);
+assert.equal(resolveSpriteNativeTransparency("gpt-image-2", true), false);
+assert.equal(resolveSpriteNativeTransparency("gpt-image-2-preview", true), false);
+assert.equal(resolveSpriteNativeTransparency("gpt-image-1.5", true), true);
+assert.equal(resolveSpriteNativeTransparency("sdxl", true), true);
+assert.equal(resolveSpriteNativeTransparency("gpt-image-2", false), false);
+
+assert.deepEqual(
+  resolveSpriteSheetCanvas({ cols: 1, rows: 1, spriteType: "full-body", model: "gpt-image-2" }),
+  {
+    sheetWidth: 1024,
+    sheetHeight: 1536,
+    cellWidth: 1024,
+    cellHeight: 1536,
+  },
+);
+assert.deepEqual(
+  resolveSpriteSheetCanvas({ cols: 1, rows: 1, spriteType: "full-body", model: "sdxl" }),
+  {
+    sheetWidth: 1024,
+    sheetHeight: 1536,
+    cellWidth: 1024,
+    cellHeight: 1536,
+  },
+);
+
+const fullBodyReferenceContract = buildFullBodyReferenceContract([
+  { kind: "neutral-full-body" },
+  { kind: "expression", expression: "happy" },
+  { kind: "identity" },
+]);
+assert.match(fullBodyReferenceContract, /Reference image 1 is the user-approved neutral full-body design/iu);
+assert.match(fullBodyReferenceContract, /Preserve its exact clothing, footwear, accessories/iu);
+assert.match(fullBodyReferenceContract, /Reference image 2 is the saved portrait for the "happy" expression/iu);
+assert.match(fullBodyReferenceContract, /Match its face, gaze, mouth, eyebrows, and emotional intensity/iu);
+assert.match(fullBodyReferenceContract, /Reference image 3 is an additional identity reference/iu);
+assert.match(fullBodyReferenceContract, /one uninterrupted head-to-toe sprite/iu);
 
 function solidImage(width: number, height: number, color: [number, number, number, number]) {
   return Buffer.alloc(width * height * 4).fill(Buffer.from(color));
@@ -63,17 +113,55 @@ for (let yPos = 10; yPos < 30; yPos++) {
     setPixel(chromaPixels, width, xPos, yPos, edge ? [128, 128, 0, 255] : [255, 0, 0, 255]);
   }
 }
+for (let yPos = 16; yPos < 24; yPos++) {
+  for (let xPos = 16; xPos < 24; xPos++) setPixel(chromaPixels, width, xPos, yPos, [0, 255, 0, 255]);
+}
+setPixel(chromaPixels, width, 5, 5, [0, 80, 0, 255]);
+for (let yPos = 14; yPos < 27; yPos++) {
+  for (let xPos = 2; xPos < 10; xPos++) setPixel(chromaPixels, width, xPos, yPos, [0, 72, 0, 255]);
+}
+setPixel(chromaPixels, width, 20, 9, [80, 160, 0, 255]);
 const chromaCleanup = await removeUniformSpriteBackgroundPng(await encodeRaw(chromaPixels, width, height), 35);
 assert.ok(chromaCleanup.confidence > 0.8, `expected a confident flat matte, received ${chromaCleanup.confidence}`);
 const chromaOutput = await decodeRaw(chromaCleanup.buffer);
 assert.ok(pixelAt(chromaOutput.data, width, 0, 0).alpha <= 4, "flat chroma corner should be transparent");
-assert.ok(pixelAt(chromaOutput.data, width, 20, 20).alpha >= 250, "opaque subject center should be preserved");
+assert.ok(pixelAt(chromaOutput.data, width, 13, 13).alpha >= 250, "opaque subject should be preserved");
+assert.ok(
+  pixelAt(chromaOutput.data, width, 20, 20).alpha <= 4,
+  "an enclosed chroma pocket between subject regions should be transparent",
+);
 const chromaEdge = pixelAt(chromaOutput.data, width, 10, 20);
 assert.ok(
   chromaEdge.alpha > 40 && chromaEdge.alpha < 220,
   `soft subject edge should keep partial alpha, got ${chromaEdge.alpha}`,
 );
 assert.ok(chromaEdge.green < 80, `soft subject edge should be despilled, got green=${chromaEdge.green}`);
+const chromaFringe = pixelAt(chromaOutput.data, width, 20, 9);
+assert.ok(chromaFringe.alpha < 180, `mixed chroma fringe should lose matte opacity, got alpha=${chromaFringe.alpha}`);
+assert.ok(
+  chromaFringe.green - (chromaFringe.red + chromaFringe.blue) / 2 <= 2,
+  `mixed chroma fringe should have no residual green dominance, got rgb=${chromaFringe.red},${chromaFringe.green},${chromaFringe.blue}`,
+);
+const isolatedChroma = pixelAt(chromaOutput.data, width, 5, 5);
+assert.ok(
+  isolatedChroma.alpha <= 4,
+  `an isolated dark chroma pixel surrounded by backdrop should be transparent, got alpha=${isolatedChroma.alpha}`,
+);
+const wideChromaHalo = pixelAt(chromaOutput.data, width, 8, 20);
+assert.ok(
+  wideChromaHalo.green - (wideChromaHalo.red + wideChromaHalo.blue) / 2 <= 2,
+  `a wide dark chroma halo beyond the local edge band should have no green spill, got rgb=${wideChromaHalo.red},${wideChromaHalo.green},${wideChromaHalo.blue}`,
+);
+for (let pixelIndex = 0; pixelIndex < width * height; pixelIndex++) {
+  const xPos = pixelIndex % width;
+  const yPos = Math.floor(pixelIndex / width);
+  const pixel = pixelAt(chromaOutput.data, width, xPos, yPos);
+  if (pixel.alpha <= 4) continue;
+  assert.ok(
+    pixel.green - (pixel.red + pixel.blue) / 2 <= 2,
+    `visible output pixel ${xPos},${yPos} retained green matte dominance: rgb=${pixel.red},${pixel.green},${pixel.blue}`,
+  );
+}
 
 const legacyWhitePixels = solidImage(width, height, [255, 255, 255, 255]);
 for (let yPos = 8; yPos < 32; yPos++) {

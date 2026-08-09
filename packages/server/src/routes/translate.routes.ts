@@ -6,7 +6,12 @@ import { z } from "zod";
 import { createConnectionsStorage } from "../services/storage/connections.storage.js";
 import { createLLMProvider } from "../services/llm/provider-registry.js";
 import { withConnectionFallbackProvider } from "../services/llm/connection-fallback-provider.js";
-import { DEFAULT_TRANSLATION_SYSTEM_PROMPT, PROVIDERS, localAuthProviderBaseUrl } from "@marinara-engine/shared";
+import {
+  DEFAULT_TRANSLATION_SYSTEM_PROMPT,
+  PROVIDERS,
+  localAuthProviderBaseUrl,
+  resolveTranslationSystemPrompt,
+} from "@marinara-engine/shared";
 import { isDeeplxLocalUrlsEnabled } from "../config/runtime-config.js";
 import { safeFetch, validateOutboundUrl } from "../utils/security.js";
 import { resolveBaseUrl } from "./generate/generate-route-utils.js";
@@ -18,7 +23,7 @@ const GOOGLE_MAX_LENGTH = 5000;
 const translateSchema = z.object({
   text: z.string().min(1).max(50000),
   provider: z.enum(["ai", "deeplx", "deepl", "google"]),
-  targetLanguage: z.string().min(1),
+  targetLanguage: z.string().trim().min(1).max(100),
   connectionId: z.string().optional(),
   systemPrompt: z.string().max(5000).optional().nullable(),
   deeplApiKey: z.string().optional(),
@@ -101,7 +106,10 @@ async function translateWithAI(
     category: "main",
     onFallback,
   });
-  const systemPrompt = input.systemPrompt?.trim() || DEFAULT_TRANSLATION_SYSTEM_PROMPT;
+  const systemPrompt = resolveTranslationSystemPrompt(
+    input.systemPrompt?.trim() || DEFAULT_TRANSLATION_SYSTEM_PROMPT,
+    input.targetLanguage,
+  );
   const result = await provider.chatComplete(
     [
       {

@@ -194,8 +194,8 @@
   --muted-foreground: #d4adfc;
   --accent: #2a1a3e;
   --accent-foreground: #f0e8ff;
-  --destructive: #ff6b9d;
-  --destructive-foreground: #0a0a0a;
+  --destructive: var(--primary);
+  --destructive-foreground: var(--primary-foreground);
   --border: #d4adfc33;
   --input: #d4adfc33;
   --ring: #d4acfb;
@@ -407,7 +407,8 @@
 
   --marinara-custom-cursor-fill: #d4acfb;
   --marinara-custom-cursor-stroke: #050312;
-  --cursor-pink: url("data:image/svg+xml,%3Csvg width='24' height='24' viewBox='0 0 24 24' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M3 3L10 20L12 12L20 10L3 3Z' fill='%23D4ACFB' stroke='%23050312' stroke-width='1'/%3E%3C/svg%3E") 3 3;
+  --cursor-pink: url("data:image/svg+xml,%3Csvg width='24' height='24' viewBox='0 0 24 24' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M3 3L10 20L12 12L20 10L3 3Z' fill='%23D4ACFB' stroke='%23050312' stroke-width='1'/%3E%3C/svg%3E")
+    3 3;
   --marinara-custom-cursor: var(--cursor-pink), auto;
 
   --y2k-pink: var(--primary);
@@ -464,8 +465,8 @@
   --muted-foreground: #7a64a0;
   --accent: #ede4f7;
   --accent-foreground: #1a1025;
-  --destructive: #e84878;
-  --destructive-foreground: #ffffff;
+  --destructive: var(--primary);
+  --destructive-foreground: var(--primary-foreground);
   --border: #d4adfc44;
   --input: #d4adfc44;
   --ring: #d4acfb;
@@ -726,6 +727,23 @@
   padding: 0.375rem 0.625rem;
 }
 
+.mari-chrome-control--regular-label {
+  font-weight: 400;
+}
+
+.mari-character-row-action {
+  height: 1.75rem;
+  min-height: 1.75rem;
+  padding: 0;
+}
+
+@media (width < 48rem) {
+  .mari-character-row-action {
+    height: 1.5rem;
+    min-height: 1.5rem;
+  }
+}
+
 .mari-chrome-control--selected,
 .mari-chrome-control[aria-pressed="true"] {
   border-color: var(--marinara-chat-chrome-button-border-active);
@@ -881,6 +899,12 @@
   --mari-panel-gradient-text: #f9fafb;
 }
 
+.mari-panel-gradient--backgrounds {
+  --mari-panel-gradient-start: #818cf8;
+  --mari-panel-gradient-end: #6366f1;
+  --mari-panel-gradient-text: #eef2ff;
+}
+
 .mari-suggestion-chips {
   display: flex;
   flex-wrap: wrap;
@@ -991,11 +1015,7 @@
 }
 
 .mari-avatar-placeholder {
-  background: linear-gradient(
-    135deg,
-    var(--mari-avatar-placeholder-start),
-    var(--mari-avatar-placeholder-end)
-  );
+  background: linear-gradient(135deg, var(--mari-avatar-placeholder-start), var(--mari-avatar-placeholder-end));
   color: var(--mari-avatar-placeholder-text);
   box-shadow:
     0 0.25rem 0.75rem color-mix(in srgb, var(--mari-avatar-placeholder-end) 18%, transparent),
@@ -1148,6 +1168,7 @@
 }
 
 .mari-chrome-sort-field {
+  width: 6.5rem;
   border-color: var(--marinara-chat-chrome-button-border);
   color: var(--marinara-chat-chrome-button-text-active);
 }
@@ -1392,15 +1413,21 @@
 }
 
 [data-marinara-chat-chrome-accent-mode="gradient"]
-  .mari-chrome-control:not(.mari-chrome-control--danger):not(.mari-chat-mode-action):not(.mari-panel-gradient-button):hover {
+  .mari-chrome-control:not(.mari-chrome-control--danger):not(.mari-chat-mode-action):not(
+    .mari-panel-gradient-button
+  ):hover {
   border-color: var(--marinara-chat-chrome-button-border-hover);
   background: var(--marinara-chat-chrome-surface-bg-hover);
 }
 
 [data-marinara-chat-chrome-accent-mode="gradient"]
-  .mari-chrome-control--selected:not(.mari-chrome-control--danger):not(.mari-chat-mode-action):not(.mari-panel-gradient-button),
+  .mari-chrome-control--selected:not(.mari-chrome-control--danger):not(.mari-chat-mode-action):not(
+    .mari-panel-gradient-button
+  ),
 [data-marinara-chat-chrome-accent-mode="gradient"]
-  .mari-chrome-control[aria-pressed="true"]:not(.mari-chrome-control--danger):not(.mari-chat-mode-action):not(.mari-panel-gradient-button) {
+  .mari-chrome-control[aria-pressed="true"]:not(.mari-chrome-control--danger):not(.mari-chat-mode-action):not(
+    .mari-panel-gradient-button
+  ) {
   border-color: var(--marinara-chat-chrome-button-border-active);
   background: var(--marinara-chat-chrome-surface-bg-active);
   color: var(--marinara-chat-chrome-button-text-active);
@@ -1502,6 +1529,8 @@
 
 .mari-editor-header {
   display: flex;
+  height: 3.8125rem;
+  flex: 0 0 3.8125rem;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.75rem;
@@ -1512,10 +1541,109 @@
 
 .mari-editor-header-main {
   display: flex;
+  min-height: 2.25rem;
   min-width: 0;
   flex: 1 1 18rem;
   align-items: center;
   gap: 0.75rem;
+}
+
+.mari-settings-search-header {
+  height: auto;
+  min-height: 3.8125rem;
+  flex: 0 0 auto;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  background: transparent;
+}
+
+.mari-quick-preset-editor {
+  --marinara-editor-bg: transparent;
+  --marinara-editor-surface-bg: var(--marinara-chat-chrome-panel-bg);
+  --marinara-editor-surface-bg-hover: var(--marinara-chat-chrome-highlight-bg-hover);
+  --marinara-editor-control-bg: var(--marinara-chat-chrome-button-bg);
+  --marinara-editor-control-bg-hover: var(--marinara-chat-chrome-button-bg-hover);
+  --marinara-editor-border: var(--marinara-chat-chrome-button-border);
+  --marinara-editor-border-strong: var(--marinara-chat-chrome-button-border-hover);
+  --marinara-editor-divider: var(--marinara-chat-chrome-panel-divider);
+  --marinara-editor-text: var(--marinara-chat-chrome-panel-text);
+  --marinara-editor-muted: var(--marinara-chat-chrome-panel-muted);
+
+  background: transparent;
+  color: var(--marinara-chat-chrome-panel-text);
+}
+
+.mari-quick-preset-editor .mari-editor-panel {
+  border-color: var(--marinara-chat-chrome-button-border);
+  background: var(--marinara-chat-chrome-button-bg);
+  box-shadow: none;
+}
+
+.mari-quick-preset-editor .mari-editor-panel--soft {
+  background: color-mix(in srgb, var(--marinara-chat-chrome-button-bg) 78%, var(--marinara-chat-chrome-panel-bg) 22%);
+}
+
+.mari-quick-preset-editor .mari-editor-toolbar {
+  border-color: var(--marinara-chat-chrome-button-border);
+  background: transparent;
+  box-shadow: none;
+}
+
+.mari-quick-preset-editor .mari-editor-field {
+  border-color: var(--marinara-chat-chrome-input-border);
+  background: var(--marinara-chat-chrome-input-bg);
+  color: var(--marinara-chat-chrome-panel-text);
+}
+
+@media (max-width: 639px) {
+  .mari-quick-preset-editor [data-preset-marker-section="true"] {
+    border-color: color-mix(in srgb, #60a5fa 52%, var(--marinara-chat-chrome-button-border));
+    background: color-mix(in srgb, #3b82f6 13%, var(--marinara-chat-chrome-button-bg));
+  }
+
+  .mari-quick-preset-editor [data-preset-section-group-badge] {
+    display: none;
+  }
+}
+
+.mari-chat-settings-inline-editor {
+  --background: var(--marinara-chat-chrome-panel-bg);
+  --card: var(--marinara-chat-chrome-button-bg);
+  --secondary: var(--marinara-chat-chrome-button-bg);
+  --accent: var(--marinara-chat-chrome-button-bg-hover);
+  --foreground: var(--marinara-chat-chrome-panel-text);
+  --muted-foreground: var(--marinara-chat-chrome-panel-muted);
+  --border: var(--marinara-chat-chrome-button-border);
+  --ring: var(--marinara-chat-chrome-focus-ring);
+  --marinara-editor-bg: transparent;
+  --marinara-editor-surface-bg: var(--marinara-chat-chrome-button-bg);
+  --marinara-editor-surface-bg-hover: var(--marinara-chat-chrome-button-bg-hover);
+  --marinara-editor-control-bg: var(--marinara-chat-chrome-input-bg);
+  --marinara-editor-control-bg-hover: var(--marinara-chat-chrome-button-bg-hover);
+  --marinara-editor-border: var(--marinara-chat-chrome-button-border);
+  --marinara-editor-border-strong: var(--marinara-chat-chrome-button-border-hover);
+  --marinara-editor-divider: var(--marinara-chat-chrome-panel-divider);
+  --marinara-editor-text: var(--marinara-chat-chrome-panel-text);
+  --marinara-editor-muted: var(--marinara-chat-chrome-panel-muted);
+
+  color: var(--marinara-chat-chrome-panel-text);
+}
+
+.mari-chat-settings-inline-editor .mari-editor-panel {
+  border-color: var(--marinara-chat-chrome-button-border);
+  background: var(--marinara-chat-chrome-button-bg);
+  box-shadow: none;
+}
+
+.mari-chat-settings-inline-editor .mari-editor-panel--soft {
+  background: color-mix(in srgb, var(--marinara-chat-chrome-button-bg) 74%, var(--marinara-chat-chrome-panel-bg) 26%);
+}
+
+.mari-chat-settings-inline-editor .mari-editor-field {
+  border-color: var(--marinara-chat-chrome-input-border);
+  background: var(--marinara-chat-chrome-input-bg);
+  color: var(--marinara-chat-chrome-panel-text);
 }
 
 .mari-editor-title,
@@ -1531,16 +1659,66 @@
 .mari-editor-title,
 .mari-editor-title-input {
   color: var(--marinara-editor-text);
-  font-size: 1.125rem;
+  font-size: 1rem;
   font-weight: 700;
-  line-height: 1.35;
+  line-height: 1.2;
 }
 
 .mari-editor-subtitle-input,
 .mari-editor-meta {
   color: var(--marinara-editor-muted);
-  font-size: 0.75rem;
-  line-height: 1.35;
+  font-size: 0.6875rem;
+  line-height: 1.2;
+}
+
+.mari-editor-title-line {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.mari-editor-title-line .mari-editor-title-input {
+  width: auto;
+  max-width: 100%;
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  field-sizing: content;
+}
+
+.mari-editor-byline {
+  display: flex;
+  min-width: 0;
+  max-width: 42%;
+  flex: 0 1 auto;
+  align-items: baseline;
+  gap: 0.25rem;
+}
+
+.mari-editor-byline-creator {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mari-editor-byline-version {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.mari-editor-secondary-line {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.mari-editor-secondary-line .mari-editor-subtitle-input {
+  width: auto;
+  flex: 1 1 auto;
 }
 
 .mari-editor-meta {
@@ -1575,11 +1753,7 @@
 }
 
 .mari-editor-avatar-tile.mari-avatar-placeholder {
-  background: linear-gradient(
-    135deg,
-    var(--mari-avatar-placeholder-start),
-    var(--mari-avatar-placeholder-end)
-  );
+  background: linear-gradient(135deg, var(--mari-avatar-placeholder-start), var(--mari-avatar-placeholder-end));
   color: var(--mari-avatar-placeholder-text);
   box-shadow:
     0 0.25rem 0.75rem color-mix(in srgb, var(--mari-avatar-placeholder-end) 18%, transparent),
@@ -1665,6 +1839,22 @@
 
 .mari-editor-action--danger {
   color: var(--destructive);
+}
+
+.mari-editor-action--accent {
+  border-color: var(--marinara-editor-border-strong);
+  background: color-mix(in srgb, var(--marinara-editor-accent) 13%, transparent);
+  color: var(--marinara-editor-accent);
+}
+
+.mari-editor-action--accent:hover {
+  background: color-mix(in srgb, var(--marinara-editor-accent) 18%, transparent);
+  color: var(--marinara-editor-text);
+}
+
+.mari-editor-action--favorite[data-favorite="true"],
+.mari-editor-action--favorite:hover {
+  color: var(--marinara-editor-accent);
 }
 
 .mari-editor-status {
@@ -2048,12 +2238,15 @@
 
 @media (max-width: 767px) {
   .mari-editor-header {
+    height: auto;
+    min-height: 3.8125rem;
+    flex-basis: auto;
     gap: 0.5rem;
     padding-inline: 0.75rem;
   }
 
   .mari-editor-title-input {
-    font-size: 1rem;
+    font-size: 0.9375rem;
   }
 
   .mari-editor-icon-tile,
@@ -2153,7 +2346,11 @@ textarea {
   -webkit-touch-callout: default;
 }
 
-:where(:root[data-marinara-custom-cursor="enabled"] input, :root[data-marinara-custom-cursor="enabled"] select, :root[data-marinara-custom-cursor="enabled"] textarea) {
+:where(
+  :root[data-marinara-custom-cursor="enabled"] input,
+  :root[data-marinara-custom-cursor="enabled"] select,
+  :root[data-marinara-custom-cursor="enabled"] textarea
+) {
   cursor: var(--marinara-custom-cursor) !important;
 }
 
@@ -2465,16 +2662,12 @@ body {
   }
   54% {
     opacity: 0.95;
-    filter:
-      drop-shadow(0 0 0.38rem var(--mari-home-star-glow))
-      drop-shadow(0 0 0.9rem var(--mari-home-star-glow));
+    filter: drop-shadow(0 0 0.38rem var(--mari-home-star-glow)) drop-shadow(0 0 0.9rem var(--mari-home-star-glow));
     transform: translate(-50%, -50%) scale(1.16);
   }
   72% {
     opacity: 0.72;
-    filter:
-      drop-shadow(0 0 0.46rem var(--mari-home-star-glow))
-      drop-shadow(0 0 1.1rem var(--mari-home-star-glow));
+    filter: drop-shadow(0 0 0.46rem var(--mari-home-star-glow)) drop-shadow(0 0 1.1rem var(--mari-home-star-glow));
     transform: translate(-50%, -50%) scale(1.05);
   }
   100% {
@@ -2578,6 +2771,28 @@ strong {
   color: #e8e6e3;
   overflow-wrap: anywhere;
   word-break: break-word;
+  /* Code is LTR syntax whatever surrounds it. The direction must live in CSS,
+     not only the renderer's dir attribute: the chat HTML path re-sanitizes
+     markup with an attribute allowlist that strips `dir`. */
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+/* Mixed-direction defence, docs viewer only: links and bold runs frequently
+   hold LTR text (English UI labels, URLs) inside RTL prose; isolating them
+   keeps the bidi algorithm from dragging sentence punctuation around.
+   Scoped to .docs-reader-content because chat shares .mari-message-content
+   and isolation would change how existing RTL chat prose reorders. */
+.docs-reader-content a,
+.docs-reader-content strong {
+  unicode-bidi: isolate;
+}
+
+/* ==highlight== inside docs: inline padding severs cursive shaping across the
+   element boundary (Arabic contextual forms), so the docs reader drops it.
+   Chat keeps the padded look — same reasoning as the scoped rule above. */
+.docs-reader-content .mari-md-highlight {
+  padding: 0;
 }
 
 /* Strikethrough */
@@ -2606,6 +2821,12 @@ strong {
   -webkit-overflow-scrolling: touch;
   white-space: pre;
   color: #d4d4d4;
+  /* Code is LTR even when the document around it is RTL. Lives in CSS, not
+     only the renderer's dir attribute, because the chat HTML path strips
+     attributes. No text-align here: direction alone realigns the block, and
+     text-align would override card/theme CSS that chat honors today. */
+  direction: ltr;
+  unicode-bidi: isolate;
 }
 .mari-message-content .mari-md-codeblock code {
   background: none;
@@ -2634,7 +2855,7 @@ strong {
 .mari-message-content .mari-md-codeblock-lang {
   position: absolute;
   top: 0;
-  right: 0;
+  inset-inline-end: 0;
   font-size: 0.7em;
   color: rgba(255, 255, 255, 0.3);
   padding: 0.25em 0.6em;
@@ -2656,7 +2877,7 @@ strong {
 /* Unordered lists */
 .mari-message-content .mari-md-ul {
   list-style: disc;
-  padding-left: 1.5em;
+  padding-inline-start: 1.5em;
   margin: 0.35em 0;
 }
 .mari-message-content .mari-md-ul .mari-md-ul {
@@ -2667,7 +2888,7 @@ strong {
 /* Ordered lists */
 .mari-message-content .mari-md-ol {
   list-style: decimal;
-  padding-left: 1.5em;
+  padding-inline-start: 1.5em;
   margin: 0.35em 0;
 }
 .mari-message-content .mari-md-ol .mari-md-ol {
@@ -2695,7 +2916,7 @@ strong {
 .mari-message-content .mari-md-table td {
   border: 1px solid rgba(255, 255, 255, 0.1);
   padding: 0.4em 0.75em;
-  text-align: left;
+  text-align: start;
 }
 .mari-message-content .mari-md-table th {
   background: rgba(255, 255, 255, 0.06);
@@ -2725,14 +2946,17 @@ strong {
   background-color: color-mix(in srgb, var(--primary) 24%, transparent);
   color: var(--foreground);
   border-radius: 2px;
-  padding: 0 0.1em;
+  /* No inset at all (native-find style): inline padding severs cursive
+     shaping across the mark boundary (Arabic contextual forms, lam-alef),
+     and a box-shadow substitute grows the tint vertically and double-paints
+     where two marks abut. The bare background hugs the glyphs safely. */
   font-weight: 500;
 }
 
 /* Task lists */
 .mari-message-content .mari-md-task-list {
   list-style: none;
-  padding-left: 0.25em;
+  padding-inline-start: 0.25em;
   margin: 0.35em 0;
 }
 .mari-message-content li.mari-md-task-item {
@@ -2959,7 +3183,8 @@ strong {
   line-height: calc(1.35rem * var(--tracker-panel-font-scale));
 }
 
-.mari-tracker-panel-scroll[data-tracker-content-constrained="true"] :is(.leading-3, .leading-4, .leading-5, .leading-6) {
+.mari-tracker-panel-scroll[data-tracker-content-constrained="true"]
+  :is(.leading-3, .leading-4, .leading-5, .leading-6) {
   line-height: calc(var(--tracker-panel-base-line-height) * var(--tracker-panel-font-scale));
 }
 
@@ -3093,7 +3318,8 @@ strong {
   .mari-sidebar-header,
   .mari-sidebar-footer,
   .mari-right-panel,
-  .mari-right-panel-header {
+  .mari-right-panel-header,
+  [data-chat-mode="roleplay"] .marinara-chat-input-shell {
     backdrop-filter: none !important;
   }
 
@@ -3102,6 +3328,12 @@ strong {
   .mari-sidebar-footer,
   .mari-right-panel-header {
     background: var(--card) !important;
+  }
+
+  [data-chat-mode="roleplay"] .marinara-chat-input-shell {
+    background: linear-gradient(var(--card), var(--card)), var(--background) !important;
+    contain: layout paint;
+    isolation: isolate;
   }
 
   .mari-sidebar,
@@ -3649,6 +3881,94 @@ strong {
 .group:focus-visible .roleplay-hud-scroll-track,
 .roleplay-hud-scroll-track--active {
   animation: roleplay-hud-field-scroll 9s linear infinite;
+}
+
+/* ── Chat resource drop target ──
+   Accent comes from the panel gradient tokens (.mari-panel-gradient--*), so a dropped
+   lorebook reads amber, a persona reads emerald, and so on. */
+@keyframes mari-chat-drop-zone-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes mari-chat-drop-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.mari-chat-drop-zone {
+  --mari-chat-drop-accent: var(--mari-panel-gradient-end, var(--primary));
+  --mari-chat-drop-accent-soft: var(--mari-panel-gradient-start, var(--primary));
+
+  border: 0.25rem dotted color-mix(in srgb, var(--mari-chat-drop-accent) 80%, transparent);
+  border-radius: 1rem;
+  background: radial-gradient(
+    circle at center,
+    color-mix(in srgb, var(--mari-chat-drop-accent-soft) 18%, transparent),
+    color-mix(in srgb, var(--mari-chat-drop-accent) 10%, transparent)
+  );
+  box-shadow: inset 0 0 3rem color-mix(in srgb, var(--mari-chat-drop-accent) 16%, transparent);
+  animation: mari-chat-drop-zone-in 0.12s ease-out;
+}
+
+.mari-chat-drop-zone--blocked {
+  --mari-chat-drop-accent: var(--destructive);
+  --mari-chat-drop-accent-soft: var(--destructive);
+}
+
+.mari-chat-drop-card {
+  border-color: color-mix(in srgb, var(--mari-chat-drop-accent) 60%, transparent);
+  animation: mari-chat-drop-card-in 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Mobile-only edge dock: the library panel covers the chat, so the drop target comes to the finger. */
+.mari-chat-drop-dock {
+  --mari-chat-drop-accent: var(--mari-panel-gradient-end, var(--primary));
+  --mari-chat-drop-accent-soft: var(--mari-panel-gradient-start, var(--primary));
+
+  border-color: color-mix(in srgb, var(--mari-chat-drop-accent) 70%, transparent);
+  background: color-mix(in srgb, var(--card) 92%, transparent);
+  box-shadow: 0 0.5rem 1.5rem rgb(0 0 0 / 30%);
+  transition: transform 0.12s ease-out, box-shadow 0.12s ease-out;
+  animation: mari-chat-drop-card-in 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.mari-chat-drop-dock--blocked {
+  --mari-chat-drop-accent: var(--destructive);
+  --mari-chat-drop-accent-soft: var(--destructive);
+}
+
+.mari-chat-drop-dock--over {
+  transform: translateY(-50%) scale(1.06);
+  box-shadow: 0 0 0 0.35rem color-mix(in srgb, var(--mari-chat-drop-accent) 26%, transparent);
+}
+
+.mari-chat-drop-icon {
+  background: linear-gradient(135deg, var(--mari-chat-drop-accent-soft), var(--mari-chat-drop-accent));
+  color: var(--mari-panel-gradient-text, var(--primary-foreground));
+  box-shadow: 0 0 0 0.4rem color-mix(in srgb, var(--mari-chat-drop-accent) 20%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mari-chat-drop-zone,
+  .mari-chat-drop-card,
+  .mari-chat-drop-dock {
+    animation: none;
+  }
+
+  .mari-chat-drop-dock--over {
+    transform: translateY(-50%);
+  }
 }
 
 @keyframes message-in {
@@ -4642,6 +4962,18 @@ strong {
     padding-right: env(safe-area-inset-right);
   }
 
+  /* Scoped to conversation/roleplay/game (each sets data-chat-mode on its
+     root) so the keyboard-viewport tracking from AppShell.tsx only affects
+     the app shell while one of those surfaces is actually showing. */
+  .mari-app[data-chat-surface-active="true"]:has([data-chat-mode]) {
+    top: var(--mari-visual-viewport-offset-top, 0px);
+    bottom: auto;
+    height: var(--mari-visual-viewport-height, 100dvh);
+    min-height: 0;
+    /* Counters the iOS scroll-drag bug described in AppShell.tsx. */
+    transform: translateY(var(--mari-app-scroll-compensate, 0px)) translateZ(0);
+  }
+
   .app-sidebar-mobile {
     position: fixed !important;
     inset: 0 !important;
@@ -4795,8 +5127,12 @@ strong {
   }
 
   .chat-input-container {
-    padding: 0.25em 2% max(0.5em, env(safe-area-inset-bottom)) !important;
-    scroll-margin-bottom: max(4.5rem, env(safe-area-inset-bottom));
+    padding: 0.25em 2% max(0.5em, var(--mari-safe-area-inset-bottom, env(safe-area-inset-bottom))) !important;
+    scroll-margin-bottom: max(4.5rem, var(--mari-safe-area-inset-bottom, env(safe-area-inset-bottom)));
+  }
+  html[data-mari-software-keyboard-open] .chat-input-container {
+    padding-bottom: 0.5em !important;
+    scroll-margin-bottom: 4.5rem;
   }
   .chat-input-container .marinara-chat-input-shell {
     gap: 0.25rem !important;
@@ -4876,6 +5212,28 @@ strong {
 /* ─────────────────────────────────────────────
    21. PERFORMANCE — GPU COMPOSITING HINTS
    ───────────────────────────────────────────── */
+[data-chat-mode="roleplay"] .mari-chat-input-textarea {
+  contain: paint;
+}
+
+/* Local models often share the same GPU as the active browser tab. Freeze
+   ambient effects during generation while keeping progress spinners live. */
+.mari-generation-render-paused
+  :where(
+    .roleplay-hud-scroll-track,
+    [class*="game-expression-reaction"],
+    .glimmer-streaming,
+    .game-map-fog,
+    .game-map-marquee-track,
+    .game-party-marker,
+    .game-campfire,
+    .game-combat-border,
+    [class*="anim-text-"]
+  ),
+.mari-generation-render-paused .rpg-streaming::after {
+  animation-play-state: paused !important;
+}
+
 .rpg-sprite-container img,
 .rpg-avatar-glow img,
 .rpg-avatar-panel img,

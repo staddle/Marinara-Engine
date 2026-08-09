@@ -25,6 +25,8 @@ import { downloadJsonFile } from "../../lib/download-json";
 import { api } from "../../lib/api-client";
 import { CustomEmojiSelectionSettings } from "./CustomEmojiSelectionSettings";
 import { cn } from "../../lib/utils";
+import { useTranslation as useUiTranslation } from "react-i18next";
+import { rememberRecentMedia, useRecentMedia } from "../../hooks/use-recent-media";
 
 interface StickerPickerProps {
   open: boolean;
@@ -42,6 +44,7 @@ const cellClass =
   "flex aspect-square w-full items-center justify-center rounded-md p-1 transition-transform hover:scale-105 hover:bg-foreground/10 active:scale-100";
 
 export function StickerPicker({ open, onClose, onSelect, anchorRef, containerRef, embedded }: StickerPickerProps) {
+  const { t: localizeUi } = useUiTranslation();
   const { data: stickers } = useCustomStickers();
   const { list: conversationStickers } = useConversationCustomStickers();
   const upload = useUploadCustomSticker();
@@ -56,6 +59,7 @@ export function StickerPicker({ open, onClose, onSelect, anchorRef, containerRef
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [pos, setPos] = useState<{ top: number; left?: number; right?: number; maxHeight?: number }>({ top: 0 });
+  const recentStickers = useRecentMedia("sticker");
 
   const updatePosition = useCallback(() => {
     if (!anchorRef?.current) return;
@@ -157,11 +161,11 @@ export function StickerPicker({ open, onClose, onSelect, anchorRef, containerRef
           }
           const suggested = slugifyCustomName(file.name.replace(/\.[^.]+$/, ""));
           const raw = await showPromptDialog({
-            title: "Name this sticker",
-            message: "Use it in messages as sticker:name: — lowercase letters, numbers, and underscores.",
+            title: localizeUi("ui.chat.stickerpicker.nameThisSticker"),
+            message: localizeUi("ui.chat.stickerpicker.useItInMessagesAsStickerNameLowercaseLetters"),
             defaultValue: suggested,
             placeholder: "e.g. wave",
-            confirmLabel: "Add",
+            confirmLabel: localizeUi("ui.characters.metadatatab.add"),
             previewImageUrl: objectUrl,
           });
           if (raw == null) continue;
@@ -178,39 +182,41 @@ export function StickerPicker({ open, onClose, onSelect, anchorRef, containerRef
         }
       }
     },
-    [upload],
+    [upload, localizeUi],
   );
 
   const handleRename = useCallback(
     async (id: string, current: string) => {
       const raw = await showPromptDialog({
-        title: "Rename sticker",
-        message: "New name (used as sticker:name:).",
+        title: localizeUi("ui.chat.stickerpicker.renameSticker"),
+        message: localizeUi("ui.chat.stickerpicker.newNameUsedAsStickerName"),
         defaultValue: current,
-        confirmLabel: "Rename",
+        confirmLabel: localizeUi("ui.chat.chatbranchselector.rename"),
       });
       if (raw == null) return;
       const name = slugifyCustomName(raw);
       if (!name || name === current) return;
       rename.mutate({ id, name });
     },
-    [rename],
+    [rename, localizeUi],
   );
 
   const handleDelete = useCallback(
     async (id: string, name: string) => {
       if (
         await showConfirmDialog({
-          title: "Delete sticker",
-          message: `Delete sticker:${name}:? Messages that already used it will show the text instead.`,
-          confirmLabel: "Delete",
+          title: localizeUi("ui.chat.stickerpicker.deleteSticker"),
+          message: localizeUi("ui.chat.stickerpicker.deleteStickerValue1MessagesThatAlreadyUsedItWill", {
+            value1: name,
+          }),
+          confirmLabel: localizeUi("lorebook.editor.batch.delete"),
           tone: "destructive",
         })
       ) {
         remove.mutate(id);
       }
     },
-    [remove],
+    [remove, localizeUi],
   );
 
   const handleExport = useCallback(async () => {
@@ -267,8 +273,13 @@ export function StickerPicker({ open, onClose, onSelect, anchorRef, containerRef
         )
         .filter(([, arr]) => arr.length > 0)
     : sourceGroups;
+  const conversationStickerByName = new Map(conversationStickers.map((sticker) => [sticker.name, sticker] as const));
+  const visibleRecentStickers = recentStickers
+    .map((item) => conversationStickerByName.get(item.value))
+    .filter((item): item is ConversationCustomSticker => item !== undefined);
 
-  const send = (name: string) => {
+  const send = (name: string, previewUrl: string) => {
+    rememberRecentMedia("sticker", { value: name, label: name, previewUrl });
     onSelect(name);
     onClose();
   };
@@ -281,7 +292,7 @@ export function StickerPicker({ open, onClose, onSelect, anchorRef, containerRef
             type="text"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search stickers..."
+            placeholder={localizeUi("ui.chat.stickerpicker.searchStickers")}
             className="w-full rounded-md bg-foreground/5 px-2.5 py-1.5 text-xs outline-none ring-1 ring-foreground/10 transition-shadow placeholder:text-foreground/35 focus:ring-foreground/20"
             autoFocus={!embedded}
           />
@@ -295,7 +306,7 @@ export function StickerPicker({ open, onClose, onSelect, anchorRef, containerRef
             onClick={() => fileRef.current?.click()}
             className="inline-flex items-center gap-1.5 rounded-md bg-foreground/5 px-2 py-1 text-xs text-foreground/70 ring-1 ring-foreground/10 transition-colors hover:bg-foreground/10 hover:text-foreground/90"
           >
-            <ImagePlus size="0.875rem" /> Upload
+            <ImagePlus size="0.875rem" /> {localizeUi("ui.characters.characterclipcard.upload")}
           </button>
           {editing && (
             <>
@@ -304,7 +315,7 @@ export function StickerPicker({ open, onClose, onSelect, anchorRef, containerRef
                 onClick={() => importFileRef.current?.click()}
                 className="rounded-md bg-foreground/5 px-2 py-1 text-xs text-foreground/70 ring-1 ring-foreground/10 transition-colors hover:bg-foreground/10 hover:text-foreground/90"
               >
-                Import
+                {localizeUi("ui.chat.chatbranchselector.import")}
               </button>
               {globalList.length > 0 && (
                 <button
@@ -312,7 +323,7 @@ export function StickerPicker({ open, onClose, onSelect, anchorRef, containerRef
                   onClick={() => void handleExport()}
                   className="rounded-md bg-foreground/5 px-2 py-1 text-xs text-foreground/70 ring-1 ring-foreground/10 transition-colors hover:bg-foreground/10 hover:text-foreground/90"
                 >
-                  Export
+                  {localizeUi("ui.characters.spritestab.export")}
                 </button>
               )}
             </>
@@ -330,8 +341,8 @@ export function StickerPicker({ open, onClose, onSelect, anchorRef, containerRef
           <button
             type="button"
             onClick={() => setShowSettings((v) => !v)}
-            title="Selection preferences"
-            aria-label="Selection preferences"
+            title={localizeUi("ui.chat.customemojitab.selectionPreferences")}
+            aria-label={localizeUi("ui.chat.customemojitab.selectionPreferences")}
             className={cn(
               "flex items-center rounded-md px-1.5 py-1 text-xs transition-colors",
               showSettings
@@ -351,7 +362,7 @@ export function StickerPicker({ open, onClose, onSelect, anchorRef, containerRef
                 : "text-foreground/45 hover:bg-foreground/10 hover:text-foreground/70",
             )}
           >
-            {editing ? "Done" : "Edit"}
+            {editing ? localizeUi("lorebook.editor.batch.done") : localizeUi("ui.noodle.noodlepostcard.edit")}
           </button>
         </div>
       </div>
@@ -361,14 +372,39 @@ export function StickerPicker({ open, onClose, onSelect, anchorRef, containerRef
       {error && <p className="px-3 py-1.5 text-[0.6875rem] text-red-400">{error}</p>}
 
       <div className="flex-1 overflow-y-auto px-2 py-2">
+        {!q && !editing && visibleRecentStickers.length > 0 && (
+          <section data-recent-media="sticker" className="mb-2 border-b border-foreground/10 pb-2">
+            <p className={headerClass}>{localizeUi("ui.mediaPicker.recentlyUsed")}</p>
+            <div className="grid grid-cols-3 gap-1.5">
+              {visibleRecentStickers.map((sticker) => (
+                <button
+                  key={sticker.name}
+                  type="button"
+                  onClick={() => send(sticker.name, sticker.url)}
+                  title={localizeUi("ui.chat.stickerpicker.sendStickerValue1", { value1: sticker.name })}
+                  className={cellClass}
+                >
+                  <img
+                    src={sticker.url}
+                    alt={localizeUi("ui.chat.stickerpicker.stickerValue1", { value1: sticker.name })}
+                    className="max-h-16 max-w-full object-contain"
+                  />
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
         {filteredGlobal.length === 0 && filteredGroups.length === 0 ? (
           <p className="px-1 py-6 text-center text-[0.6875rem] text-foreground/45">
             {q ? (
-              <>No stickers match “{query.trim()}”.</>
+              <>
+                {localizeUi("ui.chat.stickerpicker.noStickersMatch")}
+                {query.trim()}”.
+              </>
             ) : (
               <>
-                No stickers yet. Upload one (max 512×512) to send it as <span className="font-mono">sticker:name:</span>
-                .
+                {localizeUi("ui.chat.stickerpicker.noStickersYetUploadOneMax512512To")}{" "}
+                <span className="font-mono">{localizeUi("ui.chat.stickerpicker.stickerName")}</span>.
               </>
             )}
           </p>
@@ -376,19 +412,27 @@ export function StickerPicker({ open, onClose, onSelect, anchorRef, containerRef
           <>
             {filteredGlobal.length > 0 && (
               <>
-                {filteredGroups.length > 0 && <p className={headerClass}>Global</p>}
+                {filteredGroups.length > 0 && (
+                  <p className={headerClass}>{localizeUi("ui.lorebooks.lorebookeditor.global")}</p>
+                )}
                 <div className="grid grid-cols-3 gap-1.5">
                   {filteredGlobal.map((sticker) => (
                     <div key={sticker.id} className="group relative">
                       <button
                         type="button"
-                        onClick={() => (editing ? void handleRename(sticker.id, sticker.name) : send(sticker.name))}
-                        title={editing ? `Rename sticker:${sticker.name}:` : `Send sticker:${sticker.name}:`}
+                        onClick={() =>
+                          editing ? void handleRename(sticker.id, sticker.name) : send(sticker.name, sticker.url)
+                        }
+                        title={
+                          editing
+                            ? localizeUi("ui.chat.stickerpicker.renameStickerValue1", { value1: sticker.name })
+                            : localizeUi("ui.chat.stickerpicker.sendStickerValue1", { value1: sticker.name })
+                        }
                         className={cellClass}
                       >
                         <img
                           src={sticker.url}
-                          alt={`sticker:${sticker.name}:`}
+                          alt={localizeUi("ui.chat.stickerpicker.stickerValue1", { value1: sticker.name })}
                           className="max-h-16 max-w-full object-contain"
                         />
                       </button>
@@ -396,7 +440,7 @@ export function StickerPicker({ open, onClose, onSelect, anchorRef, containerRef
                         <button
                           type="button"
                           onClick={() => void handleDelete(sticker.id, sticker.name)}
-                          title={`Delete sticker:${sticker.name}:`}
+                          title={localizeUi("ui.chat.stickerpicker.deleteStickerValue1", { value1: sticker.name })}
                           className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-[var(--destructive)] text-white shadow ring-1 ring-black/10 transition-transform hover:scale-110"
                         >
                           <Trash2 size="0.625rem" />
@@ -416,13 +460,16 @@ export function StickerPicker({ open, onClose, onSelect, anchorRef, containerRef
                     <div key={sticker.name} className="group relative">
                       <button
                         type="button"
-                        onClick={() => send(sticker.name)}
-                        title={`Send sticker:${sticker.name}: — ${source}`}
+                        onClick={() => send(sticker.name, sticker.url)}
+                        title={localizeUi("ui.chat.stickerpicker.sendStickerValue1Value2", {
+                          value1: sticker.name,
+                          value2: source,
+                        })}
                         className={cellClass}
                       >
                         <img
                           src={sticker.url}
-                          alt={`sticker:${sticker.name}:`}
+                          alt={localizeUi("ui.chat.stickerpicker.stickerValue1", { value1: sticker.name })}
                           className="max-h-16 max-w-full object-contain"
                         />
                       </button>

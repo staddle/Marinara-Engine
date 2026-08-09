@@ -24,6 +24,7 @@ export type MarkerType =
   | "persona"
   | "chat_history"
   | "chat_summary"
+  | "id_macro_cards"
   | "world_info_before"
   | "world_info_after"
   | "dialogue_examples"
@@ -187,6 +188,25 @@ export const GENERATION_PARAMETER_SEND_KEYS = [
 export type GenerationParameterSendKey = (typeof GENERATION_PARAMETER_SEND_KEYS)[number];
 export type GenerationParameterSendMap = Partial<Record<GenerationParameterSendKey, boolean>>;
 
+export const CUSTOM_GENERATION_PARAMETERS_SETTINGS_KEY = "custom-generation-parameters";
+
+/** A reusable numeric provider parameter defined in Settings → Advanced. */
+export interface ManagedGenerationParameterDefinition {
+  id: string;
+  name: string;
+  requestKey: string;
+  min: number;
+  max: number;
+  tooltip?: string;
+}
+
+export interface ManagedGenerationParameterValue {
+  enabled: boolean;
+  value: number;
+}
+
+export type ManagedGenerationParameterValueMap = Record<string, ManagedGenerationParameterValue>;
+
 /** Generation parameters sent with each API call. */
 export interface GenerationParameters {
   temperature: number;
@@ -209,6 +229,8 @@ export interface GenerationParameters {
   customThinkingTags: ThinkingTagPair[];
   /** Raw provider request parameters merged into the outgoing request body. */
   customParameters: Record<string, unknown>;
+  /** Values for reusable user-defined numeric provider parameters, keyed by definition ID. */
+  managedCustomParameters: ManagedGenerationParameterValueMap;
   /** Per-parameter request switches. Missing map preserves legacy send behavior. */
   enabledParameters?: GenerationParameterSendMap;
   /** Merge consecutive system messages */

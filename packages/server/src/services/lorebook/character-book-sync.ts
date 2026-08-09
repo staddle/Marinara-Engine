@@ -59,7 +59,7 @@ function asStringArray(value: unknown): string[] {
 function toCharacterBookEntry(entry: LoreEntryRow, index: number): CharacterBookEntry {
   const order = asNumber(entry.order, 100);
   const positionValue = asNumber(entry.position, 0);
-  const position = positionValue === 2 ? 4 : positionValue === 1 ? "after_char" : "before_char";
+  const position = positionValue === 7 ? 7 : positionValue === 2 ? 4 : positionValue === 1 ? "after_char" : "before_char";
   const role = entry.role === "user" ? 1 : entry.role === "assistant" ? 2 : 0;
   return {
     keys: asStringArray(entry.keys),
@@ -77,6 +77,7 @@ function toCharacterBookEntry(entry: LoreEntryRow, index: number): CharacterBook
     secondary_keys: asStringArray(entry.secondaryKeys),
     constant: asBoolean(entry.constant),
     position,
+    outletName: asString(entry.outletName),
     depth: asNumber(entry.depth, 4),
     role,
     selectiveLogic: asString(entry.selectiveLogic, "and"),

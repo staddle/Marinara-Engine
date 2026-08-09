@@ -70,7 +70,12 @@ export function resolveStoredChatOptions(
     minP: parameters.minP,
     frequencyPenalty: parameters.frequencyPenalty,
     presencePenalty: parameters.presencePenalty,
-    reasoningEffort: reasoningEffort ?? undefined,
+    reasoningEffort:
+      parameters.enabledParameters?.reasoningEffort === false
+        ? undefined
+        : parameters.reasoningEffort === null
+          ? "none"
+          : (reasoningEffort ?? undefined),
     verbosity: parameters.verbosity ?? undefined,
     serviceTier: parameters.serviceTier,
     stop: parameters.stopSequences,

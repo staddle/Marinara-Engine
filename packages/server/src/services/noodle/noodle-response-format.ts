@@ -1,4 +1,9 @@
-import { isOpenAIGpt56Model } from "@marinara-engine/shared";
+import {
+  NOODLER_REPLY_CONTENT_MAX_LENGTH,
+  isOpenAIGpt56Model,
+  NOODLER_POST_CONTENT_MAX_LENGTH,
+  NOODLER_POST_TITLE_MAX_LENGTH,
+} from "@marinara-engine/shared";
 
 export const NOODLE_JSON_OUTPUT_HEADING = "# JSON Output Format";
 
@@ -104,18 +109,19 @@ const profilesSchema = {
   additionalProperties: false,
 } as const;
 
-const privatePostSchema = {
+const noodlerPostSchema = {
   type: "object",
   properties: {
-    content: { type: "string" },
-    imagePrompt: nullableString,
-    poll: pollSchema,
+    title: { type: ["string", "null"], maxLength: NOODLER_POST_TITLE_MAX_LENGTH },
+    content: { type: "string", maxLength: NOODLER_POST_CONTENT_MAX_LENGTH },
+    // strict mode has no optional properties — nullable + required is how optionality is spelled.
+    imagePrompt: { type: ["string", "null"] },
   },
-  required: ["content", "imagePrompt", "poll"],
+  required: ["title", "content", "imagePrompt"],
   additionalProperties: false,
 } as const;
 
-const privateProfileSchema = {
+const noodlerProfileSchema = {
   type: "object",
   properties: {
     displayName: { type: "string" },
@@ -128,9 +134,16 @@ const privateProfileSchema = {
   additionalProperties: false,
 } as const;
 
+const noodlerReplySchema = {
+  type: "object",
+  properties: { content: { type: "string", maxLength: NOODLER_REPLY_CONTENT_MAX_LENGTH } },
+  required: ["content"],
+  additionalProperties: false,
+} as const;
+
 export function noodleResponseFormat(
   model: string,
-  kind: "timeline" | "profiles" | "private_post" | "private_profile",
+  kind: "timeline" | "profiles" | "noodler_post" | "noodler_profile" | "noodler_reply",
 ): { type: string; [key: string]: unknown } {
   if (!isOpenAIGpt56Model(model)) return { type: "json_object" };
   const schema =
@@ -138,9 +151,11 @@ export function noodleResponseFormat(
       ? timelineSchema
       : kind === "profiles"
         ? profilesSchema
-        : kind === "private_profile"
-          ? privateProfileSchema
-          : privatePostSchema;
+        : kind === "noodler_profile"
+          ? noodlerProfileSchema
+           : kind === "noodler_reply"
+             ? noodlerReplySchema
+             : noodlerPostSchema;
   return {
     type: "json_schema",
     name:
@@ -148,9 +163,11 @@ export function noodleResponseFormat(
         ? "noodle_timeline"
         : kind === "profiles"
           ? "noodle_profiles"
-          : kind === "private_profile"
-            ? "noodler_private_profile"
-            : "noodler_private_post",
+          : kind === "noodler_profile"
+            ? "noodler_profile"
+             : kind === "noodler_reply"
+               ? "noodler_reply"
+               : "noodler_post",
     schema,
     strict: true,
   };

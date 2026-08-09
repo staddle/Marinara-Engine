@@ -40,6 +40,7 @@ import {
   type WandResult,
 } from "../../lib/sprite-cleanup-tools";
 import { Modal } from "./Modal";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface SpriteWandCleanupEditorProps {
   imageUrl: string;
@@ -381,6 +382,7 @@ export function SpriteWandCleanupEditor({
   onApply,
   onClose,
 }: SpriteWandCleanupEditorProps) {
+  const { t: localizeUi } = useUiTranslation();
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const originalImageRef = useRef<ImageData | null>(null);
@@ -889,7 +891,7 @@ export function SpriteWandCleanupEditor({
     : "Move over the sprite to sample pixels";
 
   return (
-    <Modal open onClose={onClose} title={`Clean ${label}`} width="max-w-6xl">
+    <Modal open onClose={onClose} title={localizeUi("ui.ui.spritewandcleanupeditor.cleanValue1", { value1: label })} width="max-w-6xl">
       <div className="flex h-[calc(100dvh-7rem)] min-h-0 flex-col gap-3 overflow-x-hidden overflow-y-auto sm:h-[min(44rem,calc(90dvh-6rem))]">
         <div className="flex shrink-0 flex-wrap items-center gap-2">
           {cleanupToolOptions.map(({ tool: optionTool, label: optionLabel, title, Icon }) => (
@@ -912,9 +914,9 @@ export function SpriteWandCleanupEditor({
               onClick={() => handleSelectTool("pan")}
               disabled={loading || applying}
               className={navigationButtonClass(tool === "pan")}
-              aria-label="Pan"
+              aria-label={localizeUi("ui.ui.spritewandcleanupeditor.pan")}
               aria-pressed={tool === "pan"}
-              title="Drag around while zoomed in"
+              title={localizeUi("ui.ui.spritewandcleanupeditor.dragAroundWhileZoomedIn")}
             >
               <Hand size="0.875rem" />
             </button>
@@ -924,8 +926,8 @@ export function SpriteWandCleanupEditor({
               onClick={zoomOut}
               disabled={loading || applying}
               className={navigationButtonClass()}
-              aria-label="Zoom out"
-              title="Zoom out"
+              aria-label={localizeUi("ui.ui.spritewandcleanupeditor.zoomOut")}
+              title={localizeUi("ui.ui.spritewandcleanupeditor.zoomOut")}
             >
               <ZoomOut size="0.875rem" />
             </button>
@@ -934,7 +936,7 @@ export function SpriteWandCleanupEditor({
               onClick={fitCanvasToStage}
               disabled={loading || applying}
               className="h-7 rounded-md px-2 text-[0.6875rem] font-medium tabular-nums text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-45"
-              title="Fit to view"
+              title={localizeUi("ui.ui.spritewandcleanupeditor.fitToView")}
             >
               {Math.round(zoom * 100)}%
             </button>
@@ -943,8 +945,8 @@ export function SpriteWandCleanupEditor({
               onClick={zoomIn}
               disabled={loading || applying}
               className={navigationButtonClass()}
-              aria-label="Zoom in"
-              title="Zoom in"
+              aria-label={localizeUi("ui.ui.spritewandcleanupeditor.zoomIn")}
+              title={localizeUi("ui.ui.spritewandcleanupeditor.zoomIn")}
             >
               <ZoomIn size="0.875rem" />
             </button>
@@ -960,13 +962,11 @@ export function SpriteWandCleanupEditor({
                   onClick={handleResetWandDefaults}
                   disabled={loading || applying}
                   className="inline-flex min-w-fit items-center gap-1.5 whitespace-nowrap rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:text-[var(--foreground)] disabled:opacity-45"
-                  title="Reset wand controls to their defaults"
+                  title={localizeUi("ui.ui.spritewandcleanupeditor.resetWandControlsToTheirDefaults")}
                 >
-                  <RotateCcw size="0.875rem" />
-                  Defaults
-                </button>
+                  <RotateCcw size="0.875rem" />{localizeUi("ui.panels.connectiondefaultssection.defaults")}</button>
                 <RangeControl
-                  label="Tolerance"
+                  label={localizeUi("ui.ui.spritewandcleanupeditor.tolerance")}
                   min={4}
                   max={128}
                   value={wandTolerance}
@@ -975,30 +975,30 @@ export function SpriteWandCleanupEditor({
                   className="min-w-[12rem] flex-[1_1_12rem]"
                 />
                 <ToggleControl
-                  label="Strong"
+                  label={localizeUi("ui.ui.spritewandcleanupeditor.strong")}
                   checked={wandStrong}
                   onChange={setWandStrong}
                   disabled={loading || applying}
-                  title="Reach farther into matching debris"
+                  title={localizeUi("ui.ui.spritewandcleanupeditor.reachFartherIntoMatchingDebris")}
                 />
                 <RangeControl
-                  label="Softness"
+                  label={localizeUi("ui.ui.spritewandcleanupeditor.softness")}
                   min={0}
                   max={100}
                   value={wandSoftness}
                   onChange={setWandSoftness}
                   disabled={loading || applying}
-                  title="0 is a hard cut; higher values leave a softer low-alpha edge"
+                  title={localizeUi("ui.ui.spritewandcleanupeditor.text0IsAHardCutHigherValuesLeaveA")}
                   className="min-w-[14rem] flex-[1_1_14rem]"
                 />
                 <RangeControl
-                  label="Feather"
+                  label={localizeUi("ui.ui.spritewandcleanupeditor.feather")}
                   min={0}
                   max={100}
                   value={wandFeather}
                   onChange={setWandFeather}
                   disabled={loading || applying}
-                  title="How much soft border the wand leaves behind, and how gradually it fades"
+                  title={localizeUi("ui.ui.spritewandcleanupeditor.howMuchSoftBorderTheWandLeavesBehindAnd")}
                   className="min-w-[14rem] flex-[1_1_14rem]"
                 />
               </>
@@ -1007,7 +1007,7 @@ export function SpriteWandCleanupEditor({
             {activeBrushMode && (
               <>
                 <RangeControl
-                  label="Brush"
+                  label={localizeUi("ui.ui.spritewandcleanupeditor.brush")}
                   min={2}
                   max={96}
                   value={brushSize}
@@ -1030,11 +1030,9 @@ export function SpriteWandCleanupEditor({
                           : "text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]",
                       ].join(" ")}
                       aria-pressed={brushToolMode === "paint"}
-                      title="Paint with the selected color"
+                      title={localizeUi("ui.ui.spritewandcleanupeditor.paintWithTheSelectedColor")}
                     >
-                      <Brush size="0.75rem" />
-                      Color
-                    </button>
+                      <Brush size="0.75rem" />{localizeUi("ui.ui.spritewandcleanupeditor.color")}</button>
                     <button
                       type="button"
                       onClick={() => handleSelectBrushToolMode("restore")}
@@ -1046,43 +1044,41 @@ export function SpriteWandCleanupEditor({
                           : "text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]",
                       ].join(" ")}
                       aria-pressed={brushToolMode === "restore"}
-                      title="Paint original pixels back in"
+                      title={localizeUi("ui.ui.spritewandcleanupeditor.paintOriginalPixelsBackIn")}
                     >
-                      <Undo2 size="0.75rem" />
-                      Restore
-                    </button>
+                      <Undo2 size="0.75rem" />{localizeUi("ui.ui.spritewandcleanupeditor.restore")}</button>
                   </div>
                 )}
                 {tool === "clean" && (
                   <>
                     <RangeControl
-                      label="Tolerance"
+                      label={localizeUi("ui.ui.spritewandcleanupeditor.tolerance")}
                       min={4}
                       max={128}
                       value={cleanTolerance}
                       onChange={setCleanTolerance}
                       disabled={loading || applying}
-                      title="How closely pixels must match the sampled cleanup color"
+                      title={localizeUi("ui.ui.spritewandcleanupeditor.howCloselyPixelsMustMatchTheSampledCleanupColor")}
                       className="min-w-[12rem] flex-[1_1_12rem]"
                     />
                     <RangeControl
-                      label="Edge Guard"
+                      label={localizeUi("ui.ui.spritewandcleanupeditor.edgeGuard")}
                       min={0}
                       max={100}
                       value={cleanEdgeGuard}
                       onChange={setCleanEdgeGuard}
                       disabled={loading || applying}
-                      title="How strongly the brush avoids character-like edge pixels"
+                      title={localizeUi("ui.ui.spritewandcleanupeditor.howStronglyTheBrushAvoidsCharacterLikeEdgePixels")}
                       className="min-w-[16rem] flex-[1_1_16rem]"
                     />
                     <RangeControl
-                      label="Feather"
+                      label={localizeUi("ui.ui.spritewandcleanupeditor.feather")}
                       min={0}
                       max={100}
                       value={cleanFeather}
                       onChange={setCleanFeather}
                       disabled={loading || applying}
-                      title="Soften the edge of the cleaned brush stroke"
+                      title={localizeUi("ui.ui.spritewandcleanupeditor.softenTheEdgeOfTheCleanedBrushStroke")}
                       className="min-w-[14rem] flex-[1_1_14rem]"
                     />
                   </>
@@ -1090,9 +1086,9 @@ export function SpriteWandCleanupEditor({
                 {tool === "brush" && brushToolMode === "paint" && (
                   <div
                     className="flex min-w-fit items-center gap-2 rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs"
-                    title="Brush color"
+                    title={localizeUi("ui.ui.spritewandcleanupeditor.brushColor")}
                   >
-                    <span className="shrink-0 whitespace-nowrap font-medium text-[var(--foreground)]">Color</span>
+                    <span className="shrink-0 whitespace-nowrap font-medium text-[var(--foreground)]">{localizeUi("ui.ui.spritewandcleanupeditor.color")}</span>
                     <input
                       type="color"
                       value={brushColor}
@@ -1102,7 +1098,7 @@ export function SpriteWandCleanupEditor({
                       }}
                       disabled={loading || applying}
                       className="h-7 w-9 cursor-pointer rounded-md border border-[var(--border)] bg-transparent p-0.5 disabled:opacity-45"
-                      aria-label="Brush color"
+                      aria-label={localizeUi("ui.ui.spritewandcleanupeditor.brushColor")}
                     />
                     <span className="font-mono text-[0.6875rem] uppercase text-[var(--muted-foreground)]">
                       {brushColor}
@@ -1118,17 +1114,15 @@ export function SpriteWandCleanupEditor({
                           : "text-[var(--muted-foreground)] ring-[var(--border)] hover:text-[var(--foreground)]",
                       ].join(" ")}
                       aria-pressed={pickingBrushColor}
-                      title="Pick brush color from the sprite"
+                      title={localizeUi("ui.ui.spritewandcleanupeditor.pickBrushColorFromTheSprite")}
                     >
-                      <Pipette size="0.75rem" />
-                      Pick
-                    </button>
+                      <Pipette size="0.75rem" />{localizeUi("ui.ui.spritewandcleanupeditor.pick")}</button>
                   </div>
                 )}
                 {usesOpacityHardnessControls(tool) && (
                   <>
                     <RangeControl
-                      label="Opacity"
+                      label={localizeUi("ui.ui.spritewandcleanupeditor.opacity")}
                       min={0}
                       max={100}
                       value={brushOpacity}
@@ -1138,7 +1132,7 @@ export function SpriteWandCleanupEditor({
                       className="min-w-48 flex-1"
                     />
                     <RangeControl
-                      label="Hardness"
+                      label={localizeUi("ui.ui.spritewandcleanupeditor.hardness")}
                       min={0}
                       max={100}
                       value={brushHardness}
@@ -1151,13 +1145,13 @@ export function SpriteWandCleanupEditor({
                 )}
                 {tool === "blur" && (
                   <RangeControl
-                    label="Strength"
+                    label={localizeUi("ui.ui.spritewandcleanupeditor.strength")}
                     min={0}
                     max={100}
                     value={blurStrength}
                     onChange={setBlurStrength}
                     disabled={loading || applying}
-                    title="How strongly the blur brush smooths alpha edges"
+                    title={localizeUi("ui.ui.spritewandcleanupeditor.howStronglyTheBlurBrushSmoothsAlphaEdges")}
                     className="min-w-48 flex-1"
                   />
                 )}
@@ -1213,8 +1207,8 @@ export function SpriteWandCleanupEditor({
                 onPointerLeave={() => setHoverPoint(null)}
                 className={`block rounded-lg [touch-action:none] ${cursorClass}`}
                 style={canvasDisplayStyle}
-                aria-label={`Sprite cleanup canvas for ${label}`}
-                title={pickingBrushColor ? "Pick brush color" : "Edit sprite transparency"}
+                aria-label={localizeUi("ui.ui.spritewandcleanupeditor.spriteCleanupCanvasForValue1", { value1: label })}
+                title={pickingBrushColor ?localizeUi("ui.ui.spritewandcleanupeditor.pickBrushColor") :localizeUi("ui.ui.spritewandcleanupeditor.editSpriteTransparency")}
               />
               {reticleStyle && !loading && (
                 <span
@@ -1239,35 +1233,27 @@ export function SpriteWandCleanupEditor({
             disabled={loading || applying || history.length === 0}
             className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:text-[var(--foreground)] disabled:opacity-45"
           >
-            <Undo2 size="0.875rem" />
-            Undo
-          </button>
+            <Undo2 size="0.875rem" />{localizeUi("ui.ui.spritewandcleanupeditor.undo")}</button>
           <button
             type="button"
             onClick={handleReset}
             disabled={loading || applying || !hasChanges}
             className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:text-[var(--foreground)] disabled:opacity-45"
           >
-            <RotateCcw size="0.875rem" />
-            Reset
-          </button>
+            <RotateCcw size="0.875rem" />{localizeUi("ui.characters.charactercliptrimmodal.reset")}</button>
           <button
             type="button"
             onClick={onClose}
             disabled={applying}
             className="rounded-lg px-3 py-2 text-sm font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-50"
-          >
-            Cancel
-          </button>
+          >{localizeUi("chat.delete.dialog.cancel")}</button>
           <button
             type="button"
             onClick={() => void handleApply()}
             disabled={loading || applying || !hasChanges}
             className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-2 text-sm font-medium text-[var(--primary-foreground)] transition-colors hover:opacity-90 disabled:opacity-50"
           >
-            {applying ? <Loader2 size="0.875rem" className="animate-spin" /> : <Eraser size="0.875rem" />}
-            Apply Cleanup
-          </button>
+            {applying ? <Loader2 size="0.875rem" className="animate-spin" /> : <Eraser size="0.875rem" />}{localizeUi("ui.ui.spritewandcleanupeditor.applyCleanup")}</button>
         </div>
       </div>
     </Modal>

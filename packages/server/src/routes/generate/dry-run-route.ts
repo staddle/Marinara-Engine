@@ -27,6 +27,7 @@ import { processLorebooks } from "../../services/lorebook/index.js";
 import { resolveLorebookScopeExclusions } from "../../services/lorebook/game-lorebook-scope.js";
 import { injectAtDepth } from "../../services/lorebook/prompt-injector.js";
 import { createLLMProvider } from "../../services/llm/provider-registry.js";
+import { withConnectionAdmissionProvider } from "../../services/generation/connection-admission.js";
 import { getLocalSidecarProvider } from "../../services/llm/local-sidecar.js";
 import {
   assemblePrompt,
@@ -42,7 +43,12 @@ import {
 } from "../../services/prompt/index.js";
 import { mergeAdjacentMessages } from "../../services/prompt/merger.js";
 import { wrapContent } from "../../services/prompt/format-engine.js";
-import { yieldToEventLoop, type BaseLLMProvider, type ChatMessage } from "../../services/llm/base-provider.js";
+import {
+  yieldToEventLoop,
+  type BaseLLMProvider,
+  type ChatMessage,
+  type ChatOptions,
+} from "../../services/llm/base-provider.js";
 import {
   fitMessagesForModelAccess,
   mergeModelContextLimit,
@@ -75,6 +81,7 @@ import {
   resolveActivePersonaCandidate,
   resolvePromptCharacterIdsForTarget,
   resolveCharacterNameMap,
+  resolveGroupGenerationMode,
   resolveRegenerationGameStateAnchor,
   resolveProviderTopK,
   resolveRoleplayChatSummary,
@@ -581,7 +588,7 @@ export async function registerDryRunRoute(app: FastifyInstance) {
       impersonate,
       impersonateBlockAgents: false,
     });
-    const supportsHiddenFromAI = chatMode === "conversation" || chatMode === "roleplay" || chatMode === "visual_novel";
+    const supportsHiddenFromAI = chatMode === "conversation" || chatMode === "roleplay";
     let startIdx = 0;
     for (let i = allChatMessages.length - 1; i >= 0; i--) {
       const extra = parseExtra(allChatMessages[i]!.extra);
@@ -605,7 +612,7 @@ export async function registerDryRunRoute(app: FastifyInstance) {
     );
     const promptSpatialProjection =
       (ownerSpatialProjection?.ownerMode === "game" && chatMode === "game") ||
-      (ownerSpatialProjection?.ownerMode === "roleplay" && (chatMode === "roleplay" || chatMode === "visual_novel"))
+      (ownerSpatialProjection?.ownerMode === "roleplay" && chatMode === "roleplay")
         ? ownerSpatialProjection
         : null;
     const ownerSpatialLorebookEntryIds = promptSpatialProjection?.lorebookEntryIds ?? [];
@@ -716,6 +723,13 @@ export async function registerDryRunRoute(app: FastifyInstance) {
         ? body.forCharacterId
         : null;
     const promptCharacterIds = resolvePromptCharacterIdsForTarget(characterIds, promptTargetCharacterId);
+    const promptGroupResponseOrder = (chatMeta.groupResponseOrder as string) ?? "sequential";
+    const dryRunGroupChatMode = resolveGroupGenerationMode(chatMode, chatMeta.groupChatMode);
+    const deferCharacterMacros =
+      characterIds.length > 1 &&
+      dryRunGroupChatMode === "individual" &&
+      (promptGroupResponseOrder !== "manual" || chatMode === "conversation") &&
+      !impersonate;
     const audienceCharacterIds = impersonate ? [] : promptTargetCharacterId ? [promptTargetCharacterId] : characterIds;
     if (audienceCharacterIds.length > 0) {
       const audience = new Set(audienceCharacterIds);
@@ -832,13 +846,13 @@ export async function registerDryRunRoute(app: FastifyInstance) {
     applyRegexScriptsToPromptMessages(mappedMessages, await regexScriptsStore.list(), {
       resolveMacros: (value, randomSeed) => resolveMacros(value, promptMacroContext, { trimResult: false, randomSeed }),
       targetCharacterId: promptTargetCharacterId,
+      targetPromptPresetId: effectivePresetId,
     });
 
     for (const msg of mappedMessages) {
       msg.content = msg.content.replace(/\n([ \t]*\n){2,}/g, "\n\n");
     }
     mappedMessages = resolveHistoryMessageMacros(mappedMessages);
-    const dryRunGroupChatMode = ((chatMeta.groupChatMode as string) ?? "merged") as string;
     const shouldPrefixGroupHistorySpeakers =
       chatMeta.groupSpeakerNamesInHistory === true &&
       characterIds.length > 1 &&
@@ -1278,9 +1292,15 @@ export async function registerDryRunRoute(app: FastifyInstance) {
         idleDuration: promptIdleDuration,
         impersonate,
         preserveImpersonatePresetSections: impersonate && effectivePresetSource === "impersonate",
+        deferCharacterMacros,
       };
 
       const assembled = await assemblePrompt(assemblerInput);
+      Object.assign(promptMacroContext.variables, assembled.macroVariables);
+      promptMacroContext.agentData = {
+        ...promptMacroContext.agentData,
+        ...assembled.macroAgentData,
+      };
       finalMessages = assembled.messages;
       temperature = assembled.parameters.temperature;
       maxTokens = assembled.parameters.maxTokens;
@@ -1456,6 +1476,24 @@ export async function registerDryRunRoute(app: FastifyInstance) {
       }
     }
 
+    const authorNotesRaw = typeof chatMeta.authorNotes === "string" ? chatMeta.authorNotes.trim() : "";
+    const authorNotes = authorNotesRaw
+      ? resolveMacros(
+          authorNotesRaw,
+          promptMacroContext,
+          deferCharacterMacros ? { deferCharacterMacros: "all" } : undefined,
+        ).trim()
+      : "";
+    if (authorNotes) {
+      const authorNotesDepth =
+        typeof chatMeta.authorNotesDepth === "number" && Number.isFinite(chatMeta.authorNotesDepth)
+          ? Math.max(0, Math.floor(chatMeta.authorNotesDepth))
+          : 4;
+      finalMessages = injectAtDepth(finalMessages as any, [
+        { content: authorNotes, role: "system", depth: authorNotesDepth },
+      ]) as any;
+    }
+
     // Optional injection: tracker context (read-only snapshot)
     const resolvedInjectTrackersForRun = usePromptParts ? false : resolvedInjectTrackers;
     if (resolvedInjectTrackersForRun) {
@@ -1533,6 +1571,12 @@ export async function registerDryRunRoute(app: FastifyInstance) {
 
     // enableThinking activates provider reasoning mode (separate from showing thoughts).
     const enableThinking = !!resolvedEffort;
+    const providerReasoningEffort: ChatOptions["reasoningEffort"] =
+      enabledParameters?.reasoningEffort === false
+        ? undefined
+        : reasoningEffort === null
+          ? "none"
+          : (resolvedEffort ?? undefined);
 
     // ── Claude 4.5+ sampling parameter restrictions ──
     const modelLc = (conn.model ?? "").toLowerCase();
@@ -1561,7 +1605,7 @@ export async function registerDryRunRoute(app: FastifyInstance) {
 
     const provider: BaseLLMProvider =
       connId === LOCAL_SIDECAR_CONNECTION_ID
-        ? (getLocalSidecarProvider() as any)
+        ? withConnectionAdmissionProvider(getLocalSidecarProvider() as any, LOCAL_SIDECAR_CONNECTION_ID)
         : createLLMProvider(
             conn.provider,
             baseUrl,
@@ -1572,6 +1616,7 @@ export async function registerDryRunRoute(app: FastifyInstance) {
             conn.claudeFastMode === "true",
             conn.treatAsLocalEndpoint === "true",
             conn.defaultParameters,
+            connId ?? undefined,
           );
 
     // ── Mirror /api/generate: normalize + fit prompt to context ──
@@ -1639,7 +1684,7 @@ export async function registerDryRunRoute(app: FastifyInstance) {
           frequencyPenalty: suppressModelParameters ? undefined : frequencyPenalty || undefined,
           presencePenalty: suppressModelParameters ? undefined : presencePenalty || undefined,
           enableThinking: suppressModelParameters ? undefined : enableThinking || undefined,
-          reasoningEffort: suppressModelParameters ? undefined : resolvedEffort || undefined,
+          reasoningEffort: suppressModelParameters ? undefined : providerReasoningEffort,
           verbosity: suppressModelParameters ? undefined : verbosity || undefined,
           serviceTier: serviceTier || undefined,
           showThoughts: showThoughts || undefined,
@@ -1704,7 +1749,7 @@ export async function registerDryRunRoute(app: FastifyInstance) {
           presencePenalty: presencePenalty || undefined,
           minP: minP || undefined,
           enableThinking,
-          reasoningEffort: resolvedEffort ?? undefined,
+          reasoningEffort: providerReasoningEffort,
           excludePastReasoning,
           verbosity: verbosity ?? undefined,
           serviceTier,
@@ -1769,7 +1814,7 @@ export async function registerDryRunRoute(app: FastifyInstance) {
         presencePenalty: presencePenalty || undefined,
         minP: minP || undefined,
         enableThinking,
-        reasoningEffort: resolvedEffort ?? undefined,
+        reasoningEffort: providerReasoningEffort,
         excludePastReasoning,
         verbosity: verbosity ?? undefined,
         serviceTier,

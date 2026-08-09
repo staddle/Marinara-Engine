@@ -1,9 +1,9 @@
 import { EMOJI_SEARCH_NAMES } from "./emoji-catalog.generated";
+import { matchesEmojiQuery } from "./emoji-search";
 
 export interface StandardEmojiShortcode {
   name: string;
   emoji: string;
-  searchText: string;
 }
 
 const COMMON_SHORTCODES: Readonly<Record<string, string>> = {
@@ -51,13 +51,13 @@ function toShortcode(value: string): string {
 const byName = new Map<string, StandardEmojiShortcode>();
 
 for (const [name, emoji] of Object.entries(COMMON_SHORTCODES)) {
-  byName.set(name, { name, emoji, searchText: `${name.replaceAll("_", " ")} ${EMOJI_SEARCH_NAMES[emoji] ?? ""}` });
+  byName.set(name, { name, emoji });
 }
 
 for (const [emoji, unicodeName] of Object.entries(EMOJI_SEARCH_NAMES)) {
   const name = toShortcode(unicodeName);
   if (!name || byName.has(name)) continue;
-  byName.set(name, { name, emoji, searchText: `${name.replaceAll("_", " ")} ${unicodeName}` });
+  byName.set(name, { name, emoji });
 }
 
 export const STANDARD_EMOJI_SHORTCODES: readonly StandardEmojiShortcode[] = Array.from(byName.values());
@@ -70,7 +70,7 @@ export function searchStandardEmojiShortcodes(query: string, limit = 10): Standa
   const normalized = toShortcode(query);
   if (!normalized) return [];
   const matches = STANDARD_EMOJI_SHORTCODES.filter(
-    (entry) => entry.name.includes(normalized) || entry.searchText.includes(normalized.replaceAll("_", " ")),
+    (entry) => entry.name.includes(normalized) || matchesEmojiQuery(query, entry.emoji),
   ).sort((a, b) => {
     const aStarts = a.name.startsWith(normalized) ? 1 : 0;
     const bStarts = b.name.startsWith(normalized) ? 1 : 0;

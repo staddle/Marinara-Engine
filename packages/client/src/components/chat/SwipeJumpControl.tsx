@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { cn } from "../../lib/utils";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface SwipeJumpControlProps {
   messageId: string;
@@ -25,6 +26,7 @@ export function SwipeJumpControl({
   inputClassName,
   iconSize = "0.75rem",
 }: SwipeJumpControlProps) {
+  const { t: localizeUi } = useUiTranslation();
   const [inputValue, setInputValue] = useState(() => String(activeSwipeIndex + 1));
 
   useEffect(() => {
@@ -65,14 +67,12 @@ export function SwipeJumpControl({
           setSwipeByDisplayIndex(activeSwipeIndex);
         }}
         disabled={activeSwipeIndex <= 0}
-        aria-label="Previous swipe"
-        title="Previous swipe"
+        aria-label={localizeUi("ui.chat.swipejumpcontrol.previousSwipe")}
+        title={localizeUi("ui.chat.swipejumpcontrol.previousSwipe")}
       >
         <ChevronLeft size={iconSize} />
       </button>
-      <label className="sr-only" htmlFor={inputId}>
-        Jump to swipe
-      </label>
+      <label className="sr-only" htmlFor={inputId}>{localizeUi("ui.chat.swipejumpcontrol.jumpToSwipe")}</label>
       <input
         id={inputId}
         type="text"
@@ -94,8 +94,8 @@ export function SwipeJumpControl({
           "h-[1.375rem] w-9 rounded-full border border-transparent bg-[var(--marinara-chat-chrome-highlight-bg)] px-1.5 py-0.5 text-center tabular-nums text-[0.625rem] font-medium text-[var(--marinara-chat-chrome-panel-muted)] outline-none transition-[background-color,border-color,box-shadow,color] focus:border-[var(--marinara-chat-chrome-button-border-active)] focus:bg-[var(--marinara-chat-chrome-button-bg-active)]",
           inputClassName,
         )}
-        aria-label={`Jump to swipe, 1 through ${displaySwipeCount}`}
-        title={`Jump to swipe 1-${displaySwipeCount}`}
+        aria-label={localizeUi("ui.chat.swipejumpcontrol.jumpToSwipe1ThroughValue1", { value1: displaySwipeCount })}
+        title={localizeUi("ui.chat.swipejumpcontrol.jumpToSwipe1Value1", { value1: displaySwipeCount })}
       />
       <span className="tabular-nums">/{displaySwipeCount}</span>
       <button
@@ -110,8 +110,8 @@ export function SwipeJumpControl({
           onCreateNextSwipe?.();
         }}
         disabled={!hasNextSwipe && !canCreateNextSwipe}
-        aria-label={hasNextSwipe ? "Next swipe" : "Generate next swipe"}
-        title={hasNextSwipe ? "Next swipe" : "Generate next swipe"}
+        aria-label={hasNextSwipe ?localizeUi("ui.chat.swipejumpcontrol.nextSwipe") :localizeUi("ui.chat.swipejumpcontrol.generateNextSwipe")}
+        title={hasNextSwipe ?localizeUi("ui.chat.swipejumpcontrol.nextSwipe") :localizeUi("ui.chat.swipejumpcontrol.generateNextSwipe")}
       >
         <ChevronRight size={iconSize} />
       </button>

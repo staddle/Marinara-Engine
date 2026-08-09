@@ -101,6 +101,9 @@ export async function adminRoutes(app: FastifyInstance) {
     if (requestedScopes.includes("lorebooks")) {
       await runDelete("lorebook_entries", () => db.delete(schema.lorebookEntries).run());
       await runDelete("lorebooks", () => db.delete(schema.lorebooks).run());
+      await runDelete("library_folders:lorebooks", () =>
+        db.delete(schema.libraryFolders).where(eq(schema.libraryFolders.scope, "lorebooks")).run(),
+      );
     }
 
     if (requestedScopes.includes("presets")) {
@@ -108,6 +111,9 @@ export async function adminRoutes(app: FastifyInstance) {
       await runDelete("prompt_groups", () => db.delete(schema.promptGroups).run());
       await runDelete("choice_blocks", () => db.delete(schema.choiceBlocks).run());
       await runDelete("prompt_presets", () => db.delete(schema.promptPresets).run());
+      await runDelete("library_folders:presets", () =>
+        db.delete(schema.libraryFolders).where(eq(schema.libraryFolders.scope, "presets")).run(),
+      );
     }
 
     if (requestedScopes.includes("connections")) {
@@ -124,6 +130,9 @@ export async function adminRoutes(app: FastifyInstance) {
       await runDelete("custom_tools", () => db.delete(schema.customTools).run());
       await runDelete("regex_scripts", () => db.delete(schema.regexScripts).run());
       await runDelete("custom_themes", () => db.delete(schema.customThemes).run());
+      await runDelete("library_folders:agents", () =>
+        db.delete(schema.libraryFolders).where(eq(schema.libraryFolders.scope, "agents")).run(),
+      );
     }
 
     if (requestedScopes.includes("media")) {

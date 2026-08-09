@@ -76,6 +76,8 @@ The **Dialogue & Greetings** section sets how a chat opens and how the character
 - **Alternate Greetings**. Extra opening messages. When you start a chat you can pick which one to use. Use the up and down controls to reorder them, and the X to remove one.
 - **Example Dialogue**. Sample exchanges that teach the character's voice. Use `<START>` to separate exchanges. Use `{{user}}` and `{{char}}` as placeholders.
 
+Greetings and example messages can also display images from the character's Gallery; see [Character galleries → Reuse a gallery image in messages and greetings](galleries.md#reuse-a-gallery-image-in-messages-and-greetings).
+
 A short Example Dialogue entry looks like this:
 
 ```
@@ -113,7 +115,7 @@ The picture size comes from the **Portraits** image-size setting in the image-ge
 
 The **Advanced** tab holds prompt controls for advanced users. You can leave all of these empty for a normal character.
 
-These character-authored prompt controls apply in Conversation, Roleplay, Visual Novel, and Game modes. A selected Conversation or Game preset changes the surrounding prompt, but does not disable the character's Post-History Instructions or Depth Prompt.
+These character-authored prompt controls apply in Conversation, Roleplay, and Game modes. A selected Conversation or Game preset changes the surrounding prompt, but does not disable the character's Post-History Instructions or Depth Prompt.
 
 - **System Prompt**. Character-specific instructions added through the active preset's character block, Conversation character context, or Game character/GM card as appropriate. This does not replace the chat's main system prompt.
 - **Post-History Instructions**. Text placed near the end of the prompt, close to generation. A common use is a short reminder like "Stay in character".
@@ -138,7 +140,9 @@ To go back to an older version:
 1. Open the **Compare** window for the version you want, or click its restore icon in the list.
 2. Click **Restore this version**, then confirm.
 
-Restoring replaces your current card with that snapshot. It does not add a new history entry. You can also delete a saved snapshot from the list. Deleting a snapshot does not change your current card.
+Restoring replaces your current card with that snapshot. It does not add a new history entry. Use the pencil icon to correct a saved snapshot's card-version label without restoring it. You can also delete a saved snapshot from the list; deleting one does not change your current card.
+
+Use **Reset** in the **Version history** header when you want to restart the card's versioning. After confirmation, Marinara deletes every saved snapshot and sets the current card version to `0.0`. This cannot be undone.
 
 ## Reviewing agent-proposed card updates
 

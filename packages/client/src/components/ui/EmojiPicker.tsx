@@ -4,441 +4,11 @@
 import { useState, useRef, useEffect, useCallback, useLayoutEffect } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "../../lib/utils";
+import { rememberRecentMedia, useRecentMedia } from "../../hooks/use-recent-media";
 import { EMOJI_CATEGORIES, EMOJI_SEARCH_NAMES } from "../../lib/emoji-catalog.generated";
-
-/** Emoji → searchable keywords (lowercase). Only needs entries for emojis in CATEGORIES. */
-const EMOJI_ALIASES: Record<string, string> = {
-  "😀": "grinning face happy",
-  "😃": "grinning big eyes happy",
-  "😄": "grinning smiling happy",
-  "😁": "beaming grin",
-  "😆": "laughing squinting",
-  "😅": "sweat grinning nervous",
-  "🤣": "rofl rolling laughing",
-  "😂": "joy tears laughing cry",
-  "🙂": "slightly smiling",
-  "😊": "blushing shy smiling",
-  "😇": "innocent angel halo",
-  "🥰": "love hearts smiling",
-  "😍": "heart eyes love",
-  "🤩": "star struck wow",
-  "😘": "kiss blowing",
-  "😗": "kissing",
-  "😚": "kissing closed eyes",
-  "😙": "kissing smiling",
-  "🥲": "smiling tear sad",
-  "😋": "yummy delicious tongue",
-  "😛": "tongue out",
-  "😜": "winking tongue playful",
-  "🤪": "zany crazy wild",
-  "😝": "squinting tongue",
-  "🤑": "money face rich",
-  "🤗": "hugging hug",
-  "🤭": "giggling hand over mouth",
-  "🫢": "open eyes hand over mouth",
-  "🤫": "shushing quiet secret",
-  "🤔": "thinking hmm",
-  "🫡": "saluting salute",
-  "🤐": "zipper mouth shut",
-  "🤨": "raised eyebrow skeptical",
-  "😐": "neutral face",
-  "😑": "expressionless",
-  "😶": "no mouth silent",
-  "🫥": "dotted line invisible",
-  "😏": "smirking smug",
-  "😒": "unamused annoyed",
-  "🙄": "eye roll whatever",
-  "😬": "grimacing awkward",
-  "🤥": "lying pinocchio",
-  "😌": "relieved content peaceful",
-  "😔": "sad pensive",
-  "😪": "sleepy tired",
-  "🤤": "drooling",
-  "😴": "sleeping zzz",
-  "😷": "mask sick",
-  "🤒": "thermometer sick fever",
-  "🤕": "bandage hurt injured",
-  "🤢": "nauseous sick",
-  "🤮": "vomiting puke",
-  "🥴": "woozy drunk",
-  "😵": "dizzy knocked out",
-  "🤯": "exploding head mind blown",
-  "🥳": "party celebrate birthday",
-  "🥺": "pleading puppy eyes",
-  "😢": "crying tear sad",
-  "😭": "sobbing crying loud",
-  "😤": "angry steam huffing",
-  "😠": "angry face mad",
-  "😡": "rage furious red",
-  "🤬": "cursing swearing symbols",
-  "😈": "devil smiling horns",
-  "👿": "angry devil",
-  "💀": "skull dead",
-  "☠️": "skull crossbones death",
-  "💩": "poop poo",
-  "🤡": "clown",
-  "👹": "ogre monster",
-  "👺": "goblin tengu",
-  "👻": "ghost boo",
-  "👽": "alien ufo",
-  "🤖": "robot",
-  "😺": "cat grinning happy",
-  "😸": "cat grinning smile",
-  "😹": "cat joy tears",
-  "😻": "cat heart eyes love",
-  "😼": "cat smirk wry",
-  "😽": "cat kissing",
-  "🙀": "cat weary shocked",
-  "😿": "cat crying sad",
-  "😾": "cat pouting angry",
-  "👋": "wave hi hello bye",
-  "🤚": "raised back hand",
-  "🖐️": "hand splayed",
-  "✋": "raised hand stop high five",
-  "🖖": "vulcan spock",
-  "🫱": "rightward hand",
-  "🫲": "leftward hand",
-  "🫳": "palm down",
-  "🫴": "palm up",
-  "👌": "ok perfect",
-  "🤌": "pinched fingers italian",
-  "🤏": "pinching small tiny",
-  "✌️": "peace victory",
-  "🤞": "crossed fingers luck",
-  "🫰": "index pointing heart",
-  "🤟": "love you gesture",
-  "🤘": "rock on metal horns",
-  "🤙": "call me shaka",
-  "👈": "pointing left",
-  "👉": "pointing right",
-  "👆": "pointing up",
-  "🖕": "middle finger flip off",
-  "👇": "pointing down",
-  "☝️": "index pointing up",
-  "🫵": "pointing at viewer",
-  "👍": "thumbs up good yes",
-  "👎": "thumbs down bad no",
-  "✊": "raised fist",
-  "👊": "fist bump punch",
-  "🤛": "left fist",
-  "🤜": "right fist",
-  "👏": "clapping applause",
-  "🙌": "raising hands celebrate",
-  "🫶": "heart hands love",
-  "👐": "open hands",
-  "🤲": "palms up together",
-  "🤝": "handshake deal",
-  "🙏": "pray please thank you",
-  "✍️": "writing hand",
-  "💪": "muscle strong flexing",
-  "🦾": "mechanical arm",
-  "🦿": "mechanical leg",
-  "🦵": "leg",
-  "🦶": "foot",
-  "👂": "ear listening",
-  "🦻": "ear hearing aid",
-  "👃": "nose smell",
-  "🧠": "brain smart",
-  "🫀": "anatomical heart",
-  "🫁": "lungs",
-  "🦷": "tooth",
-  "🦴": "bone",
-  "👀": "eyes looking",
-  "👁️": "eye",
-  "👅": "tongue",
-  "👄": "mouth lips",
-  "👶": "baby",
-  "🧒": "child kid",
-  "👦": "boy",
-  "👧": "girl",
-  "🧑": "person adult",
-  "👱": "blonde",
-  "👨": "man",
-  "🧔": "bearded",
-  "👩": "woman",
-  "🧓": "older person",
-  "👴": "old man grandpa",
-  "👵": "old woman grandma",
-  "💂": "guard",
-  "👷": "construction worker",
-  "🫅": "person crown king queen",
-  "🤴": "prince",
-  "👸": "princess",
-  "👳": "turban",
-  "🧕": "headscarf hijab",
-  "🤵": "tuxedo groom",
-  "👰": "bride veil wedding",
-  "🤰": "pregnant",
-  "🫃": "pregnant man",
-  "🤱": "breastfeeding",
-  "👼": "angel baby cherub",
-  "🎅": "santa christmas",
-  "🤶": "mrs claus christmas",
-  "🦸": "superhero",
-  "🦹": "supervillain",
-  "🧙": "mage wizard",
-  "🧚": "fairy",
-  "🧛": "vampire",
-  "🧜": "mermaid merman",
-  "🧝": "elf",
-  "🧞": "genie",
-  "🧟": "zombie",
-  "🧌": "troll",
-  "💆": "massage",
-  "💇": "haircut",
-  "🚶": "walking",
-  "🧍": "standing",
-  "🧎": "kneeling",
-  "🏃": "running",
-  "💃": "dancer dancing woman",
-  "🕺": "dancer dancing man",
-  "🕴️": "hovering suit",
-  "👯": "bunny ears",
-  "🧖": "sauna steam",
-  "🧗": "climbing",
-  "🏌️": "golf",
-  "🏄": "surfing",
-  "🚣": "rowing",
-  "🏊": "swimming",
-  "⛹️": "basketball",
-  "🏋️": "weightlifting gym",
-  "🚴": "cycling biking",
-  "🚵": "mountain biking",
-  "🤸": "cartwheel",
-  "🤼": "wrestling",
-  "🤽": "water polo",
-  "🤾": "handball",
-  "🤺": "fencing",
-  "⛷️": "skiing",
-  "🏂": "snowboarding",
-  "🏇": "horse racing",
-  "❤️": "red heart love",
-  "🧡": "orange heart",
-  "💛": "yellow heart",
-  "💚": "green heart",
-  "💙": "blue heart",
-  "💜": "purple heart",
-  "🖤": "black heart",
-  "🤍": "white heart",
-  "🤎": "brown heart",
-  "💔": "broken heart",
-  "❤️‍🔥": "heart fire passion",
-  "❤️‍🩹": "mending heart healing",
-  "❣️": "exclamation heart",
-  "💕": "two hearts",
-  "💞": "revolving hearts",
-  "💓": "beating heart",
-  "💗": "growing heart",
-  "💖": "sparkling heart",
-  "💘": "heart arrow cupid",
-  "💝": "heart ribbon gift",
-  "💟": "heart decoration",
-  "♥️": "heart suit card",
-  "💑": "couple heart",
-  "💏": "couple kiss",
-  "👪": "family",
-  "👨‍👩‍👦": "family man woman boy",
-  "👨‍👩‍👧": "family man woman girl",
-  "🌸": "cherry blossom flower pink",
-  "💐": "bouquet flowers",
-  "🌷": "tulip flower",
-  "🌹": "rose flower red",
-  "🥀": "wilted flower dead",
-  "🌺": "hibiscus flower",
-  "🌻": "sunflower",
-  "🌼": "blossom flower",
-  "🌱": "seedling sprout",
-  "🪴": "potted plant",
-  "🌲": "evergreen tree pine",
-  "🌳": "deciduous tree",
-  "🌴": "palm tree tropical",
-  "🌵": "cactus desert",
-  "🌾": "rice sheaf",
-  "🌿": "herb leaf",
-  "☘️": "shamrock clover",
-  "🍀": "four leaf clover luck",
-  "🍁": "maple leaf autumn fall",
-  "🍂": "fallen leaf autumn",
-  "🍃": "leaf wind",
-  "🍄": "mushroom",
-  "🪹": "empty nest",
-  "🪺": "nest eggs",
-  "🐾": "paw prints",
-  "🐵": "monkey face",
-  "🐒": "monkey",
-  "🦍": "gorilla",
-  "🦧": "orangutan",
-  "🐶": "dog face puppy",
-  "🐕": "dog",
-  "🦮": "guide dog",
-  "🐩": "poodle",
-  "🐺": "wolf",
-  "🦊": "fox",
-  "🦝": "raccoon",
-  "🐱": "cat face kitty",
-  "🐈": "cat",
-  "🦁": "lion",
-  "🐯": "tiger face",
-  "🐅": "tiger",
-  "🐆": "leopard",
-  "🐴": "horse face",
-  "🫎": "moose",
-  "🫏": "donkey",
-  "🦄": "unicorn",
-  "🦓": "zebra",
-  "🐮": "cow face",
-  "🐂": "ox",
-  "🐃": "water buffalo",
-  "🐄": "cow",
-  "🐷": "pig face",
-  "🐖": "pig",
-  "🐗": "boar",
-  "🐽": "pig nose",
-  "🐏": "ram",
-  "🐑": "sheep",
-  "🐐": "goat",
-  "🐪": "camel",
-  "🐫": "two hump camel",
-  "🦙": "llama",
-  "🦒": "giraffe",
-  "🐘": "elephant",
-  "🦣": "mammoth",
-  "🦏": "rhino",
-  "🦛": "hippo",
-  "🐭": "mouse face",
-  "🐁": "mouse",
-  "🐀": "rat",
-  "🐹": "hamster",
-  "🐰": "rabbit face bunny",
-  "🐇": "rabbit",
-  "🐿️": "chipmunk",
-  "🦫": "beaver",
-  "🦔": "hedgehog",
-  "🦇": "bat",
-  "🐻": "bear",
-  "🐨": "koala",
-  "🐼": "panda",
-  "🦥": "sloth",
-  "🦦": "otter",
-  "🦨": "skunk",
-  "🦘": "kangaroo",
-  "🦡": "badger",
-  "🍕": "pizza",
-  "🍔": "hamburger burger",
-  "🍟": "french fries",
-  "🌭": "hot dog",
-  "🥪": "sandwich",
-  "🌮": "taco",
-  "🌯": "burrito",
-  "🍗": "chicken leg poultry",
-  "🍖": "meat bone",
-  "🥩": "steak cut meat",
-  "🍣": "sushi",
-  "🍱": "bento box",
-  "🍜": "ramen noodles",
-  "🍝": "spaghetti pasta",
-  "🍲": "pot food stew",
-  "🍛": "curry rice",
-  "🍳": "egg cooking frying",
-  "🥚": "egg",
-  "🥞": "pancakes",
-  "🧇": "waffle",
-  "🧀": "cheese",
-  "🥐": "croissant",
-  "🍞": "bread loaf",
-  "🥖": "baguette french bread",
-  "🥯": "bagel",
-  "🍩": "donut doughnut",
-  "🍪": "cookie",
-  "🎂": "birthday cake",
-  "🍰": "shortcake cake",
-  "🧁": "cupcake",
-  "🍮": "custard flan",
-  "🍭": "lollipop candy",
-  "🍬": "candy sweet",
-  "🍫": "chocolate bar",
-  "🍿": "popcorn",
-  "🍦": "ice cream soft serve",
-  "🍧": "shaved ice",
-  "🍨": "ice cream sundae",
-  "☕": "coffee hot",
-  "🍵": "tea green",
-  "🧋": "bubble tea boba",
-  "🥤": "cup straw soda",
-  "🍺": "beer mug",
-  "🍻": "clinking beers cheers",
-  "🥂": "champagne toast wine",
-  "🍷": "wine glass",
-  "🍸": "cocktail martini",
-  "🍹": "tropical drink",
-  "🍾": "champagne bottle",
-  "🍶": "sake",
-  "🧊": "ice cube",
-  "💻": "laptop computer",
-  "📱": "phone mobile",
-  "🖥️": "desktop computer monitor",
-  "⌨️": "keyboard",
-  "🖨️": "printer",
-  "📷": "camera",
-  "📸": "camera flash",
-  "📹": "video camera",
-  "🎥": "movie camera film",
-  "📺": "television tv",
-  "📻": "radio",
-  "🎙️": "microphone studio mic",
-  "⏰": "alarm clock",
-  "🔮": "crystal ball fortune",
-  "🧿": "nazar evil eye",
-  "💎": "gem diamond jewel",
-  "⚔️": "crossed swords",
-  "🔫": "pistol gun water",
-  "🏹": "bow arrow",
-  "🛡️": "shield",
-  "💡": "lightbulb idea",
-  "🔦": "flashlight torch",
-  "🕯️": "candle",
-  "📚": "books stack",
-  "📖": "open book reading",
-  "📝": "memo writing note",
-  "✏️": "pencil",
-  "🔑": "key",
-  "🗝️": "old key",
-  "💯": "hundred perfect score",
-  "🔥": "fire hot lit",
-  "✨": "sparkles shiny",
-  "🌈": "rainbow",
-  "☀️": "sun sunny",
-  "❄️": "snowflake cold winter",
-  "🌊": "wave ocean water",
-  "♠️": "spade card",
-  "♦️": "diamond card",
-  "♣️": "club card",
-  "🎯": "bullseye target dart",
-  "🎵": "music note",
-  "🎶": "music notes",
-  "✅": "check mark yes",
-  "❌": "cross mark no wrong",
-  "⭕": "circle",
-  "❓": "question mark",
-  "❗": "exclamation mark",
-  "✔️": "check mark done",
-  "🔴": "red circle",
-  "🟠": "orange circle",
-  "🟡": "yellow circle",
-  "🟢": "green circle",
-  "🔵": "blue circle",
-  "🟣": "purple circle",
-  "⚫": "black circle",
-  "⚪": "white circle",
-  "🟤": "brown circle",
-  "💬": "speech bubble chat",
-  "💭": "thought bubble",
-  "💤": "sleeping zzz",
-  "💥": "collision boom bang",
-  "💢": "anger symbol",
-  "💨": "dash wind fast",
-  "🧪": "test tube lab laboratory science chemistry experiment",
-};
+import { EMOJI_KEYWORDS, matchesEmojiQuery } from "../../lib/emoji-search";
+import { useTranslation as useUiTranslation } from "react-i18next";
+import { Search } from "lucide-react";
 
 const CURATED_CATEGORIES = [
   {
@@ -1168,9 +738,11 @@ export function EmojiPicker({
   customTab,
   embedded,
 }: EmojiPickerProps) {
+  const { t: localizeUi } = useUiTranslation();
   const [search, setSearch] = useState("");
   const [activeCategory, setActiveCategory] = useState<number | "custom">(0);
   const panelRef = useRef<HTMLDivElement>(null);
+  const recentEmojis = useRecentMedia("emoji");
 
   // Close on outside click
   useEffect(() => {
@@ -1287,6 +859,10 @@ export function EmojiPicker({
 
   const handleSelect = useCallback(
     (emoji: string) => {
+      rememberRecentMedia("emoji", {
+        value: emoji,
+        label: EMOJI_SEARCH_NAMES[emoji] ?? EMOJI_KEYWORDS[emoji] ?? emoji,
+      });
       onSelect(emoji);
     },
     [onSelect],
@@ -1296,16 +872,10 @@ export function EmojiPicker({
 
   const searching = search.trim().length > 0;
   const filteredCategories = searching
-    ? (() => {
-        const q = search.trim().toLowerCase();
-        return CATEGORIES.map((cat) => ({
-          ...cat,
-          emojis: cat.emojis.filter((emoji) => {
-            const names = `${EMOJI_SEARCH_NAMES[emoji] ?? ""} ${EMOJI_ALIASES[emoji] ?? ""}`;
-            return emoji === q || names.includes(q);
-          }),
-        })).filter((cat) => cat.emojis.length > 0);
-      })()
+    ? CATEGORIES.map((cat) => ({
+        ...cat,
+        emojis: cat.emojis.filter((emoji) => matchesEmojiQuery(search, emoji)),
+      })).filter((cat) => cat.emojis.length > 0)
     : CATEGORIES;
   const visibleStandardCategories = searching
     ? filteredCategories
@@ -1315,15 +885,21 @@ export function EmojiPicker({
     <>
       {/* Search spans every standard category and custom emojis, regardless of the selected tab. */}
       <div className="border-b border-foreground/10 px-3 py-2">
-        <input
-          type="text"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search emojis..."
-          aria-label="Search emojis"
-          className="w-full rounded-md bg-foreground/5 px-2.5 py-1.5 text-xs outline-none ring-1 ring-foreground/10 transition-shadow placeholder:text-foreground/35 focus:ring-foreground/20"
-          autoFocus={!embedded}
-        />
+        <div
+          data-emoji-search-shell
+          className="flex items-center gap-2 rounded-md bg-foreground/5 px-2.5 py-1.5 ring-1 ring-foreground/10 transition-shadow focus-within:ring-foreground/20"
+        >
+          <Search aria-hidden="true" size="0.875rem" className="shrink-0 text-foreground/45" />
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder={localizeUi("ui.ui.emojipicker.searchEmojis")}
+            aria-label={localizeUi("ui.ui.emojipicker.searchEmojis_ecbfa28")}
+            className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-foreground/35"
+            autoFocus={!embedded}
+          />
+        </div>
       </div>
 
       {/* Category tabs */}
@@ -1367,34 +943,55 @@ export function EmojiPicker({
 
       {/* Emoji grid (or the custom-emoji tab content) */}
       <div className="flex-1 overflow-y-auto px-2 py-2">
-        {!searching && activeCategory === "custom" && customTab
-          ? customTab.render(search)
-          : (
-              <>
-                {visibleStandardCategories.map((cat) => (
-                  <div key={cat.label}>
-                    <p className="mb-1 px-1 text-[0.625rem] font-semibold uppercase tracking-wide text-foreground/45">
-                      {cat.label}
-                    </p>
-                    <div className="grid grid-cols-8 gap-0.5">
-                      {cat.emojis.map((emoji) => (
-                        <button
-                          key={emoji}
-                          type="button"
-                          onClick={() => handleSelect(emoji)}
-                          aria-label={EMOJI_SEARCH_NAMES[emoji] ?? EMOJI_ALIASES[emoji] ?? emoji}
-                          title={EMOJI_SEARCH_NAMES[emoji] ?? EMOJI_ALIASES[emoji] ?? emoji}
-                          className="rounded-md p-1 text-xl transition-transform hover:scale-125 hover:bg-foreground/10 active:scale-100"
-                        >
-                          {emoji}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-                {searching && customTab && (customTab.renderSearch?.(search) ?? customTab.render(search))}
-              </>
-            )}
+        {!searching && recentEmojis.length > 0 && (
+          <section data-recent-media="emoji" className="mb-2 border-b border-foreground/10 pb-2">
+            <p className="mb-1 px-1 text-[0.625rem] font-semibold uppercase tracking-wide text-foreground/45">
+              {localizeUi("ui.mediaPicker.recentlyUsed")}
+            </p>
+            <div className="grid grid-cols-8 gap-0.5">
+              {recentEmojis.map((item) => (
+                <button
+                  key={item.value}
+                  type="button"
+                  onClick={() => handleSelect(item.value)}
+                  aria-label={item.label ?? item.value}
+                  title={item.label ?? item.value}
+                  className="min-w-0 truncate rounded-md p-1 text-xl transition-transform hover:scale-125 hover:bg-foreground/10 active:scale-100"
+                >
+                  {item.value}
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
+        {!searching && activeCategory === "custom" && customTab ? (
+          customTab.render(search)
+        ) : (
+          <>
+            {visibleStandardCategories.map((cat) => (
+              <div key={cat.label}>
+                <p className="mb-1 px-1 text-[0.625rem] font-semibold uppercase tracking-wide text-foreground/45">
+                  {cat.label}
+                </p>
+                <div className="grid grid-cols-8 gap-0.5">
+                  {cat.emojis.map((emoji) => (
+                    <button
+                      key={emoji}
+                      type="button"
+                      onClick={() => handleSelect(emoji)}
+                      aria-label={EMOJI_SEARCH_NAMES[emoji] ?? EMOJI_KEYWORDS[emoji] ?? emoji}
+                      title={EMOJI_SEARCH_NAMES[emoji] ?? EMOJI_KEYWORDS[emoji] ?? emoji}
+                      className="rounded-md p-1 text-xl transition-transform hover:scale-125 hover:bg-foreground/10 active:scale-100"
+                    >
+                      {emoji}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+            {searching && customTab && (customTab.renderSearch?.(search) ?? customTab.render(search))}
+          </>
+        )}
       </div>
     </>
   );

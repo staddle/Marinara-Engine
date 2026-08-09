@@ -21,6 +21,9 @@ export type GameCombatStyle = "classic" | "tactical";
 /** Status of a game session. */
 export type GameSessionStatus = "setup" | "active" | "concluded";
 
+/** Which system owns the campaign-scale map when a new game begins. */
+export type GameWorldMapMode = "standard" | "hierarchical";
+
 /** Spotify source constraints for Game Mode DJ selection. */
 export type GameSpotifySourceType = SpotifySourceType;
 
@@ -184,6 +187,8 @@ export interface GameSetupConfig {
   combatStyle?: GameCombatStyle;
   /** Optional user prompt used to create the initial hierarchical world map draft. */
   spatialMapInstructions?: string;
+  /** Campaign-scale map authority selected during New Game. Older saves default to "standard". */
+  gameWorldMapMode?: GameWorldMapMode;
   /** Character ID to use as GM (only when gmMode is "character") */
   gmCharacterId?: string | null;
   /** Party member IDs; library character IDs or `npc:<slug>` tracked-NPC IDs. */
@@ -193,6 +198,15 @@ export interface GameSetupConfig {
   /** Connection to use for the scene wrap-up turn (backgrounds, music, widgets, etc.).
    *  When omitted, falls back to sidecar (if available) or skips the wrap-up. */
   sceneConnectionId?: string;
+  /** Id of the installed package providing this game's EXPERIENCE — a self-contained game mode drawing its
+   *  own surface over the shared narration. Chosen at creation and fixed for the game's lifetime, since an
+   *  experience owns the whole run. Omitted = the built-in Game mode, unchanged. */
+  gameExperienceId?: string;
+  /** Whatever the experience's own setup collected, stored verbatim and never interpreted by the host, so
+   *  it can always recover the options the game was created with. */
+  experienceConfig?: Record<string, unknown>;
+  /** Enable installed agents and agent-driven Game Mode features for this game. */
+  enableAgents?: boolean;
   /** Enable automatic sprite generation for characters using image model */
   enableSpriteGeneration?: boolean;
   /** Connection ID for image generation (NPC portraits + location backgrounds) */
@@ -203,6 +217,8 @@ export interface GameSetupConfig {
   gameStoryboardAutoIllustrationsEnabled?: boolean;
   /** Automatically create storyboard keyframe videos after completed GM turns. */
   gameStoryboardAutoGenerationEnabled?: boolean;
+  /** Master switch for Game Mode storyboard controls and automatic generation. */
+  gameStoryboardsEnabled?: boolean;
   /** Target number of storyboard keyframes to create per completed GM turn. */
   gameStoryboardKeyframeCount?: number;
   /** Selected built-in or chat-local GM prompt template. */
@@ -706,7 +722,7 @@ export interface GameTurnStoryboardKeyframe {
   sectionStartIndex: number | null;
   sectionEndIndex: number | null;
   anchorQuote: string;
-  anchorKind: "narration" | "dialogue" | "readable" | "system" | "";
+  anchorKind: "narration" | "dialogue" | "readable" | "system" | "user" | "assistant" | "";
   narrationBeat: string;
   mangaPanelPrompt: string;
   imagePrompt: string;

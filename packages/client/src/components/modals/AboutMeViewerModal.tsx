@@ -13,11 +13,13 @@ import { useChat, useUpdateChatMetadata } from "../../hooks/use-chats";
 import { useCharacter, usePersonas } from "../../hooks/use-characters";
 import { useConversationCustomEmojis } from "../../hooks/use-conversation-custom-emojis";
 import { useChatStore } from "../../stores/chat.store";
-import { cn, getAvatarCropStyle, type AvatarCropValue } from "../../lib/utils";
+import type { AvatarCrop } from "@marinara-engine/shared";
+import { cn, getAvatarCropStyle } from "../../lib/utils";
 import { parseChatMetadata } from "../../lib/chat-display";
 import { renderInlineWithCustomEmojis } from "../../lib/custom-emoji-render";
 import { EmojiPicker } from "../ui/EmojiPicker";
 import { CustomEmojiTab } from "../chat/CustomEmojiTab";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface AnchorRect {
   top: number;
@@ -35,7 +37,7 @@ interface AboutMeViewerModalProps {
   id: string;
   anchorRect?: AnchorRect | null;
   avatarUrl?: string | null;
-  avatarCrop?: AvatarCropValue | null;
+  avatarCrop?: AvatarCrop | null;
   displayName?: string | null;
   nameColor?: string | null;
   status?: "online" | "idle" | "dnd" | "offline" | null;
@@ -125,6 +127,7 @@ export function AboutMeViewerModal({
   status,
   activity,
 }: AboutMeViewerModalProps) {
+  const { t: localizeUi } = useUiTranslation();
   const activeChatId = useChatStore((s) => s.activeChatId);
   const { data: chat } = useChat(activeChatId);
   const { data: character } = useCharacter(kind === "character" ? id : null);
@@ -275,9 +278,9 @@ export function AboutMeViewerModal({
       else delete next[id];
       await writeOverrides(next);
       setEditing(false);
-      toast.success(draft.trim() ? "Chat-specific about me saved" : "Reverted to the default about me");
+      toast.success(draft.trim() ?localizeUi("ui.modals.aboutmeviewermodal.chatSpecificAboutMeSaved") :localizeUi("ui.modals.aboutmeviewermodal.revertedToTheDefaultAboutMe"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to save");
+      toast.error(err instanceof Error ? err.message :localizeUi("ui.modals.aboutmeviewermodal.failedToSave"));
     }
   };
 
@@ -288,9 +291,9 @@ export function AboutMeViewerModal({
     try {
       await writeOverrides(next);
       setEditing(false);
-      toast.success("Reverted to the default about me");
+      toast.success(localizeUi("ui.modals.aboutmeviewermodal.revertedToTheDefaultAboutMe"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Failed to clear");
+      toast.error(err instanceof Error ? err.message :localizeUi("ui.modals.aboutmeviewermodal.failedToClear"));
     }
   };
 
@@ -362,7 +365,7 @@ export function AboutMeViewerModal({
           type="button"
           onClick={onClose}
           className="absolute right-2 top-2 rounded-lg bg-black/25 p-1 text-white/90 transition-colors hover:bg-black/40"
-          aria-label="Close"
+          aria-label={localizeUi("capabilities.actions.close")}
         >
           <X size="0.875rem" />
         </button>
@@ -411,7 +414,7 @@ export function AboutMeViewerModal({
             {kind === "character" && (
               <p className="mari-about-me-presence mt-0.5 text-[0.75rem] text-[var(--muted-foreground)]">
                 {statusLabel(status)}
-                {activity ? ` · ${activity}` : ""}
+                {activity ?localizeUi("ui.modals.aboutmeviewermodal.value1", { value1: activity }) : ""}
               </p>
             )}
           </div>
@@ -424,9 +427,7 @@ export function AboutMeViewerModal({
             )}
           >
             <div className="mb-1.5 flex shrink-0 items-center justify-between gap-2">
-              <span className="mari-about-me-label text-[0.6875rem] font-bold uppercase tracking-wide text-[var(--muted-foreground)]">
-                About Me
-              </span>
+              <span className="mari-about-me-label text-[0.6875rem] font-bold uppercase tracking-wide text-[var(--muted-foreground)]">{localizeUi("ui.characters.convoprofilefields.aboutMe")}</span>
               <span
                 className={cn(
                   "mari-about-me-badge rounded-full px-1.5 py-0.5 text-[0.5625rem] font-medium",
@@ -435,7 +436,7 @@ export function AboutMeViewerModal({
                     : "bg-[var(--background)]/60 text-[var(--muted-foreground)]",
                 )}
               >
-                {hasOverride ? "Chat-specific" : "Default"}
+                {hasOverride ?localizeUi("ui.modals.aboutmeviewermodal.chatSpecific") :localizeUi("ui.noodle.noodlehome.default")}
               </span>
             </div>
 
@@ -451,7 +452,7 @@ export function AboutMeViewerModal({
                 {effective.trim() ? (
                   renderAbout(effective)
                 ) : (
-                  <span className="text-[var(--muted-foreground)]">No about me set.</span>
+                  <span className="text-[var(--muted-foreground)]">{localizeUi("ui.modals.aboutmeviewermodal.noAboutMeSet")}</span>
                 )}
               </div>
             ) : (
@@ -474,7 +475,7 @@ export function AboutMeViewerModal({
                     onChange={(e) => setDraft(e.target.value)}
                     rows={5}
                     autoFocus
-                    placeholder="What this person shows in this conversation… :emoji: works too"
+                    placeholder={localizeUi("ui.modals.aboutmeviewermodal.whatThisPersonShowsInThisConversationEmojiWorks")}
                     className={cn(
                       "w-full rounded-lg border border-[var(--border)] bg-[var(--background)] p-2 pr-9 text-[0.8125rem] leading-relaxed outline-none transition-colors placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20",
                       isMobile ? "h-full resize-none" : "resize-y",
@@ -492,7 +493,7 @@ export function AboutMeViewerModal({
                       }
                       setEmojiOpen((v) => !v);
                     }}
-                    aria-label="Emoji"
+                    aria-label={localizeUi("chat.input.emoji")}
                     className="absolute bottom-2 right-2 rounded-md p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
                   >
                     <Smile size="1rem" />
@@ -513,9 +514,7 @@ export function AboutMeViewerModal({
                     disabled={isPending}
                     className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-xs text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] disabled:opacity-50"
                   >
-                    <Trash2 size="0.8125rem" />
-                    Clear
-                  </button>
+                    <Trash2 size="0.8125rem" />{localizeUi("lorebook.editor.batch.clear")}</button>
                 )}
                 <button
                   type="button"
@@ -526,9 +525,7 @@ export function AboutMeViewerModal({
                   }}
                   className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-2.5 py-1.5 text-xs font-medium text-[var(--primary-foreground)] transition-opacity hover:opacity-90"
                 >
-                  <Pencil size="0.8125rem" />
-                  Edit
-                </button>
+                  <Pencil size="0.8125rem" />{localizeUi("ui.noodle.noodlepostcard.edit")}</button>
               </>
             ) : (
               <>
@@ -536,21 +533,17 @@ export function AboutMeViewerModal({
                   <button
                     type="button"
                     onClick={() => setDraft(editBaseline)}
-                    title="Undo the changes to this about me"
+                    title={localizeUi("ui.characters.convoprofilefields.undoTheChangesToThisAboutMe")}
                     className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-xs text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)]"
                   >
-                    <Undo2 size="0.8125rem" />
-                    Revert
-                  </button>
+                    <Undo2 size="0.8125rem" />{localizeUi("ui.characters.convoprofilefields.revert")}</button>
                 )}
                 <button
                   type="button"
                   onClick={() => setEditing(false)}
                   className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-2.5 py-1.5 text-xs text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)]"
                 >
-                  <RotateCcw size="0.8125rem" />
-                  Cancel
-                </button>
+                  <RotateCcw size="0.8125rem" />{localizeUi("chat.delete.dialog.cancel")}</button>
                 <button
                   type="button"
                   onClick={handleSave}
@@ -558,15 +551,12 @@ export function AboutMeViewerModal({
                   className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-2.5 py-1.5 text-xs font-medium text-[var(--primary-foreground)] transition-opacity hover:opacity-90 disabled:opacity-50"
                 >
                   <Save size="0.8125rem" />
-                  {isPending ? "Saving…" : "Save"}
+                  {isPending ?localizeUi("chat.settings.inlineEditor.saving") :localizeUi("ui.noodle.noodlehome.save")}
                 </button>
               </>
             )}
           </div>
-          <p className="mt-2 shrink-0 text-[0.625rem] text-[var(--muted-foreground)]">
-            Default about me is edited on the {kind === "persona" ? "persona" : "character"} card. A chat-specific
-            override only applies here.
-          </p>
+          <p className="mt-2 shrink-0 text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.modals.aboutmeviewermodal.defaultAboutMeIsEditedOnThe")} {kind === "persona" ?localizeUi("ui.modals.aboutmeviewermodal.persona") :localizeUi("ui.noodle.noodlehome.character")} {localizeUi("ui.modals.aboutmeviewermodal.cardAChatSpecificOverrideOnlyAppliesHere")}</p>
         </div>
 
         {/* Mobile: emoji picker docked in normal flow at the sheet's bottom, so it

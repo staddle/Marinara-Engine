@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import type { ScenePromptPreferences, ScenePromptPov, ScenePromptTense } from "@marinara-engine/shared";
 import { Modal } from "../ui/Modal";
 import { normalizeScenePromptPreferences } from "../../stores/ui.store";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface ScenePromptPreferencesModalProps {
   open: boolean;
@@ -32,6 +33,7 @@ export function ScenePromptPreferencesModal({
   onSubmit,
   onCancel,
 }: ScenePromptPreferencesModalProps) {
+  const { t: localizeUi } = useUiTranslation();
   const initial = normalizeScenePromptPreferences(initialPreferences);
   const [pov, setPov] = useState<ScenePromptPov>(initial.pov);
   const [tense, setTense] = useState<ScenePromptTense>(initial.tense);
@@ -60,18 +62,16 @@ export function ScenePromptPreferencesModal({
   };
 
   return (
-    <Modal open={open} onClose={handleClose} title="Scene Prompt Setup" width="max-w-lg">
+    <Modal open={open} onClose={handleClose} title={localizeUi("ui.modals.scenepromptpreferencesmodal.scenePromptSetup")} width="max-w-lg">
       <div className="flex flex-col gap-4 p-4">
         <div className="space-y-1">
           <p className="text-sm font-semibold text-[var(--foreground)]">
-            {sourceLabel ? `${sourceLabel} wants to start a scene.` : "Start a scene."}
+            {sourceLabel ?localizeUi("ui.modals.scenepromptpreferencesmodal.value1WantsToStartAScene", { value1: sourceLabel }) :localizeUi("ui.modals.scenepromptpreferencesmodal.startAScene")}
           </p>
-          <p className="text-xs leading-relaxed text-[var(--muted-foreground)]">
-            Pick the writing shape before Marinara plans the scene.
-          </p>
+          <p className="text-xs leading-relaxed text-[var(--muted-foreground)]">{localizeUi("ui.modals.scenepromptpreferencesmodal.pickTheWritingShapeBeforeMarinaraPlansTheScene")}</p>
         </div>
 
-        <OptionGroup label="POV">
+        <OptionGroup label={localizeUi("ui.modals.scenepromptpreferencesmodal.pov")}>
           {POV_OPTIONS.map((option) => (
             <OptionButton
               key={option.id}
@@ -82,7 +82,7 @@ export function ScenePromptPreferencesModal({
           ))}
         </OptionGroup>
 
-        <OptionGroup label="Tense">
+        <OptionGroup label={localizeUi("ui.modals.scenepromptpreferencesmodal.tense")}>
           {TENSE_OPTIONS.map((option) => (
             <OptionButton
               key={option.id}
@@ -94,13 +94,13 @@ export function ScenePromptPreferencesModal({
         </OptionGroup>
 
         <label className="space-y-1.5">
-          <span className="text-xs font-semibold text-[var(--foreground)]">Extra instructions</span>
+          <span className="text-xs font-semibold text-[var(--foreground)]">{localizeUi("ui.modals.scenepromptpreferencesmodal.extraInstructions")}</span>
           <textarea
             value={extraInstructions}
             onChange={(event) => setExtraInstructions(event.target.value)}
             maxLength={2000}
             rows={4}
-            placeholder="Optional notes for the generated scene prompt."
+            placeholder={localizeUi("ui.modals.scenepromptpreferencesmodal.optionalNotesForTheGeneratedScenePrompt")}
             className="min-h-24 w-full resize-y rounded-lg border border-[var(--border)] bg-[var(--secondary)] p-3 text-sm leading-relaxed text-[var(--foreground)] outline-none placeholder:text-[var(--muted-foreground)]/50 focus:border-[var(--primary)]/45 focus:ring-1 focus:ring-[var(--primary)]/25"
           />
         </label>
@@ -110,16 +110,12 @@ export function ScenePromptPreferencesModal({
             type="button"
             onClick={handleClose}
             className="rounded-lg border border-[var(--border)] px-3 py-2 text-sm font-semibold text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-          >
-            Cancel
-          </button>
+          >{localizeUi("chat.delete.dialog.cancel")}</button>
           <button
             type="button"
             onClick={handleSubmit}
             className="rounded-lg bg-[var(--primary)] px-3 py-2 text-sm font-semibold text-[var(--primary-foreground)] transition-opacity hover:opacity-90"
-          >
-            Plan Scene
-          </button>
+          >{localizeUi("ui.modals.scenepromptpreferencesmodal.planScene")}</button>
         </div>
       </div>
     </Modal>

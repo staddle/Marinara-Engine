@@ -2,6 +2,7 @@ import { cn } from "../../../../lib/utils";
 import type { TrackerPanelSizeProfile } from "../../../../stores/ui.store";
 import { useTrackerFieldLock } from "../TrackerLockContext";
 import { WorldRenderedEdit, WorldValueText } from "./WorldEditableTile";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 export function WorldLocationPlate({
   value,
@@ -14,14 +15,15 @@ export function WorldLocationPlate({
   lockKey?: string;
   sizeProfile: TrackerPanelSizeProfile;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const lock = useTrackerFieldLock(lockKey);
   const compact = sizeProfile === "compact";
   return (
     <WorldRenderedEdit
-      label="Location"
+      label={localizeUi("ui.noodle.noodleprofilesurface.location")}
       value={value}
       onSave={onSave}
-      placeholder="Set location"
+      placeholder={localizeUi("ui.trackerPanel.worldlocationplate.setLocation")}
       className={cn(
         "flex min-w-0 items-center gap-1.5 rounded-sm px-1 pb-0.5 pt-0 text-left",
         compact && "px-0.5",

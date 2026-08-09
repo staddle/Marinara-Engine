@@ -19,6 +19,7 @@ import {
   type TouchEvent as ReactTouchEvent,
 } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { useTranslation, useTranslation as useUiTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
   useLorebook,
@@ -75,6 +76,7 @@ import {
   FlaskConical,
   FolderPlus,
   RefreshCw,
+  Info,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { HelpTooltip } from "../ui/HelpTooltip";
@@ -92,12 +94,14 @@ import {
   type LorebookEntry,
   type LorebookFolder,
   type LorebookCategory,
+  type BulkUpdateLorebookEntriesInput,
 } from "@marinara-engine/shared";
 import { LorebookEntryRow } from "./LorebookEntryRow";
 import { LorebookFolderRow } from "./LorebookFolderRow";
 import { ExpandableTextarea, estimateTokens } from "./LorebookFormFields";
 import { ExportFormatDialog, type ExportFormatChoice } from "../ui/ExportFormatDialog";
 import { EditorTabRail } from "../ui/EditorTabRail";
+import { Modal } from "../ui/Modal";
 
 // ──────────────────────────────────────────────
 // Folder collapse state lives in localStorage — purely a UI preference, not
@@ -188,6 +192,7 @@ function LinkedResourcePicker({
   onAdd: (id: string) => void;
   onRemove: (id: string) => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const selectedItems = selectedIds.map(
     (id) =>
       items.find((item) => item.id === id) ?? {
@@ -230,7 +235,7 @@ function LinkedResourcePicker({
               <button
                 onClick={() => onRemove(item.id)}
                 className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
-                title={`Remove ${item.name}`}
+                title={localizeUi("ui.lorebooks.linkedresourcepicker.removeValue1", { value1: item.name })}
               >
                 <X size="0.6875rem" />
               </button>
@@ -285,7 +290,7 @@ function LinkedResourcePicker({
             ))}
             {availableItems.length === 0 && (
               <p className="px-3 py-2 text-[0.6875rem] text-[var(--muted-foreground)]">
-                {items.length === selectedItems.length ? `All ${label.toLowerCase()} already added.` : "No matches."}
+                {items.length === selectedItems.length ?localizeUi("ui.lorebooks.linkedresourcepicker.allValue1AlreadyAdded", { value1: label.toLowerCase() }) :localizeUi("ui.lorebooks.linkedresourcepicker.noMatches")}
               </p>
             )}
           </div>
@@ -322,20 +327,65 @@ const SORT_OPTIONS: Array<{ value: EntrySortKey; label: string }> = [
   { value: "oldest", label: "Oldest" },
 ];
 
-const BATCH_ENTRY_SETTING_OPTIONS = [
-  { value: "enabled", label: "Entry enabled" },
-  { value: "constant", label: "Always active" },
-  { value: "selective", label: "Selective matching" },
-  { value: "matchWholeWords", label: "Match whole words" },
-  { value: "caseSensitive", label: "Case sensitive" },
-  { value: "useRegex", label: "Use regex" },
-  { value: "preventRecursion", label: "Prevent recursion" },
-  { value: "excludeRecursion", label: "Exclude from recursion" },
-  { value: "delayUntilRecursion", label: "Delay until recursion" },
-  { value: "excludeFromVectorization", label: "Exclude from vectors" },
-  { value: "locked", label: "Locked" },
-] as const;
-type BatchEntrySetting = (typeof BATCH_ENTRY_SETTING_OPTIONS)[number]["value"];
+type BatchEntryChanges = BulkUpdateLorebookEntriesInput["changes"];
+
+const BATCH_EDITABLE_ENTRY_FIELDS = [
+  "enabled",
+  "constant",
+  "selective",
+  "selectiveLogic",
+  "probability",
+  "scanDepth",
+  "matchWholeWords",
+  "caseSensitive",
+  "useRegex",
+  "characterFilterMode",
+  "characterFilterIds",
+  "characterTagFilterMode",
+  "characterTagFilters",
+  "generationTriggerFilterMode",
+  "generationTriggerFilters",
+  "additionalMatchingSources",
+  "position",
+  "depth",
+  "order",
+  "role",
+  "sticky",
+  "cooldown",
+  "delay",
+  "ephemeral",
+  "group",
+  "groupWeight",
+  "folderId",
+  "preventRecursion",
+  "excludeRecursion",
+  "delayUntilRecursion",
+  "excludeFromVectorization",
+  "locked",
+  "tag",
+] as const satisfies ReadonlyArray<keyof BatchEntryChanges>;
+
+const BATCH_EDITABLE_ENTRY_FIELD_SET = new Set<keyof LorebookEntry>(BATCH_EDITABLE_ENTRY_FIELDS);
+
+function pickBatchEditableEntryChanges(changes: Partial<LorebookEntry>): BatchEntryChanges {
+  const picked: Record<string, unknown> = {};
+  for (const field of BATCH_EDITABLE_ENTRY_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(changes, field)) {
+      picked[field] = changes[field];
+    }
+  }
+  return picked as BatchEntryChanges;
+}
+
+function omitBatchEditableEntryChanges(changes: Partial<LorebookEntry>): Partial<LorebookEntry> {
+  const personalChanges: Partial<LorebookEntry> = {};
+  for (const [field, value] of Object.entries(changes)) {
+    if (!BATCH_EDITABLE_ENTRY_FIELD_SET.has(field as keyof LorebookEntry)) {
+      (personalChanges as Record<string, unknown>)[field] = value;
+    }
+  }
+  return personalChanges;
+}
 
 function entryStatusSortRank(entry: LorebookEntry): number {
   if (!entry.enabled) return 3;
@@ -345,11 +395,12 @@ function entryStatusSortRank(entry: LorebookEntry): number {
 }
 
 export function LorebookEditor() {
+  const { t: localizeUi } = useUiTranslation();
+  const { t } = useTranslation();
   const lorebookId = useUIStore((s) => s.lorebookDetailId);
   const closeDetail = useUIStore((s) => s.closeLorebookDetail);
   const activeChat = useChatStore((s) => s.activeChat);
-  const activeOwnerChatId =
-    activeChat?.mode === "roleplay" || activeChat?.mode === "game" ? activeChat.id : null;
+  const activeOwnerChatId = activeChat?.mode === "roleplay" || activeChat?.mode === "game" ? activeChat.id : null;
   const spatialBacklinksQuery = useSpatialContext(activeOwnerChatId);
   const { data: rawLorebook, isLoading, isError } = useLorebook(lorebookId);
   const { data: rawLorebooks } = useLorebooks();
@@ -363,6 +414,12 @@ export function LorebookEditor() {
   const deleteEntry = useDeleteLorebookEntry();
   const updateEntry = useUpdateLorebookEntry();
   const bulkUpdateEntries = useBulkUpdateLorebookEntries();
+  const updateEntryMutationRef = useRef(updateEntry);
+  const bulkUpdateEntriesMutationRef = useRef(bulkUpdateEntries);
+  useEffect(() => {
+    updateEntryMutationRef.current = updateEntry;
+    bulkUpdateEntriesMutationRef.current = bulkUpdateEntries;
+  }, [bulkUpdateEntries, updateEntry]);
   const reorderEntries = useReorderLorebookEntries();
   const createFolder = useCreateLorebookFolder();
   const updateFolder = useUpdateLorebookFolder();
@@ -427,7 +484,9 @@ export function LorebookEditor() {
     }
   }, [activeChat?.metadata]);
 
-  const [activeTab, setActiveTab] = useState<TabId>("overview");
+  const [activeTab, setActiveTab] = useState<TabId>(
+    () => (useUIStore.getState().lorebookDetailInitialTab as TabId | null) ?? "overview",
+  );
   const [expandedEntryId, setExpandedEntryId] = useState<string | null>(null);
   const [lorebookDirty, setLorebookDirty] = useState(false);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
@@ -456,8 +515,11 @@ export function LorebookEditor() {
   const [entrySelectionMode, setEntrySelectionMode] = useState(false);
   const [selectedEntryIds, setSelectedEntryIds] = useState<Set<string>>(new Set());
   const [entryTransferTargetId, setEntryTransferTargetId] = useState("");
-  const [batchEntrySetting, setBatchEntrySetting] = useState<BatchEntrySetting | "">("");
-  const [batchEntryValue, setBatchEntryValue] = useState<"true" | "false">("true");
+  const [entryTransferOperation, setEntryTransferOperation] = useState<"copy" | "move" | null>(null);
+  const selectedEntryIdsRef = useRef(selectedEntryIds);
+  useEffect(() => {
+    selectedEntryIdsRef.current = selectedEntryIds;
+  }, [selectedEntryIds]);
 
   // ── Folder UI state ──
   // Collapse state: persisted in localStorage, keyed per-lorebook. Loaded
@@ -758,63 +820,90 @@ export function LorebookEditor() {
     });
   }, []);
 
-  const handleTransferEntries = useCallback(
-    async (operation: "copy" | "move") => {
-      if (!lorebookId || !entryTransferTargetId || selectedEntryIds.size === 0) return;
-      const targetLorebookName =
-        transferTargetLorebooks.find((book) => book.id === entryTransferTargetId)?.name ?? "the selected lorebook";
+  const openEntryTransferDialog = useCallback(
+    (operation: "copy" | "move") => {
+      if (selectedEntryIds.size === 0) return;
+      if (transferTargetLorebooks.length === 0) {
+        toast.error(t("lorebook.editor.batch.transfer.noDestination"));
+        return;
+      }
+      setEntryTransferTargetId((current) =>
+        transferTargetLorebooks.some((book) => book.id === current) ? current : transferTargetLorebooks[0]!.id,
+      );
+      setEntryTransferOperation(operation);
+    },
+    [selectedEntryIds.size, t, transferTargetLorebooks],
+  );
 
-      if (
-        operation === "move" &&
-        !(await showConfirmDialog({
-          title: "Move Lorebook Entries",
-          message: `Move ${selectedEntryIds.size} selected ${selectedEntryIds.size === 1 ? "entry" : "entries"} to "${targetLorebookName}"? They will be removed from this lorebook.`,
-          confirmLabel: "Move",
-        }))
-      ) {
+  const handleTransferEntries = useCallback(async () => {
+    const operation = entryTransferOperation;
+    if (!operation || !lorebookId || !entryTransferTargetId || selectedEntryIds.size === 0) return;
+    const targetLorebookName =
+      transferTargetLorebooks.find((book) => book.id === entryTransferTargetId)?.name ??
+      t("lorebook.editor.batch.transfer.selectedLorebook");
+
+    try {
+      const result = await transferEntries.mutateAsync({
+        sourceLorebookId: lorebookId,
+        targetLorebookId: entryTransferTargetId,
+        entryIds: Array.from(selectedEntryIds),
+        operation,
+      });
+      toast.success(
+        t(`lorebook.editor.batch.transfer.${operation}Success`, {
+          count: result.transferred,
+          name: targetLorebookName,
+        }),
+      );
+      setEntryTransferOperation(null);
+      exitEntrySelectionMode();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t(`lorebook.editor.batch.transfer.${operation}Failure`));
+    }
+  }, [
+    entryTransferOperation,
+    entryTransferTargetId,
+    exitEntrySelectionMode,
+    lorebookId,
+    selectedEntryIds,
+    t,
+    transferEntries,
+    transferTargetLorebooks,
+  ]);
+
+  const handleEntryUpdate = useCallback(
+    async (entryId: string, sourceChanges: Partial<LorebookEntry>, changedFields: Partial<LorebookEntry>) => {
+      if (!lorebookId) throw new Error(t("lorebook.editor.batch.updateFailure"));
+      const selectedIds = selectedEntryIdsRef.current;
+      const shouldBatch = selectedIds.size > 1 && selectedIds.has(entryId);
+      const batchChanges = shouldBatch ? pickBatchEditableEntryChanges(changedFields) : ({} as BatchEntryChanges);
+
+      if (!shouldBatch || Object.keys(batchChanges).length === 0) {
+        await updateEntryMutationRef.current.mutateAsync({ lorebookId, entryId, ...sourceChanges });
         return;
       }
 
+      const personalChanges = omitBatchEditableEntryChanges(sourceChanges);
+      const tasks: Array<Promise<unknown>> = [
+        bulkUpdateEntriesMutationRef.current.mutateAsync({
+          lorebookId,
+          entryIds: Array.from(selectedIds),
+          changes: batchChanges,
+        }),
+      ];
+      if (Object.keys(personalChanges).length > 0) {
+        tasks.push(updateEntryMutationRef.current.mutateAsync({ lorebookId, entryId, ...personalChanges }));
+      }
+
       try {
-        const result = await transferEntries.mutateAsync({
-          sourceLorebookId: lorebookId,
-          targetLorebookId: entryTransferTargetId,
-          entryIds: Array.from(selectedEntryIds),
-          operation,
-        });
-        toast.success(
-          `${operation === "move" ? "Moved" : "Copied"} ${result.transferred} ${result.transferred === 1 ? "entry" : "entries"} to "${targetLorebookName}".`,
-        );
-        exitEntrySelectionMode();
+        await Promise.all(tasks);
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : `Failed to ${operation} entries.`);
+        toast.error(error instanceof Error ? error.message : t("lorebook.editor.batch.updateFailure"));
+        throw error;
       }
     },
-    [
-      entryTransferTargetId,
-      exitEntrySelectionMode,
-      lorebookId,
-      selectedEntryIds,
-      transferEntries,
-      transferTargetLorebooks,
-    ],
+    [lorebookId, t],
   );
-
-  const handleBatchUpdateEntries = useCallback(async () => {
-    if (!lorebookId || selectedEntryIds.size === 0 || !batchEntrySetting) return;
-    try {
-      const result = await bulkUpdateEntries.mutateAsync({
-        lorebookId,
-        entryIds: Array.from(selectedEntryIds),
-        changes: { [batchEntrySetting]: batchEntryValue === "true" },
-      });
-      const settingLabel =
-        BATCH_ENTRY_SETTING_OPTIONS.find((option) => option.value === batchEntrySetting)?.label ?? "Setting";
-      toast.success(`${settingLabel} updated for ${result.updated} ${result.updated === 1 ? "entry" : "entries"}.`);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to update selected entries.");
-    }
-  }, [batchEntrySetting, batchEntryValue, bulkUpdateEntries, lorebookId, selectedEntryIds]);
 
   const handleDeleteSelectedEntries = useCallback(async () => {
     if (!lorebookId || selectedEntryIds.size === 0) return;
@@ -823,9 +912,9 @@ export function LorebookEditor() {
 
     if (
       !(await showConfirmDialog({
-        title: "Delete Lorebook Entries",
-        message: `Delete ${count} selected ${count === 1 ? "entry" : "entries"}? This cannot be undone.`,
-        confirmLabel: "Delete",
+        title:localizeUi("ui.lorebooks.lorebookeditor.deleteLorebookEntries"),
+        message:localizeUi("ui.lorebooks.lorebookeditor.deleteValue1SelectedValue2ThisCannotBeUndone", { value1: count, value2: count === 1 ?localizeUi("ui.lorebooks.lorebookeditor.entry") :localizeUi("ui.lorebooks.lorebookeditor.entries_c2e311d") }),
+        confirmLabel:localizeUi("lorebook.editor.batch.delete"),
         tone: "destructive",
       }))
     ) {
@@ -839,17 +928,17 @@ export function LorebookEditor() {
     const deletedCount = selectedIds.length - failedIds.length;
 
     if (deletedCount > 0) {
-      toast.success(`Deleted ${deletedCount} ${deletedCount === 1 ? "entry" : "entries"}.`);
+      toast.success(localizeUi("ui.lorebooks.lorebookeditor.deletedValue1Value2", { value1: deletedCount, value2: deletedCount === 1 ?localizeUi("ui.lorebooks.lorebookeditor.entry") :localizeUi("ui.lorebooks.lorebookeditor.entries_c2e311d") }));
     }
 
     if (failedIds.length > 0) {
       setSelectedEntryIds(new Set(failedIds));
-      toast.error(`Failed to delete ${failedIds.length} ${failedIds.length === 1 ? "entry" : "entries"}.`);
+      toast.error(localizeUi("ui.lorebooks.lorebookeditor.failedToDeleteValue1Value2", { value1: failedIds.length, value2: failedIds.length === 1 ?localizeUi("ui.lorebooks.lorebookeditor.entry") :localizeUi("ui.lorebooks.lorebookeditor.entries_c2e311d") }));
       return;
     }
 
     exitEntrySelectionMode();
-  }, [deleteEntry, exitEntrySelectionMode, lorebookId, selectedEntryIds]);
+  }, [deleteEntry, exitEntrySelectionMode, lorebookId, selectedEntryIds, localizeUi]);
 
   // Toggle the inline drawer for an entry. Single-expand keeps the page
   // tidy; users can collapse the open one and click another to jump.
@@ -1368,8 +1457,12 @@ export function LorebookEditor() {
 
   const handleAddFolder = useCallback(async () => {
     if (!lorebookId) return;
-    await createFolder.mutateAsync({ lorebookId, name: "New Folder", enabled: true });
-  }, [lorebookId, createFolder]);
+    await createFolder.mutateAsync({
+      lorebookId,
+      name: localizeUi("ui.panels.backgroundpicker.newFolder"),
+      enabled: true,
+    });
+  }, [lorebookId, createFolder, localizeUi]);
 
   const handleSaveLorebook = useCallback(async () => {
     if (!lorebookId) return;
@@ -1396,9 +1489,9 @@ export function LorebookEditor() {
         tags: formTags,
       });
       setLorebookDirty(false);
-      toast.success("Lorebook saved");
+      toast.success(localizeUi("ui.lorebooks.lorebookeditor.lorebookSaved"));
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to save lorebook");
+      toast.error(error instanceof Error ? error.message :localizeUi("ui.lorebooks.lorebookeditor.failedToSaveLorebook"));
     } finally {
       setSaving(false);
     }
@@ -1421,7 +1514,7 @@ export function LorebookEditor() {
     formCharacterIds,
     formPersonaIds,
     formTags,
-    updateLorebook,
+    updateLorebook, localizeUi,
   ]);
 
   const handleAddEntry = useCallback(async () => {
@@ -1457,18 +1550,20 @@ export function LorebookEditor() {
   useEffect(() => {
     if (!lorebookId) return;
     if (isError) {
-      toast.error("Lorebook not found — it may have been deleted");
+      toast.error(localizeUi("ui.lorebooks.lorebookeditor.lorebookNotFoundItMayHaveBeenDeleted"));
       closeDetail();
     }
-  }, [lorebookId, isError, closeDetail]);
+  }, [lorebookId, isError, closeDetail, localizeUi]);
 
   const handleDelete = useCallback(async () => {
     if (!lorebookId) return;
     if (
       !(await showConfirmDialog({
-        title: "Delete Lorebook",
-        message: "Delete this lorebook? All entries will be lost.",
-        confirmLabel: "Delete",
+        title:localizeUi("ui.lorebooks.lorebookeditor.deleteLorebook_570bd40"),
+        message: localizeUi("dialog.delete.namedContents", {
+          name: lorebook?.name || localizeUi("ui.lorebooks.lorebookeditor.deleteLorebook"),
+        }),
+        confirmLabel:localizeUi("lorebook.editor.batch.delete"),
         tone: "destructive",
       }))
     ) {
@@ -1476,7 +1571,7 @@ export function LorebookEditor() {
     }
     await deleteLorebook.mutateAsync(lorebookId);
     closeDetail();
-  }, [lorebookId, deleteLorebook, closeDetail]);
+  }, [closeDetail, deleteLorebook, lorebook?.name, lorebookId, localizeUi]);
 
   // ── Loading ──
   if (isLoading || !lorebook) {
@@ -1569,9 +1664,7 @@ export function LorebookEditor() {
             }}
           >
             {folderEntries.length === 0 && childFolders.length === 0 && (
-              <p className="py-2 text-[0.625rem] italic text-[var(--muted-foreground)]">
-                Empty — drag an entry here or pick this folder from an entry's folder selector.
-              </p>
+              <p className="py-2 text-[0.625rem] italic text-[var(--muted-foreground)]">{localizeUi("ui.lorebooks.lorebookeditor.emptyDragAnEntryHereOrPickThisFolder")}</p>
             )}
             {folderEntries.map((entry, eIdx) => {
               const isDropTarget = dropTargetContainer === folder.id && draggingEntryIdx !== null;
@@ -1636,6 +1729,7 @@ export function LorebookEditor() {
                     onToggleSelected={() => toggleEntrySelection(entry.id)}
                     previewMatch={previewMatches.get(entry.id)}
                     mapBacklinks={mapBacklinksByEntryId.get(entry.id)}
+                    onUpdateEntry={handleEntryUpdate}
                   />
                   {showDropAfter && (
                     <div className="mari-chrome-accent-progress mari-accent-animated mx-2 mt-1 h-0.5 rounded-full" />
@@ -1658,8 +1752,8 @@ export function LorebookEditor() {
     <div className="mari-editor-shell mari-editor-legacy-bridge flex flex-1 flex-col overflow-hidden">
       <ExportFormatDialog
         open={exportDialogOpen}
-        title="Export Lorebook"
-        description="Native keeps Marinara folders and entry fields. Compatible exports a folderless World Info JSON for other roleplay tools."
+        title={localizeUi("ui.lorebooks.lorebookeditor.exportLorebook")}
+        description={localizeUi("ui.lorebooks.lorebookeditor.nativeKeepsMarinaraFoldersAndEntryFieldsCompatibleExports")}
         onClose={() => setExportDialogOpen(false)}
         onSelect={(format: ExportFormatChoice) => {
           if (!lorebookId) return;
@@ -1667,18 +1761,80 @@ export function LorebookEditor() {
           void api.download(`/lorebooks/${lorebookId}/export?format=${format}`);
         }}
       />
+      <Modal
+        open={entryTransferOperation !== null}
+        onClose={() => {
+          if (!transferEntries.isPending) setEntryTransferOperation(null);
+        }}
+        title={t(
+          entryTransferOperation === "copy"
+            ? "lorebook.editor.batch.transfer.copyTitle"
+            : "lorebook.editor.batch.transfer.moveTitle",
+        )}
+        width="max-w-sm"
+        closeDisabled={transferEntries.isPending}
+      >
+        <div className="space-y-4">
+          <p className="text-sm leading-relaxed text-[var(--muted-foreground)]">
+            {t(
+              entryTransferOperation === "copy"
+                ? "lorebook.editor.batch.transfer.copyMessage"
+                : "lorebook.editor.batch.transfer.moveMessage",
+              { count: selectedEntryIds.size },
+            )}
+          </p>
+          <label className="block space-y-1.5">
+            <span className="text-xs font-medium text-[var(--foreground)]">
+              {t("lorebook.editor.batch.transfer.destination")}
+            </span>
+            <select
+              value={entryTransferTargetId}
+              onChange={(event) => setEntryTransferTargetId(event.target.value)}
+              aria-label={t("lorebook.editor.batch.transfer.destination")}
+              className="mari-editor-field w-full px-3 py-2 text-sm"
+            >
+              {transferTargetLorebooks.map((book) => (
+                <option key={book.id} value={book.id}>
+                  {book.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setEntryTransferOperation(null)}
+              disabled={transferEntries.isPending}
+              className="rounded-lg px-3 py-2 text-sm font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-40"
+            >
+              {t("lorebook.editor.batch.transfer.cancel")}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleTransferEntries()}
+              disabled={!entryTransferTargetId || transferEntries.isPending}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-2 text-sm font-medium text-[var(--primary-foreground)] transition-colors hover:bg-[var(--primary)]/85 disabled:opacity-40"
+            >
+              {transferEntries.isPending ? <Loader2 size="0.8125rem" className="animate-spin" /> : null}
+              {t(
+                entryTransferOperation === "copy"
+                  ? "lorebook.editor.batch.transfer.copyConfirm"
+                  : "lorebook.editor.batch.transfer.moveConfirm",
+              )}
+            </button>
+          </div>
+        </div>
+      </Modal>
 
       {/* Unsaved warning banner */}
       {showUnsavedWarning && (
         <div className="flex items-center gap-3 bg-[var(--warning)]/10 px-4 py-2.5 text-xs">
           <AlertTriangle size="0.875rem" className="text-[var(--warning)]" />
-          <span className="flex-1 text-[var(--warning)]">You have unsaved changes</span>
+          <span className="flex-1 text-[var(--warning)]">{localizeUi("ui.lorebooks.lorebookeditor.youHaveUnsavedChanges")}</span>
           <button
             onClick={() => setShowUnsavedWarning(false)}
             className="mari-editor-action mari-editor-action--compact px-3 py-1 text-[0.6875rem]"
-          >
-            Keep editing
-          </button>
+          >{localizeUi("ui.lorebooks.lorebookeditor.keepEditing")}</button>
           <button
             onClick={() => {
               setShowUnsavedWarning(false);
@@ -1686,9 +1842,7 @@ export function LorebookEditor() {
               closeDetail();
             }}
             className="rounded-lg px-3 py-1 text-[0.6875rem] font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)]"
-          >
-            Discard & close
-          </button>
+          >{localizeUi("ui.lorebooks.lorebookeditor.discardClose")}</button>
           <button
             onClick={async () => {
               await handleSaveLorebook();
@@ -1696,9 +1850,7 @@ export function LorebookEditor() {
               closeDetail();
             }}
             className="mari-editor-action mari-editor-action--primary mari-editor-action--compact px-3 py-1 text-[0.6875rem]"
-          >
-            Save & close
-          </button>
+          >{localizeUi("ui.lorebooks.lorebookeditor.saveClose")}</button>
         </div>
       )}
 
@@ -1711,9 +1863,9 @@ export function LorebookEditor() {
           <BookOpen size="1.125rem" />
         </div>
         <div className="min-w-0 flex-1">
-          <h2 className="mari-editor-title truncate text-base">{lorebook.name}</h2>
+          <h2 className="mari-editor-title truncate">{lorebook.name}</h2>
           <p className="mari-editor-meta">
-            {entries.length} entries • {lorebook.category}
+            {entries.length} {localizeUi("ui.lorebooks.lorebookeditor.entries")} {lorebook.category}
           </p>
         </div>
         <div className="mari-editor-actions flex">
@@ -1723,12 +1875,12 @@ export function LorebookEditor() {
             className="mari-editor-action mari-editor-action--primary inline-flex disabled:opacity-50"
           >
             <Save size="0.8125rem" />
-            {saving ? "Saving…" : "Save"}
+            {saving ?localizeUi("chat.settings.inlineEditor.saving") :localizeUi("ui.noodle.noodlehome.save")}
           </button>
           <button
             onClick={() => setExportDialogOpen(true)}
             className="mari-editor-action inline-flex"
-            title="Export lorebook"
+            title={localizeUi("ui.lorebooks.lorebookeditor.exportLorebook_8e0ea30")}
           >
             <svg width="0.875rem" height="0.875rem" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
               <path
@@ -1741,7 +1893,7 @@ export function LorebookEditor() {
               <rect x="3" y="15" width="14" height="2" rx="1" fill="currentColor" />
             </svg>
           </button>
-          <button onClick={handleDelete} className="mari-editor-action inline-flex" title="Delete lorebook">
+          <button onClick={handleDelete} className="mari-editor-action inline-flex" title={localizeUi("ui.lorebooks.lorebookeditor.deleteLorebook")}>
             <Trash2 size="0.875rem" />
           </button>
         </div>
@@ -1763,7 +1915,7 @@ export function LorebookEditor() {
               <div className="space-y-4">
                 {/* Name */}
                 <div className="mari-editor-panel p-3">
-                  <label className="mb-1.5 block text-xs font-medium">Name</label>
+                  <label className="mb-1.5 block text-xs font-medium">{localizeUi("ui.lorebooks.lorebookeditor.name")}</label>
                   <input
                     value={formName}
                     onChange={(e) => {
@@ -1776,7 +1928,7 @@ export function LorebookEditor() {
 
                 {/* Description */}
                 <div className="mari-editor-panel p-3">
-                  <label className="mb-1.5 block text-xs font-medium">Description</label>
+                  <label className="mb-1.5 block text-xs font-medium">{localizeUi("chat.settings.inlineEditor.fields.description")}</label>
                   <ExpandableTextarea
                     value={formDescription}
                     onChange={(value) => {
@@ -1784,15 +1936,14 @@ export function LorebookEditor() {
                       markLorebookDirty();
                     }}
                     rows={3}
-                    title="Edit lorebook description"
+                    title={localizeUi("ui.lorebooks.lorebookeditor.editLorebookDescription")}
                   />
                 </div>
 
                 {/* Tags */}
                 <div className="mari-editor-panel p-3">
                   <label className="mb-1.5 flex items-center gap-1 text-xs font-medium">
-                    <Tag size="0.75rem" /> Tags
-                  </label>
+                    <Tag size="0.75rem" /> {localizeUi("ui.lorebooks.lorebookeditor.tags")}</label>
                   <div className="flex flex-wrap gap-1.5 mb-2">
                     {formTags.map((tag) => (
                       <span key={tag} className="mari-editor-chip mari-editor-chip--accent px-2 py-1 text-[0.6875rem]">
@@ -1819,7 +1970,7 @@ export function LorebookEditor() {
                           handleAddTags();
                         }
                       }}
-                      placeholder="Add tag…"
+                      placeholder={localizeUi("ui.lorebooks.lorebookeditor.addTag")}
                       className="mari-editor-field flex-1 px-3 py-2 text-xs"
                     />
                     <button onClick={handleAddTags} className="mari-editor-action px-3 py-2">
@@ -1830,9 +1981,7 @@ export function LorebookEditor() {
 
                 {/* Category */}
                 <div className="mari-editor-panel p-3">
-                  <label htmlFor="lorebook-editor-category" className="mb-1.5 block text-xs font-medium">
-                    Category
-                  </label>
+                  <label htmlFor="lorebook-editor-category" className="mb-1.5 block text-xs font-medium">{localizeUi("ui.lorebooks.lorebookeditor.category")}</label>
                   <div className="relative md:hidden">
                     <select
                       id="lorebook-editor-category"
@@ -1884,9 +2033,9 @@ export function LorebookEditor() {
                     <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
                       {/* Character Link */}
                       <LinkedResourcePicker
-                        label="Linked Characters"
-                        help="When linked to characters, this lorebook auto-activates in chats that include any of them."
-                        emptyText="No characters selected"
+                        label={localizeUi("ui.lorebooks.lorebookeditor.linkedCharacters")}
+                        help={localizeUi("ui.lorebooks.lorebookeditor.whenLinkedToCharactersThisLorebookAutoActivatesIn")}
+                        emptyText={localizeUi("ui.lorebooks.lorebookeditor.noCharactersSelected")}
                         addLabel="Add Character"
                         searchPlaceholder="Search characters..."
                         icon={<Users size="0.875rem" />}
@@ -1912,9 +2061,9 @@ export function LorebookEditor() {
 
                       {/* Persona Link */}
                       <LinkedResourcePicker
-                        label="Linked Personas"
-                        help="When linked to personas, this lorebook auto-activates in chats that use any of them."
-                        emptyText="No personas selected"
+                        label={localizeUi("ui.lorebooks.lorebookeditor.linkedPersonas")}
+                        help={localizeUi("ui.lorebooks.lorebookeditor.whenLinkedToPersonasThisLorebookAutoActivatesIn")}
+                        emptyText={localizeUi("ui.lorebooks.lorebookeditor.noPersonasSelected")}
                         addLabel="Add Persona"
                         searchPlaceholder="Search personas..."
                         icon={<UserRound size="0.875rem" />}
@@ -1949,10 +2098,8 @@ export function LorebookEditor() {
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                   <div className="mari-editor-panel flex min-h-[4.75rem] items-center justify-between px-4 py-3">
                     <div>
-                      <p className="text-xs font-medium">Enabled</p>
-                      <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
-                        When off, entries in this lorebook won't activate
-                      </p>
+                      <p className="text-xs font-medium">{localizeUi("ui.noodle.noodlehome.enabled")}</p>
+                      <p className="text-[0.6875rem] text-[var(--muted-foreground)]">{localizeUi("ui.lorebooks.lorebookeditor.whenOffEntriesInThisLorebookWonTActivate")}</p>
                     </div>
                     <SettingsSwitch
                       ariaLabel={formEnabled ? "Disable lorebook" : "Enable lorebook"}
@@ -1968,7 +2115,7 @@ export function LorebookEditor() {
                   {scopeSummary && (
                     <div className="mari-editor-panel flex h-[10.25rem] items-start overflow-hidden px-4 py-3 md:row-span-2">
                       <div className="min-w-0 overflow-hidden">
-                        <p className="text-xs font-medium mb-1">Linked To:</p>
+                        <p className="text-xs font-medium mb-1">{localizeUi("ui.lorebooks.lorebookeditor.linkedTo")}</p>
                         {"text" in scopeSummary ? (
                           <p className="text-[0.6875rem] text-[var(--muted-foreground)]">{scopeSummary.text}</p>
                         ) : (
@@ -2003,10 +2150,8 @@ export function LorebookEditor() {
 
                   <div className="mari-editor-panel flex min-h-[4.75rem] items-center justify-between px-4 py-3">
                     <div>
-                      <p className="text-xs font-medium">Global</p>
-                      <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
-                        Active in every chat when this lorebook is enabled
-                      </p>
+                      <p className="text-xs font-medium">{localizeUi("ui.lorebooks.lorebookeditor.global")}</p>
+                      <p className="text-[0.6875rem] text-[var(--muted-foreground)]">{localizeUi("ui.lorebooks.lorebookeditor.activeInEveryChatWhenThisLorebookIsEnabled")}</p>
                     </div>
                     <SettingsSwitch
                       ariaLabel={formIsGlobal ? "Disable global lorebook" : "Enable global lorebook"}
@@ -2023,9 +2168,8 @@ export function LorebookEditor() {
                 {/* Scan settings */}
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
                   <div>
-                    <label className="mb-1.5 flex items-center gap-1 text-xs font-medium">
-                      Scan Depth{" "}
-                      <HelpTooltip text="How many recent messages to scan for keyword matches. Higher = searches further back in chat history, but uses more processing." />
+                    <label className="mb-1.5 flex items-center gap-1 text-xs font-medium">{localizeUi("ui.lorebooks.lorebookeditor.scanDepth")}{" "}
+                      <HelpTooltip text={localizeUi("ui.lorebooks.lorebookeditor.howManyRecentMessagesToScanForKeywordMatches")} />
                     </label>
                     <input
                       type="number"
@@ -2039,9 +2183,8 @@ export function LorebookEditor() {
                     />
                   </div>
                   <div>
-                    <label className="mb-1.5 flex items-center gap-1 text-xs font-medium">
-                      Token Budget{" "}
-                      <HelpTooltip text="Maximum number of tokens this lorebook can inject per generation. Prevents a lorebook from consuming too much of the context window." />
+                    <label className="mb-1.5 flex items-center gap-1 text-xs font-medium">{localizeUi("ui.lorebooks.lorebookeditor.tokenBudget")}{" "}
+                      <HelpTooltip text={localizeUi("ui.lorebooks.lorebookeditor.maximumNumberOfTokensThisLorebookCanInjectPer")} />
                     </label>
                     <input
                       type="number"
@@ -2055,9 +2198,8 @@ export function LorebookEditor() {
                     />
                   </div>
                   <div>
-                    <label className="mb-1.5 flex items-center gap-1 text-xs font-medium">
-                      Entry Limit{" "}
-                      <HelpTooltip text="Maximum active entries this lorebook can contribute per generation. Token budgets still trim the final prompt." />
+                    <label className="mb-1.5 flex items-center gap-1 text-xs font-medium">{localizeUi("ui.lorebooks.lorebookeditor.entryLimit")}{" "}
+                      <HelpTooltip text={localizeUi("ui.lorebooks.lorebookeditor.maximumActiveEntriesThisLorebookCanContributePerGeneration")} />
                     </label>
                     <input
                       type="number"
@@ -2080,9 +2222,7 @@ export function LorebookEditor() {
                   </div>
                   <div className="flex min-w-0 flex-col justify-end">
                     <div className="mari-editor-panel flex h-10 w-full items-center justify-between px-3 py-2.5">
-                      <span className="mr-2 inline-flex items-center gap-1 text-xs">
-                        Recursive
-                        <HelpTooltip text="When on, activated entry content is scanned for additional keyword matches during extra recursive passes. Use it when lore should chain into related lore." />
+                      <span className="mr-2 inline-flex items-center gap-1 text-xs">{localizeUi("ui.lorebooks.lorebookeditor.recursive")}<HelpTooltip text={localizeUi("ui.lorebooks.lorebookeditor.whenOnActivatedEntryContentIsScannedForAdditional")} />
                       </span>
                       <SettingsSwitch
                         ariaLabel={formRecursive ? "Disable recursive scanning" : "Enable recursive scanning"}
@@ -2097,9 +2237,7 @@ export function LorebookEditor() {
                   </div>
                   <div className="flex min-w-0 flex-col justify-end">
                     <div className="mari-editor-panel flex h-10 w-full items-center justify-between px-3 py-2.5">
-                      <span className="mr-2 inline-flex items-center gap-1 text-xs">
-                        Vectors
-                        <HelpTooltip text="When on, entries in this lorebook may use semantic embeddings. When off, keyword matching still works and vectorization skips this lorebook." />
+                      <span className="mr-2 inline-flex items-center gap-1 text-xs">{localizeUi("ui.lorebooks.lorebookeditor.vectors")}<HelpTooltip text={localizeUi("ui.lorebooks.lorebookeditor.whenOnEntriesInThisLorebookMayUseSemantic")} />
                       </span>
                       <SettingsSwitch
                         ariaLabel={
@@ -2118,9 +2256,8 @@ export function LorebookEditor() {
 
                 {formRecursive && (
                   <div className="max-w-[12rem]">
-                    <label className="mb-1.5 flex items-center gap-1 text-xs font-medium">
-                      Max Depth{" "}
-                      <HelpTooltip text="Maximum number of recursive passes. Each pass scans activated entry content for additional keyword matches. Higher values find more connections but use more processing." />
+                    <label className="mb-1.5 flex items-center gap-1 text-xs font-medium">{localizeUi("ui.lorebooks.lorebookeditor.maxDepth")}{" "}
+                      <HelpTooltip text={localizeUi("ui.lorebooks.lorebookeditor.maximumNumberOfRecursivePassesEachPassScansActivated")} />
                     </label>
                     <input
                       type="number"
@@ -2174,10 +2311,10 @@ export function LorebookEditor() {
                     aria-expanded={keywordPreviewOpen}
                   >
                     <FlaskConical size="0.8125rem" className="mari-chrome-accent-icon mari-accent-animated shrink-0" />
-                    <span className="flex-1">Keyword test</span>
+                    <span className="flex-1">{localizeUi("ui.lorebooks.lorebookeditor.keywordTest")}</span>
                     {previewActive && (
                       <span className="rounded-full bg-emerald-400/15 px-2 py-0.5 text-[0.625rem] font-medium text-emerald-300 ring-1 ring-emerald-400/25">
-                        {previewMatchCount} match{previewMatchCount === 1 ? "" : "es"}
+                        {previewMatchCount} {localizeUi("ui.lorebooks.lorebookeditor.match")}{previewMatchCount === 1 ? "" :localizeUi("ui.lorebooks.lorebookeditor.es")}
                       </span>
                     )}
                     <ChevronDown
@@ -2190,17 +2327,12 @@ export function LorebookEditor() {
                   </button>
                   {keywordPreviewOpen && (
                     <div className="space-y-2 border-t border-[var(--marinara-editor-divider)] px-3 py-3">
-                      <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
-                        Paste sample chat text and entries whose keys would trigger get an emerald accent and a
-                        &quot;Would activate&quot; chip. Constant entries are flagged separately because they activate
-                        regardless of text. Out of scope: timing, probability, character/persona filters, and semantic
-                        matching.
-                      </p>
+                      <p className="text-[0.6875rem] text-[var(--muted-foreground)]">{localizeUi("ui.lorebooks.lorebookeditor.pasteSampleChatTextAndEntriesWhoseKeysWould")}</p>
                       <div className="relative">
                         <textarea
                           value={keywordPreviewText}
                           onChange={(e) => setKeywordPreviewText(e.target.value)}
-                          placeholder="Paste a paragraph or sample messages here…"
+                          placeholder={localizeUi("ui.lorebooks.lorebookeditor.pasteAParagraphOrSampleMessagesHere")}
                           rows={4}
                           className="mari-editor-field w-full resize-y px-3 py-2 pr-8 text-xs"
                         />
@@ -2209,8 +2341,8 @@ export function LorebookEditor() {
                             type="button"
                             onClick={() => setKeywordPreviewText("")}
                             className="absolute right-2 top-2 rounded p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-                            title="Clear keyword test"
-                            aria-label="Clear keyword test"
+                            title={localizeUi("ui.lorebooks.lorebookeditor.clearKeywordTest")}
+                            aria-label={localizeUi("ui.lorebooks.lorebookeditor.clearKeywordTest")}
                           >
                             <X size="0.75rem" />
                           </button>
@@ -2219,10 +2351,11 @@ export function LorebookEditor() {
                       {previewActive && (
                         <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
                           {previewMatchCount === 0
-                            ? "No entries would activate on this text."
-                            : `${previewMatchCount} of ${entries.filter((e) => e.enabled).length} enabled entr${
-                                entries.filter((e) => e.enabled).length === 1 ? "y" : "ies"
-                              } would activate.`}
+                            ?localizeUi("ui.lorebooks.lorebookeditor.noEntriesWouldActivateOnThisText")
+                            : localizeUi("ui.lorebooks.lorebookeditor.enabledEntriesWouldActivate", {
+                                matchCount: previewMatchCount,
+                                count: entries.filter((entry) => entry.enabled).length,
+                              })}
                         </p>
                       )}
                     </div>
@@ -2241,7 +2374,7 @@ export function LorebookEditor() {
                     />
                     <input
                       type="text"
-                      placeholder="Search entries…"
+                      placeholder={localizeUi("chat.settings.inlineLorebook.search")}
                       value={entrySearch}
                       onChange={(e) => setEntrySearch(e.target.value)}
                       className="mari-editor-field w-full py-2.5 pl-8 pr-3 text-xs"
@@ -2274,108 +2407,66 @@ export function LorebookEditor() {
                       entrySelectionMode &&
                         "border-[var(--marinara-chat-chrome-button-border-active)] bg-[var(--marinara-chat-chrome-highlight-bg)] text-[var(--marinara-chat-chrome-button-text-active)]",
                     )}
-                    title="Select entries to copy or move"
+                    title={t("lorebook.editor.batch.selectTitle")}
                   >
-                    <CheckSquare2 size="0.8125rem" />
-                    Select
-                  </button>
+                    <CheckSquare2 size="0.8125rem" />{localizeUi("settings.common.select")}</button>
                   <button
                     onClick={handleAddFolder}
                     className="mari-editor-action flex shrink-0 items-center gap-1.5 px-3 py-2.5 text-xs"
-                    title="Create a new folder to group entries"
+                    title={localizeUi("ui.lorebooks.lorebookeditor.createANewFolderToGroupEntries")}
                   >
-                    <FolderPlus size="0.8125rem" />
-                    Add Folder
-                  </button>
+                    <FolderPlus size="0.8125rem" />{localizeUi("ui.lorebooks.lorebookeditor.addFolder")}</button>
                   <button
                     onClick={handleAddEntry}
                     className="mari-editor-action mari-editor-action--primary inline-flex shrink-0"
                   >
-                    <Plus size="0.8125rem" />
-                    Add Entry
-                  </button>
+                    <Plus size="0.8125rem" />{localizeUi("ui.lorebooks.lorebookeditor.addEntry")}</button>
                 </div>
+
+                <p
+                  role="note"
+                  className="flex items-start gap-1.5 px-1 text-[0.6875rem] leading-relaxed text-[var(--muted-foreground)]"
+                >
+                  <Info size="0.6875rem" aria-hidden="true" className="mt-0.5 shrink-0 text-[var(--primary)]" />
+                  <span>{t("lorebook.editor.batch.hint")}</span>
+                </p>
 
                 {entrySelectionMode && (
                   <div className="mari-editor-toolbar flex flex-wrap items-center gap-2 px-3 py-2">
+                    <div
+                      role="status"
+                      className="flex w-full items-start gap-2 rounded-lg border border-[var(--marinara-editor-border-strong)] bg-[var(--marinara-editor-control-bg-hover)] px-2.5 py-2"
+                    >
+                      <Info size="0.8125rem" className="mt-0.5 shrink-0 text-[var(--primary)]" />
+                      <p className="text-[0.6875rem] leading-relaxed text-[var(--foreground)]">
+                        {t("lorebook.editor.batch.info")}
+                        <span className="block text-[var(--muted-foreground)]">
+                          {t("lorebook.editor.batch.exclusions")}
+                        </span>
+                      </p>
+                    </div>
                     <span className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
-                      {selectedEntryIds.size} selected
+                      {t("lorebook.editor.batch.selected", { count: selectedEntryIds.size })}
                     </span>
                     <button
                       onClick={() => setSelectedEntryIds(new Set(visibleEntryIds))}
                       disabled={visibleEntryIds.length === 0}
                       className="mari-editor-action mari-editor-action--compact px-2.5 py-1 text-[0.625rem] disabled:opacity-40"
                     >
-                      Select all
+                      {t("lorebook.editor.batch.selectAll")}
                     </button>
                     <button
                       onClick={() => setSelectedEntryIds(new Set())}
                       disabled={selectedEntryIds.size === 0}
                       className="rounded-lg px-2.5 py-1 text-[0.625rem] font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-40"
                     >
-                      Clear
+                      {t("lorebook.editor.batch.clear")}
                     </button>
-                    <select
-                      value={batchEntrySetting}
-                      onChange={(event) => setBatchEntrySetting(event.target.value as BatchEntrySetting | "")}
-                      className="mari-editor-field min-h-8 min-w-[10rem] px-2.5 py-1.5 text-xs"
-                      aria-label="Setting to apply to selected entries"
-                    >
-                      <option value="">Batch setting…</option>
-                      {BATCH_ENTRY_SETTING_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
-                    <select
-                      value={batchEntryValue}
-                      onChange={(event) => setBatchEntryValue(event.target.value as "true" | "false")}
-                      className="mari-editor-field min-h-8 px-2.5 py-1.5 text-xs"
-                      aria-label="Value to apply to selected entries"
-                    >
-                      <option value="true">On</option>
-                      <option value="false">Off</option>
-                    </select>
                     <button
-                      onClick={() => void handleBatchUpdateEntries()}
+                      onClick={() => openEntryTransferDialog("copy")}
                       disabled={
                         selectedEntryIds.size === 0 ||
-                        !batchEntrySetting ||
-                        bulkUpdateEntries.isPending ||
-                        transferEntries.isPending ||
-                        deleteEntry.isPending
-                      }
-                      className="mari-editor-action mari-editor-action--primary mari-editor-action--compact inline-flex items-center gap-1 px-2.5 py-1.5 text-[0.625rem] disabled:opacity-40"
-                    >
-                      {bulkUpdateEntries.isPending ? (
-                        <Loader2 size="0.6875rem" className="animate-spin" />
-                      ) : (
-                        <Check size="0.6875rem" />
-                      )}
-                      Apply
-                    </button>
-                    <select
-                      value={entryTransferTargetId}
-                      onChange={(e) => setEntryTransferTargetId(e.target.value)}
-                      disabled={transferTargetLorebooks.length === 0}
-                      className="mari-editor-field min-h-8 min-w-[12rem] flex-1 px-2.5 py-1.5 text-xs disabled:opacity-50"
-                    >
-                      {transferTargetLorebooks.length === 0 ? (
-                        <option value="">Create another lorebook first</option>
-                      ) : (
-                        transferTargetLorebooks.map((book) => (
-                          <option key={book.id} value={book.id}>
-                            {book.name}
-                          </option>
-                        ))
-                      )}
-                    </select>
-                    <button
-                      onClick={() => void handleTransferEntries("copy")}
-                      disabled={
-                        selectedEntryIds.size === 0 ||
-                        !entryTransferTargetId ||
+                        transferTargetLorebooks.length === 0 ||
                         transferEntries.isPending ||
                         bulkUpdateEntries.isPending ||
                         deleteEntry.isPending
@@ -2387,25 +2478,25 @@ export function LorebookEditor() {
                       ) : (
                         <Copy size="0.6875rem" />
                       )}
-                      Copy
+                      {t("lorebook.editor.batch.copy")}
                     </button>
                     <button
-                      onClick={() => void handleTransferEntries("move")}
+                      onClick={() => openEntryTransferDialog("move")}
                       disabled={
                         selectedEntryIds.size === 0 ||
-                        !entryTransferTargetId ||
+                        transferTargetLorebooks.length === 0 ||
                         transferEntries.isPending ||
                         bulkUpdateEntries.isPending ||
                         deleteEntry.isPending
                       }
-                      className="inline-flex items-center gap-1 rounded-lg bg-[var(--destructive)]/12 px-2.5 py-1.5 text-[0.625rem] font-medium text-[var(--destructive)] transition-all hover:bg-[var(--destructive)]/20 disabled:opacity-40"
+                      className="mari-editor-action mari-editor-action--compact inline-flex items-center gap-1 px-2.5 py-1.5 text-[0.625rem] disabled:opacity-40"
                     >
                       {transferEntries.isPending ? (
                         <Loader2 size="0.6875rem" className="animate-spin" />
                       ) : (
                         <MoveRight size="0.6875rem" />
                       )}
-                      Move
+                      {t("lorebook.editor.batch.move")}
                     </button>
                     <button
                       onClick={() => void handleDeleteSelectedEntries()}
@@ -2422,13 +2513,13 @@ export function LorebookEditor() {
                       ) : (
                         <Trash2 size="0.6875rem" />
                       )}
-                      Delete
+                      {t("lorebook.editor.batch.delete")}
                     </button>
                     <button
                       onClick={exitEntrySelectionMode}
                       className="rounded-lg px-2.5 py-1.5 text-[0.625rem] font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
                     >
-                      Done
+                      {t("lorebook.editor.batch.done")}
                     </button>
                   </div>
                 )}
@@ -2437,23 +2528,22 @@ export function LorebookEditor() {
                 {entries.length > 0 && (
                   <div className="flex items-center gap-3 text-[0.6875rem] text-[var(--muted-foreground)]">
                     <span>
-                      {entries.length} {entries.length === 1 ? "entry" : "entries"}
+                      {entries.length} {entries.length === 1 ?localizeUi("ui.lorebooks.lorebookeditor.entry") :localizeUi("ui.lorebooks.lorebookeditor.entries_c2e311d")}
                     </span>
                     {folders.length > 0 && (
                       <>
                         <span>•</span>
                         <span>
-                          {folders.length} {folders.length === 1 ? "folder" : "folders"}
+                          {folders.length} {folders.length === 1 ?localizeUi("ui.lorebooks.lorebookeditor.folder") :localizeUi("ui.lorebooks.lorebookeditor.folders")}
                         </span>
                       </>
                     )}
                     <span>•</span>
                     <span className="flex items-center gap-1">
                       <Hash size="0.625rem" />
-                      {entries.reduce((sum, e) => sum + estimateTokens(e.content), 0).toLocaleString()} tokens (est.)
-                    </span>
+                      {entries.reduce((sum, e) => sum + estimateTokens(e.content), 0).toLocaleString()} {localizeUi("ui.lorebooks.lorebookeditor.tokensEst")}</span>
                     {!showFolderGrouping && folders.length > 0 && (
-                      <span className="ml-auto italic">Folder view paused (clear search and sort by Order)</span>
+                      <span className="ml-auto italic">{localizeUi("ui.lorebooks.lorebookeditor.folderViewPausedClearSearchAndSortByOrder")}</span>
                     )}
                   </div>
                 )}
@@ -2462,7 +2552,7 @@ export function LorebookEditor() {
                 {entries.length === 0 && folders.length === 0 && (
                   <div className="mari-editor-empty flex flex-col items-center gap-2 py-8 text-center">
                     <FileText size="1.5rem" className="text-[var(--muted-foreground)]" />
-                    <p className="text-xs text-[var(--muted-foreground)]">No entries yet — add one to get started</p>
+                    <p className="text-xs text-[var(--muted-foreground)]">{localizeUi("ui.lorebooks.lorebookeditor.noEntriesYetAddOneToGetStarted")}</p>
                   </div>
                 )}
 
@@ -2510,8 +2600,8 @@ export function LorebookEditor() {
                         }}
                       >
                         {draggingFolderIdx !== null
-                          ? "Drop here to move the folder to the top level"
-                          : "Drop here to move out of the folder"}
+                          ?localizeUi("ui.lorebooks.lorebookeditor.dropHereToMoveTheFolderToTheTop")
+                          :localizeUi("ui.lorebooks.lorebookeditor.dropHereToMoveOutOfTheFolder")}
                       </div>
                     )}
 
@@ -2535,9 +2625,7 @@ export function LorebookEditor() {
                       }}
                     >
                       {(entriesByContainer.get(null) ?? []).length === 0 && (
-                        <p className="py-3 text-center text-[0.625rem] italic text-[var(--muted-foreground)] opacity-50">
-                          No entries at the root level
-                        </p>
+                        <p className="py-3 text-center text-[0.625rem] italic text-[var(--muted-foreground)] opacity-50">{localizeUi("ui.lorebooks.lorebookeditor.noEntriesAtTheRootLevel")}</p>
                       )}
                       {(entriesByContainer.get(null) ?? []).map((entry, idx) => {
                         const rootList = entriesByContainer.get(null) ?? [];
@@ -2603,6 +2691,7 @@ export function LorebookEditor() {
                               onToggleSelected={() => toggleEntrySelection(entry.id)}
                               previewMatch={previewMatches.get(entry.id)}
                               mapBacklinks={mapBacklinksByEntryId.get(entry.id)}
+                              onUpdateEntry={handleEntryUpdate}
                             />
                             {showDropAfter && (
                               <div className="mari-chrome-accent-progress mari-accent-animated mx-2 mt-1 h-0.5 rounded-full" />
@@ -2641,6 +2730,7 @@ export function LorebookEditor() {
                         onToggleSelected={() => toggleEntrySelection(entry.id)}
                         previewMatch={previewMatches.get(entry.id)}
                         mapBacklinks={mapBacklinksByEntryId.get(entry.id)}
+                        onUpdateEntry={handleEntryUpdate}
                       />
                     ))}
                   </div>
@@ -2650,7 +2740,7 @@ export function LorebookEditor() {
                 {lorebookId && !showFolderGrouping && filteredEntries.length === 0 && entries.length > 0 && (
                   <div className="mari-editor-empty flex flex-col items-center gap-2 py-8 text-center">
                     <FileText size="1.5rem" className="text-[var(--muted-foreground)]" />
-                    <p className="text-xs text-[var(--muted-foreground)]">No entries match your search</p>
+                    <p className="text-xs text-[var(--muted-foreground)]">{localizeUi("ui.lorebooks.lorebookeditor.noEntriesMatchYourSearch")}</p>
                   </div>
                 )}
               </div>
@@ -2684,6 +2774,7 @@ function VectorizeSection({
   onVectorScoreThresholdChange: (value: number) => void;
   onVectorMaxResultsChange: (value: number) => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const queryClient = useQueryClient();
   const { data: rawConnections } = useConnections();
   const sidecarModelDownloaded = useSidecarStore((s) => s.modelDownloaded);
@@ -2779,11 +2870,12 @@ function VectorizeSection({
     const conn = embeddingConnections.find((c) => c.id === selectedConnectionId);
     if (mode === "all" && storedVectorCount > 0) {
       const confirmed = await showConfirmDialog({
-        title: "Re-vectorize All Entries",
-        message: `Re-vectorize all ${vectorizableEntryCount} vectorizable entr${
-          vectorizableEntryCount === 1 ? "y" : "ies"
-        } with ${conn?.name ?? "the selected connection"}? Existing stored vectors will be overwritten.`,
-        confirmLabel: "Re-vectorize all",
+        title:localizeUi("ui.lorebooks.vectorizesection.reVectorizeAllEntries"),
+        message: localizeUi("ui.lorebooks.vectorizesection.reVectorizeAllEntriesWithConnection", {
+          count: vectorizableEntryCount,
+          connection: conn?.name ?? localizeUi("ui.lorebooks.vectorizesection.theSelectedConnection"),
+        }),
+        confirmLabel:localizeUi("ui.lorebooks.vectorizesection.reVectorizeAll"),
         cancelLabel: "Cancel",
         tone: "default",
       });
@@ -2815,9 +2907,9 @@ function VectorizeSection({
   const handleClearVectors = async () => {
     if (storedVectorCount === 0 || clearingVectors) return;
     const confirmed = await showConfirmDialog({
-      title: "Delete Stored Vectors",
-      message: `Delete ${storedVectorCount} stored embedding vector${storedVectorCount === 1 ? "" : "s"} from this lorebook? Keyword matching and entries will remain unchanged.`,
-      confirmLabel: "Delete vectors",
+      title:localizeUi("ui.lorebooks.vectorizesection.deleteStoredVectors"),
+      message:localizeUi("ui.lorebooks.vectorizesection.deleteValue1StoredEmbeddingVectorValue2FromThisLorebook", { value1: storedVectorCount, value2: storedVectorCount === 1 ? "" :localizeUi("ui.noodle.stageprofileview.s") }),
+      confirmLabel:localizeUi("ui.lorebooks.vectorizesection.deleteVectors"),
       cancelLabel: "Cancel",
       tone: "destructive",
     });
@@ -2843,8 +2935,8 @@ function VectorizeSection({
     <div className="mari-editor-panel space-y-3 p-4">
       <div className="flex items-center gap-2">
         <Sparkles size="0.875rem" className="mari-chrome-accent-icon mari-accent-animated" />
-        <h4 className="text-xs font-semibold">Semantic Search (Embeddings)</h4>
-        <HelpTooltip text="Vectorize entries to enable semantic matching. Entries will be found by meaning, not just keywords. Requires a connection with an Embedding Model configured." />
+        <h4 className="text-xs font-semibold">{localizeUi("ui.lorebooks.vectorizesection.semanticSearchEmbeddings")}</h4>
+        <HelpTooltip text={localizeUi("ui.lorebooks.vectorizesection.vectorizeEntriesToEnableSemanticMatchingEntriesWillBe")} />
       </div>
       <div className="flex flex-wrap items-center gap-2 text-[0.625rem] text-[var(--muted-foreground)]">
         <span
@@ -2856,17 +2948,14 @@ function VectorizeSection({
           )}
         >
           {allVectorized ? <Check size="0.625rem" /> : <AlertTriangle size="0.625rem" />}
-          {vectorizedCount}/{vectorizableEntryCount} entries vectorized
-        </span>
-        {missingCount > 0 && <span>{missingCount} still need embeddings.</span>}
-        {excludeFromVectorization ? <span>This lorebook excludes every entry.</span> : null}
-        {!excludeFromVectorization && excludedCount > 0 && <span>{excludedCount} excluded.</span>}
+          {vectorizedCount}/{vectorizableEntryCount} {localizeUi("ui.lorebooks.vectorizesection.entriesVectorized")}</span>
+        {missingCount > 0 && <span>{missingCount} {localizeUi("ui.lorebooks.vectorizesection.stillNeedEmbeddings")}</span>}
+        {excludeFromVectorization ? <span>{localizeUi("ui.lorebooks.vectorizesection.thisLorebookExcludesEveryEntry")}</span> : null}
+        {!excludeFromVectorization && excludedCount > 0 && <span>{excludedCount} {localizeUi("ui.lorebooks.vectorizesection.excluded")}</span>}
       </div>
       <div className="grid gap-2 sm:grid-cols-3">
         <label className="space-y-1 text-[0.625rem] font-medium text-[var(--muted-foreground)]">
-          <span className="flex items-center gap-1">
-            Query Messages
-            <HelpTooltip text="How many recent chat messages to embed when searching this lorebook semantically. Use 0 to query against the full chat history." />
+          <span className="flex items-center gap-1">{localizeUi("ui.lorebooks.vectorizesection.queryMessages")}<HelpTooltip text={localizeUi("ui.lorebooks.vectorizesection.howManyRecentChatMessagesToEmbedWhenSearching")} />
           </span>
           <input
             type="number"
@@ -2882,9 +2971,7 @@ function VectorizeSection({
           />
         </label>
         <label className="space-y-1 text-[0.625rem] font-medium text-[var(--muted-foreground)]">
-          <span className="flex items-center gap-1">
-            Score Threshold
-            <HelpTooltip text="Minimum calibrated semantic similarity required before a vectorized entry activates. Higher values are stricter." />
+          <span className="flex items-center gap-1">{localizeUi("ui.lorebooks.vectorizesection.scoreThreshold")}<HelpTooltip text={localizeUi("ui.lorebooks.vectorizesection.minimumCalibratedSemanticSimilarityRequiredBeforeAVectorizedEntry")} />
           </span>
           <input
             type="number"
@@ -2899,9 +2986,7 @@ function VectorizeSection({
           />
         </label>
         <label className="space-y-1 text-[0.625rem] font-medium text-[var(--muted-foreground)]">
-          <span className="flex items-center gap-1">
-            Vector Limit
-            <HelpTooltip text="Maximum number of semantic/vector entries this lorebook can add to one generation before normal token budgets are applied." />
+          <span className="flex items-center gap-1">{localizeUi("ui.lorebooks.vectorizesection.vectorLimit")}<HelpTooltip text={localizeUi("ui.lorebooks.vectorizesection.maximumNumberOfSemanticVectorEntriesThisLorebookCan")} />
           </span>
           <input
             type="number"
@@ -2921,13 +3006,9 @@ function VectorizeSection({
         </label>
       </div>
       {excludeFromVectorization ? (
-        <p className="text-[0.625rem] text-[var(--muted-foreground)]">
-          Semantic search is disabled by the lorebook-level Vectors toggle.
-        </p>
+        <p className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.lorebooks.vectorizesection.semanticSearchIsDisabledByTheLorebookLevelVectors")}</p>
       ) : embeddingConnections.length === 0 ? (
-        <p className="text-[0.625rem] text-[var(--muted-foreground)]">
-          No connections with an embedding model configured. Set an Embedding Model on a connection first.
-        </p>
+        <p className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.lorebooks.vectorizesection.noConnectionsWithAnEmbeddingModelConfiguredSetAn")}</p>
       ) : (
         <>
           <div className="flex flex-wrap items-center gap-2">
@@ -2936,7 +3017,7 @@ function VectorizeSection({
               onChange={(e) => handleConnectionChange(e.target.value)}
               className="mari-editor-field min-w-44 flex-1 px-2.5 py-1.5 text-xs"
             >
-              <option value="">No semantic search</option>
+              <option value="">{localizeUi("ui.lorebooks.vectorizesection.noSemanticSearch")}</option>
               {embeddingConnections.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.name} ({c.embeddingModel})
@@ -2957,49 +3038,43 @@ function VectorizeSection({
               )}
               {vectorizingMode === primaryVectorizeMode
                 ? primaryVectorizeMode === "all"
-                  ? "Re-vectorizing..."
-                  : "Vectorizing..."
+                  ?localizeUi("ui.lorebooks.vectorizesection.reVectorizing")
+                  :localizeUi("ui.lorebooks.vectorizesection.vectorizing")
                 : !selectedConnectionId
-                  ? "Select connection"
+                  ?localizeUi("ui.chat.homeprofessormarichat.selectConnection")
                   : primaryVectorizeMode === "all"
-                    ? `Re-vectorize ${vectorizableEntryCount} entries`
-                    : `Vectorize ${missingCount} missing`}
+                    ?localizeUi("ui.lorebooks.vectorizesection.reVectorizeValue1Entries", { value1: vectorizableEntryCount })
+                    :localizeUi("ui.lorebooks.vectorizesection.vectorizeValue1Missing", { value1: missingCount })}
             </button>
             {showRevectorizeAllAction && (
               <button
                 onClick={() => handleVectorize("all")}
                 disabled={vectorizing || vectorizableEntryCount === 0 || !selectedConnectionId}
                 className="flex items-center gap-1.5 rounded-xl bg-[var(--secondary)]/70 px-3 py-1.5 text-xs font-medium text-[var(--foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--secondary)] active:scale-[0.98] disabled:opacity-50"
-                title="Overwrite every stored vector in this lorebook with the selected embedding model"
+                title={localizeUi("ui.lorebooks.vectorizesection.overwriteEveryStoredVectorInThisLorebookWithThe")}
               >
                 {vectorizingMode === "all" ? (
                   <Loader2 size="0.75rem" className="animate-spin" />
                 ) : (
                   <RefreshCw size="0.75rem" />
                 )}
-                {vectorizingMode === "all" ? "Re-vectorizing..." : "Re-vectorize all"}
+                {vectorizingMode === "all" ?localizeUi("ui.lorebooks.vectorizesection.reVectorizing") :localizeUi("ui.lorebooks.vectorizesection.reVectorizeAll")}
               </button>
             )}
             <button
               onClick={handleClearVectors}
               disabled={clearingVectors || vectorizing || storedVectorCount === 0}
               className="flex items-center gap-1.5 rounded-xl bg-[var(--secondary)] px-3 py-1.5 text-xs font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] hover:text-[var(--foreground)] active:scale-[0.98] disabled:opacity-50"
-              title="Delete all stored vectors for this lorebook"
+              title={localizeUi("ui.lorebooks.vectorizesection.deleteAllStoredVectorsForThisLorebook")}
             >
-              {clearingVectors ? <Loader2 size="0.75rem" className="animate-spin" /> : <Trash2 size="0.75rem" />}
-              Delete vectors
-            </button>
+              {clearingVectors ? <Loader2 size="0.75rem" className="animate-spin" /> : <Trash2 size="0.75rem" />}{localizeUi("ui.lorebooks.vectorizesection.deleteVectors")}</button>
           </div>
           {storedVectorCount > 0 && (
             <p className="text-[0.625rem] text-[var(--muted-foreground)]">
-              {storedVectorCount} stored vector{storedVectorCount === 1 ? "" : "s"} can be deleted without changing
-              lorebook text.
-            </p>
+              {storedVectorCount} {localizeUi("ui.lorebooks.vectorizesection.storedVector")}{storedVectorCount === 1 ? "" :localizeUi("ui.noodle.stageprofileview.s")} {localizeUi("ui.lorebooks.vectorizesection.canBeDeletedWithoutChangingLorebookText")}</p>
           )}
           {!selectedConnectionId && (
-            <p className="text-[0.625rem] text-[var(--muted-foreground)]">
-              Semantic search is off until you choose an embedding connection and vectorize entries.
-            </p>
+            <p className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.lorebooks.vectorizesection.semanticSearchIsOffUntilYouChooseAnEmbedding")}</p>
           )}
           {result && (
             <p

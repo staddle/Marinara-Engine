@@ -13,7 +13,9 @@
 // ratio without distortion.
 import { useEffect, useRef, useState } from "react";
 import { Crop, Maximize2, RotateCcw, Trash2, X } from "lucide-react";
-import { type AvatarCrop, type LegacyAvatarCrop, getAvatarCropStyle, isLegacyAvatarCrop } from "../../lib/utils";
+import type { AvatarCrop, SourceRectAvatarCrop } from "@marinara-engine/shared";
+import { getAvatarCropStyle, isLegacyAvatarCrop } from "../../lib/utils";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface CropPx {
   x: number;
@@ -29,10 +31,10 @@ export interface AvatarCropWidgetProps {
   alt: string;
   /** Currently saved crop. Pass null when none has been set. Accepts the legacy
    *  shape for read; on first interaction the widget writes the current shape. */
-  crop: AvatarCrop | LegacyAvatarCrop | null;
+  crop: AvatarCrop | null;
   /** Fired on every change (drag, corner resize, reset). Always emits the
-   *  current AvatarCrop shape. */
-  onChange: (next: AvatarCrop) => void;
+   *  current source-rectangle shape. */
+  onChange: (next: SourceRectAvatarCrop) => void;
   onRemove?: () => void;
   removing?: boolean;
 }
@@ -42,6 +44,7 @@ const MAX_DISPLAY_W = 360;
 const MAX_DISPLAY_H = 360;
 
 export function AvatarCropWidget({ src, alt, crop, onChange, onRemove, removing = false }: AvatarCropWidgetProps) {
+  const { t: localizeUi } = useUiTranslation();
   const imgRef = useRef<HTMLImageElement>(null);
   const [imgRect, setImgRect] = useState<{ w: number; h: number } | null>(null);
   const [cropPx, setCropPx] = useState<CropPx | null>(null);
@@ -202,7 +205,7 @@ export function AvatarCropWidget({ src, alt, crop, onChange, onRemove, removing 
 
   // Live preview reads cropPx (instant) rather than the saved crop prop, so the
   // preview stays in sync with the overlay even between onChange ticks.
-  const previewCrop: AvatarCrop | null =
+  const previewCrop: SourceRectAvatarCrop | null =
     imgRect && cropPx
       ? {
           srcX: cropPx.x / imgRect.w,
@@ -216,41 +219,36 @@ export function AvatarCropWidget({ src, alt, crop, onChange, onRemove, removing 
     <div className="space-y-3 rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-4">
       <div className="flex items-center justify-between gap-2">
         <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-          <Crop size="0.75rem" /> Avatar Crop
-        </span>
+          <Crop size="0.75rem" /> {localizeUi("ui.ui.avatarcropwidget.avatarCrop")}</span>
         <div className="flex items-center gap-1.5">
           <button
             type="button"
             onClick={() => setShowFullView(true)}
-            className="inline-flex items-center gap-1 rounded-lg bg-[var(--accent)] px-2 py-1 text-[0.625rem] font-medium text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)]"
-            title="Open full image"
+            className="mari-editor-action mari-editor-action--compact inline-flex gap-1 rounded-lg px-2 py-1 text-[0.625rem]"
+            title={localizeUi("ui.ui.avatarcropwidget.openFullImage")}
           >
-            <Maximize2 size="0.625rem" /> Full image
-          </button>
+            <Maximize2 size="0.625rem" /> {localizeUi("ui.ui.avatarcropwidget.fullImage")}</button>
           <button
             type="button"
             onClick={reset}
-            className="inline-flex items-center gap-1 rounded-lg bg-[var(--accent)] px-2 py-1 text-[0.625rem] font-medium text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)]"
-            title="Reset to centered max-square crop"
+            className="mari-editor-action mari-editor-action--compact inline-flex gap-1 rounded-lg px-2 py-1 text-[0.625rem]"
+            title={localizeUi("ui.ui.avatarcropwidget.resetToCenteredMaxSquareCrop")}
           >
-            <RotateCcw size="0.625rem" /> Reset
-          </button>
+            <RotateCcw size="0.625rem" /> {localizeUi("ui.characters.charactercliptrimmodal.reset")}</button>
           {onRemove && (
             <button
               type="button"
               onClick={onRemove}
               disabled={removing}
-              className="inline-flex items-center gap-1 rounded-lg bg-[var(--destructive)]/10 px-2 py-1 text-[0.625rem] font-medium text-[var(--destructive)] transition-colors hover:bg-[var(--destructive)]/15 disabled:opacity-45"
-              title="Remove avatar"
+              className="mari-editor-action mari-editor-action--compact mari-editor-action--danger inline-flex gap-1 rounded-lg px-2 py-1 text-[0.625rem]"
+              title={localizeUi("ui.ui.avatarcropwidget.removeAvatar")}
             >
-              <Trash2 size="0.625rem" /> {removing ? "Removing..." : "Remove"}
+              <Trash2 size="0.625rem" /> {removing ?localizeUi("ui.ui.avatarcropwidget.removing") :localizeUi("settings.notifications.customSound.actions.remove")}
             </button>
           )}
         </div>
       </div>
-      <p className="text-[0.625rem] text-[var(--muted-foreground)]">
-        Drag the square to pan, the corners to resize. The avatar shows exactly the region inside the square.
-      </p>
+      <p className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.ui.avatarcropwidget.dragTheSquareToPanTheCornersToResize")}</p>
 
       <div className="flex gap-4 max-md:flex-col max-md:items-center">
         {/* Crop canvas — sized to fit the displayed image exactly so overlay
@@ -325,7 +323,7 @@ export function AvatarCropWidget({ src, alt, crop, onChange, onRemove, removing 
 
         {/* Live preview — circle avatar at typical sidebar size */}
         <div className="flex shrink-0 flex-col items-center gap-2">
-          <span className="text-[0.625rem] text-[var(--muted-foreground)]">Preview</span>
+          <span className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("settings.notifications.customSound.actions.preview")}</span>
           <div className="relative h-24 w-24 overflow-hidden rounded-full bg-black/20 ring-2 ring-[var(--border)]">
             <img src={src} alt={alt} className="h-full w-full object-cover" style={getAvatarCropStyle(previewCrop)} />
           </div>

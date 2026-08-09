@@ -19,10 +19,12 @@ interface ContextMenuProps {
   y: number;
   items: ContextMenuItem[];
   onClose: () => void;
+  /** Visual treatment for destructive items. Defaults to the semantic destructive color. */
+  destructiveTone?: "destructive" | "accent";
 }
 
 /** Right-click menu anchored at (x, y). Auto-flips when it would clip the viewport. */
-export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
+export function ContextMenu({ x, y, items, onClose, destructiveTone = "destructive" }: ContextMenuProps) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [pos, setPos] = useState({ left: x, top: y });
 
@@ -87,7 +89,9 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
             item.disabled
               ? "cursor-not-allowed text-[var(--muted-foreground)] opacity-50"
               : item.destructive
-                ? "text-[var(--destructive)] hover:bg-[var(--destructive)]/10"
+                ? destructiveTone === "accent"
+                  ? "text-[var(--primary)] hover:bg-[var(--primary)]/10"
+                  : "text-[var(--destructive)] hover:bg-[var(--destructive)]/10"
                 : "text-[var(--foreground)] hover:bg-[var(--accent)]",
           )}
         >

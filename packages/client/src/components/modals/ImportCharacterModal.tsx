@@ -12,6 +12,7 @@ import {
   inspectCharacterFilesForEmbeddedLorebooks,
   type EmbeddedLorebookImportPreview,
 } from "../../lib/character-import";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface Props {
   open: boolean;
@@ -40,6 +41,7 @@ const REGEX_SCOPE_OPTIONS: Array<{ value: RegexScriptScope; label: string; descr
 ];
 
 export function ImportCharacterModal({ open, onClose }: Props) {
+  const { t: localizeUi } = useUiTranslation();
   const fileRef = useRef<HTMLInputElement>(null);
   const [status, setStatus] = useState<"idle" | "loading" | "done">("idle");
   const [results, setResults] = useState<ImportResultRow[]>([]);
@@ -251,7 +253,7 @@ export function ImportCharacterModal({ open, onClose }: Props) {
         reset();
         onClose();
       }}
-      title="Import Character"
+      title={localizeUi("ui.modals.importcharactermodal.importCharacter")}
     >
       <div className="flex flex-col gap-4">
         {pendingLorebookChoice && (
@@ -259,11 +261,8 @@ export function ImportCharacterModal({ open, onClose }: Props) {
             <div className="flex items-start gap-3">
               <BookOpen className="mt-0.5 shrink-0 text-[var(--primary)]" size="1.125rem" />
               <div className="min-w-0 flex-1">
-                <p className="text-sm font-semibold text-[var(--foreground)]">Embedded lorebook found</p>
-                <p className="mt-1 text-xs leading-relaxed text-[var(--muted-foreground)]">
-                  Import the embedded lorebook as a standalone Marinara lorebook, or keep it only inside the character
-                  card.
-                </p>
+                <p className="text-sm font-semibold text-[var(--foreground)]">{localizeUi("ui.modals.importcharactermodal.embeddedLorebookFound")}</p>
+                <p className="mt-1 text-xs leading-relaxed text-[var(--muted-foreground)]">{localizeUi("ui.modals.importcharactermodal.importTheEmbeddedLorebookAsAStandaloneMarinaraLorebook")}</p>
                 <div className="mt-3 max-h-32 overflow-y-auto rounded-lg border border-[var(--border)]/70 bg-[var(--background)]/40">
                   {pendingLorebookChoice.previews.map((preview) => (
                     <div
@@ -272,7 +271,7 @@ export function ImportCharacterModal({ open, onClose }: Props) {
                     >
                       <span className="min-w-0 truncate font-medium">{preview.name ?? preview.filename}</span>
                       <span className="shrink-0 text-[var(--muted-foreground)]">
-                        {preview.embeddedLorebookEntries} {preview.embeddedLorebookEntries === 1 ? "entry" : "entries"}
+                        {preview.embeddedLorebookEntries} {preview.embeddedLorebookEntries === 1 ?localizeUi("ui.lorebooks.lorebookeditor.entry") :localizeUi("ui.lorebooks.lorebookeditor.entries_c2e311d")}
                       </span>
                     </div>
                   ))}
@@ -282,16 +281,12 @@ export function ImportCharacterModal({ open, onClose }: Props) {
                     type="button"
                     onClick={() => void handleFiles(pendingLorebookChoice.files, false)}
                     className="rounded-lg border border-[var(--border)] px-3 py-2 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-                  >
-                    No Import
-                  </button>
+                  >{localizeUi("ui.modals.importcharactermodal.noImport")}</button>
                   <button
                     type="button"
                     onClick={() => void handleFiles(pendingLorebookChoice.files, true)}
                     className="rounded-lg bg-[var(--primary)] px-3 py-2 text-xs font-semibold text-[var(--primary-foreground)] transition-opacity hover:opacity-90"
-                  >
-                    Import Lorebook
-                  </button>
+                  >{localizeUi("ui.modals.importcharactermodal.importLorebook")}</button>
                 </div>
               </div>
             </div>
@@ -301,10 +296,8 @@ export function ImportCharacterModal({ open, onClose }: Props) {
         <div className="rounded-xl border border-[var(--border)] bg-[var(--secondary)]/40 p-3">
           <div className="mb-2 flex items-center justify-between gap-2">
             <div>
-              <p className="text-xs font-semibold text-[var(--foreground)]">Imported card tags</p>
-              <p className="mt-0.5 text-[0.6875rem] text-[var(--muted-foreground)]">
-                Choose how source-site tags are applied to character cards.
-              </p>
+              <p className="text-xs font-semibold text-[var(--foreground)]">{localizeUi("ui.modals.importcharactermodal.importedCardTags")}</p>
+              <p className="mt-0.5 text-[0.6875rem] text-[var(--muted-foreground)]">{localizeUi("ui.modals.importcharactermodal.chooseHowSourceSiteTagsAreAppliedToCharacter")}</p>
             </div>
           </div>
           <div className="grid gap-2 sm:grid-cols-3">
@@ -336,10 +329,8 @@ export function ImportCharacterModal({ open, onClose }: Props) {
 
         <div className="rounded-xl border border-[var(--border)] bg-[var(--secondary)]/40 p-3">
           <div className="mb-2">
-            <p className="text-xs font-semibold text-[var(--foreground)]">Imported regex scripts</p>
-            <p className="mt-0.5 text-[0.6875rem] text-[var(--muted-foreground)]">
-              Keep a bot's embedded find/replace scripts scoped to that character, or add them globally.
-            </p>
+            <p className="text-xs font-semibold text-[var(--foreground)]">{localizeUi("ui.modals.importcharactermodal.importedRegexScripts")}</p>
+            <p className="mt-0.5 text-[0.6875rem] text-[var(--muted-foreground)]">{localizeUi("ui.modals.importcharactermodal.keepABotSEmbeddedFindReplaceScriptsScoped")}</p>
           </div>
           <div className="grid gap-2 sm:grid-cols-2">
             {REGEX_SCOPE_OPTIONS.map((option) => (
@@ -388,24 +379,18 @@ export function ImportCharacterModal({ open, onClose }: Props) {
             className={`transition-colors ${dragOver ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}`}
           />
           <div className="text-center">
-            <p className="text-sm font-medium">Drop one or more files here or click to browse</p>
-            <p className="mt-1 text-xs text-[var(--muted-foreground)]">
-              Supports JSON, PNG character cards, CharX, and Marinara exports
-            </p>
+            <p className="text-sm font-medium">{localizeUi("ui.modals.importcharactermodal.dropOneOrMoreFilesHereOrClickTo")}</p>
+            <p className="mt-1 text-xs text-[var(--muted-foreground)]">{localizeUi("ui.modals.importcharactermodal.supportsJsonPngCharacterCardsCharxAndMarinaraExports")}</p>
           </div>
           <div className="flex gap-2">
             <span className="flex items-center gap-1 rounded-full bg-[var(--secondary)] px-2.5 py-1 text-xs text-[var(--muted-foreground)]">
-              <FileJson size="0.75rem" /> .json
-            </span>
+              <FileJson size="0.75rem" /> {localizeUi("ui.modals.importcharactermodal.json")}</span>
             <span className="flex items-center gap-1 rounded-full bg-[var(--secondary)] px-2.5 py-1 text-xs text-[var(--muted-foreground)]">
-              <Image size="0.75rem" /> .png
-            </span>
+              <Image size="0.75rem" /> {localizeUi("ui.modals.importcharactermodal.png")}</span>
             <span className="flex items-center gap-1 rounded-full bg-[var(--secondary)] px-2.5 py-1 text-xs text-[var(--muted-foreground)]">
-              <FileJson size="0.75rem" /> .charx
-            </span>
+              <FileJson size="0.75rem" /> {localizeUi("ui.modals.importcharactermodal.charx")}</span>
             <span className="flex items-center gap-1 rounded-full bg-[var(--secondary)] px-2.5 py-1 text-xs text-[var(--muted-foreground)]">
-              <FileJson size="0.75rem" /> .marinara
-            </span>
+              <FileJson size="0.75rem" /> {localizeUi("ui.modals.importcharactermodal.marinara")}</span>
           </div>
         </div>
 
@@ -424,9 +409,7 @@ export function ImportCharacterModal({ open, onClose }: Props) {
         {/* Status */}
         {status === "loading" && (
           <div className="flex items-center gap-2 rounded-lg bg-[var(--secondary)] p-3 text-xs">
-            <Loader2 size="0.875rem" className="animate-spin text-[var(--primary)]" />
-            Importing files...
-          </div>
+            <Loader2 size="0.875rem" className="animate-spin text-[var(--primary)]" />{localizeUi("ui.modals.importcharactermodal.importingFiles")}</div>
         )}
         {status === "done" && results.length > 0 && (
           <div className="flex flex-col gap-2">
@@ -438,9 +421,8 @@ export function ImportCharacterModal({ open, onClose }: Props) {
               }`}
             >
               {results.some((result) => result.success) ? <CheckCircle size="0.875rem" /> : <XCircle size="0.875rem" />}
-              {results.filter((result) => result.success).length} succeeded,{" "}
-              {results.filter((result) => !result.success).length} failed
-            </div>
+              {results.filter((result) => result.success).length} {localizeUi("ui.modals.importcharactermodal.succeeded")}{" "}
+              {results.filter((result) => !result.success).length} {localizeUi("ui.modals.importcharactermodal.failed")}</div>
 
             <div className="max-h-52 overflow-y-auto rounded-lg border border-[var(--border)]">
               {results.map((result) => (
@@ -471,9 +453,7 @@ export function ImportCharacterModal({ open, onClose }: Props) {
               onClose();
             }}
             className="rounded-lg px-4 py-2 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)]"
-          >
-            Close
-          </button>
+          >{localizeUi("capabilities.actions.close")}</button>
         </div>
       </div>
     </Modal>

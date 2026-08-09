@@ -83,6 +83,7 @@ export function buildVeniceImageRequest(input: VeniceImageRequestInput): Record<
     prompt: input.prompt.trim(),
     format: "webp",
     return_binary: false,
+    safe_mode: false,
     variants: 1,
   };
 

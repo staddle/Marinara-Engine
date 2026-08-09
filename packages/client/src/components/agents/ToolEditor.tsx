@@ -34,6 +34,7 @@ import { downloadJsonFile, sanitizeExportFilenamePart } from "../../lib/download
 import { HelpTooltip } from "../ui/HelpTooltip";
 import { SettingsSwitch } from "../panels/settings/SettingControls";
 import { createFolderEntry } from "@marinara-engine/shared";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 const EXEC_TYPES = [
   { value: "static", label: "Static Result", icon: FileText, description: "Returns a fixed string when called." },
@@ -48,6 +49,7 @@ const SCRIPT_TOOLS_DISABLED_MESSAGE =
 //  Main Editor
 // ═══════════════════════════════════════════════
 export function ToolEditor() {
+  const { t: localizeUi } = useUiTranslation();
   const toolDetailId = useUIStore((s) => s.toolDetailId);
   const closeToolDetail = useUIStore((s) => s.closeToolDetail);
 
@@ -283,9 +285,11 @@ export function ToolEditor() {
     if (!dbTool) return;
     if (
       !(await showConfirmDialog({
-        title: "Delete Tool",
-        message: "Delete this custom tool? This cannot be undone.",
-        confirmLabel: "Delete",
+        title:localizeUi("ui.agents.tooleditor.deleteTool"),
+        message: localizeUi("dialog.delete.namedPermanent", {
+          name: dbTool.name,
+        }),
+        confirmLabel:localizeUi("lorebook.editor.batch.delete"),
         tone: "destructive",
       }))
     ) {
@@ -299,9 +303,7 @@ export function ToolEditor() {
   if (!toolDetailId || (!dbTool && !isNew)) {
     return (
       <div className="mari-editor-shell flex flex-1 items-center justify-center">
-        <p className="mari-editor-empty px-4 py-3 text-sm">
-          Tool not found.
-        </p>
+        <p className="mari-editor-empty px-4 py-3 text-sm">{localizeUi("ui.agents.tooleditor.toolNotFound")}</p>
       </div>
     );
   }
@@ -316,7 +318,7 @@ export function ToolEditor() {
         <button
           type="button"
           onClick={handleClose}
-          aria-label="Back to tools"
+          aria-label={localizeUi("ui.agents.tooleditor.backToTools")}
           className="mari-editor-action inline-flex"
         >
           <ArrowLeft size="1.125rem" />
@@ -331,35 +333,33 @@ export function ToolEditor() {
             markDirty();
           }}
           className="mari-editor-title-input min-w-0 flex-1 font-mono placeholder:text-[var(--marinara-editor-muted)]"
-          placeholder="tool_name"
+          placeholder={localizeUi("ui.agents.tooleditor.toolName")}
         />
         <div className="mari-editor-actions flex max-md:w-full max-md:justify-end max-md:border-t max-md:border-[var(--marinara-editor-divider)] max-md:pt-2">
           {saveError && (
             <span className="mari-editor-status mr-2 text-red-400">
-              <AlertCircle size="0.6875rem" /> Error
-            </span>
+              <AlertCircle size="0.6875rem" /> {localizeUi("ui.agents.tooleditor.error")}</span>
           )}
           {savedFlash && !dirty && (
             <span className="mari-editor-status mr-2 text-emerald-400">
-              <Check size="0.6875rem" /> Saved
-            </span>
+              <Check size="0.6875rem" /> {localizeUi("chat.settings.inlineEditor.saved")}</span>
           )}
-          {dirty && !saveError && <span className="mari-editor-status mr-2 text-amber-400">Unsaved</span>}
+          {dirty && !saveError && <span className="mari-editor-status mr-2 text-amber-400">{localizeUi("ui.agents.agenteditor.unsaved")}</span>}
           <button
             onClick={handleSave}
             disabled={isPending}
             className="mari-editor-action mari-editor-action--primary inline-flex disabled:opacity-50"
-            title="Save tool"
-            aria-label="Save tool"
+            title={localizeUi("ui.agents.tooleditor.saveTool")}
+            aria-label={localizeUi("ui.agents.tooleditor.saveTool")}
           >
-            <Save size="0.8125rem" /> <span className="max-md:hidden">Save</span>
+            <Save size="0.8125rem" /> <span className="max-md:hidden">{localizeUi("ui.noodle.noodlehome.save")}</span>
           </button>
           {dbTool && (
             <button
               onClick={handleExport}
               className="mari-editor-action inline-flex"
-              title="Export function"
-              aria-label="Export function"
+              title={localizeUi("ui.agents.tooleditor.exportFunction")}
+              aria-label={localizeUi("ui.agents.tooleditor.exportFunction")}
             >
               <Upload size="0.9375rem" />
             </button>
@@ -368,8 +368,8 @@ export function ToolEditor() {
             <button
               onClick={handleDelete}
               className="mari-editor-action inline-flex"
-              title="Delete function"
-              aria-label="Delete function"
+              title={localizeUi("ui.agents.tooleditor.deleteFunction")}
+              aria-label={localizeUi("ui.agents.tooleditor.deleteFunction")}
             >
               <Trash2 size="0.9375rem" />
             </button>
@@ -380,29 +380,23 @@ export function ToolEditor() {
       {/* Unsaved warning */}
       {showUnsavedWarning && (
         <div className="flex items-center justify-between bg-amber-500/10 px-4 py-2 text-xs text-amber-400">
-          <span>You have unsaved changes.</span>
+          <span>{localizeUi("ui.agents.agenteditor.youHaveUnsavedChanges")}</span>
           <div className="flex gap-2">
             <button
               onClick={() => setShowUnsavedWarning(false)}
               className="rounded-lg px-3 py-1 hover:bg-[var(--accent)]"
-            >
-              Keep editing
-            </button>
+            >{localizeUi("ui.agents.agenteditor.keepEditing")}</button>
             <button
               onClick={() => closeToolDetail()}
               className="rounded-lg px-3 py-1 text-[var(--destructive)] hover:bg-[var(--destructive)]/15"
-            >
-              Discard
-            </button>
+            >{localizeUi("ui.agents.agenteditor.discard")}</button>
             <button
               onClick={async () => {
                 await handleSave();
                 closeToolDetail();
               }}
               className="rounded-lg bg-amber-500/20 px-3 py-1 hover:bg-amber-500/30"
-            >
-              Save & close
-            </button>
+            >{localizeUi("ui.agents.agenteditor.saveClose")}</button>
           </div>
         </div>
       )}
@@ -422,17 +416,14 @@ export function ToolEditor() {
       <div className="flex-1 overflow-y-auto p-6">
         <div className="mx-auto max-w-3xl space-y-6">
           {/* ── Name hint ── */}
-          <p className="text-[0.625rem] text-[var(--muted-foreground)]">
-            Tool name must be lowercase snake_case (e.g.{" "}
-            <code className="rounded bg-[var(--secondary)] px-1">check_weather</code>). This is the identifier the AI
-            will use to call this function.
-          </p>
+          <p className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.agents.tooleditor.toolNameMustBeLowercaseSnakeCaseEG")}{" "}
+            <code className="rounded bg-[var(--secondary)] px-1">{"check_weather"}</code>{localizeUi("ui.agents.tooleditor.thisIsTheIdentifierTheAiWillUseTo")}</p>
 
           {/* ── Description ── */}
           <FieldGroup
-            label="Description"
+            label={localizeUi("chat.settings.inlineEditor.fields.description")}
             icon={<Info size="0.875rem" className="text-[var(--primary)]" />}
-            help="Tell the AI what this tool does. Be descriptive — the AI reads this to decide when and how to call your tool."
+            help={localizeUi("ui.agents.tooleditor.tellTheAiWhatThisToolDoesBeDescriptive")}
           >
             <input
               value={localDesc}
@@ -441,19 +432,17 @@ export function ToolEditor() {
                 markDirty();
               }}
               className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
-              placeholder="Describe what this tool does — the AI reads this to decide when to call it…"
+              placeholder={localizeUi("ui.agents.tooleditor.describeWhatThisToolDoesTheAiReadsThis")}
             />
           </FieldGroup>
 
           {/* ── Parameters ── */}
           <FieldGroup
-            label="Parameters"
+            label={localizeUi("ui.agents.tooleditor.parameters")}
             icon={<Code2 size="0.875rem" className="text-[var(--primary)]" />}
-            help="The input arguments the AI can pass when calling this tool. Each parameter has a name, type, and description."
+            help={localizeUi("ui.agents.tooleditor.theInputArgumentsTheAiCanPassWhenCalling")}
           >
-            <p className="text-[0.625rem] text-[var(--muted-foreground)] mb-3">
-              Define the arguments the AI can pass when calling this tool.
-            </p>
+            <p className="text-[0.625rem] text-[var(--muted-foreground)] mb-3">{localizeUi("ui.agents.tooleditor.defineTheArgumentsTheAiCanPassWhenCalling")}</p>
             <div className="space-y-2">
               {localParams.map((param, idx) => (
                 <div
@@ -470,7 +459,7 @@ export function ToolEditor() {
                           setLocalParams(next);
                           markDirty();
                         }}
-                        placeholder="param_name"
+                        placeholder={localizeUi("ui.agents.tooleditor.paramName")}
                         className="w-32 rounded-lg bg-[var(--secondary)] px-2 py-1.5 font-mono text-xs ring-1 ring-[var(--border)] focus:outline-none focus:ring-[var(--ring)]"
                       />
                       <select
@@ -483,14 +472,14 @@ export function ToolEditor() {
                         }}
                         className="rounded-lg bg-[var(--secondary)] px-2 py-1.5 text-xs ring-1 ring-[var(--border)] focus:outline-none focus:ring-[var(--ring)]"
                       >
-                        <option value="string">string</option>
-                        <option value="number">number</option>
-                        <option value="boolean">boolean</option>
-                        <option value="array">array</option>
-                        <option value="object">object</option>
+                        <option value="string">{localizeUi("ui.agents.tooleditor.string")}</option>
+                        <option value="number">{localizeUi("ui.agents.tooleditor.number")}</option>
+                        <option value="boolean">{localizeUi("ui.agents.tooleditor.boolean")}</option>
+                        <option value="array">{localizeUi("ui.agents.tooleditor.array")}</option>
+                        <option value="object">{localizeUi("ui.agents.tooleditor.object")}</option>
                       </select>
                       <SettingsSwitch
-                        label="Required"
+                        label={localizeUi("ui.agents.tooleditor.required")}
                         checked={param.required}
                         onChange={(checked) => {
                           const next = [...localParams];
@@ -510,7 +499,7 @@ export function ToolEditor() {
                         setLocalParams(next);
                         markDirty();
                       }}
-                      placeholder="Description of this parameter…"
+                      placeholder={localizeUi("ui.agents.tooleditor.descriptionOfThisParameter")}
                       className="w-full rounded-lg bg-[var(--secondary)] px-2 py-1.5 text-xs ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-[var(--ring)]"
                     />
                   </div>
@@ -532,13 +521,12 @@ export function ToolEditor() {
                 }}
                 className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-[var(--border)] px-3 py-2 text-xs text-[var(--muted-foreground)] transition-colors hover:border-[var(--primary)]/40 hover:text-[var(--primary)]"
               >
-                <Plus size="0.75rem" /> Add Parameter
-              </button>
+                <Plus size="0.75rem" /> {localizeUi("ui.agents.tooleditor.addParameter")}</button>
             </div>
           </FieldGroup>
 
           {/* ── Execution Type ── */}
-          <FieldGroup label="Execution Type" icon={<Wrench size="0.875rem" className="text-[var(--primary)]" />}>
+          <FieldGroup label={localizeUi("ui.agents.tooleditor.executionType")} icon={<Wrench size="0.875rem" className="text-[var(--primary)]" />}>
             <div className="grid grid-cols-3 gap-2">
               {EXEC_TYPES.map((et) => {
                 const isActive = localExecType === et.value;
@@ -573,12 +561,9 @@ export function ToolEditor() {
               <div className="mt-3 flex gap-2 rounded-xl border border-amber-500/25 bg-amber-500/10 p-3 text-xs text-amber-200">
                 <AlertCircle size="0.875rem" className="mt-0.5 shrink-0" />
                 <div>
-                  <div className="font-medium">Script tools are disabled on this server.</div>
-                  <div className="mt-1 text-amber-100/80">
-                    Set <code className="rounded bg-black/20 px-1">CUSTOM_TOOL_SCRIPT_ENABLED=true</code> in{" "}
-                    <code className="rounded bg-black/20 px-1">.env</code> and restart Marinara only for trusted
-                    in-process Script tools.
-                  </div>
+                  <div className="font-medium">{localizeUi("ui.agents.tooleditor.scriptToolsAreDisabledOnThisServer")}</div>
+                  <div className="mt-1 text-amber-100/80">{localizeUi("ui.agents.tooleditor.set")} <code className="rounded bg-black/20 px-1">{"CUSTOM_TOOL_SCRIPT_ENABLED=true"}</code> {localizeUi("ui.agents.tooleditor.in")}{" "}
+                    <code className="rounded bg-black/20 px-1">{".env"}</code> {localizeUi("ui.agents.tooleditor.andRestartMarinaraOnlyForTrustedInProcessScript")}</div>
                 </div>
               </div>
             )}
@@ -586,19 +571,16 @@ export function ToolEditor() {
           </FieldGroup>
 
           <FieldGroup
-            label="Hidden Marinara context"
+            label={localizeUi("ui.agents.tooleditor.hiddenMarinaraContext")}
             icon={<KeyRound size="0.875rem" className="text-[var(--primary)]" />}
-            help="Adds a separate server-provided context object to webhook and script executions. The AI does not see these fields as tool parameters."
+            help={localizeUi("ui.agents.tooleditor.addsASeparateServerProvidedContextObjectToWebhook")}
           >
             <SettingsSwitch
-              label={<span className="block font-medium text-[var(--foreground)]">Include hidden chat context</span>}
+              label={<span className="block font-medium text-[var(--foreground)]">{localizeUi("ui.agents.tooleditor.includeHiddenChatContext")}</span>}
               description={
-                <span>
-                  Webhooks receive <code className="rounded bg-[var(--secondary)] px-1">context</code> beside{" "}
-                  <code className="rounded bg-[var(--secondary)] px-1">arguments</code>; scripts receive a{" "}
-                  <code className="rounded bg-[var(--secondary)] px-1">context</code> variable. Includes chat ID, mode,
-                  persona, character IDs/names, chat variables, recent message IDs, and game state.
-                </span>
+                <span>{localizeUi("ui.agents.tooleditor.webhooksReceive")} <code className="rounded bg-[var(--secondary)] px-1">{"context"}</code> {localizeUi("ui.agents.tooleditor.beside")}{" "}
+                  <code className="rounded bg-[var(--secondary)] px-1">{"arguments"}</code>{localizeUi("ui.agents.tooleditor.scriptsReceiveA")}{" "}
+                  <code className="rounded bg-[var(--secondary)] px-1">{"context"}</code> {localizeUi("ui.agents.tooleditor.variableIncludesChatIdModePersonaCharacterIdsNames")}</span>
               }
               checked={localIncludeHiddenContext}
               onChange={(checked) => {
@@ -613,7 +595,7 @@ export function ToolEditor() {
 
           {/* ── Execution Config ── */}
           {localExecType === "static" && (
-            <FieldGroup label="Static Result" icon={<FileText size="0.875rem" className="text-[var(--primary)]" />}>
+            <FieldGroup label={localizeUi("ui.agents.tooleditor.staticResult")} icon={<FileText size="0.875rem" className="text-[var(--primary)]" />}>
               <textarea
                 value={localStaticResult}
                 onChange={(e) => {
@@ -621,37 +603,31 @@ export function ToolEditor() {
                   markDirty();
                 }}
                 rows={5}
-                placeholder='{"result": "OK"}'
+                placeholder={localizeUi("ui.agents.tooleditor.resultOk")}
                 className="w-full resize-y rounded-xl bg-[var(--secondary)] px-4 py-3 font-mono text-xs leading-relaxed ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
               />
-              <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
-                This string is returned as-is when the AI calls this tool. Useful for informational tools or
-                placeholders.
-              </p>
+              <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.agents.tooleditor.thisStringIsReturnedAsIsWhenTheAi")}</p>
             </FieldGroup>
           )}
 
           {localExecType === "webhook" && (
-            <FieldGroup label="Webhook URL" icon={<Globe size="0.875rem" className="text-[var(--primary)]" />}>
+            <FieldGroup label={localizeUi("ui.agents.tooleditor.webhookUrl")} icon={<Globe size="0.875rem" className="text-[var(--primary)]" />}>
               <input
                 value={localWebhookUrl}
                 onChange={(e) => {
                   setLocalWebhookUrl(e.target.value);
                   markDirty();
                 }}
-                placeholder="https://api.example.com/my-tool"
+                placeholder={localizeUi("ui.agents.tooleditor.httpsApiExampleComMyTool")}
                 className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 font-mono text-sm ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
               />
-              <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
-                A POST request will be sent with{" "}
-                <code className="rounded bg-[var(--secondary)] px-1">{"{ tool, arguments, context? }"}</code> as JSON body.
-                Response is returned to the AI.
-              </p>
+              <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.agents.tooleditor.aPostRequestWillBeSentWith")}{" "}
+                <code className="rounded bg-[var(--secondary)] px-1">{"{ tool, arguments, context? }"}</code> {localizeUi("ui.agents.tooleditor.asJsonBodyResponseIsReturnedToTheAi")}</p>
             </FieldGroup>
           )}
 
           {localExecType === "script" && (
-            <FieldGroup label="Script Body" icon={<Code2 size="0.875rem" className="text-[var(--primary)]" />}>
+            <FieldGroup label={localizeUi("ui.agents.tooleditor.scriptBody")} icon={<Code2 size="0.875rem" className="text-[var(--primary)]" />}>
               <textarea
                 value={localScriptBody}
                 onChange={(e) => {
@@ -659,19 +635,16 @@ export function ToolEditor() {
                   markDirty();
                 }}
                 rows={10}
-                placeholder={
-                  "// args is an object with the parameters\n// Return a value or object\nconst result = args.x + args.y;\nreturn { sum: result };"
+                placeholder={localizeUi("ui.agents.tooleditor.argsIsAnObjectWithTheParametersReturnA")
                 }
                 className="w-full resize-y rounded-xl bg-[var(--secondary)] px-4 py-3 font-mono text-xs leading-relaxed ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
               />
-              <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
-                Write JavaScript. Has access to <code className="rounded bg-[var(--secondary)] px-1">args</code>,{" "}
-                <code className="rounded bg-[var(--secondary)] px-1">context</code>,{" "}
-                <code className="rounded bg-[var(--secondary)] px-1">JSON</code>,{" "}
-                <code className="rounded bg-[var(--secondary)] px-1">Math</code>,{" "}
-                <code className="rounded bg-[var(--secondary)] px-1">Date</code>. Must{" "}
-                <code className="rounded bg-[var(--secondary)] px-1">return</code> a result.
-              </p>
+              <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.agents.tooleditor.writeJavascriptHasAccessTo")} <code className="rounded bg-[var(--secondary)] px-1">{"args"}</code>,{" "}
+                <code className="rounded bg-[var(--secondary)] px-1">{"context"}</code>,{" "}
+                <code className="rounded bg-[var(--secondary)] px-1">{"JSON"}</code>,{" "}
+                <code className="rounded bg-[var(--secondary)] px-1">{"Math"}</code>,{" "}
+                <code className="rounded bg-[var(--secondary)] px-1">{"Date"}</code>{localizeUi("ui.agents.tooleditor.must")}{" "}
+                <code className="rounded bg-[var(--secondary)] px-1">{"return"}</code> {localizeUi("ui.agents.tooleditor.aResult")}</p>
             </FieldGroup>
           )}
         </div>

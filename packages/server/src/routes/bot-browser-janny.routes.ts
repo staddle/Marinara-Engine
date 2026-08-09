@@ -2,6 +2,8 @@
 // Routes: Browser — JannyAI provider
 // ──────────────────────────────────────────────
 import type { FastifyInstance } from "fastify";
+import { logger } from "../lib/logger.js";
+import { fetchJannyCharacterCard } from "../services/bot-browser/janny-character-card.js";
 import { resolveValidatedImage, safeFetch } from "../utils/security.js";
 
 const JANNY_SEARCH_URL = "https://search.jannyai.com/multi-search";
@@ -305,6 +307,27 @@ export async function botBrowserJannyRoutes(app: FastifyInstance) {
       }
       if (!res.ok) throw new Error(`JannyAI search error ${res.status}`);
       return res.json();
+    } finally {
+      clearTimeout(timeout);
+    }
+  });
+
+  // ── Download the complete PNG character card through JannyAI's supported API ──
+  app.get<{ Params: { id: string } }>("/janny/download/:id", async (req, reply) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 45_000);
+    try {
+      const card = await fetchJannyCharacterCard(req.params.id, { signal: controller.signal });
+      return reply
+        .header("Content-Type", card.mimeType)
+        .header("Content-Disposition", 'attachment; filename="character.png"')
+        .send(card.buffer);
+    } catch (err) {
+      logger.warn(err, "[bot-browser] JannyAI character-card download failed");
+      const statusCode = (err as Error).name === "AbortError" ? 504 : 502;
+      return reply.status(statusCode).send({
+        error: "JannyAI could not provide the complete character card. Please try again later.",
+      });
     } finally {
       clearTimeout(timeout);
     }

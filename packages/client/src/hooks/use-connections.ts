@@ -195,7 +195,8 @@ export type RemoteConnectionModel = {
 
 export function useFetchModels() {
   return useMutation({
-    mutationFn: (id: string) => api.get<{ models: RemoteConnectionModel[] }>(`/connections/${id}/models`),
+    mutationFn: (id: string) =>
+      api.get<{ models: RemoteConnectionModel[]; loras?: RemoteConnectionModel[] }>(`/connections/${id}/models`),
   });
 }
 
@@ -204,9 +205,12 @@ export function useSaveConnectionDefaults() {
   return useMutation({
     mutationFn: ({ id, params }: { id: string; params: Record<string, unknown> | null }) =>
       api.put(`/connections/${id}/default-parameters`, params),
-    onSuccess: (_data, variables) => {
-      qc.invalidateQueries({ queryKey: connectionKeys.list() });
-      qc.invalidateQueries({ queryKey: connectionKeys.detail(variables.id) });
-    },
+    // Returning the promise makes mutateAsync wait for the refetches, so the
+    // follow-up connection save cannot race in an older defaults snapshot.
+    onSuccess: (_data, variables) =>
+      Promise.all([
+        qc.invalidateQueries({ queryKey: connectionKeys.list() }),
+        qc.invalidateQueries({ queryKey: connectionKeys.detail(variables.id) }),
+      ]),
   });
 }

@@ -2,6 +2,7 @@ import type { CSSProperties } from "react";
 import type { SkillCheckResult } from "@marinara-engine/shared";
 import { cn } from "../../lib/utils";
 import { AnimatedDiceRoll } from "./AnimatedDiceRoll";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface AnimatedSkillCheckResultProps {
   result: SkillCheckResult;
@@ -27,6 +28,7 @@ function resultLabel(result: SkillCheckResult): string {
 }
 
 export function AnimatedSkillCheckResult({ result, accentColor, animate = false, onDismiss, className }: AnimatedSkillCheckResultProps) {
+  const { t: localizeUi } = useUiTranslation();
   const label = resultLabel(result);
   const tone = result.criticalSuccess
     ? "critical-success"
@@ -42,8 +44,8 @@ export function AnimatedSkillCheckResult({ result, accentColor, animate = false,
   return (
     <div className={cn("skill-check-roll", `skill-check-roll--${tone}`, animate && "is-animating", className)} style={style}>
       <div className="skill-check-roll-meta">
-        <span>{result.skill} Check</span>
-        <span>DC {result.dc}{rollMode}</span>
+        <span>{result.skill} {localizeUi("ui.agents.customagentrepositoriesmodal.check")}</span>
+        <span>{localizeUi("ui.dice.animatedskillcheckresult.dc")} {result.dc}{rollMode}</span>
       </div>
       <AnimatedDiceRoll
         notation={`${result.rolls.length}d20`}
@@ -58,7 +60,7 @@ export function AnimatedSkillCheckResult({ result, accentColor, animate = false,
         highlightValue={result.rollMode !== "normal" ? result.usedRoll : undefined}
       />
       <div className="skill-check-roll-result">
-        <span>{result.rollMode !== "normal" ? `Using ${result.usedRoll}` : `Rolled ${result.usedRoll}`}</span>
+        <span>{result.rollMode !== "normal" ?localizeUi("ui.dice.animatedskillcheckresult.usingValue1", { value1: result.usedRoll }) :localizeUi("ui.dice.animatedskillcheckresult.rolledValue1", { value1: result.usedRoll })}</span>
         <strong>{label}</strong>
       </div>
     </div>

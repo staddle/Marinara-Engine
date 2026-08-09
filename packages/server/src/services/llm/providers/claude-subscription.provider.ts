@@ -23,6 +23,7 @@
 import { randomUUID } from "node:crypto";
 import { isClaudeAdaptiveOnlyNoSamplingModel, shouldSuppressUnknownModelParameters } from "@marinara-engine/shared";
 import { BaseLLMProvider, type ChatMessage, type ChatOptions, type LLMUsage } from "../base-provider.js";
+import { supportsAnthropicThinkingDisable } from "./anthropic.provider.js";
 import { logger } from "../../../lib/logger.js";
 import { isClaudeSubscriptionResumeEnabled } from "../../../config/runtime-config.js";
 import {
@@ -413,14 +414,24 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
     };
     if (systemPrompt !== undefined) sdkOptions.systemPrompt = systemPrompt;
 
-    if (!suppressModelParameters && options.enableThinking) {
-      sdkOptions.thinking = { type: "adaptive" };
-      // EffortLevel covers low|medium|high|xhigh|max; reasoningEffort matches
-      // that provider-facing set.
-      sdkOptions.effort = (options.reasoningEffort ?? "high") as "low" | "medium" | "high" | "xhigh" | "max";
-    } else if (!suppressModelParameters && isAdaptiveOnly) {
-      // Adaptive-only Claude models always think; let the SDK pick a default effort.
-      sdkOptions.thinking = { type: "adaptive" };
+    if (
+      !suppressModelParameters &&
+      options.reasoningEffort === "none" &&
+      supportsAnthropicThinkingDisable(options.model)
+    ) {
+      sdkOptions.thinking = { type: "disabled" };
+    } else if (!suppressModelParameters && (options.enableThinking || isAdaptiveOnly)) {
+      sdkOptions.thinking = {
+        type: "adaptive",
+        ...(options.captureReasoning ? { display: "summarized" as const } : {}),
+      };
+      // Opus 5 and the other adaptive-only models think by default, but effort
+      // remains an independent request control. Preserve an explicit effort
+      // even when callers only opt into displaying the summarized reasoning.
+      const activeEffort = options.reasoningEffort !== "none" ? options.reasoningEffort : undefined;
+      if (activeEffort || options.enableThinking) {
+        sdkOptions.effort = (activeEffort ?? "high") as "low" | "medium" | "high" | "xhigh" | "max";
+      }
     }
 
     // Subprocess environment. `ENABLE_CLAUDEAI_MCP_SERVERS=false` opts out of

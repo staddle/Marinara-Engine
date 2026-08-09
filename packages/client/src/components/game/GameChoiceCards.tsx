@@ -9,6 +9,7 @@ import { X } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { normalizeChoiceText } from "../../lib/game-choice-utils";
 import { AnimatedText } from "./AnimatedText";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface GameChoiceCardsProps {
   choices: string[];
@@ -38,6 +39,7 @@ function choiceStateClassName(
 }
 
 export function GameChoiceCards({ choices, onSelect, onDismiss, disabled, replayChoice }: GameChoiceCardsProps) {
+  const { t: localizeUi } = useUiTranslation();
   const [selected, setSelected] = useState<number | null>(null);
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const replayMode = replayChoice !== undefined;
@@ -58,15 +60,15 @@ export function GameChoiceCards({ choices, onSelect, onDismiss, disabled, replay
       <div className="flex h-full max-h-[clamp(8rem,30svh,14rem)] min-h-0 w-full flex-col rounded-2xl border border-white/15 bg-black/50 p-3 shadow-[0_8px_24px_rgba(0,0,0,0.3)] backdrop-blur-md sm:max-h-[clamp(9rem,36svh,20rem)] md:max-h-[min(52dvh,32rem)]">
         <div className="mb-2 flex shrink-0 items-center justify-between gap-2">
           <span className="rounded-full bg-white/10 px-2 py-0.5 text-[0.625rem] font-semibold uppercase tracking-wide text-white/90">
-            {replayMode ? "Recorded choice" : "Choose your action"}
+            {replayMode ?localizeUi("ui.game.gamechoicecards.recordedChoice") :localizeUi("ui.game.gamechoicecards.chooseYourAction")}
           </span>
           {onDismiss && (
             <button
               type="button"
               onClick={onDismiss}
               className="rounded-lg p-1 text-white/55 transition-colors hover:bg-white/10 hover:text-white"
-              title="Close choices"
-              aria-label="Close choices"
+              title={localizeUi("ui.game.gamechoicecards.closeChoices")}
+              aria-label={localizeUi("ui.game.gamechoicecards.closeChoices")}
             >
               <X size="0.875rem" />
             </button>
@@ -88,7 +90,7 @@ export function GameChoiceCards({ choices, onSelect, onDismiss, disabled, replay
                 onMouseLeave={() => setHoveredIndex(null)}
                 disabled={choiceDisabled}
                 title={
-                  replayMode && !isRecordedChoice ? "This choice was not selected in the original session" : undefined
+                  replayMode && !isRecordedChoice ?localizeUi("ui.game.gamechoicecards.thisChoiceWasNotSelectedInTheOriginalSession") : undefined
                 }
                 className={cn(
                   "group relative shrink-0 overflow-hidden rounded-xl border px-4 py-3 text-left text-sm transition-all duration-200",

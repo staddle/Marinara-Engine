@@ -23,6 +23,8 @@ export const lorebooks = fileTable("lorebooks", {
   chatId: text("chat_id"),
   isGlobal: text("is_global").notNull().default("false"),
   enabled: text("enabled").notNull().default("true"),
+  /** UI-only visibility flag; hidden books remain active and editable from their owning character. */
+  hiddenFromLibrary: text("hidden_from_library").notNull().default("false"),
   /** JSON object: { mode: "all" | "disabled" | "specific", chatIds: string[] } */
   scope: text("scope").notNull().default('{"mode":"all","chatIds":[]}'),
   /** Tags for organizing/filtering lorebooks (JSON array of strings) */
@@ -135,6 +137,8 @@ export const lorebookEntries = fileTable("lorebook_entries", {
   additionalMatchingSources: text("additional_matching_sources").notNull().default("[]"),
 
   position: integer("position").notNull().default(0),
+  /** Exact, case-sensitive name used by the {{outlet::name}} prompt macro */
+  outletName: text("outlet_name").notNull().default(""),
   depth: integer("depth").notNull().default(4),
   order: integer("order").notNull().default(100),
   role: text("role", { enum: ["system", "user", "assistant"] })

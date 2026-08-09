@@ -1,9 +1,14 @@
 import { Suspense, lazy, type ComponentProps, type CSSProperties } from "react";
 import type { SpriteSide } from "@marinara-engine/shared";
-import { ChevronUp, ChevronDown, Loader2, Trash2 } from "lucide-react";
+import { useTranslation, useTranslation as useUiTranslation } from "react-i18next";
+import { ChevronUp, ChevronDown, Layers, ListChecks, Loader2, Trash2, X } from "lucide-react";
 import type { PeekPromptData } from "./chat-area.types";
 import type { LocalSpriteVisualSettings } from "./local-sprite-visual-settings";
 import type { ChatImage } from "../../hooks/use-gallery";
+import { cn } from "../../lib/utils";
+import { Modal } from "../ui/Modal";
+import { NEUTRAL_PANEL_SHELL } from "../ui/neutral-surface-styles";
+import { getChatFloatingPanelDesktopRight, type ChatToolbarFloatingPanelAnchor } from "./ChatToolbarControls";
 
 const loadChatSettingsDrawer = async () => {
   const module = await import("./ChatSettingsDrawer");
@@ -35,14 +40,15 @@ const PeekPromptModal = lazy(async () => {
 });
 
 type ChatData = ComponentProps<typeof ChatSettingsDrawer>["chat"];
-export type ChatFloatingPanelAnchor = { right: number; top: number } | null;
+export type ChatFloatingPanelAnchor = ChatToolbarFloatingPanelAnchor;
 export type ChatSettingsInitialSection = ComponentProps<typeof ChatSettingsDrawer>["initialSection"];
 
 type SharedSceneSettingsProps = {
   spriteArrangeMode: boolean;
   onToggleSpriteArrange: () => void;
   onResetSpritePlacements: () => void;
-  onSpriteSideChange: (side: SpriteSide) => void;
+  onResetSpriteCharacterVisualSettings?: (characterId: string) => void;
+  onSpriteSideChange: (side: SpriteSide, characterId?: string) => void;
   spriteVisualSettings?: LocalSpriteVisualSettings;
   onSpriteVisualSettingsChange?: (patch: Partial<LocalSpriteVisualSettings>) => void;
 };
@@ -58,6 +64,8 @@ type DeleteDialogProps = {
   onClose: () => void;
 };
 
+const DELETE_DIALOG_ACTION_CLASS = "mari-chrome-control min-h-10 w-full justify-start px-3 py-2 text-left text-xs";
+
 function DeleteConfirmationDialog({
   messageId,
   canDeleteSwipe,
@@ -68,48 +76,45 @@ function DeleteConfirmationDialog({
   onDeleteMore,
   onClose,
 }: DeleteDialogProps) {
-  if (!messageId) return null;
+  const { t } = useTranslation();
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3 pb-[max(env(safe-area-inset-bottom),0.75rem)] pt-[max(env(safe-area-inset-top),0.75rem)] sm:p-4"
-      onClick={onClose}
+    <Modal
+      open={!!messageId}
+      onClose={onClose}
+      title={t("chat.delete.dialog.title")}
+      width="max-w-sm"
+      chatFloatingPanel
     >
-      <div
-        className="mx-4 w-full max-w-xs rounded-xl bg-[var(--card)] p-5 shadow-2xl ring-1 ring-[var(--border)]"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <p className="mb-4 text-center text-sm font-semibold">How to proceed?</p>
-        <div className="flex flex-col gap-2">
-          {canDeleteSwipe && (
-            <button
-              onClick={onDeleteSwipe}
-              className="rounded-lg bg-[var(--secondary)] px-4 py-2 text-xs font-medium transition-colors hover:bg-[var(--accent)]"
-            >
-              Delete only this swipe ({activeSwipeIndex + 1}/{swipeCount})
-            </button>
-          )}
-          <button
-            onClick={onConfirm}
-            className="rounded-lg bg-[var(--destructive)] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[var(--destructive)]/80"
-          >
-            Delete this message
+      <p className="mb-4 text-sm leading-relaxed text-[var(--marinara-chat-chrome-panel-muted)]">
+        {t("chat.delete.dialog.description")}
+      </p>
+      <div className="grid gap-2" data-component="MessageDeleteActions">
+        {canDeleteSwipe && (
+          <button type="button" onClick={onDeleteSwipe} className={DELETE_DIALOG_ACTION_CLASS}>
+            <Layers size="0.8rem" />
+            <span>
+              {t("chat.delete.dialog.swipe", {
+                current: activeSwipeIndex + 1,
+                total: swipeCount,
+              })}
+            </span>
           </button>
-          <button
-            onClick={onDeleteMore}
-            className="rounded-lg bg-[var(--secondary)] px-4 py-2 text-xs font-medium transition-colors hover:bg-[var(--accent)]"
-          >
-            Delete more
-          </button>
-          <button
-            onClick={onClose}
-            className="rounded-lg px-4 py-2 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)]"
-          >
-            Cancel
-          </button>
-        </div>
+        )}
+        <button type="button" onClick={onConfirm} className={DELETE_DIALOG_ACTION_CLASS}>
+          <Trash2 size="0.8rem" />
+          <span>{t("chat.delete.dialog.message")}</span>
+        </button>
+        <button type="button" onClick={onDeleteMore} className={DELETE_DIALOG_ACTION_CLASS}>
+          <ListChecks size="0.8rem" />
+          <span>{t("chat.delete.dialog.more")}</span>
+        </button>
+        <button type="button" onClick={onClose} className={DELETE_DIALOG_ACTION_CLASS}>
+          <X size="0.8rem" />
+          <span>{t("chat.delete.dialog.cancel")}</span>
+        </button>
       </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -132,50 +137,61 @@ function MultiSelectBar({
   onSelectAllAbove,
   onSelectAllBelow,
 }: MultiSelectBarProps) {
+  const { t } = useTranslation();
   if (!open) return null;
 
   return (
-    <div className="fixed bottom-6 left-1/2 z-50 flex -translate-x-1/2 flex-col items-stretch gap-2 rounded-xl bg-[var(--card)] px-5 py-3 shadow-2xl ring-1 ring-[var(--border)]">
-      <div className="flex items-center gap-3">
-        <span className="text-xs font-medium text-[var(--muted-foreground)]">{selectedCount} selected</span>
+    <div
+      data-component="MessageMultiSelectBar"
+      className={cn(
+        NEUTRAL_PANEL_SHELL,
+        "mari-chrome-token-scope fixed bottom-[max(1rem,env(safe-area-inset-bottom))] left-1/2 z-50 flex w-[min(30rem,calc(100vw-1.5rem))] -translate-x-1/2 flex-col gap-2 p-3",
+      )}
+    >
+      <span className="text-center text-xs font-medium text-[var(--marinara-chat-chrome-panel-muted)]">
+        {t("chat.delete.selection.count", { count: selectedCount })}
+      </span>
+      <div className="grid grid-cols-2 gap-2">
         <button
+          type="button"
           onClick={onDelete}
           disabled={selectedCount === 0}
-          className="flex items-center gap-1.5 rounded-lg bg-[var(--destructive)] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[var(--destructive)]/80 disabled:opacity-40"
+          className="mari-chrome-control min-h-10 w-full px-3 py-2 text-xs"
         >
           <Trash2 size="0.75rem" />
-          Delete selected
+          <span>{t("chat.delete.selection.delete")}</span>
         </button>
-        <button
-          onClick={onCancel}
-          className="rounded-lg px-4 py-2 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)]"
-        >
-          Cancel
+        <button type="button" onClick={onCancel} className="mari-chrome-control min-h-10 w-full px-3 py-2 text-xs">
+          <X size="0.75rem" />
+          <span>{t("chat.delete.selection.cancel")}</span>
         </button>
       </div>
       <div className="flex items-center justify-center gap-2">
         <button
+          type="button"
           onClick={onSelectAllAbove}
           disabled={selectedCount === 0}
-          title="Select all messages above"
-          aria-label="Select all messages above"
-          className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] disabled:opacity-40"
+          title={t("chat.delete.selection.above")}
+          aria-label={t("chat.delete.selection.above")}
+          className="mari-chrome-control mari-chrome-control--small h-8 w-8 p-0"
         >
           <ChevronUp size="0.85rem" />
         </button>
         <button
+          type="button"
           onClick={onUnselectAll}
           disabled={selectedCount === 0}
-          className="rounded-lg px-3 py-1 text-[11px] font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] disabled:opacity-40"
+          className="mari-chrome-control mari-chrome-control--small px-3 text-[0.6875rem]"
         >
-          Unselect all
+          <span>{t("chat.delete.selection.unselectAll")}</span>
         </button>
         <button
+          type="button"
           onClick={onSelectAllBelow}
           disabled={selectedCount === 0}
-          title="Select all messages below"
-          aria-label="Select all messages below"
-          className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] disabled:opacity-40"
+          title={t("chat.delete.selection.below")}
+          aria-label={t("chat.delete.selection.below")}
+          className="mari-chrome-control mari-chrome-control--small h-8 w-8 p-0"
         >
           <ChevronDown size="0.85rem" />
         </button>
@@ -185,6 +201,7 @@ function MultiSelectBar({
 }
 
 function ChatSettingsLoadingFallback({ anchor }: { anchor: ChatFloatingPanelAnchor }) {
+  const { t: localizeUi } = useUiTranslation();
   const anchoredOnMobile = !!anchor && typeof window !== "undefined" && window.innerWidth < 768;
   const panelStyle: CSSProperties | undefined = anchor
     ? anchoredOnMobile
@@ -195,7 +212,7 @@ function ChatSettingsLoadingFallback({ anchor }: { anchor: ChatFloatingPanelAnch
           top: `${anchor.top}px`,
           width: `min(34rem, calc(100vw - ${anchor.right}px - 0.75rem))`,
         }
-      : { right: `${anchor.right}px`, top: `${anchor.top}px` }
+      : { right: getChatFloatingPanelDesktopRight(anchor), top: `${anchor.top}px` }
     : undefined;
 
   return (
@@ -206,10 +223,10 @@ function ChatSettingsLoadingFallback({ anchor }: { anchor: ChatFloatingPanelAnch
     >
       <div className="mari-chrome-text-strong flex shrink-0 items-center gap-2 border-b border-[var(--marinara-chat-chrome-panel-divider)] px-4 py-3 text-sm font-semibold">
         <Loader2 size="0.875rem" className="mari-chrome-accent-icon animate-spin" />
-        Chat Settings
+        {localizeUi("chat.toolbar.settings")}
       </div>
       <div className="mari-chrome-text-muted flex min-h-32 items-center justify-center px-4 py-8 text-xs">
-        Loading settings...
+        {localizeUi("ui.chat.chatsettingsloadingfallback.loadingSettings")}
       </div>
     </div>
   );
@@ -241,7 +258,7 @@ type ChatCommonOverlaysProps = {
   selfieCharacters?: Array<{ id: string; name: string }>;
   /** Run Illustrator in its background prompt mode. */
   onGenerateBackground?: () => void | Promise<void>;
-  /** Generate a storyboard for the latest completed Game Mode GM turn. */
+  /** Generate a storyboard for the latest completed Game or Roleplay episode. */
   onGenerateStoryboard?: () => void | Promise<void>;
   /** Show the latest Game Mode storyboard viewer. */
   onViewStoryboard?: () => void;
@@ -314,6 +331,7 @@ export function ChatCommonOverlays({
             spriteArrangeMode={sceneSettings.spriteArrangeMode}
             onToggleSpriteArrange={sceneSettings.onToggleSpriteArrange}
             onResetSpritePlacements={sceneSettings.onResetSpritePlacements}
+            onResetSpriteCharacterVisualSettings={sceneSettings.onResetSpriteCharacterVisualSettings}
             onSpriteSideChange={sceneSettings.onSpriteSideChange}
             spriteVisualSettings={sceneSettings.spriteVisualSettings}
             onSpriteVisualSettingsChange={sceneSettings.onSpriteVisualSettingsChange}

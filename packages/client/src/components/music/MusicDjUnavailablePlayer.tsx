@@ -10,6 +10,7 @@ import {
 import { GripVertical, Music2, Sparkles, X } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { useUIStore } from "../../stores/ui.store";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 const MOBILE_WIDGET_COLLAPSED_SIZE = 48;
 const MOBILE_WIDGET_EXPANDED_MAX_WIDTH = 320;
@@ -84,6 +85,7 @@ export function MusicDjUnavailablePlayer({
   floating?: boolean;
   mobileOnly?: boolean;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const openRightPanel = useUIStore((state) => state.openRightPanel);
   const openAgentCatalog = useUIStore((state) => state.openAgentCatalog);
   const agentCatalogOpen = useUIStore((state) => state.agentCatalogOpen);
@@ -221,33 +223,27 @@ export function MusicDjUnavailablePlayer({
           >
             <div className="mb-1.5 flex items-center gap-1">
               <GripVertical size="0.875rem" className="text-[var(--marinara-music-player-icon)]" />
-              <span className="flex-1 text-[0.625rem] font-medium text-[var(--marinara-music-player-muted)]">
-                Music Player
-              </span>
+              <span className="flex-1 text-[0.625rem] font-medium text-[var(--marinara-music-player-muted)]">{localizeUi("settings.controls.musicPlayer.label")}</span>
               <button
                 type="button"
                 onPointerDown={(event) => event.stopPropagation()}
                 onClick={() => setCollapsed(true)}
                 className="rounded-full p-1 text-[var(--marinara-music-player-icon)] transition-colors hover:bg-[var(--marinara-music-player-button-bg-hover)]"
-                aria-label="Collapse Music Player"
+                aria-label={localizeUi("ui.music.musicdjunavailableplayer.collapseMusicPlayer")}
               >
                 <X size="0.875rem" />
               </button>
             </div>
             <div className="flex items-center gap-2">
               <Music2 size="0.875rem" className="shrink-0 text-[var(--marinara-music-player-icon)]" />
-              <span className="min-w-0 flex-1 text-[0.6875rem] leading-tight text-[var(--marinara-music-player-text)]">
-                Download Music DJ Agent to configure
-              </span>
+              <span className="min-w-0 flex-1 text-[0.6875rem] leading-tight text-[var(--marinara-music-player-text)]">{localizeUi("ui.music.musicdjunavailableplayer.downloadMusicDjAgentToConfigure")}</span>
               <button
                 type="button"
                 onPointerDown={(event) => event.stopPropagation()}
                 onClick={openDownloadAgents}
                 className="mari-chrome-control mari-chrome-control--primary mari-chrome-control--compact shrink-0 gap-1.5 whitespace-nowrap"
               >
-                <Sparkles size="0.75rem" />
-                Download Agents
-              </button>
+                <Sparkles size="0.75rem" />{localizeUi("ui.agents.agentcatalogview.downloadAgents")}</button>
             </div>
           </div>
         )}
@@ -266,17 +262,13 @@ export function MusicDjUnavailablePlayer({
       )}
     >
       <Music2 size="0.875rem" className="shrink-0 text-[var(--marinara-music-player-icon)]" />
-      <span className="min-w-0 flex-1 text-[0.6875rem] leading-tight text-[var(--marinara-music-player-text)]">
-        Download Music DJ Agent to configure
-      </span>
+      <span className="min-w-0 flex-1 text-[0.6875rem] leading-tight text-[var(--marinara-music-player-text)]">{localizeUi("ui.music.musicdjunavailableplayer.downloadMusicDjAgentToConfigure")}</span>
       <button
         type="button"
         onClick={openDownloadAgents}
         className="mari-chrome-control mari-chrome-control--primary mari-chrome-control--compact shrink-0 gap-1.5 whitespace-nowrap"
       >
-        <Sparkles size="0.75rem" />
-        Download Agents
-      </button>
+        <Sparkles size="0.75rem" />{localizeUi("ui.agents.agentcatalogview.downloadAgents")}</button>
     </div>
   );
 }

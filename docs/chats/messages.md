@@ -71,6 +71,8 @@ These three actions look similar but do different things. Choose the one that ma
 
 The **/continue** command extends the same message. Type `/continue` (or its short form `/cont`) in the input box and send it. The AI picks up where its last reply stopped and adds more text to that same message, instead of making a new swipe.
 
+By default, Marinara inserts a blank line before the added text. To make continuations attach directly to the final character of the previous response, turn off **Settings → General → Responses → Add a new line before /continue text**. Marinara then tells the model to continue exactly from the cutoff without a separator.
+
 ```
 /continue
 ```

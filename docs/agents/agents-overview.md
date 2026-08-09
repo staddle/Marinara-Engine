@@ -8,7 +8,7 @@ Agents are small AI helpers that run automatically around your main chat reply. 
 
 Agents are turned on per chat, not per character. There is no agent toggle on a character card. Two chats with the same character can run completely different agents. You choose which agents run in each chat's settings.
 
-Fresh Marinara Engine installations start without optional agents. This keeps the base app and Termux installation smaller. The official v2.3.0+ catalog contains 29 one-click packages: 6 Writer Agents, 8 Tracker Agents, and 15 Misc Agents, including Maps, Calls, and all six Conversation games. Their source, manifests, downloadable artifacts, and repository-level catalog are public in [Pasta-Devs/Marinara-Agents](https://github.com/Pasta-Devs/Marinara-Agents). For the complete per-agent guide, see [Downloadable Agents Reference](built-in-agents.md). To make your own, see [Creating Custom Agents](custom-agents.md).
+Fresh Marinara Engine installations start without optional agents. This keeps the base app and Termux installation smaller. The official v2.3.0+ catalog contains 30 one-click packages: 6 Writer Agents, 8 Tracker Agents, and 16 Misc Agents, including Long-Term Memory, Maps, Calls, and all six Conversation games. Their source, manifests, downloadable artifacts, and repository-level catalog are public in [Pasta-Devs/Marinara-Agents](https://github.com/Pasta-Devs/Marinara-Agents). For the complete per-agent guide, see [Downloadable Agents Reference](built-in-agents.md). To make your own, see [Creating Custom Agents](custom-agents.md).
 
 ## The three phases
 
@@ -26,7 +26,7 @@ Click **Download Agents** at the top to open the full-screen official catalog. I
 
 The in-app catalog is backed by the public [Marinara-Agents repository](https://github.com/Pasta-Devs/Marinara-Agents). You can inspect every package and artifact there, but normal users should install through **Download Agents** so Marinara can validate compatibility, permissions, hashes, archive contents, and restart requirements.
 
-The catalog includes first-party chat agents, Hierarchical Maps, Conversation audio/video calls, and every optional Conversation game. Installed agents are grouped into **Writer Agents**, **Tracker Agents**, and **Misc Agents**, plus a **Custom Agents** section for ones you make. Uninstalling a catalog package removes its code and settings from the Engine while preserving chat messages and history. Deleting a custom agent removes it for good.
+The catalog includes first-party chat agents, World Maps, Conversation audio/video calls, and every optional Conversation game. Installed agents are grouped into **Writer Agents**, **Tracker Agents**, and **Misc Agents**, plus a **Custom Agents** section for ones you make. Uninstalling a catalog package removes its code and settings from the Engine while preserving chat messages and history. Deleting a custom agent removes it for good.
 
 When upgrading from an Engine version that bundled these features, Marinara downloads the matching packages once and preserves existing chat selections, agent settings, stored runtime data, and history. If that migration cannot reach the catalog, it retries at the next startup instead of discarding anything.
 
@@ -60,9 +60,9 @@ This readout turns amber with a warning icon when the load gets heavy. The real 
 
 A fresh installation starts with no optional agents installed or active. Each chat mode shows only compatible packages you have installed.
 
-- **Roleplay**: install Roleplay agents from the catalog, then add them in Chat Settings. Hierarchical Maps appears there like any other supported agent.
+- **Roleplay**: install Roleplay agents from the catalog, then add them in Chat Settings. World Maps appears there like any other supported agent.
 - **Conversation**: install Calls or individual table games from the catalog. Games appear in the games picker and register their slash commands; calls add their toolbar and Chat Settings controls.
-- **Game Mode**: installed Game-compatible agents can be selected during game creation or added later. Hierarchical Maps contributes its map workspace and world-map view only when it is active for that game.
+- **Game Mode**: installed Game-compatible agents can be selected during game creation or added later. World Maps contributes its map workspace and world-map view only when it is active for that game.
 
 You can add or remove compatible agents at any time.
 

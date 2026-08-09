@@ -6,6 +6,7 @@ import { X } from "lucide-react";
 import type { TreeNode } from "../../hooks/use-game-assets";
 import { useGameAssetFileInfo } from "../../hooks/use-game-assets";
 import { formatBytes, formatDate } from "../../lib/format";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 /**
  * Popover showing image metadata (dimensions, format, size, modified date).
@@ -16,6 +17,7 @@ import { formatBytes, formatDate } from "../../lib/format";
  * @param onClose - Callback when popover should close
  */
 export function ImageInfoPopover({ node, onClose }: { node: TreeNode; onClose: () => void }) {
+  const { t: localizeUi } = useUiTranslation();
   const { data: info } = useGameAssetFileInfo(node.path);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -43,10 +45,10 @@ export function ImageInfoPopover({ node, onClose }: { node: TreeNode; onClose: (
       className="fixed z-[60] rounded-lg border border-[var(--border)] bg-[var(--card)] p-4 shadow-xl max-sm:inset-x-0 max-sm:bottom-0 max-sm:rounded-b-none max-sm:border-b-0 sm:right-4 sm:top-20 sm:w-64"
     >
       <div className="mb-3 flex items-center justify-between">
-        <h4 className="text-sm font-semibold text-[var(--foreground)]">File Info</h4>
+        <h4 className="text-sm font-semibold text-[var(--foreground)]">{localizeUi("ui.gameAssets.imageinfopopover.fileInfo")}</h4>
         <button
           type="button"
-          aria-label="Close"
+          aria-label={localizeUi("capabilities.actions.close")}
           onClick={onClose}
           className="rounded-md p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
         >
@@ -56,16 +58,16 @@ export function ImageInfoPopover({ node, onClose }: { node: TreeNode; onClose: (
       {info ? (
         <div className="space-y-2 text-xs">
           <div className="flex justify-between">
-            <span className="text-[var(--muted-foreground)]">Name</span>
+            <span className="text-[var(--muted-foreground)]">{localizeUi("ui.characters.metadatatab.name")}</span>
             <span className="text-right text-[var(--foreground)]">{info.name}</span>
           </div>
           <div className="flex justify-between">
-            <span className="text-[var(--muted-foreground)]">Size</span>
+            <span className="text-[var(--muted-foreground)]">{localizeUi("ui.gameAssets.assetgrid.size")}</span>
             <span className="text-[var(--foreground)]">{formatBytes(info.size)}</span>
           </div>
           {info.width != null && info.height != null && (
             <div className="flex justify-between">
-              <span className="text-[var(--muted-foreground)]">Dimensions</span>
+              <span className="text-[var(--muted-foreground)]">{localizeUi("ui.gameAssets.imageinfopopover.dimensions")}</span>
               <span className="text-[var(--foreground)]">
                 {info.width} × {info.height}
               </span>
@@ -73,17 +75,17 @@ export function ImageInfoPopover({ node, onClose }: { node: TreeNode; onClose: (
           )}
           {info.format && (
             <div className="flex justify-between">
-              <span className="text-[var(--muted-foreground)]">Format</span>
+              <span className="text-[var(--muted-foreground)]">{localizeUi("ui.gameAssets.imageinfopopover.format")}</span>
               <span className="uppercase text-[var(--foreground)]">{info.format}</span>
             </div>
           )}
           <div className="flex justify-between">
-            <span className="text-[var(--muted-foreground)]">Modified</span>
+            <span className="text-[var(--muted-foreground)]">{localizeUi("ui.gameAssets.assetgrid.modified")}</span>
             <span className="text-[var(--foreground)]">{formatDate(info.modified)}</span>
           </div>
         </div>
       ) : (
-        <div className="mari-chrome-text-muted text-sm">Loading...</div>
+        <div className="mari-chrome-text-muted text-sm">{localizeUi("ui.characters.characterlibraryview.loading")}</div>
       )}
     </div>
   );

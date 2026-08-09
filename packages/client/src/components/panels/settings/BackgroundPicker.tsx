@@ -1,10 +1,11 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUpDown,
   Check,
   ChevronDown,
-  ChevronRight,
+  Folder,
+  FolderInput,
   FolderPlus,
   Image,
   Loader2,
@@ -17,6 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { toast } from "sonner";
+import { BACKGROUND_THUMBNAIL_WIDTH } from "@marinara-engine/shared";
 import { api } from "../../../lib/api-client";
 import { cn } from "../../../lib/utils";
 import {
@@ -25,20 +27,26 @@ import {
   getNextBackgroundFolderName,
   type BackgroundLibrarySort,
 } from "../../../lib/background-library";
-import { confirmNonEmptyFolderDelete, showConfirmDialog } from "../../../lib/app-dialogs";
+import {
+  confirmNonEmptyFolderDelete,
+  showChoiceDialog,
+  showConfirmDialog,
+  showPromptDialog,
+} from "../../../lib/app-dialogs";
 import { DEFAULT_ROLEPLAY_BACKGROUND_URL } from "../../../stores/ui.store";
 import { useGameAssetManifest } from "../../../hooks/use-game-assets";
-import { handleFolderRenameKeyDown, useFolderRenameGesture } from "../../../hooks/use-folder-rename-gesture";
 import { useTouchFolderDrag } from "../../../hooks/use-touch-folder-drag";
 import { ImageUploadDropzone } from "../../ui/ImageUploadDropzone";
-import { SmoothFolderContent } from "../../ui/SmoothFolderContent";
 import { TouchDragHandle } from "../../ui/TouchDragHandle";
+import { Modal } from "../../ui/Modal";
+import { useTranslation as useUiTranslation } from "react-i18next";
+import { clearActiveChatResourceDrag, writeChatResourceDragPayload } from "../../../lib/chat-resource-drag";
+import { ChatResourceActionButton } from "../../chat/ChatResourceActionButton";
 
 type BackgroundLibraryItem = {
   id: string;
   filename: string;
   url: string;
-  originalName: string | null;
   tags: string[];
   source?: "user" | "game_asset";
   tag?: string;
@@ -47,6 +55,7 @@ type BackgroundLibraryItem = {
   renameable?: boolean;
   createdAt: string;
   folderId: string | null;
+  favorite?: boolean;
 };
 
 type BackgroundLibraryFolder = {
@@ -60,7 +69,6 @@ type BackgroundUploadResponse = {
   success: boolean;
   filename: string;
   url: string;
-  originalName: string;
   tags: string[];
 };
 
@@ -73,12 +81,133 @@ type BackgroundPickerProps = {
 
 const BACKGROUND_QUERY_KEY = ["backgrounds"] as const;
 const BACKGROUND_FOLDER_QUERY_KEY = ["background-folders"] as const;
+// The actions are a static row under the thumbnail with card colours and a touch-sized hit target.
+const CARD_ACTION_CLASS =
+  "flex h-9 w-9 items-center justify-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] md:h-7 md:w-7";
+// From md up they normally float over the image on hover instead, which needs white-on-scrim.
+const FLOATING_CARD_ACTION_CLASS = "md:text-white/80 md:hover:bg-white/15 md:hover:text-white";
 const INLINE_ACCENT_BUTTON_CLASS =
   "rounded-md bg-[var(--primary)]/15 px-1.5 py-0.5 text-[0.625rem] text-[var(--primary)] transition-colors hover:bg-[var(--primary)]/25 disabled:cursor-not-allowed disabled:opacity-50";
 
-function parseDraggedBackgroundId(value: string): string | null {
-  const trimmed = value.trim();
-  return trimmed ? trimmed : null;
+const CARD_TEXT_FIELD_CLASS =
+  "min-w-0 flex-1 rounded border border-[var(--border)] bg-[var(--background)] px-1.5 py-1 text-[0.6875rem] text-[var(--foreground)] outline-none focus:border-[var(--primary)]";
+
+/**
+ * The rename input keeps its draft here rather than in the picker, so typing a name
+ * re-renders one card instead of every card in the grid.
+ */
+function CardNameForm({
+  initialValue,
+  ariaLabel,
+  placeholder,
+  saveLabel,
+  pending,
+  onSubmit,
+  onCancel,
+}: {
+  initialValue: string;
+  ariaLabel: string;
+  placeholder: string;
+  saveLabel: string;
+  pending: boolean;
+  onSubmit: (value: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState(initialValue);
+
+  return (
+    <form
+      className="flex min-w-0 items-center gap-1"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onSubmit(value.trim());
+      }}
+    >
+      <input
+        type="text"
+        value={value}
+        maxLength={100}
+        onChange={(event) => setValue(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key !== "Escape") return;
+          event.stopPropagation();
+          onCancel();
+        }}
+        aria-label={ariaLabel}
+        placeholder={placeholder}
+        className={CARD_TEXT_FIELD_CLASS}
+        autoFocus
+      />
+      <button type="submit" disabled={pending} className={INLINE_ACCENT_BUTTON_CLASS}>
+        {saveLabel}
+      </button>
+    </form>
+  );
+}
+
+/** Same reason as CardNameForm: the tag draft belongs to the card that is being edited. */
+function CardTagInput({
+  suggestions,
+  datalistId,
+  placeholder,
+  addLabel,
+  pending,
+  onAdd,
+  onCancel,
+}: {
+  suggestions: string[];
+  datalistId: string;
+  placeholder: string;
+  addLabel: string;
+  pending: boolean;
+  onAdd: (tag: string) => void;
+  onCancel: () => void;
+}) {
+  const [value, setValue] = useState("");
+
+  const submit = () => {
+    if (!value.trim()) return;
+    onAdd(value);
+    setValue("");
+  };
+
+  return (
+    <div className="mt-1 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-1">
+      <input
+        type="text"
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            submit();
+          }
+          if (event.key === "Escape") {
+            event.stopPropagation();
+            onCancel();
+          }
+        }}
+        placeholder={placeholder}
+        className="w-full min-w-0 rounded border border-[var(--border)] bg-[var(--background)] px-2 py-1 text-[0.6875rem] text-[var(--foreground)] outline-none focus:border-[var(--primary)]"
+        data-background-tag-input
+        autoFocus
+        list={datalistId}
+      />
+      <datalist id={datalistId}>
+        {suggestions.map((tag) => (
+          <option key={tag} value={tag} />
+        ))}
+      </datalist>
+      <button
+        type="button"
+        onClick={submit}
+        disabled={!value.trim() || pending}
+        className={INLINE_ACCENT_BUTTON_CLASS}
+      >
+        {addLabel}
+      </button>
+    </div>
+  );
 }
 
 export function BackgroundPicker({
@@ -87,24 +216,39 @@ export function BackgroundPicker({
   defaultRoleplayBackground,
   onDefaultChange,
 }: BackgroundPickerProps) {
+  const { t: localizeUi } = useUiTranslation();
+  const [open, setOpen] = useState(false);
+  const [pendingSelection, setPendingSelection] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [editingTags, setEditingTags] = useState<string | null>(null);
-  const [tagInput, setTagInput] = useState("");
   const [renamingFile, setRenamingFile] = useState<string | null>(null);
-  const [renameInput, setRenameInput] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [sort, setSort] = useState<BackgroundLibrarySort>("name-asc");
+  const [sourceFilter, setSourceFilter] = useState<"all" | "user" | "game_asset">("all");
+  const [folderFilter, setFolderFilter] = useState<string>("all");
   const [includedTagValues, setIncludedTagValues] = useState<string[]>([]);
   const [tagsExpanded, setTagsExpanded] = useState(false);
-  const [expandedFolderId, setExpandedFolderId] = useState<string | null>(null);
-  const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
-  const [editFolderName, setEditFolderName] = useState("");
   const [draggedBackgroundId, setDraggedBackgroundId] = useState<string | null>(null);
-  const handleFolderRenameGesture = useFolderRenameGesture();
   const { refetch: refreshGameAssetManifest } = useGameAssetManifest();
   const qc = useQueryClient();
   const draggedBackgroundIdRef = useRef<string | null>(null);
   const tagUpdatePendingRef = useRef(false);
+  const closeAfterSelectionRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const modalContentRef = useRef<HTMLDivElement>(null);
+
+  useEffect(
+    () => () => {
+      if (closeAfterSelectionRef.current) clearTimeout(closeAfterSelectionRef.current);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (!open) return;
+    // The focus scope can scroll the panel while it mounts; start at the top regardless.
+    const frame = requestAnimationFrame(() => modalContentRef.current?.scrollTo({ top: 0 }));
+    return () => cancelAnimationFrame(frame);
+  }, [open]);
 
   const { data: backgrounds = [] } = useQuery({
     queryKey: BACKGROUND_QUERY_KEY,
@@ -146,7 +290,6 @@ export function BackgroundPicker({
     mutationFn: (name: string) => api.post<BackgroundLibraryFolder>("/backgrounds/folders", { name }),
     onSuccess: (folder) => {
       qc.setQueryData<BackgroundLibraryFolder[]>(BACKGROUND_FOLDER_QUERY_KEY, (current = []) => [...current, folder]);
-      setExpandedFolderId(folder.id);
     },
   });
 
@@ -157,8 +300,6 @@ export function BackgroundPicker({
       qc.setQueryData<BackgroundLibraryFolder[]>(BACKGROUND_FOLDER_QUERY_KEY, (current = []) =>
         current.map((folder) => (folder.id === updatedFolder.id ? updatedFolder : folder)),
       );
-      setEditingFolderId(null);
-      setEditFolderName("");
     },
   });
 
@@ -173,7 +314,8 @@ export function BackgroundPicker({
           background.folderId === folderId ? { ...background, folderId: null } : background,
         ),
       );
-      if (expandedFolderId === folderId) setExpandedFolderId(null);
+      // Never leave the chips filtered on a folder that no longer exists.
+      setFolderFilter((current) => (current === folderId ? "all" : current));
     },
   });
 
@@ -190,7 +332,25 @@ export function BackgroundPicker({
     },
     onError: (_error, _variables, context) => {
       if (context?.previous) qc.setQueryData(BACKGROUND_QUERY_KEY, context.previous);
-      toast.error("Failed to move background.");
+      toast.error(localizeUi("ui.panels.backgroundpicker.failedToMoveBackground"));
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: BACKGROUND_QUERY_KEY }),
+  });
+
+  const toggleFavorite = useMutation({
+    mutationFn: ({ backgroundId, favorite }: { backgroundId: string; favorite: boolean }) =>
+      api.patch("/backgrounds/favorite", { backgroundId, favorite }),
+    onMutate: async ({ backgroundId, favorite }) => {
+      await qc.cancelQueries({ queryKey: BACKGROUND_QUERY_KEY });
+      const previous = qc.getQueryData<BackgroundLibraryItem[]>(BACKGROUND_QUERY_KEY);
+      qc.setQueryData<BackgroundLibraryItem[]>(BACKGROUND_QUERY_KEY, (current = []) =>
+        current.map((background) => (background.id === backgroundId ? { ...background, favorite } : background)),
+      );
+      return { previous };
+    },
+    onError: (_error, _variables, context) => {
+      if (context?.previous) qc.setQueryData(BACKGROUND_QUERY_KEY, context.previous);
+      toast.error(localizeUi("ui.panels.backgroundpicker.failedToUpdateFavorite"));
     },
     onSettled: () => qc.invalidateQueries({ queryKey: BACKGROUND_QUERY_KEY }),
   });
@@ -204,15 +364,62 @@ export function BackgroundPicker({
     return [...values].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
   }, [backgrounds]);
 
-  const visibleBackgrounds = useMemo(
-    () => filterAndSortBackgrounds(backgrounds, { search: searchQuery, includedTags, sort }),
-    [backgrounds, includedTags, searchQuery, sort],
+  const visibleBackgrounds = useMemo(() => {
+    const filtered = filterAndSortBackgrounds(backgrounds, { search: searchQuery, includedTags, sort });
+    return filtered.filter((background) => {
+      if (sourceFilter !== "all" && background.source !== sourceFilter) return false;
+      if (folderFilter === "favorites") return Boolean(background.favorite);
+      if (folderFilter === "unfiled") return !background.folderId;
+      if (folderFilter !== "all") return background.folderId === folderFilter;
+      return true;
+    });
+  }, [backgrounds, folderFilter, includedTags, searchQuery, sort, sourceFilter]);
+  const activeFolder = folders.find((folder) => folder.id === folderFilter) ?? null;
+  const selectedBackground = backgrounds.find((background) => background.url === selected) ?? null;
+  const sourceCounts = useMemo(
+    () => ({
+      all: backgrounds.length,
+      user: backgrounds.filter((background) => background.source !== "game_asset").length,
+      game_asset: backgrounds.filter((background) => background.source === "game_asset").length,
+    }),
+    [backgrounds],
   );
-  const folderFilterActive = searchQuery.trim().length > 0 || includedTags.size > 0;
-  const visibleRootBackgrounds = useMemo(
-    () => visibleBackgrounds.filter((background) => !background.folderId),
-    [visibleBackgrounds],
+
+  /**
+   * Selecting a background closes the library shortly after, which is a race against any control
+   * the user reaches for next. Every other card action calls this first so the sheet stays open.
+   */
+  const cancelPendingClose = useCallback(() => {
+    if (!closeAfterSelectionRef.current) return;
+    clearTimeout(closeAfterSelectionRef.current);
+    closeAfterSelectionRef.current = null;
+    setPendingSelection(null);
+  }, []);
+
+  const selectBackground = useCallback(
+    (background: BackgroundLibraryItem, isSelected: boolean) => {
+      if (isSelected) {
+        cancelPendingClose();
+        setPendingSelection(null);
+        onSelect(null);
+        return;
+      }
+      if (closeAfterSelectionRef.current) clearTimeout(closeAfterSelectionRef.current);
+      setPendingSelection(background.url);
+      onSelect(background.url);
+      closeAfterSelectionRef.current = setTimeout(() => {
+        setOpen(false);
+        setPendingSelection(null);
+        closeAfterSelectionRef.current = null;
+      }, 280);
+    },
+    [cancelPendingClose, onSelect],
   );
+
+  const closePicker = useCallback(() => {
+    cancelPendingClose();
+    setOpen(false);
+  }, [cancelPendingClose]);
 
   const handleUpload = useCallback(
     async (files: File[]) => {
@@ -227,19 +434,36 @@ export function BackgroundPicker({
           }),
         );
         const successfulUploads = uploads
-          .filter(
-            (result): result is PromiseFulfilledResult<BackgroundUploadResponse> => result.status === "fulfilled",
-          )
+          .filter((result): result is PromiseFulfilledResult<BackgroundUploadResponse> => result.status === "fulfilled")
           .map((result) => result.value)
           .filter((result) => result.success);
         const failed = uploads.length - successfulUploads.length;
 
         if (successfulUploads.length > 0) {
+          // Importing while browsing a folder files the uploads there instead of into Unfiled.
+          const targetFolderId = folders.some((folder) => folder.id === folderFilter) ? folderFilter : null;
+          if (targetFolderId) {
+            const moves = await Promise.allSettled(
+              successfulUploads.map((upload) =>
+                api.patch("/backgrounds/organization", {
+                  backgroundId: `user:${upload.filename}`,
+                  folderId: targetFolderId,
+                }),
+              ),
+            );
+            // An upload that fails to file would otherwise silently land in Unfiled.
+            if (moves.some((result) => result.status === "rejected")) {
+              toast.error(localizeUi("ui.panels.backgroundpicker.failedToMoveBackground"));
+            }
+          }
           qc.invalidateQueries({ queryKey: BACKGROUND_QUERY_KEY });
           void refreshGameAssetManifest().catch(() => undefined);
           onSelect(successfulUploads[successfulUploads.length - 1]!.url);
           toast.success(
-            `Imported ${successfulUploads.length} background${successfulUploads.length === 1 ? "" : "s"}.`,
+            localizeUi("ui.panels.backgroundpicker.importedValue1BackgroundValue2", {
+              value1: successfulUploads.length,
+              value2: successfulUploads.length === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s"),
+            }),
           );
         }
         if (failed > 0) {
@@ -247,22 +471,25 @@ export function BackgroundPicker({
           toast.error(
             rejected?.status === "rejected" && rejected.reason instanceof Error
               ? rejected.reason.message
-              : `${failed} background import${failed === 1 ? "" : "s"} failed.`,
+              : localizeUi("ui.panels.backgroundpicker.value1BackgroundImportValue2Failed", {
+                  value1: failed,
+                  value2: failed === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s"),
+                }),
           );
         }
       } catch {
-        toast.error("Background import failed.");
+        toast.error(localizeUi("ui.panels.backgroundpicker.backgroundImportFailed"));
       } finally {
         setUploading(false);
       }
     },
-    [onSelect, qc, refreshGameAssetManifest],
+    [folderFilter, folders, onSelect, qc, refreshGameAssetManifest, localizeUi],
   );
 
   const addTag = useCallback(
-    async (filename: string, currentTags: string[]) => {
+    async (filename: string, currentTags: string[], rawTag: string) => {
       if (tagUpdatePendingRef.current) return;
-      const tag = tagInput
+      const tag = rawTag
         .trim()
         .toLowerCase()
         .replace(/[^a-z0-9 _-]/g, "");
@@ -270,14 +497,13 @@ export function BackgroundPicker({
       tagUpdatePendingRef.current = true;
       try {
         await updateTags.mutateAsync({ filename, tags: [...currentTags, tag] });
-        setTagInput("");
       } catch {
-        toast.error("Failed to update background tags.");
+        toast.error(localizeUi("ui.panels.backgroundpicker.failedToUpdateBackgroundTags"));
       } finally {
         tagUpdatePendingRef.current = false;
       }
     },
-    [tagInput, updateTags],
+    [updateTags, localizeUi],
   );
 
   const removeTag = useCallback(
@@ -288,29 +514,37 @@ export function BackgroundPicker({
         await updateTags.mutateAsync({ filename, tags: currentTags.filter((tag) => tag !== tagToRemove) });
         setIncludedTagValues((current) => current.filter((tag) => tag !== tagToRemove));
       } catch {
-        toast.error("Failed to update background tags.");
+        toast.error(localizeUi("ui.panels.backgroundpicker.failedToUpdateBackgroundTags"));
       } finally {
         tagUpdatePendingRef.current = false;
       }
     },
-    [updateTags],
+    [updateTags, localizeUi],
   );
 
-  const handleCreateFolder = useCallback(() => {
-    createFolder.mutate(getNextBackgroundFolderName(folders));
-  }, [createFolder, folders]);
+  const handleCreateFolder = useCallback(async () => {
+    const name = await showPromptDialog({
+      title: localizeUi("ui.panels.backgroundpicker.newFolder"),
+      message: localizeUi("ui.panels.backgroundpicker.folderName"),
+      defaultValue: getNextBackgroundFolderName(folders),
+      confirmLabel: localizeUi("ui.panels.appearancesettings.add"),
+    });
+    const trimmed = name?.trim();
+    if (trimmed) createFolder.mutate(trimmed);
+  }, [createFolder, folders, localizeUi]);
 
-  const commitFolderRename = useCallback(
-    (folder: BackgroundLibraryFolder) => {
-      const name = editFolderName.trim();
-      if (!name || name === folder.name) {
-        setEditingFolderId(null);
-        setEditFolderName("");
-        return;
-      }
-      renameFolder.mutate({ id: folder.id, name });
+  const handleRenameActiveFolder = useCallback(
+    async (folder: BackgroundLibraryFolder) => {
+      const name = await showPromptDialog({
+        title: localizeUi("ui.panels.backgroundpicker.renameFolder"),
+        message: localizeUi("ui.panels.backgroundpicker.folderName"),
+        defaultValue: folder.name,
+        confirmLabel: localizeUi("ui.noodle.noodlehome.save"),
+      });
+      const trimmed = name?.trim();
+      if (trimmed && trimmed !== folder.name) renameFolder.mutate({ id: folder.id, name: trimmed });
     },
-    [editFolderName, renameFolder],
+    [localizeUi, renameFolder],
   );
 
   const handleDeleteFolder = useCallback(
@@ -337,6 +571,46 @@ export function BackgroundPicker({
     },
     [moveBackground],
   );
+
+  /**
+   * Keyboard and screen-reader path to the same result as dragging a card onto a folder chip.
+   * Drag is pointer-only, so without this there is no way to file a background without a mouse.
+   */
+  const handleMoveBackground = useCallback(
+    async (background: BackgroundLibraryItem) => {
+      cancelPendingClose();
+      const currentFolderId = background.folderId ?? "";
+      const choice = await showChoiceDialog({
+        title: localizeUi("ui.panels.backgroundpicker.moveToFolder"),
+        message: getBackgroundLibraryTitle(background),
+        choices: [
+          { key: "", label: localizeUi("ui.panels.backgroundpicker.unfiled") },
+          ...folders.map((folder) => ({ key: folder.id, label: folder.name })),
+        ].filter((choice) => choice.key !== currentFolderId),
+      });
+      if (choice === null) return;
+      assignBackground(background.id, choice || null);
+    },
+    [assignBackground, cancelPendingClose, folders, localizeUi],
+  );
+
+  const handleFolderDrop = useCallback(
+    (event: DragEvent, folderId: string | null) => {
+      event.preventDefault();
+      const backgroundId = (
+        event.dataTransfer.getData("application/x-marinara-background-id") ||
+        event.dataTransfer.getData("text/plain")
+      ).trim();
+      if (backgroundId) assignBackground(backgroundId, folderId);
+    },
+    [assignBackground],
+  );
+
+  const allowFolderDrop = useCallback((event: DragEvent) => {
+    if (!draggedBackgroundIdRef.current) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  }, []);
 
   const finishBackgroundTouchDrag = useCallback(
     (backgroundId: string, x: number, y: number) => {
@@ -371,9 +645,9 @@ export function BackgroundPicker({
     async (background: BackgroundLibraryItem) => {
       const title = getBackgroundLibraryTitle(background);
       const confirmed = await showConfirmDialog({
-        title: "Delete Background",
-        message: `Delete “${title}”? This cannot be undone.`,
-        confirmLabel: "Delete",
+        title: localizeUi("ui.panels.backgroundpicker.deleteBackground_e1c408d"),
+        message: localizeUi("ui.panels.backgroundpicker.deleteValue1ThisCannotBeUndone", { value1: title }),
+        confirmLabel: localizeUi("lorebook.editor.batch.delete"),
         tone: "destructive",
       });
       if (!confirmed) return;
@@ -382,10 +656,10 @@ export function BackgroundPicker({
         if (selected === background.url) onSelect(null);
         if (defaultRoleplayBackground === background.url) onDefaultChange(DEFAULT_ROLEPLAY_BACKGROUND_URL);
       } catch {
-        toast.error("Failed to delete background.");
+        toast.error(localizeUi("ui.panels.backgroundpicker.failedToDeleteBackground"));
       }
     },
-    [defaultRoleplayBackground, deleteBackground, onDefaultChange, onSelect, selected],
+    [defaultRoleplayBackground, deleteBackground, onDefaultChange, onSelect, selected, localizeUi],
   );
 
   const toggleIncludedTag = useCallback((tag: string) => {
@@ -394,544 +668,668 @@ export function BackgroundPicker({
     );
   }, []);
 
-  const renderBackground = (background: BackgroundLibraryItem) => {
-    const isSelected = selected === background.url;
+  const renderCard = (background: BackgroundLibraryItem) => {
+    const isSelected = selected === background.url || pendingSelection === background.url;
     const isDefaultRoleplay = defaultRoleplayBackground === background.url;
-    const isUserBackground = background.source !== "game_asset";
-    const isEditable = background.editable !== false && isUserBackground;
-    const canRename = background.renameable !== false && isUserBackground;
-    const canDelete = background.deletable !== false && isUserBackground;
-    const isEditing = editingTags === background.id;
+    const isEditable = background.editable !== false && background.source !== "game_asset";
+    const isEditingTags = editingTags === background.id;
     const isRenaming = renamingFile === background.id;
     const title = getBackgroundLibraryTitle(background);
-    const sourceLabel = background.source === "game_asset" ? "Game asset" : "Library";
+    const isFloatingActions = !isEditingTags && !isRenaming;
     const datalistId = `background-tag-suggestions-${background.id.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 
     return (
-      <div
+      <article
         key={background.id}
         data-background-id={background.id}
+        data-background-selected={isSelected ? "true" : "false"}
         data-touch-drag-card="background"
         draggable={!isRenaming}
         onDragStart={(event) => {
           draggedBackgroundIdRef.current = background.id;
           setDraggedBackgroundId(background.id);
-          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.effectAllowed = "copyMove";
           event.dataTransfer.setData("application/x-marinara-background-id", background.id);
           event.dataTransfer.setData("text/plain", background.id);
+          writeChatResourceDragPayload(event.dataTransfer, {
+            version: 1,
+            kind: "background",
+            ids: [background.url],
+            label: title,
+          });
         }}
         onDragEnd={() => {
           draggedBackgroundIdRef.current = null;
           setDraggedBackgroundId(null);
+          clearActiveChatResourceDrag();
         }}
         className={cn(
-          "group relative flex touch-pan-y items-start gap-2 rounded-xl p-1.5 transition-colors hover:bg-[var(--sidebar-accent)]/45",
+          "group relative min-w-0 touch-pan-y overflow-hidden rounded-xl bg-[var(--secondary)]/35 ring-1 transition-all",
+          isSelected
+            ? "shadow-[0_0_0_3px_color-mix(in_srgb,var(--primary)_12%,transparent)] ring-2 ring-[var(--primary)]"
+            : "ring-[var(--border)] hover:-translate-y-0.5 hover:shadow-lg hover:ring-[var(--primary)]/45",
           draggedBackgroundId === background.id && "opacity-50",
         )}
       >
-        <TouchDragHandle
-          label={`Drag ${title} to a folder`}
-          size="0.75rem"
-          className="mt-2"
-          onTouchStart={(event) => {
-            startBackgroundTouchDrag(event, background.id, {
-              allowInteractiveTarget: true,
-              sourceElement: event.currentTarget.closest<HTMLElement>('[data-touch-drag-card="background"]'),
-            });
-          }}
-        />
-        <button
-          type="button"
-          onClick={() => onSelect(isSelected ? null : background.url)}
-          className={cn(
-            "relative aspect-video w-24 shrink-0 overflow-hidden rounded-lg border-2 transition-colors",
-            isSelected
-              ? "border-[var(--primary)] shadow-md shadow-[var(--primary)]/20"
-              : "border-transparent hover:border-[var(--muted-foreground)]/30",
-          )}
-          aria-label={isSelected ? `Remove ${title} from this chat` : `Use ${title} for this chat`}
-          aria-pressed={isSelected}
-        >
-          <img src={background.url} alt="" className="h-full w-full object-cover" loading="lazy" />
-          {isSelected && (
-            <span className="absolute inset-0 flex items-center justify-center bg-black/30">
-              <Check size="0.875rem" className="text-white" />
+        {/* The overlays are positioned against the thumbnail, not the card: anchoring them to the
+            card floated the always-visible mobile action row on top of the name and tag chips. */}
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => selectBackground(background, isSelected)}
+            className="relative block aspect-[16/10] w-full overflow-hidden bg-[var(--background)] text-left"
+            aria-label={
+              isSelected
+                ? localizeUi("ui.panels.backgroundpicker.removeValue1FromThisChat", { value1: title })
+                : localizeUi("ui.panels.backgroundpicker.useValue1ForThisChat", { value1: title })
+            }
+            aria-pressed={isSelected}
+          >
+            {/* Thumbnail, not the original: a grid of full-size backgrounds decodes to
+                hundreds of MB of bitmap. The server falls back to the original when it
+                cannot resize (animated GIF, no native sharp). */}
+            <img
+              src={`${background.url}?w=${BACKGROUND_THUMBNAIL_WIDTH}`}
+              alt=""
+              className="h-full w-full object-cover transition-transform duration-300 ease-out group-hover:scale-[1.025]"
+              loading="lazy"
+              decoding="async"
+            />
+            <span className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-black/70 to-transparent" />
+            <span className="absolute bottom-2 left-2 rounded-md bg-black/60 px-1.5 py-0.5 text-[0.5625rem] font-medium text-white/90 backdrop-blur-sm">
+              {localizeUi(
+                background.source === "game_asset"
+                  ? "ui.panels.backgroundpicker.gameAsset"
+                  : "ui.panels.backgroundpicker.myUpload",
+              )}
             </span>
-          )}
-        </button>
-
-        <div className="min-w-0 flex-1 py-0.5 pr-16">
-          <div className="flex min-w-0 items-center gap-1">
-            {isRenaming ? (
-              <form
-                className="flex min-w-0 flex-1 items-center gap-1"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  if (renameInput.trim()) {
-                    renameBackground.mutate({ filename: background.filename, name: renameInput.trim() });
-                  }
-                }}
+            {isDefaultRoleplay && (
+              <span
+                data-background-default-indicator
+                className="absolute bottom-2 right-2 hidden rounded-md bg-black/60 px-1.5 py-0.5 text-[0.5rem] font-medium text-amber-300 backdrop-blur-sm md:block md:group-hover:opacity-0"
               >
-                <input
-                  type="text"
-                  value={renameInput}
-                  onChange={(event) => setRenameInput(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Escape") setRenamingFile(null);
-                  }}
-                  className="min-w-0 flex-1 rounded border border-[var(--border)] bg-[var(--background)] px-1.5 py-1 text-[0.6875rem] text-[var(--foreground)] outline-none focus:border-[var(--primary)]"
-                  autoFocus
-                />
-                <button
-                  type="submit"
-                  disabled={!renameInput.trim() || renameBackground.isPending}
-                  className={INLINE_ACCENT_BUTTON_CLASS}
-                >
-                  {renameBackground.isPending ? "…" : "Save"}
-                </button>
-              </form>
-            ) : (
+                {localizeUi("ui.panels.backgroundpicker.roleplayDefaultShort")}
+              </span>
+            )}
+            {isSelected && (
+              <span className="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-full bg-[var(--primary)] text-[var(--primary-foreground)] shadow-lg">
+                <Check size="0.875rem" strokeWidth={3} />
+              </span>
+            )}
+          </button>
+
+          {/* The star sits on the image so favouriting never competes with the row of card actions. */}
+          <button
+            type="button"
+            data-background-favorite-toggle
+            onClick={() => {
+              cancelPendingClose();
+              toggleFavorite.mutate({ backgroundId: background.id, favorite: !background.favorite });
+            }}
+            className={cn(
+              "absolute left-2 top-2 flex h-11 w-11 items-center justify-center rounded-full bg-black/55 backdrop-blur-sm transition-colors md:h-7 md:w-7",
+              background.favorite
+                ? "text-amber-300"
+                : "text-white/80 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 max-md:opacity-100",
+            )}
+            title={localizeUi(
+              background.favorite
+                ? "ui.panels.backgroundpicker.removeFromFavorites"
+                : "ui.panels.backgroundpicker.addToFavorites",
+            )}
+            aria-label={localizeUi(
+              background.favorite
+                ? "ui.panels.backgroundpicker.removeValue1FromFavorites"
+                : "ui.panels.backgroundpicker.addValue1ToFavorites",
+              { value1: title },
+            )}
+            aria-pressed={Boolean(background.favorite)}
+          >
+            <Star size="0.875rem" fill={background.favorite ? "currentColor" : "none"} />
+          </button>
+
+          <TouchDragHandle
+            label={localizeUi("ui.panels.backgroundpicker.dragValue1ToAFolder", { value1: title })}
+            size="0.875rem"
+            className="absolute right-2 top-2 rounded-full bg-black/55 text-white/80 backdrop-blur-sm max-md:h-11 max-md:w-11"
+            onTouchStart={(event) => {
+              cancelPendingClose();
+              startBackgroundTouchDrag(event, background.id, {
+                allowInteractiveTarget: true,
+                chatResourcePayload: { version: 1, kind: "background", ids: [background.url], label: title },
+                sourceElement: event.currentTarget.closest<HTMLElement>('[data-touch-drag-card="background"]'),
+              });
+            }}
+          />
+
+          {/* Static row under the thumbnail on touch (always visible, so it must not cover the name
+              or the tags), floating scrim over the image on hover from md up. While an inline
+              editor is open the row stays in flow on every viewport, so the floating version can
+              never land on top of the input and its Save/Add button. */}
+          <div
+            data-background-actions
+            className={cn(
+              "flex flex-wrap items-center justify-end gap-0.5 px-1.5 pb-0.5 pt-1.5",
+              isFloatingActions &&
+                "md:absolute md:bottom-2 md:right-2 md:flex-nowrap md:rounded-lg md:bg-black/60 md:px-0.5 md:pb-0.5 md:pt-0.5 md:opacity-0 md:backdrop-blur-sm md:transition-opacity md:group-hover:opacity-100 md:group-focus-within:opacity-100",
+            )}
+          >
+            <ChatResourceActionButton
+              payload={{ version: 1, kind: "background", ids: [background.url], label: title }}
+              className={cn(CARD_ACTION_CLASS, isFloatingActions && FLOATING_CARD_ACTION_CLASS)}
+            />
+            <button
+              type="button"
+              data-background-move
+              onClick={() => void handleMoveBackground(background)}
+              className={cn(CARD_ACTION_CLASS, isFloatingActions && FLOATING_CARD_ACTION_CLASS)}
+              title={localizeUi("ui.panels.backgroundpicker.moveToFolder")}
+              aria-label={localizeUi("ui.panels.backgroundpicker.moveValue1ToAFolder", { value1: title })}
+            >
+              <FolderInput size="0.875rem" />
+            </button>
+            {isEditable && (
               <>
-                <span className="truncate text-xs font-medium text-[var(--foreground)]" title={title}>
-                  {background.filename}
-                </span>
-                {canRename && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setRenameInput(background.filename.replace(/\.[^.]+$/, ""));
-                      setRenamingFile(background.id);
-                    }}
-                    className="shrink-0 rounded-md p-1 text-[var(--muted-foreground)] opacity-0 transition-opacity hover:text-[var(--primary)] group-hover:opacity-100 max-md:opacity-100"
-                    title="Rename background"
-                    aria-label={`Rename ${title}`}
-                  >
-                    <Pencil size="0.625rem" />
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    cancelPendingClose();
+                    setRenamingFile(background.id);
+                  }}
+                  className={cn(CARD_ACTION_CLASS, isFloatingActions && FLOATING_CARD_ACTION_CLASS)}
+                  title={localizeUi("ui.panels.backgroundpicker.renameBackground")}
+                  aria-label={localizeUi("ui.panels.backgroundpicker.renameValue1", { value1: title })}
+                >
+                  <Pencil size="0.875rem" />
+                </button>
+                <button
+                  type="button"
+                  data-background-edit-tags
+                  onClick={() => {
+                    cancelPendingClose();
+                    setEditingTags(isEditingTags ? null : background.id);
+                  }}
+                  className={cn(
+                    CARD_ACTION_CLASS,
+                    isFloatingActions && FLOATING_CARD_ACTION_CLASS,
+                    isEditingTags && "bg-[var(--primary)]/20 text-[var(--primary)]",
+                  )}
+                  title={localizeUi("ui.panels.backgroundpicker.editTags")}
+                  aria-label={localizeUi("ui.panels.backgroundpicker.editTagsForValue1", { value1: title })}
+                  aria-pressed={isEditingTags}
+                >
+                  <Tag size="0.875rem" />
+                </button>
               </>
             )}
-          </div>
-
-          <div className="mt-0.5 flex flex-wrap items-center gap-1">
-            <span
+            <button
+              type="button"
+              data-background-default-toggle
+              onClick={() => {
+                cancelPendingClose();
+                onDefaultChange(isDefaultRoleplay ? DEFAULT_ROLEPLAY_BACKGROUND_URL : background.url);
+              }}
               className={cn(
-                "rounded-full px-1.5 py-0 text-[0.5625rem]",
-                background.source === "game_asset"
-                  ? "bg-[var(--primary)]/10 text-[var(--primary)]"
-                  : "bg-[var(--secondary)] text-[var(--muted-foreground)]",
+                CARD_ACTION_CLASS,
+                isFloatingActions && FLOATING_CARD_ACTION_CLASS,
+                "w-auto px-2 text-[0.5625rem] font-medium md:px-1.5 md:text-[0.5rem]",
+                isDefaultRoleplay && "bg-amber-300/12 text-amber-300",
               )}
+              title={
+                isDefaultRoleplay
+                  ? localizeUi("ui.panels.backgroundpicker.removeAsRoleplayDefault")
+                  : localizeUi("ui.panels.backgroundpicker.setAsDefaultForNewRoleplayChats")
+              }
+              aria-label={
+                isDefaultRoleplay
+                  ? localizeUi("ui.panels.backgroundpicker.value1IsTheDefaultRoleplayBackground", { value1: title })
+                  : localizeUi("ui.panels.backgroundpicker.setValue1AsTheDefaultRoleplayBackground", {
+                      value1: title,
+                    })
+              }
+              aria-pressed={isDefaultRoleplay}
             >
-              {sourceLabel}
-            </span>
-          </div>
-
-          <div className="mt-1 flex flex-wrap items-center gap-1">
-            {background.tags.map((tag) => (
-              <span
-                key={tag}
-                className="inline-flex items-center gap-0.5 rounded-full bg-[var(--secondary)] px-1.5 py-0 text-[0.5625rem] text-[var(--muted-foreground)]"
-              >
-                {tag}
-                {isEditing && isEditable && (
-                  <button
-                    type="button"
-                    onClick={() => void removeTag(background.filename, background.tags, tag)}
-                    disabled={updateTags.isPending}
-                    className="ml-0.5 rounded-full hover:text-[var(--destructive)]"
-                    aria-label={`Remove tag ${tag}`}
-                  >
-                    <X size="0.5rem" />
-                  </button>
-                )}
-              </span>
-            ))}
-            {isEditable && (
+              {localizeUi("ui.panels.backgroundpicker.roleplayDefaultShort")}
+            </button>
+            {background.deletable !== false && isEditable && (
               <button
                 type="button"
                 onClick={() => {
-                  setEditingTags(isEditing ? null : background.id);
-                  setTagInput("");
+                  cancelPendingClose();
+                  void handleDeleteBackground(background);
                 }}
                 className={cn(
-                  "rounded-full p-1 transition-colors",
-                  isEditing
-                    ? "bg-[var(--primary)]/20 text-[var(--primary)]"
-                    : "text-[var(--muted-foreground)]/60 hover:text-[var(--primary)]",
+                  CARD_ACTION_CLASS,
+                  "text-[var(--destructive)] hover:bg-[var(--destructive)]/12",
                 )}
-                title="Edit tags"
-                aria-label={`Edit tags for ${title}`}
-                aria-pressed={isEditing}
+                title={localizeUi("ui.panels.backgroundpicker.deleteBackground")}
+                aria-label={localizeUi("ui.panels.botbrowserpanel.deleteValue1", { value1: title })}
               >
-                <Tag size="0.625rem" />
+                <Trash2 size="0.875rem" />
               </button>
             )}
           </div>
+        </div>
 
-          {isEditing && isEditable && (
-            <div className="mt-1 flex items-center gap-1">
-              <input
-                type="text"
-                value={tagInput}
-                onChange={(event) => setTagInput(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    void addTag(background.filename, background.tags);
-                  }
-                  if (event.key === "Escape") setEditingTags(null);
-                }}
-                placeholder="Add tag…"
-                className="min-w-0 flex-1 rounded border border-[var(--border)] bg-[var(--background)] px-1.5 py-1 text-[0.6875rem] text-[var(--foreground)] outline-none focus:border-[var(--primary)]"
-                autoFocus
-                list={datalistId}
-              />
-              <datalist id={datalistId}>
-                {allTags
-                  .filter((tag) => !background.tags.includes(tag))
-                  .map((tag) => (
-                    <option key={tag} value={tag} />
-                  ))}
-              </datalist>
-              <button
-                type="button"
-                onClick={() => void addTag(background.filename, background.tags)}
-                disabled={!tagInput.trim() || updateTags.isPending}
-                className={INLINE_ACCENT_BUTTON_CLASS}
-              >
-                Add
-              </button>
+        <div className="px-2.5 pb-2.5 pt-2">
+          {isRenaming ? (
+            <CardNameForm
+              initialValue={background.filename.replace(/\.[^.]+$/, "")}
+              ariaLabel={localizeUi("ui.panels.backgroundpicker.renameValue1", { value1: title })}
+              placeholder={localizeUi("ui.panels.backgroundpicker.backgroundNamePlaceholder")}
+              saveLabel={localizeUi("ui.noodle.noodlehome.save")}
+              pending={renameBackground.isPending}
+              onSubmit={(value) => {
+                if (value) renameBackground.mutate({ filename: background.filename, name: value });
+              }}
+              onCancel={() => setRenamingFile(null)}
+            />
+          ) : (
+            <h3 data-background-name className="truncate text-xs font-semibold text-[var(--foreground)]" title={title}>
+              {title}
+            </h3>
+          )}
+
+          {background.tags.length > 0 && (
+            <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1">
+              {background.tags.map((tag) => (
+                <span
+                  key={tag}
+                  className="inline-flex max-w-28 items-center gap-0.5 truncate rounded-full bg-[var(--background)]/65 px-1.5 py-0.5 text-[0.5rem] text-[var(--muted-foreground)] ring-1 ring-[var(--border)]/60"
+                >
+                  {tag}
+                  {isEditingTags && (
+                    <button
+                      type="button"
+                      onClick={() => void removeTag(background.filename, background.tags, tag)}
+                      disabled={updateTags.isPending}
+                      className="-my-1 flex h-6 w-6 items-center justify-center rounded-full hover:text-[var(--destructive)] md:my-0 md:h-4 md:w-4"
+                      aria-label={localizeUi("ui.panels.backgroundpicker.removeTagValue1", { value1: tag })}
+                    >
+                      <X size="0.5rem" />
+                    </button>
+                  )}
+                </span>
+              ))}
             </div>
           )}
-        </div>
 
-        <div className="absolute right-1 top-1 flex items-center gap-0.5 rounded-lg bg-[var(--sidebar)] px-0.5 py-0.5 shadow-sm ring-1 ring-[var(--border)]">
-          {canDelete && (
-            <button
-              type="button"
-              onClick={() => void handleDeleteBackground(background)}
-              className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--destructive)] opacity-0 transition-all hover:bg-[var(--destructive)]/12 active:scale-90 group-hover:opacity-100 max-md:opacity-100"
-              title="Delete background"
-              aria-label={`Delete ${title}`}
-            >
-              <Trash2 size="0.75rem" />
-            </button>
+          {isEditingTags && (
+            <CardTagInput
+              datalistId={datalistId}
+              suggestions={allTags.filter((tag) => !background.tags.includes(tag))}
+              placeholder={localizeUi("ui.panels.backgroundpicker.addTag")}
+              addLabel={localizeUi("ui.panels.appearancesettings.add")}
+              pending={updateTags.isPending}
+              onAdd={(tag) => void addTag(background.filename, background.tags, tag)}
+              onCancel={() => setEditingTags(null)}
+            />
           )}
-          <button
-            type="button"
-            data-background-default-toggle
-            onClick={() => onDefaultChange(isDefaultRoleplay ? DEFAULT_ROLEPLAY_BACKGROUND_URL : background.url)}
-            className={cn(
-              "flex h-7 w-7 items-center justify-center rounded-md transition-all active:scale-90",
-              isDefaultRoleplay
-                ? "text-amber-300"
-                : "text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]",
-            )}
-            title={isDefaultRoleplay ? "Remove as Roleplay default" : "Set as default for new Roleplay chats"}
-            aria-label={
-              isDefaultRoleplay
-                ? `${title} is the default Roleplay background`
-                : `Set ${title} as the default Roleplay background`
-            }
-            aria-pressed={isDefaultRoleplay}
-          >
-            <Star size="0.8125rem" fill={isDefaultRoleplay ? "currentColor" : "none"} />
-          </button>
         </div>
-      </div>
+      </article>
     );
   };
 
   return (
-    <div className="flex flex-col gap-2">
-      <ImageUploadDropzone
-        label="Import Backgrounds"
-        pending={uploading}
-        pendingLabel="Importing..."
-        dragLabel="Drop backgrounds to import"
-        onFilesSelected={(files) => void handleUpload(files)}
-        icon={uploading ? <Loader2 size="0.875rem" className="animate-spin" /> : <Upload size="0.875rem" />}
-        className="rounded-lg py-3 hover:border-[var(--primary)]/40 hover:bg-[var(--secondary)]/50"
-      />
-
-      <div className="flex gap-1.5">
-        <div className="relative min-w-0 flex-1">
-          <Search size="0.8125rem" className="mari-chrome-field-icon absolute left-3 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(event) => setSearchQuery(event.target.value)}
-            placeholder="Search backgrounds"
-            className="mari-chrome-field h-10 w-full py-0 pl-8 pr-8 text-xs md:h-9"
-          />
-          {searchQuery.trim() && (
-            <button
-              type="button"
-              onClick={() => setSearchQuery("")}
-              className="absolute right-1.5 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-              title="Clear search"
-              aria-label="Clear background search"
-            >
-              <X size="0.6875rem" />
-            </button>
-          )}
-        </div>
-        <div className="relative shrink-0">
-          <select
-            value={sort}
-            onChange={(event) => setSort(event.target.value as BackgroundLibrarySort)}
-            className="mari-chrome-field mari-chrome-sort-field mari-accent-animated h-10 appearance-none py-0 pl-2.5 pr-7 text-[0.6875rem] md:h-9"
-            title="Sort backgrounds"
-            aria-label="Sort backgrounds"
-          >
-            <option value="name-asc">A-Z</option>
-            <option value="name-desc">Z-A</option>
-            <option value="newest">Newest</option>
-            <option value="oldest">Oldest</option>
-          </select>
-          <ArrowUpDown
-            size="0.625rem"
-            className="mari-chrome-field-icon mari-chrome-sort-icon mari-accent-animated pointer-events-none absolute right-2 top-1/2 -translate-y-1/2"
-          />
-        </div>
-      </div>
-
-      <div className="flex flex-col gap-0.5">
+    <>
+      {/* Stacked, not one row: the preview reads as the current value, and the two actions get a
+          full-width line each instead of being squeezed against it. */}
+      <div className="flex flex-col gap-1.5">
         <button
           type="button"
-          onClick={handleCreateFolder}
-          disabled={createFolder.isPending}
-          className="mari-chrome-control mari-chrome-control--small w-full justify-start text-[0.6875rem]"
+          onClick={() => setOpen(true)}
+          className="group flex min-w-0 items-center gap-2.5 rounded-lg p-1.5 text-left ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--secondary)]/55 hover:ring-[var(--primary)]/45"
         >
-          {createFolder.isPending ? <Loader2 size="0.75rem" className="animate-spin" /> : <FolderPlus size="0.75rem" />}
-          New Folder
+          <span className="relative aspect-video w-20 shrink-0 overflow-hidden rounded-md bg-[var(--secondary)] ring-1 ring-[var(--border)]">
+            {selected ? (
+              <img
+                src={`${selected}?w=${BACKGROUND_THUMBNAIL_WIDTH}`}
+                alt=""
+                className="h-full w-full object-cover"
+                loading="lazy"
+                decoding="async"
+              />
+            ) : (
+              <div className="flex h-full items-center justify-center text-[var(--muted-foreground)]/45">
+                <Image size="1.25rem" />
+              </div>
+            )}
+          </span>
+          <span className="min-w-0 flex-1 basis-24">
+            <div className="truncate text-xs font-semibold text-[var(--foreground)]">
+              {selectedBackground
+                ? getBackgroundLibraryTitle(selectedBackground)
+                : localizeUi("ui.panels.backgroundpicker.defaultBackground")}
+            </div>
+            <div className="mt-0.5 truncate text-[0.625rem] text-[var(--muted-foreground)]">
+              {localizeUi("ui.panels.backgroundpicker.value1BackgroundsAvailable", { value1: backgrounds.length })}
+            </div>
+          </span>
         </button>
-        <p className="mari-folder-helper">
-          Drag and drop backgrounds to folders, double-click or double-tap to rename.
-        </p>
-      </div>
-
-      <div className="flex flex-wrap gap-1">
         <button
           type="button"
-          onClick={() => setIncludedTagValues([])}
-          className={cn(
-            "mari-chrome-control mari-chrome-control--compact",
-            includedTags.size === 0 && "mari-chrome-control--selected",
-          )}
-          aria-pressed={includedTags.size === 0}
+          onClick={() => setOpen(true)}
+          className="mari-chrome-control mari-chrome-control--compact min-h-9 w-full"
         >
-          All
+          <Image size="0.75rem" />
+          {localizeUi("ui.panels.backgroundpicker.browseLibrary")}
         </button>
-        {allTags.length > 0 && (
+        {selected && (
           <button
             type="button"
-            onClick={() => setTagsExpanded((expanded) => !expanded)}
-            className={cn(
-              "mari-chrome-control mari-chrome-control--compact",
-              includedTags.size > 0 && "mari-chrome-control--selected",
-            )}
-            aria-expanded={tagsExpanded}
+            onClick={() => onSelect(null)}
+            className="mari-chrome-control mari-chrome-control--compact min-h-9 w-full !text-[var(--muted-foreground)] hover:!text-[var(--destructive)]"
+            title={localizeUi("ui.panels.backgroundpicker.clearSelection")}
           >
-            <Tag size="0.625rem" />
-            Tags ({allTags.length})
-            <ChevronDown size="0.625rem" className={cn("transition-transform", tagsExpanded && "rotate-180")} />
+            <X size="0.75rem" />
+            {localizeUi("ui.panels.backgroundpicker.clearSelection")}
           </button>
         )}
       </div>
 
-      {tagsExpanded && allTags.length > 0 && (
-        <div className="flex flex-wrap gap-1">
-          {allTags.map((tag) => (
+      <Modal
+        open={open}
+        onClose={closePicker}
+        title={localizeUi("ui.panels.backgroundpicker.backgroundLibrary")}
+        width="max-w-4xl"
+        mobileFullscreen
+        panelClassName="sm:h-[min(88dvh,52rem)]"
+        contentRef={modalContentRef}
+        dragThrough={draggedBackgroundId !== null}
+      >
+        <div className="flex flex-col gap-3">
+          <div className="flex gap-1.5">
+            <div className="relative min-w-0 flex-1">
+              <Search size="0.8125rem" className="mari-chrome-field-icon absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder={localizeUi("ui.panels.backgroundpicker.searchBackgrounds")}
+                className="mari-chrome-field h-10 w-full py-0 pl-8 pr-8 text-xs md:h-9"
+              />
+              {searchQuery.trim() && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery("")}
+                  className="absolute right-1.5 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+                  title={localizeUi("ui.noodle.noodlehome.clearSearch")}
+                  aria-label={localizeUi("ui.panels.backgroundpicker.clearBackgroundSearch")}
+                >
+                  <X size="0.6875rem" />
+                </button>
+              )}
+            </div>
+            <div className="relative shrink-0">
+              <select
+                value={sort}
+                onChange={(event) => setSort(event.target.value as BackgroundLibrarySort)}
+                className="mari-chrome-field mari-chrome-sort-field mari-accent-animated h-10 appearance-none py-0 pl-2.5 pr-7 text-[0.6875rem] md:h-9"
+                title={localizeUi("ui.panels.backgroundpicker.sortBackgrounds")}
+                aria-label={localizeUi("ui.panels.backgroundpicker.sortBackgrounds")}
+              >
+                <option value="name-asc">{localizeUi("ui.panels.backgroundpicker.aZ")}</option>
+                <option value="name-desc">{localizeUi("ui.panels.backgroundpicker.zA")}</option>
+                <option value="newest">{localizeUi("ui.panels.backgroundpicker.newest")}</option>
+                <option value="oldest">{localizeUi("ui.panels.backgroundpicker.oldest")}</option>
+              </select>
+              <ArrowUpDown
+                size="0.625rem"
+                className="mari-chrome-field-icon mari-chrome-sort-icon mari-accent-animated pointer-events-none absolute right-2 top-1/2 -translate-y-1/2"
+              />
+            </div>
+            <ImageUploadDropzone
+              label={localizeUi("ui.panels.backgroundpicker.importBackgrounds")}
+              pending={uploading}
+              pendingLabel={localizeUi("ui.panels.backgroundpicker.importing")}
+              dragLabel={localizeUi("ui.panels.backgroundpicker.dropBackgroundsToImport")}
+              onFilesSelected={(files) => void handleUpload(files)}
+              icon={uploading ? <Loader2 size="0.75rem" className="animate-spin" /> : <Upload size="0.75rem" />}
+              className="!h-10 shrink-0 !rounded-lg !border !border-solid !px-3 !py-0 text-[0.6875rem] hover:border-[var(--primary)]/40 hover:bg-[var(--secondary)]/50 md:!h-9"
+            />
+          </div>
+
+          <div className="flex flex-col gap-2 rounded-xl bg-[var(--secondary)]/30 p-2 ring-1 ring-[var(--border)]/70 sm:flex-row sm:items-center sm:justify-between">
+            <div
+              className="grid grid-cols-3 rounded-lg bg-[var(--background)]/70 p-0.5 ring-1 ring-[var(--border)]/70"
+              role="group"
+              aria-label={localizeUi("ui.panels.backgroundpicker.filterBySource")}
+            >
+              {(
+                [
+                  ["all", localizeUi("ui.panels.backgroundpicker.allSources")],
+                  ["user", localizeUi("ui.panels.backgroundpicker.myUploads")],
+                  ["game_asset", localizeUi("ui.panels.backgroundpicker.gameAssets")],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setSourceFilter(value)}
+                  className={cn(
+                    "flex min-h-8 items-center justify-center gap-1 rounded-md px-2 text-[0.625rem] font-medium transition-colors",
+                    sourceFilter === value
+                      ? "bg-[var(--primary)]/16 text-[var(--primary)] shadow-sm ring-1 ring-[var(--primary)]/25"
+                      : "text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]",
+                  )}
+                  aria-pressed={sourceFilter === value}
+                >
+                  <span>{label}</span>
+                  <span className="tabular-nums opacity-60">{sourceCounts[value]}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <p className="mari-folder-helper">
+            {localizeUi("ui.panels.backgroundpicker.dragBackgroundsOntoAFolderChip")}
+          </p>
+
+          {/* Folder chips wrap like the tag filters: no rail, no scroll strip, same on touch. */}
+          <div
+            className="flex flex-wrap items-center gap-1"
+            role="group"
+            aria-label={localizeUi("ui.panels.backgroundpicker.filterByFolder")}
+          >
+            {(
+              [
+                ["all", localizeUi("ui.panels.backgroundpicker.allFolders"), backgrounds.length],
+                [
+                  "favorites",
+                  localizeUi("ui.panels.backgroundpicker.favorites"),
+                  backgrounds.filter((background) => background.favorite).length,
+                ],
+                [
+                  "unfiled",
+                  localizeUi("ui.panels.backgroundpicker.unfiled"),
+                  backgrounds.filter((background) => !background.folderId).length,
+                ],
+              ] as const
+            ).map(([value, label, count]) => (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setFolderFilter(value)}
+                data-background-folder-filter-id={value}
+                {...(value === "unfiled" ? { "data-background-folder-root": "" } : {})}
+                // Only Unfiled is a drop target; All and Favorites are not folders.
+                onDragOver={value === "unfiled" ? allowFolderDrop : undefined}
+                onDrop={value === "unfiled" ? (event) => handleFolderDrop(event, null) : undefined}
+                className={cn(
+                  "mari-chrome-control mari-chrome-control--compact",
+                  folderFilter === value && "mari-chrome-control--selected",
+                )}
+                aria-pressed={folderFilter === value}
+              >
+                {value === "favorites" && (
+                  <Star size="0.625rem" fill={folderFilter === value ? "currentColor" : "none"} />
+                )}
+                {label}
+                <span className="tabular-nums opacity-60">{count}</span>
+              </button>
+            ))}
+            {folders.map((folder) => (
+              <button
+                key={folder.id}
+                type="button"
+                onClick={() => setFolderFilter(folder.id)}
+                data-background-folder-filter-id={folder.id}
+                data-background-folder-id={folder.id}
+                onDragOver={allowFolderDrop}
+                onDrop={(event) => handleFolderDrop(event, folder.id)}
+                className={cn(
+                  "mari-chrome-control mari-chrome-control--compact",
+                  folderFilter === folder.id && "mari-chrome-control--selected",
+                )}
+                aria-pressed={folderFilter === folder.id}
+              >
+                <Folder size="0.625rem" />
+                <span className="max-w-32 truncate">{folder.name}</span>
+                <span className="tabular-nums opacity-60">
+                  {backgrounds.filter((background) => background.folderId === folder.id).length}
+                </span>
+              </button>
+            ))}
             <button
-              key={tag}
               type="button"
-              onClick={() => toggleIncludedTag(tag)}
+              onClick={() => void handleCreateFolder()}
+              disabled={createFolder.isPending}
+              className="mari-chrome-control mari-chrome-control--compact"
+              title={localizeUi("ui.panels.backgroundpicker.newFolder")}
+              aria-label={localizeUi("ui.panels.backgroundpicker.newFolder")}
+            >
+              {createFolder.isPending ? (
+                <Loader2 size="0.625rem" className="animate-spin" />
+              ) : (
+                <FolderPlus size="0.625rem" />
+              )}
+              {localizeUi("ui.panels.backgroundpicker.newFolder")}
+            </button>
+            {activeFolder && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => void handleRenameActiveFolder(activeFolder)}
+                  className="mari-chrome-control mari-chrome-control--compact"
+                  title={localizeUi("ui.panels.backgroundpicker.renameFolder")}
+                  aria-label={localizeUi("ui.panels.backgroundpicker.renameFolderValue1", {
+                    value1: activeFolder.name,
+                  })}
+                >
+                  <Pencil size="0.625rem" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void handleDeleteFolder(
+                      activeFolder,
+                      backgrounds.filter((background) => background.folderId === activeFolder.id).length,
+                    )
+                  }
+                  className="mari-chrome-control mari-chrome-control--compact !text-[var(--destructive)]"
+                  title={localizeUi("ui.panels.backgroundpicker.deleteFolder")}
+                  aria-label={localizeUi("ui.panels.backgroundpicker.deleteFolderValue1", {
+                    value1: activeFolder.name,
+                  })}
+                >
+                  <Trash2 size="0.625rem" />
+                </button>
+              </>
+            )}
+          </div>
+
+          <div className="flex flex-wrap gap-1">
+            <button
+              type="button"
+              onClick={() => setIncludedTagValues([])}
               className={cn(
                 "mari-chrome-control mari-chrome-control--compact",
-                includedTags.has(tag) && "mari-chrome-control--selected",
+                includedTags.size === 0 && "mari-chrome-control--selected",
               )}
-              aria-pressed={includedTags.has(tag)}
+              aria-pressed={includedTags.size === 0}
             >
-              {tag}
+              {localizeUi("ui.noodle.stageprofilesourcepicker.all")}
             </button>
-          ))}
-        </div>
-      )}
-
-      <div className="flex min-h-7 flex-wrap items-center justify-between gap-2 text-[0.625rem] text-[var(--muted-foreground)]">
-        <span>
-          {visibleBackgrounds.length} of {backgrounds.length} backgrounds
-        </span>
-        <button
-          type="button"
-          onClick={() => onDefaultChange(DEFAULT_ROLEPLAY_BACKGROUND_URL)}
-          className={cn(
-            "inline-flex min-h-7 items-center gap-1 rounded-md px-1.5 py-0.5 transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]",
-            defaultRoleplayBackground === DEFAULT_ROLEPLAY_BACKGROUND_URL && "invisible pointer-events-none",
-          )}
-          aria-hidden={defaultRoleplayBackground === DEFAULT_ROLEPLAY_BACKGROUND_URL}
-          tabIndex={defaultRoleplayBackground === DEFAULT_ROLEPLAY_BACKGROUND_URL ? -1 : 0}
-        >
-          <Star size="0.625rem" />
-          Reset Roleplay default
-        </button>
-      </div>
-
-      {backgrounds.length > 0 && visibleBackgrounds.length > 0 && (
-        <div
-          data-background-folder-root
-          onDragOver={(event) => {
-            if (draggedBackgroundIdRef.current) {
-              event.preventDefault();
-              event.dataTransfer.dropEffect = "move";
-            }
-          }}
-          onDrop={(event) => {
-            event.preventDefault();
-            const backgroundId = parseDraggedBackgroundId(
-              event.dataTransfer.getData("application/x-marinara-background-id") ||
-                event.dataTransfer.getData("text/plain"),
-            );
-            if (backgroundId) assignBackground(backgroundId, null);
-          }}
-          className="flex flex-col gap-1"
-        >
-          {folders.map((folder) => {
-            const folderBackgrounds = visibleBackgrounds.filter((background) => background.folderId === folder.id);
-            const isExpanded =
-              (folderFilterActive && folderBackgrounds.length > 0) || expandedFolderId === folder.id;
-            const isEditing = editingFolderId === folder.id;
-            const totalFolderItems = backgrounds.filter((background) => background.folderId === folder.id).length;
-
-            return (
-              <div
-                key={folder.id}
-                data-background-folder-id={folder.id}
-                onDragOver={(event) => {
-                  if (draggedBackgroundIdRef.current) {
-                    event.preventDefault();
-                    event.dataTransfer.dropEffect = "move";
-                  }
-                }}
-                onDrop={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  const backgroundId = parseDraggedBackgroundId(
-                    event.dataTransfer.getData("application/x-marinara-background-id") ||
-                      event.dataTransfer.getData("text/plain"),
-                  );
-                  if (backgroundId) assignBackground(backgroundId, folder.id);
-                }}
-                className="flex flex-col rounded-lg transition-colors"
+            {allTags.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setTagsExpanded((expanded) => !expanded)}
+                className={cn(
+                  "mari-chrome-control mari-chrome-control--compact",
+                  includedTags.size > 0 && "mari-chrome-control--selected",
+                )}
+                aria-expanded={tagsExpanded}
               >
-                <div
-                  role="button"
-                  tabIndex={0}
-                  aria-expanded={isExpanded}
-                  aria-label={`${isExpanded ? "Collapse" : "Expand"} folder ${folder.name}. Double-tap or press F2 to rename.`}
-                  title="Double-click, double-tap, or press F2 to rename."
-                  className="group/folder relative flex cursor-pointer items-center gap-1.5 rounded-lg px-2 py-1.5 transition-colors hover:bg-[var(--sidebar-accent)]/40"
-                  onClick={(event) =>
-                    handleFolderRenameGesture(folder.id, event, {
-                      onSingleClick: () => setExpandedFolderId(isExpanded ? null : folder.id),
-                      onRename: () => {
-                        setEditingFolderId(folder.id);
-                        setEditFolderName(folder.name);
-                      },
-                    })
-                  }
-                  onKeyDown={(event) => {
-                    if (event.target !== event.currentTarget) return;
-                    handleFolderRenameKeyDown(event, {
-                      onSingleClick: () => setExpandedFolderId(isExpanded ? null : folder.id),
-                      onRename: () => {
-                        setEditingFolderId(folder.id);
-                        setEditFolderName(folder.name);
-                      },
-                    });
-                  }}
-                >
-                  <ChevronRight
-                    size="0.75rem"
-                    className={cn(
-                      "mari-chrome-accent-icon mari-accent-animated shrink-0 transition-transform duration-200 ease-out",
-                      isExpanded && "rotate-90",
-                    )}
-                  />
-                  <div className="min-w-0 flex-1">
-                    {isEditing ? (
-                      <input
-                        autoFocus
-                        value={editFolderName}
-                        onChange={(event) => setEditFolderName(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") event.currentTarget.blur();
-                          if (event.key === "Escape") {
-                            setEditingFolderId(null);
-                            setEditFolderName("");
-                          }
-                        }}
-                        onClick={(event) => event.stopPropagation()}
-                        onBlur={() => commitFolderRename(folder)}
-                        className="w-full rounded bg-transparent px-1 py-0.5 text-xs font-medium outline-none ring-1 ring-[var(--marinara-chat-chrome-input-border-focus)]"
-                      />
-                    ) : (
-                      <div className="truncate text-xs font-medium text-[var(--muted-foreground)]">{folder.name}</div>
-                    )}
-                  </div>
-                  <span className="shrink-0 pr-8 text-[0.5625rem] text-[var(--muted-foreground)]">
-                    {folderFilterActive ? folderBackgrounds.length : totalFolderItems}
-                  </span>
-                  <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center rounded-lg bg-[var(--sidebar)] px-0.5 py-0.5 opacity-0 shadow-sm ring-1 ring-[var(--border)] transition-opacity group-hover/folder:opacity-100 max-md:opacity-100">
-                    <button
-                      type="button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void handleDeleteFolder(folder, totalFolderItems);
-                      }}
-                      className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--destructive)] transition-all hover:bg-[var(--destructive)]/12 active:scale-90"
-                      title="Delete folder"
-                      aria-label={`Delete folder ${folder.name}`}
-                    >
-                      <Trash2 size="0.75rem" />
-                    </button>
-                  </div>
-                </div>
+                <Tag size="0.625rem" />
+                {localizeUi("ui.panels.backgroundpicker.tagsValue1", { value1: allTags.length })}
+                <ChevronDown size="0.625rem" className={cn("transition-transform", tagsExpanded && "rotate-180")} />
+              </button>
+            )}
+          </div>
 
-                <SmoothFolderContent
-                  open={isExpanded}
-                  className="ml-4 border-l border-[var(--border)]/20 pb-1 pl-1"
-                  innerClassName="flex flex-col gap-0.5"
-                >
-                  {folderBackgrounds.length === 0 ? (
-                    <div className="py-2 text-[0.625rem] italic text-[var(--muted-foreground)]">
-                      Drop backgrounds here.
-                    </div>
-                  ) : (
-                    folderBackgrounds.map(renderBackground)
+          {tagsExpanded && allTags.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {allTags.map((tag) => (
+                <button
+                  key={tag}
+                  type="button"
+                  onClick={() => toggleIncludedTag(tag)}
+                  className={cn(
+                    "mari-chrome-control mari-chrome-control--compact",
+                    includedTags.has(tag) && "mari-chrome-control--selected",
                   )}
-                </SmoothFolderContent>
-              </div>
-            );
-          })}
+                  aria-pressed={includedTags.has(tag)}
+                >
+                  {tag}
+                </button>
+              ))}
+            </div>
+          )}
 
-          {visibleRootBackgrounds.map(renderBackground)}
-        </div>
-      )}
+          <div className="flex min-h-7 flex-wrap items-center justify-between gap-2 text-[0.625rem] text-[var(--muted-foreground)]">
+            <span>
+              {visibleBackgrounds.length} {localizeUi("ui.noodle.noodlehome.of")} {backgrounds.length}{" "}
+              {localizeUi("ui.panels.backgroundpicker.backgrounds")}
+            </span>
+            <button
+              type="button"
+              onClick={() => onDefaultChange(DEFAULT_ROLEPLAY_BACKGROUND_URL)}
+              className={cn(
+                "inline-flex min-h-7 items-center gap-1 rounded-md px-1.5 py-0.5 transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]",
+                defaultRoleplayBackground === DEFAULT_ROLEPLAY_BACKGROUND_URL && "invisible pointer-events-none",
+              )}
+              aria-hidden={defaultRoleplayBackground === DEFAULT_ROLEPLAY_BACKGROUND_URL}
+              tabIndex={defaultRoleplayBackground === DEFAULT_ROLEPLAY_BACKGROUND_URL ? -1 : 0}
+            >
+              <Star size="0.625rem" />
+              {localizeUi("ui.panels.backgroundpicker.resetRoleplayDefault")}
+            </button>
+          </div>
 
-      {backgrounds.length === 0 && (
-        <div className="flex flex-col items-center gap-1.5 py-4 text-center">
-          <Image size="1.25rem" className="text-[var(--muted-foreground)]/40" />
-          <p className="mari-chrome-text-muted text-[0.625rem]">No backgrounds available yet</p>
+          {visibleBackgrounds.length > 0 && (
+            <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-4">
+              {visibleBackgrounds.map(renderCard)}
+            </div>
+          )}
+
+          {backgrounds.length === 0 && (
+            <div className="flex flex-col items-center gap-1.5 py-4 text-center">
+              <Image size="1.25rem" className="text-[var(--muted-foreground)]/40" />
+              <p className="mari-chrome-text-muted text-[0.625rem]">
+                {localizeUi("ui.panels.backgroundpicker.noBackgroundsAvailableYet")}
+              </p>
+            </div>
+          )}
+          {backgrounds.length > 0 && visibleBackgrounds.length === 0 && (
+            <div className="flex flex-col items-center gap-1.5 py-4 text-center">
+              <Search size="1.25rem" className="text-[var(--muted-foreground)]/40" />
+              <p className="mari-chrome-text-muted text-[0.625rem]">
+                {localizeUi("ui.panels.backgroundpicker.noBackgroundsMatchThoseFilters")}
+              </p>
+            </div>
+          )}
         </div>
-      )}
-      {backgrounds.length > 0 && visibleBackgrounds.length === 0 && (
-        <div className="flex flex-col items-center gap-1.5 py-4 text-center">
-          <Search size="1.25rem" className="text-[var(--muted-foreground)]/40" />
-          <p className="mari-chrome-text-muted text-[0.625rem]">No backgrounds match those filters</p>
-        </div>
-      )}
-    </div>
+      </Modal>
+    </>
   );
 }

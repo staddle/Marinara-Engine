@@ -11,6 +11,7 @@
 
 import { useEffect, useState } from "react";
 import { api } from "../../lib/api-client";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 type OriginStatus = {
   trusted: boolean;
@@ -33,6 +34,7 @@ function extractEnvLine(hint: string): string | null {
 }
 
 export function CsrfOriginWarningBanner() {
+  const { t: localizeUi } = useUiTranslation();
   const [status, setStatus] = useState<OriginStatus | null>(null);
   const [dismissed, setDismissed] = useState<boolean>(() => {
     try {
@@ -116,11 +118,8 @@ export function CsrfOriginWarningBanner() {
         }}
       >
         <div style={{ flex: "1 1 320px", minWidth: 0 }}>
-          <div style={{ fontWeight: 700, fontSize: "0.95rem", marginBottom: "0.25rem" }}>
-            ⚠ Saves will silently fail — this origin is not trusted
-          </div>
-          <div style={{ fontSize: "0.85rem", opacity: 0.95, lineHeight: 1.4 }}>
-            Marinara&apos;s CSRF protection rejects unsafe API requests from{" "}
+          <div style={{ fontWeight: 700, fontSize: "0.95rem", marginBottom: "0.25rem" }}>{localizeUi("ui.diagnostics.csrforiginwarningbanner.savesWillSilentlyFailThisOriginIsNotTrusted")}</div>
+          <div style={{ fontSize: "0.85rem", opacity: 0.95, lineHeight: 1.4 }}>{localizeUi("ui.diagnostics.csrforiginwarningbanner.marinaraSCsrfProtectionRejectsUnsafeApiRequestsFrom")}{" "}
             <code
               style={{
                 background: "rgba(0,0,0,0.25)",
@@ -131,9 +130,7 @@ export function CsrfOriginWarningBanner() {
               }}
             >
               {offender}
-            </code>
-            . Add this line to your <code>.env</code> (no restart needed, takes effect within ~2s):
-          </div>
+            </code>{localizeUi("ui.diagnostics.csrforiginwarningbanner.addThisLineToYour")} <code>.env</code> {localizeUi("ui.diagnostics.csrforiginwarningbanner.noRestartNeededTakesEffectWithin2s")}</div>
           {envLine ? (
             <div
               style={{
@@ -173,21 +170,17 @@ export function CsrfOriginWarningBanner() {
                   fontWeight: 600,
                 }}
               >
-                {copied ? "Copied ✓" : "Copy"}
+                {copied ?localizeUi("ui.diagnostics.csrforiginwarningbanner.copied") :localizeUi("lorebook.editor.batch.copy")}
               </button>
             </div>
           ) : null}
-          <div style={{ fontSize: "0.75rem", opacity: 0.85, marginTop: "0.5rem", lineHeight: 1.35 }}>
-            Auto-trusted without adding here: loopback (<code>127.0.0.1</code>, <code>localhost</code>), LAN IPs (
-            <code>192.168.x.x</code>, <code>10.x.x.x</code>), Tailscale CGNAT (<code>100.64.0.0/10</code>), Docker
-            bridge (<code>172.16.0.0/12</code>). Public IPs and DNS names need to be listed.
-          </div>
+          <div style={{ fontSize: "0.75rem", opacity: 0.85, marginTop: "0.5rem", lineHeight: 1.35 }}>{localizeUi("ui.diagnostics.csrforiginwarningbanner.autoTrustedWithoutAddingHereLoopback")}<code>127.0.0.1</code>, <code>localhost</code>{localizeUi("ui.diagnostics.csrforiginwarningbanner.lanIps")}<code>192.168.x.x</code>, <code>10.x.x.x</code>{localizeUi("ui.diagnostics.csrforiginwarningbanner.tailscaleCgnat")}<code>100.64.0.0/10</code>{localizeUi("ui.diagnostics.csrforiginwarningbanner.dockerBridge")}<code>172.16.0.0/12</code>{localizeUi("ui.diagnostics.csrforiginwarningbanner.publicIpsAndDnsNamesNeedToBeListed")}</div>
         </div>
         <button
           type="button"
           onClick={dismiss}
-          aria-label="Hide warning for this session"
-          title="Hide for this session"
+          aria-label={localizeUi("ui.diagnostics.csrforiginwarningbanner.hideWarningForThisSession")}
+          title={localizeUi("ui.diagnostics.csrforiginwarningbanner.hideForThisSession")}
           style={{
             flexShrink: 0,
             background: "transparent",

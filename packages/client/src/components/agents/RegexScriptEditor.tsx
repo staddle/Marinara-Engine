@@ -1,7 +1,7 @@
 // ──────────────────────────────────────────────
 // Full-Page Regex Script Editor
 // ──────────────────────────────────────────────
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo, type ReactNode } from "react";
 import { useUIStore } from "../../stores/ui.store";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import {
@@ -12,6 +12,7 @@ import {
   type RegexScriptRow,
 } from "../../hooks/use-regex-scripts";
 import { useCharacters } from "../../hooks/use-characters";
+import { usePresets } from "../../hooks/use-presets";
 import {
   ArrowLeft,
   Save,
@@ -25,6 +26,7 @@ import {
   Plus,
   Minus,
   Users,
+  FileText,
   Upload,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
@@ -42,6 +44,7 @@ import {
   type MacroContext,
   type RegexPlacement,
 } from "@marinara-engine/shared";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 // ═══════════════════════════════════════════════
 //  Placement metadata
@@ -162,10 +165,69 @@ function describeRegexEditorError(error: unknown): string {
   return "Failed to save regex script";
 }
 
+function ScopeTargetPicker({
+  icon,
+  options,
+  selectedIds,
+  addLabel,
+  emptyLabel,
+  removeLabel,
+  onAdd,
+  onRemove,
+}: {
+  icon: ReactNode;
+  options: Array<{ id: string; name: string }>;
+  selectedIds: string[];
+  addLabel: string;
+  emptyLabel: string;
+  removeLabel: (name: string) => string;
+  onAdd: (id: string) => void;
+  onRemove: (id: string) => void;
+}) {
+  const selected = selectedIds.map((id) => options.find((option) => option.id === id) ?? { id, name: id });
+  const available = options.filter((option) => !selectedIds.includes(option.id));
+
+  return (
+    <div className="mt-3 space-y-2">
+      {selected.map((option) => (
+        <div key={option.id} className="mari-editor-panel mari-editor-panel--soft flex items-center gap-2.5 px-3 py-2">
+          <span className={REGEX_FIELD_ICON_CLASS}>{icon}</span>
+          <span className="min-w-0 flex-1 truncate text-xs">{option.name}</span>
+          <button
+            type="button"
+            onClick={() => onRemove(option.id)}
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--muted-foreground)] hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
+            aria-label={removeLabel(option.name)}
+            title={removeLabel(option.name)}
+          >
+            <X size="0.75rem" />
+          </button>
+        </div>
+      ))}
+      <select
+        value=""
+        disabled={available.length === 0}
+        onChange={(event) => {
+          if (event.target.value) onAdd(event.target.value);
+        }}
+        className="w-full rounded-xl bg-[var(--background)] px-3 py-2 text-xs ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)] disabled:opacity-60"
+      >
+        <option value="">{available.length > 0 ? addLabel : emptyLabel}</option>
+        {available.map((option) => (
+          <option key={option.id} value={option.id}>
+            {option.name}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
 // ═══════════════════════════════════════════════
 //  Main Editor
 // ═══════════════════════════════════════════════
 export function RegexScriptEditor() {
+  const { t: localizeUi } = useUiTranslation();
   const regexDetailId = useUIStore((s) => s.regexDetailId);
   const regexDetailDefaultCharacterIds = useUIStore((s) => s.regexDetailDefaultCharacterIds);
   const regexDetailReturn = useUIStore((s) => s.regexDetailReturn);
@@ -175,6 +237,7 @@ export function RegexScriptEditor() {
 
   const { data: regexScripts } = useRegexScripts();
   const { data: characters } = useCharacters();
+  const { data: promptPresets } = usePresets();
   const updateScript = useUpdateRegexScript();
   const createScript = useCreateRegexScript();
   const deleteScript = useDeleteRegexScript();
@@ -198,6 +261,8 @@ export function RegexScriptEditor() {
   const [localApplyMode, setLocalApplyMode] = useState<RegexApplyMode>("display");
   const [localCharacterScopeEnabled, setLocalCharacterScopeEnabled] = useState(false);
   const [localTargetCharacterIds, setLocalTargetCharacterIds] = useState<string[]>([]);
+  const [localPromptPresetScopeEnabled, setLocalPromptPresetScopeEnabled] = useState(false);
+  const [localTargetPromptPresetIds, setLocalTargetPromptPresetIds] = useState<string[]>([]);
   const [localOrder, setLocalOrder] = useState(0);
   const [localMinDepth, setLocalMinDepth] = useState<number | null>(null);
   const [localMaxDepth, setLocalMaxDepth] = useState<number | null>(null);
@@ -232,6 +297,13 @@ export function RegexScriptEditor() {
       .filter((character): character is { id: string; name: string } => character !== null)
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [characters]);
+  const promptPresetOptions = useMemo(
+    () =>
+      (promptPresets ?? [])
+        .map((preset) => ({ id: preset.id, name: preset.name }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [promptPresets],
+  );
 
   // Populate from DB row or defaults for new
   useEffect(() => {
@@ -256,6 +328,9 @@ export function RegexScriptEditor() {
       const targetCharacterIds = parseStringArray(dbRow.targetCharacterIds);
       setLocalTargetCharacterIds(targetCharacterIds);
       setLocalCharacterScopeEnabled(targetCharacterIds.length > 0);
+      const targetPromptPresetIds = parseStringArray(dbRow.targetPromptPresetIds);
+      setLocalTargetPromptPresetIds(targetPromptPresetIds);
+      setLocalPromptPresetScopeEnabled(targetPromptPresetIds.length > 0);
       setLocalOrder(dbRow.order);
       setLocalMinDepth(dbRow.minDepth);
       setLocalMaxDepth(dbRow.maxDepth);
@@ -273,6 +348,8 @@ export function RegexScriptEditor() {
       const defaultScope = regexDetailDefaultCharacterIds ?? [];
       setLocalTargetCharacterIds(defaultScope);
       setLocalCharacterScopeEnabled(defaultScope.length > 0);
+      setLocalTargetPromptPresetIds([]);
+      setLocalPromptPresetScopeEnabled(false);
       setLocalOrder(0);
       setLocalMinDepth(null);
       setLocalMaxDepth(null);
@@ -342,7 +419,11 @@ export function RegexScriptEditor() {
     if (!regexDetailId) return;
     setSaveError(null);
     if (localCharacterScopeEnabled && localTargetCharacterIds.length === 0) {
-      setSaveError("Choose at least one target character.");
+      setSaveError(localizeUi("ui.agents.regexscripteditor.chooseAtLeastOneCharacter"));
+      return;
+    }
+    if (localPromptPresetScopeEnabled && localTargetPromptPresetIds.length === 0) {
+      setSaveError(localizeUi("ui.agents.regexscripteditor.chooseAtLeastOnePromptPreset"));
       return;
     }
     if (blockingRegexError) {
@@ -365,6 +446,7 @@ export function RegexScriptEditor() {
       promptOnly: localApplyMode === "prompt",
       applyMode: localApplyMode,
       targetCharacterIds: localCharacterScopeEnabled ? localTargetCharacterIds : [],
+      targetPromptPresetIds: localPromptPresetScopeEnabled ? localTargetPromptPresetIds : [],
       minDepth: localMinDepth,
       maxDepth: localMaxDepth,
     };
@@ -400,6 +482,8 @@ export function RegexScriptEditor() {
     localApplyMode,
     localCharacterScopeEnabled,
     localTargetCharacterIds,
+    localPromptPresetScopeEnabled,
+    localTargetPromptPresetIds,
     localOrder,
     localMinDepth,
     localMaxDepth,
@@ -410,6 +494,7 @@ export function RegexScriptEditor() {
     createScript,
     openRegexDetail,
     regexDetailReturn,
+    localizeUi,
   ]);
 
   const markDirty = useCallback(() => setDirty(true), []);
@@ -418,9 +503,11 @@ export function RegexScriptEditor() {
     if (!dbRow) return;
     if (
       !(await showConfirmDialog({
-        title: "Delete Regex Script",
-        message: "Delete this regex script? This cannot be undone.",
-        confirmLabel: "Delete",
+        title:localizeUi("ui.agents.regexscripteditor.deleteRegexScript_d694998"),
+        message: localizeUi("dialog.delete.namedPermanent", {
+          name: dbRow.name,
+        }),
+        confirmLabel:localizeUi("lorebook.editor.batch.delete"),
         tone: "destructive",
       }))
     ) {
@@ -436,13 +523,6 @@ export function RegexScriptEditor() {
       if (has && prev.length <= 1) return prev; // Must have at least one
       return has ? prev.filter((x) => x !== p) : [...prev, p];
     });
-    markDirty();
-  };
-
-  const toggleTargetCharacter = (characterId: string) => {
-    setLocalTargetCharacterIds((prev) =>
-      prev.includes(characterId) ? prev.filter((id) => id !== characterId) : [...prev, characterId],
-    );
     markDirty();
   };
 
@@ -462,6 +542,7 @@ export function RegexScriptEditor() {
         promptOnly: localApplyMode === "prompt",
         applyMode: localApplyMode,
         targetCharacterIds: localCharacterScopeEnabled ? localTargetCharacterIds : [],
+        targetPromptPresetIds: localPromptPresetScopeEnabled ? localTargetPromptPresetIds : [],
         order: localOrder,
         minDepth: localMinDepth,
         maxDepth: localMaxDepth,
@@ -474,16 +555,20 @@ export function RegexScriptEditor() {
   if (!regexDetailId || (!dbRow && !isNew)) {
     return (
       <div className="mari-editor-shell flex flex-1 items-center justify-center">
-        <p className="mari-editor-empty px-4 py-3 text-sm">
-          Regex script not found.
-        </p>
+        <p className="mari-editor-empty px-4 py-3 text-sm">{localizeUi("ui.agents.regexscripteditor.regexScriptNotFound")}</p>
       </div>
     );
   }
 
   const isPending = updateScript.isPending || createScript.isPending;
   const characterScopeError =
-    localCharacterScopeEnabled && localTargetCharacterIds.length === 0 ? "Choose at least one character." : null;
+    localCharacterScopeEnabled && localTargetCharacterIds.length === 0
+      ? localizeUi("ui.agents.regexscripteditor.chooseAtLeastOneCharacter")
+      : null;
+  const promptPresetScopeError =
+    localPromptPresetScopeEnabled && localTargetPromptPresetIds.length === 0
+      ? localizeUi("ui.agents.regexscripteditor.chooseAtLeastOnePromptPreset")
+      : null;
 
   return (
     <div className="mari-editor-shell mari-editor-legacy-bridge flex flex-1 flex-col overflow-hidden">
@@ -492,7 +577,7 @@ export function RegexScriptEditor() {
         <button
           type="button"
           onClick={handleClose}
-          aria-label="Back to regex scripts"
+          aria-label={localizeUi("ui.agents.regexscripteditor.backToRegexScripts")}
           className="mari-editor-action inline-flex"
         >
           <ArrowLeft size="1.125rem" />
@@ -507,32 +592,36 @@ export function RegexScriptEditor() {
             markDirty();
           }}
           className="mari-editor-title-input min-w-0 flex-1 placeholder:text-[var(--marinara-editor-muted)]"
-          placeholder="Script name…"
+          placeholder={localizeUi("ui.agents.regexscripteditor.scriptName")}
         />
         <div className="mari-editor-actions flex max-md:w-full max-md:justify-end max-md:border-t max-md:border-[var(--marinara-editor-divider)] max-md:pt-2">
           {saveError && (
             <span className="mari-editor-status mr-2 text-red-400">
-              <AlertCircle size="0.6875rem" /> Save failed
-            </span>
+              <AlertCircle size="0.6875rem" /> {localizeUi("ui.agents.agenteditor.saveFailed")}</span>
           )}
           {savedFlash && !dirty && (
             <span className="mari-editor-status mr-2 text-emerald-400">
-              <Check size="0.6875rem" /> Saved
-            </span>
+              <Check size="0.6875rem" /> {localizeUi("chat.settings.inlineEditor.saved")}</span>
           )}
-          {dirty && !saveError && <span className="mari-editor-status mr-2 text-amber-400">Unsaved</span>}
+          {dirty && !saveError && <span className="mari-editor-status mr-2 text-amber-400">{localizeUi("ui.agents.agenteditor.unsaved")}</span>}
           <button
             onClick={handleSave}
-            disabled={isPending || !!blockingRegexError || !!characterScopeError || !!depthRangeError}
+            disabled={
+              isPending ||
+              !!blockingRegexError ||
+              !!characterScopeError ||
+              !!promptPresetScopeError ||
+              !!depthRangeError
+            }
             className="mari-editor-action mari-editor-action--primary inline-flex disabled:opacity-50"
-            title="Save regex script"
-            aria-label="Save regex script"
+            title={localizeUi("ui.agents.regexscripteditor.saveRegexScript")}
+            aria-label={localizeUi("ui.agents.regexscripteditor.saveRegexScript")}
           >
-            <Save size="0.8125rem" /> <span className="max-md:hidden">Save</span>
+            <Save size="0.8125rem" /> <span className="max-md:hidden">{localizeUi("ui.noodle.noodlehome.save")}</span>
           </button>
           <SettingsSwitch
             ariaLabel={localEnabled ? "Disable regex script" : "Enable regex script"}
-            title={localEnabled ? "Enabled" : "Disabled"}
+            title={localEnabled ?localizeUi("ui.noodle.noodlehome.enabled") :localizeUi("ui.agents.agenteditor.disabled")}
             checked={localEnabled}
             onChange={(checked) => {
               setLocalEnabled(checked);
@@ -543,8 +632,8 @@ export function RegexScriptEditor() {
           <button
             onClick={handleExport}
             className="mari-editor-action inline-flex"
-            title="Export regex script"
-            aria-label="Export regex script"
+            title={localizeUi("ui.agents.regexscripteditor.exportRegexScript")}
+            aria-label={localizeUi("ui.agents.regexscripteditor.exportRegexScript")}
           >
             <Upload size="0.9375rem" />
           </button>
@@ -552,8 +641,8 @@ export function RegexScriptEditor() {
             <button
               onClick={handleDelete}
               className="mari-editor-action inline-flex"
-              title="Delete regex script"
-              aria-label="Delete regex script"
+              title={localizeUi("ui.agents.regexscripteditor.deleteRegexScript")}
+              aria-label={localizeUi("ui.agents.regexscripteditor.deleteRegexScript")}
             >
               <Trash2 size="0.9375rem" />
             </button>
@@ -564,29 +653,23 @@ export function RegexScriptEditor() {
       {/* Unsaved warning */}
       {showUnsavedWarning && (
         <div className="flex items-center justify-between bg-amber-500/10 px-4 py-2 text-xs text-amber-400">
-          <span>You have unsaved changes.</span>
+          <span>{localizeUi("ui.agents.agenteditor.youHaveUnsavedChanges")}</span>
           <div className="flex gap-2">
             <button
               onClick={() => setShowUnsavedWarning(false)}
               className="rounded-lg px-3 py-1 hover:bg-[var(--accent)]"
-            >
-              Keep editing
-            </button>
+            >{localizeUi("ui.agents.agenteditor.keepEditing")}</button>
             <button
               onClick={() => closeRegexDetail()}
               className="rounded-lg px-3 py-1 text-[var(--destructive)] hover:bg-[var(--destructive)]/15"
-            >
-              Discard
-            </button>
+            >{localizeUi("ui.agents.agenteditor.discard")}</button>
             <button
               onClick={async () => {
                 await handleSave();
                 closeRegexDetail();
               }}
               className="rounded-lg bg-amber-500/20 px-3 py-1 hover:bg-amber-500/30"
-            >
-              Save & close
-            </button>
+            >{localizeUi("ui.agents.agenteditor.saveClose")}</button>
           </div>
         </div>
       )}
@@ -607,9 +690,9 @@ export function RegexScriptEditor() {
         <div className="mx-auto max-w-3xl space-y-6">
           {/* ── Find Regex ── */}
           <FieldGroup
-            label="Find Pattern (Regex)"
+            label={localizeUi("ui.agents.regexscripteditor.findPatternRegex")}
             icon={<Regex size="0.875rem" className={REGEX_FIELD_ICON_CLASS} />}
-            help="The regular expression pattern to search for. Written without delimiters. Macros resolve with sample values in Live Test and chat values at runtime."
+            help={localizeUi("ui.agents.regexscripteditor.theRegularExpressionPatternToSearchForWrittenWithout")}
           >
             <div className="relative">
               <input
@@ -622,7 +705,7 @@ export function RegexScriptEditor() {
                   "w-full rounded-xl bg-[var(--secondary)] px-4 py-2.5 font-mono text-sm ring-1 placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2",
                   regexError ? "ring-red-500/50 focus:ring-red-500" : "ring-[var(--border)] focus:ring-[var(--ring)]",
                 )}
-                placeholder="e.g. \\*([^*]+)\\*"
+                placeholder={localizeUi("ui.agents.regexscripteditor.eG")}
               />
               {regexError && <p className="mt-1 text-[0.625rem] text-red-400">{regexError}</p>}
             </div>
@@ -630,10 +713,9 @@ export function RegexScriptEditor() {
 
           {/* ── Replace String ── */}
           <FieldGroup
-            label="Replace With"
+            label={localizeUi("ui.agents.regexscripteditor.replaceWith")}
             icon={<Info size="0.875rem" className={REGEX_FIELD_ICON_CLASS} />}
-            help={
-              "The replacement string. Supports capture groups ($1, $2), named groups ($<name>), and case transforms before captures like \\u$1, \\U$1\\E, \\l$1, and \\L$1\\E. Literal backslash text such as C:\\Users is preserved."
+            help={localizeUi("ui.agents.regexscripteditor.theReplacementStringSupportsCaptureGroups12Named")
             }
           >
             <input
@@ -643,15 +725,15 @@ export function RegexScriptEditor() {
                 markDirty();
               }}
               className="w-full rounded-xl bg-[var(--secondary)] px-4 py-2.5 font-mono text-sm ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
-              placeholder="e.g. $1 or leave empty to remove"
+              placeholder={localizeUi("ui.agents.regexscripteditor.eG1OrLeaveEmptyToRemove")}
             />
           </FieldGroup>
 
           {/* ── Flags ── */}
           <FieldGroup
-            label="Regex Flags"
+            label={localizeUi("ui.agents.regexscripteditor.regexFlags")}
             icon={<Info size="0.875rem" className={REGEX_FIELD_ICON_CLASS} />}
-            help="Standard regex flags: g (global), i (case-insensitive), m (multiline), s (dotAll), u (unicode), y (sticky), d (match indices). Duplicate or unsupported flags are rejected."
+            help={localizeUi("ui.agents.regexscripteditor.standardRegexFlagsGGlobalICaseInsensitiveM")}
           >
             <div className="flex items-center gap-2">
               {["g", "i", "m", "s", "u", "y", "d"].map((flag) => {
@@ -679,9 +761,9 @@ export function RegexScriptEditor() {
 
           {/* ── Placement ── */}
           <FieldGroup
-            label="Apply To"
+            label={localizeUi("ui.agents.regexscripteditor.applyTo")}
             icon={<Play size="0.875rem" className={REGEX_FIELD_ICON_CLASS} />}
-            help="Where this regex is applied. AI Output transforms incoming responses; User Input transforms your messages before sending."
+            help={localizeUi("ui.agents.regexscripteditor.whereThisRegexIsAppliedAiOutputTransformsIncoming")}
           >
             <div className="grid grid-cols-2 gap-2">
               {(Object.entries(PLACEMENT_META) as [RegexPlacement, { label: string; description: string }][]).map(
@@ -718,50 +800,94 @@ export function RegexScriptEditor() {
                 />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5 text-xs font-medium">
-                    <Users size="0.75rem" className={REGEX_FIELD_ICON_CLASS} />
-                    Specific Characters
-                    <HelpTooltip text="Limit this script to the selected characters. Prompt-only scripts then run only for those characters' prompts; display scripts apply per the chat's Scoped Regex mode." />
+                    <Users size="0.75rem" className={REGEX_FIELD_ICON_CLASS} />{localizeUi("ui.agents.regexscripteditor.specificCharacters")}<HelpTooltip text={localizeUi("ui.agents.regexscripteditor.limitThisScriptToTheSelectedCharactersPromptOnly")} />
                   </div>
                   <div className="mt-0.5 text-[0.625rem] text-[var(--muted-foreground)]">
                     {localCharacterScopeEnabled
-                      ? `${localTargetCharacterIds.length} selected`
-                      : "Applies to all characters"}
+                      ?localizeUi("ui.agents.regexscripteditor.value1Selected", { value1: localTargetCharacterIds.length })
+                      :localizeUi("ui.agents.regexscripteditor.appliesToAllCharacters")}
                   </div>
                 </div>
               </div>
               {localCharacterScopeEnabled && (
-                <div className="mt-3 rounded-lg bg-[var(--background)]/60 p-2 ring-1 ring-[var(--border)]">
-                  {characterOptions.length > 0 ? (
-                    <div className="grid max-h-36 grid-cols-1 gap-1.5 overflow-y-auto pr-1 sm:grid-cols-2">
-                      {characterOptions.map((character) => {
-                        const selected = localTargetCharacterIds.includes(character.id);
-                        return (
-                          <button
-                            key={character.id}
-                            type="button"
-                            onClick={() => toggleTargetCharacter(character.id)}
-                            title={character.name}
-                            className={cn(
-                              "flex min-w-0 items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-[0.6875rem] ring-1 transition-all",
-                              selected
-                                ? REGEX_ACTIVE_OPTION_CLASS
-                                : "text-[var(--muted-foreground)] ring-[var(--border)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]",
-                            )}
-                          >
-                            <span className="min-w-0 truncate">{character.name}</span>
-                            {selected && <Check size="0.6875rem" className="shrink-0" />}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <div className="px-2 py-1 text-[0.6875rem] text-[var(--muted-foreground)]">
-                      No characters found.
-                    </div>
-                  )}
+                <div>
+                  <ScopeTargetPicker
+                    icon={<Users size="0.75rem" />}
+                    options={characterOptions}
+                    selectedIds={localTargetCharacterIds}
+                    addLabel={localizeUi("ui.agents.regexscripteditor.addCharacter")}
+                    emptyLabel={localizeUi("ui.agents.regexscripteditor.noCharactersFound")}
+                    removeLabel={(name) =>
+                      localizeUi("ui.agents.regexscripteditor.removeValue1", { value1: name })
+                    }
+                    onAdd={(id) => {
+                      setLocalTargetCharacterIds((previous) => [...previous, id]);
+                      markDirty();
+                    }}
+                    onRemove={(id) => {
+                      setLocalTargetCharacterIds((previous) => previous.filter((value) => value !== id));
+                      markDirty();
+                    }}
+                  />
                   {characterScopeError && (
                     <div className="mt-2 flex items-center gap-1 text-[0.625rem] font-medium text-amber-400">
                       <AlertCircle size="0.6875rem" /> {characterScopeError}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+            <div className="rounded-xl bg-[var(--secondary)]/60 p-3 ring-1 ring-[var(--border)]">
+              <div className="flex items-start gap-2.5">
+                <SettingsSwitch
+                  ariaLabel={localizeUi("ui.agents.regexscripteditor.togglePromptPresetScope")}
+                  checked={localPromptPresetScopeEnabled}
+                  onChange={(checked) => {
+                    setLocalPromptPresetScopeEnabled(checked);
+                    markDirty();
+                  }}
+                  className="mt-0.5 shrink-0 p-0 hover:bg-transparent"
+                />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-1.5 text-xs font-medium">
+                    <FileText size="0.75rem" className={REGEX_FIELD_ICON_CLASS} />
+                    {localizeUi("ui.agents.regexscripteditor.specificPromptPresets")}
+                    <HelpTooltip
+                      text={localizeUi("ui.agents.regexscripteditor.limitThisScriptToSelectedPromptPresets")}
+                    />
+                  </div>
+                  <div className="mt-0.5 text-[0.625rem] text-[var(--muted-foreground)]">
+                    {localPromptPresetScopeEnabled
+                      ? localizeUi("ui.agents.regexscripteditor.value1Selected", {
+                          value1: localTargetPromptPresetIds.length,
+                        })
+                      : localizeUi("ui.agents.regexscripteditor.appliesToAllPromptPresets")}
+                  </div>
+                </div>
+              </div>
+              {localPromptPresetScopeEnabled && (
+                <div>
+                  <ScopeTargetPicker
+                    icon={<FileText size="0.75rem" />}
+                    options={promptPresetOptions}
+                    selectedIds={localTargetPromptPresetIds}
+                    addLabel={localizeUi("ui.agents.regexscripteditor.addPromptPreset")}
+                    emptyLabel={localizeUi("ui.agents.regexscripteditor.noPromptPresetsFound")}
+                    removeLabel={(name) =>
+                      localizeUi("ui.agents.regexscripteditor.removeValue1", { value1: name })
+                    }
+                    onAdd={(id) => {
+                      setLocalTargetPromptPresetIds((previous) => [...previous, id]);
+                      markDirty();
+                    }}
+                    onRemove={(id) => {
+                      setLocalTargetPromptPresetIds((previous) => previous.filter((value) => value !== id));
+                      markDirty();
+                    }}
+                  />
+                  {promptPresetScopeError && (
+                    <div className="mt-2 flex items-center gap-1 text-[0.625rem] font-medium text-amber-400">
+                      <AlertCircle size="0.6875rem" /> {promptPresetScopeError}
                     </div>
                   )}
                 </div>
@@ -771,9 +897,9 @@ export function RegexScriptEditor() {
 
           {/* ── Trim Strings ── */}
           <FieldGroup
-            label="Trim Strings"
+            label={localizeUi("ui.agents.regexscripteditor.trimStrings")}
             icon={<Minus size="0.875rem" className={REGEX_FIELD_ICON_CLASS} />}
-            help="Additional strings to remove from the result after the regex replacement. One per row."
+            help={localizeUi("ui.agents.regexscripteditor.additionalStringsToRemoveFromTheResultAfterThe")}
           >
             <div className="flex flex-col gap-1.5">
               {localTrimStrings.map((s, i) => (
@@ -787,7 +913,7 @@ export function RegexScriptEditor() {
                       markDirty();
                     }}
                     className="flex-1 rounded-lg bg-[var(--secondary)] px-3 py-1.5 font-mono text-xs ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
-                    placeholder="String to trim…"
+                    placeholder={localizeUi("ui.agents.regexscripteditor.stringToTrim")}
                   />
                   <button
                     onClick={() => {
@@ -807,21 +933,20 @@ export function RegexScriptEditor() {
                 }}
                 className="flex items-center gap-1 self-start rounded-lg px-2.5 py-1.5 text-[0.625rem] font-medium text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
               >
-                <Plus size="0.625rem" /> Add trim string
-              </button>
+                <Plus size="0.625rem" /> {localizeUi("ui.agents.regexscripteditor.addTrimString")}</button>
             </div>
           </FieldGroup>
 
           {/* ── Advanced Options ── */}
           <FieldGroup
-            label="Advanced Options"
+            label={localizeUi("ui.agents.regexscripteditor.advancedOptions")}
             icon={<Info size="0.875rem" className={REGEX_FIELD_ICON_CLASS} />}
-            help="Fine-tune when and how the regex runs."
+            help={localizeUi("ui.agents.regexscripteditor.fineTuneWhenAndHowTheRegexRuns")}
           >
             <div className="space-y-3">
               {/* Apply mode */}
               <div className="space-y-2">
-                <div className="text-xs font-medium">Apply Mode</div>
+                <div className="text-xs font-medium">{localizeUi("ui.agents.regexscripteditor.applyMode")}</div>
                 <div className="grid grid-cols-3 gap-2 max-sm:grid-cols-1">
                   {(Object.entries(APPLY_MODE_META) as [RegexApplyMode, { label: string; description: string }][]).map(
                     ([mode, meta]) => {
@@ -852,7 +977,7 @@ export function RegexScriptEditor() {
 
               {/* Order */}
               <div className="flex items-center gap-3">
-                <span className="text-xs font-medium w-24">Execution Order</span>
+                <span className="text-xs font-medium w-24">{localizeUi("ui.agents.regexscripteditor.executionOrder")}</span>
                 <DraftNumberInput
                   value={localOrder}
                   onCommit={(value) => {
@@ -862,12 +987,12 @@ export function RegexScriptEditor() {
                   selectOnFocus
                   className="w-20 rounded-lg bg-[var(--secondary)] px-2.5 py-1.5 text-xs ring-1 ring-transparent focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
                 />
-                <span className="text-[0.625rem] text-[var(--muted-foreground)]">Lower numbers run first</span>
+                <span className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.agents.regexscripteditor.lowerNumbersRunFirst")}</span>
               </div>
 
               {/* Depth range */}
               <div className="flex items-center gap-3">
-                <span className="text-xs font-medium w-24">Depth Range</span>
+                <span className="text-xs font-medium w-24">{localizeUi("ui.agents.regexscripteditor.depthRange")}</span>
                 <input
                   type="text"
                   inputMode="numeric"
@@ -879,9 +1004,9 @@ export function RegexScriptEditor() {
                     markDirty();
                   }}
                   className="w-16 rounded-lg bg-[var(--secondary)] px-2.5 py-1.5 text-xs ring-1 ring-transparent focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
-                  placeholder="Min"
+                  placeholder={localizeUi("ui.agents.regexscripteditor.min")}
                 />
-                <span className="text-[0.625rem] text-[var(--muted-foreground)]">to</span>
+                <span className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.noodle.wizardfooter.to")}</span>
                 <input
                   type="text"
                   inputMode="numeric"
@@ -893,11 +1018,9 @@ export function RegexScriptEditor() {
                     markDirty();
                   }}
                   className="w-16 rounded-lg bg-[var(--secondary)] px-2.5 py-1.5 text-xs ring-1 ring-transparent focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
-                  placeholder="Max"
+                  placeholder={localizeUi("ui.agents.regexscripteditor.max")}
                 />
-                <span className="text-[0.625rem] text-[var(--muted-foreground)]">
-                  message depth (empty = unlimited)
-                </span>
+                <span className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.agents.regexscripteditor.messageDepthEmptyUnlimited")}</span>
               </div>
               {depthRangeError && (
                 <div className="flex items-center gap-1 text-[0.625rem] font-medium text-red-400">
@@ -909,9 +1032,9 @@ export function RegexScriptEditor() {
 
           {/* ── Live Test ── */}
           <FieldGroup
-            label="Live Test"
+            label={localizeUi("ui.agents.regexscripteditor.liveTest")}
             icon={<Play size="0.875rem" className={REGEX_FIELD_ICON_CLASS} />}
-            help="Test your regex pattern against sample text. Macros use sample User and Character values here."
+            help={localizeUi("ui.agents.regexscripteditor.testYourRegexPatternAgainstSampleTextMacrosUse")}
           >
             <div className="space-y-2">
               <textarea
@@ -919,14 +1042,12 @@ export function RegexScriptEditor() {
                 onChange={(e) => setTestInput(e.target.value)}
                 rows={3}
                 className="w-full resize-y rounded-xl bg-[var(--secondary)] px-4 py-3 font-mono text-xs leading-relaxed ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)]/50 focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
-                placeholder="Paste sample text to test…"
+                placeholder={localizeUi("ui.agents.regexscripteditor.pasteSampleTextToTest")}
               />
-              <p className="text-[0.625rem] text-[var(--muted-foreground)]">
-                Pattern preview only: placement, enabled state, character scope, and depth are evaluated at runtime.
-              </p>
+              <p className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.agents.regexscripteditor.patternPreviewOnlyPlacementEnabledStateCharacterScopeAnd")}</p>
               {testInput && (
                 <div className="rounded-xl bg-[var(--card)] p-4 ring-1 ring-[var(--border)]">
-                  <div className="mb-1 text-[0.625rem] font-medium text-[var(--muted-foreground)]">Result:</div>
+                  <div className="mb-1 text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.agents.regexscripteditor.result")}</div>
                   <pre className="whitespace-pre-wrap font-mono text-xs leading-relaxed text-emerald-400">
                     {testResult}
                   </pre>
@@ -937,42 +1058,28 @@ export function RegexScriptEditor() {
 
           {/* ── Info Card ── */}
           <div className="rounded-xl bg-[var(--card)] p-4 ring-1 ring-[var(--border)]">
-            <h3 className="mb-2 text-xs font-semibold text-[var(--foreground)]">About Regex Scripts</h3>
+            <h3 className="mb-2 text-xs font-semibold text-[var(--foreground)]">{localizeUi("ui.agents.regexscripteditor.aboutRegexScripts")}</h3>
             <div className="space-y-1.5 text-[0.6875rem] text-[var(--muted-foreground)]">
+              <p>{localizeUi("ui.agents.regexscripteditor.regexScriptsAreAppliedToTextDuringChatEither")}</p>
+              <p>{localizeUi("ui.agents.regexscripteditor.scriptsRunInOrderLowestFirstUseCaptureGroups")}<code className="rounded bg-[var(--secondary)] px-1">$1</code>,{" "}
+                <code className="rounded bg-[var(--secondary)] px-1">$2</code>{localizeUi("ui.agents.regexscripteditor.inTheReplacementToReferenceMatchedGroupsUse")} <code className="rounded bg-[var(--secondary)] px-1">{"\\u$1"}</code> {localizeUi("ui.agents.regexscripteditor.toCapitalizeTheFirstCharacterOfACaptureOr")} <code className="rounded bg-[var(--secondary)] px-1">{"\\U$1\\E"}</code> {localizeUi("ui.agents.regexscripteditor.toUppercaseACapture")}</p>
               <p>
-                Regex scripts are applied to text during chat — either transforming AI responses before display, or
-                modifying your input before it's sent.
-              </p>
-              <p>
-                Scripts run in order (lowest first). Use capture groups (
-                <code className="rounded bg-[var(--secondary)] px-1">$1</code>,{" "}
-                <code className="rounded bg-[var(--secondary)] px-1">$2</code>) in the replacement to reference matched
-                groups. Use <code className="rounded bg-[var(--secondary)] px-1">\u$1</code> to capitalize the first
-                character of a capture, or <code className="rounded bg-[var(--secondary)] px-1">\U$1\E</code> to
-                uppercase a capture.
-              </p>
-              <p>
-                <strong className="text-[var(--foreground)]">Examples:</strong>
+                <strong className="text-[var(--foreground)]">{localizeUi("ui.agents.regexscripteditor.examples")}</strong>
               </p>
               <ul className="ml-4 list-disc space-y-0.5">
-                <li>
-                  Remove asterisks: <code className="rounded bg-[var(--secondary)] px-1">\\*([^*]+)\\*</code> →{" "}
+                <li>{localizeUi("ui.agents.regexscripteditor.removeAsterisks")} <code className="rounded bg-[var(--secondary)] px-1">{"\\*([^*]+)\\*"}</code> →{" "}
                   <code className="rounded bg-[var(--secondary)] px-1">$1</code>
                 </li>
-                <li>
-                  Remove OOC: <code className="rounded bg-[var(--secondary)] px-1">\\(OOC:.*?\\)</code> → (empty)
-                </li>
-                <li>
-                  Censor words: <code className="rounded bg-[var(--secondary)] px-1">\\bbadword\\b</code> →{" "}
+                <li>{localizeUi("ui.agents.regexscripteditor.removeOoc")} <code className="rounded bg-[var(--secondary)] px-1">{"\\(OOC:.*?\\)"}</code> {localizeUi("ui.agents.regexscripteditor.empty")}</li>
+                <li>{localizeUi("ui.agents.regexscripteditor.censorWords")} <code className="rounded bg-[var(--secondary)] px-1">{"\\bbadword\\b"}</code> →{" "}
                   <code className="rounded bg-[var(--secondary)] px-1">***</code>
                 </li>
-                <li>
-                  Capitalize replacement: <code className="rounded bg-[var(--secondary)] px-1">\U$1</code>
+                <li>{localizeUi("ui.agents.regexscripteditor.capitalizeReplacement")} <code className="rounded bg-[var(--secondary)] px-1">{"\\U$1"}</code>
                 </li>
               </ul>
               {dbRow && (
                 <p className="mt-2">
-                  <strong className="text-[var(--foreground)]">ID:</strong> {dbRow.id}
+                  <strong className="text-[var(--foreground)]">{localizeUi("ui.agents.regexscripteditor.id")}</strong> {dbRow.id}
                 </p>
               )}
             </div>

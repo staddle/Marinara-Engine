@@ -21,9 +21,9 @@ Marinara installs a free starter library the first time the server starts. It re
 - Five **Music** tracks, one for each of several scene moods.
 - A set of **Ambient** loops under nature, urban, and interior folders.
 - **Sound Effects** for menus, combat, and exploration.
-- A pack of character **Sprites** in the `generic-fantasy` folder.
 
 No **Backgrounds** are bundled. The background folders start empty. They fill up only when you upload images or when Game Mode generates scene art.
+No character **Sprites** are bundled. Add only the character art that fits your own games.
 
 All bundled files are licensed CC0, which means they are in the public domain and free to use. Full credit for each file lives in a `CREDITS.md` text file that ships with the assets on disk. It is not shown inside the app.
 
@@ -82,11 +82,11 @@ Each **Type** fills the **Folder** box with a sensible default. The defaults are
 
 The server checks every upload against these rules. They apply to both upload paths.
 
-| Category | Accepted file types |
-| --- | --- |
-| Music, Ambient, Sound Effects | MP3, OGG, WAV, FLAC, M4A, AAC, WebM |
-| Sprites | PNG, JPG, JPEG, GIF, WebP, AVIF, SVG |
-| Backgrounds | PNG, JPG, JPEG, GIF, WebP, AVIF |
+| Category                      | Accepted file types                  |
+| ----------------------------- | ------------------------------------ |
+| Music, Ambient, Sound Effects | MP3, OGG, WAV, FLAC, M4A, AAC, WebM  |
+| Sprites                       | PNG, JPG, JPEG, GIF, WebP, AVIF, SVG |
+| Backgrounds                   | PNG, JPG, JPEG, GIF, WebP, AVIF      |
 
 Audio and image files can be up to 50 MB each. Text files can be up to 10 MB. The server rejects file types that do not fit the category. The error message lists the accepted types.
 
@@ -137,9 +137,12 @@ If you copy files into the game asset folder directly on your computer, outside 
 
 Each Game Mode chat can limit itself to only some of your asset folders. This is useful when you want a horror game to skip your cheerful music, for example.
 
-1. Open the game's **Asset Browser** panel from the chat toolbar.
-2. Click the **Game assets** button. It changes to read **Selecting** while active.
-3. Use the small status control on each folder to include or exclude it.
+During setup, expand **Adjust Game Assets for this Game** on the **Features** step. For an existing game, open the game's **Asset Browser** panel from the chat toolbar.
+
+Then:
+
+1. Click the **Game assets** button. It changes to read **Selecting** while active.
+2. Use the small status control on each folder to include or exclude it.
 
 A bar shows "All folders included" or how many folders are excluded, with a **Reset to all** button to include everything again. This choice is saved for that one chat only. It changes which folders Game Mode may pick from, but it does not delete or hide any files. It has no effect outside that Game Mode chat.
 

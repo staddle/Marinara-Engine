@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import type {
   ResolvedOwnerSpatialProjection,
   SpatialContextDefinition,
@@ -33,15 +34,99 @@ import {
   updateGameMapBinding,
 } from "../../packages/server/src/services/spatial-context/game-map-binding.js";
 import {
+  createAssistantSpatialDirectiveStreamFilter,
+  extractAssistantSpatialDirective,
   materializeAssistantSpatialState,
   resolveEffectiveSpatialState,
 } from "../../packages/server/src/services/spatial-context/state-resolution.js";
 import { ensureTimestampAfter } from "../../packages/server/src/services/import/import-timestamps.js";
 import { resolveVisibleGameStateAnchor } from "../../packages/server/src/routes/generate/generate-route-utils.js";
+import {
+  resolveAlreadyAppliedSpatialTurn,
+  resolveSpatialGenerationOrigin,
+  validateSpatialGenerationRequest,
+} from "../../packages/server/src/routes/generate/spatial-transition-request.js";
+import { mergeSpatialLocationReferenceImages } from "../../packages/server/src/services/image/spatial-location-reference.js";
+import {
+  buildInitialGameMapPatch,
+  resolveGameStartWorldMapPatch,
+  resolveInitialMapLocationName,
+} from "../../packages/server/src/services/game/world-map-mode.js";
 
 assert.equal(ensureTimestampAfter("2026-07-16T07:47:03.766Z", "2026-07-16T07:47:03.765Z"), "2026-07-16T07:47:03.766Z");
 assert.equal(ensureTimestampAfter("2026-07-16T07:47:03.765Z", "2026-07-16T07:47:03.765Z"), "2026-07-16T07:47:03.766Z");
 assert.equal(ensureTimestampAfter("2026-07-16T07:47:03.700Z", "2026-07-16T07:47:03.765Z"), "2026-07-16T07:47:03.766Z");
+const impersonatedMove = {
+  destinationId: "harbor",
+  expectedDefinitionRevision: 4,
+  expectedCurrentLocationId: "world",
+  commandId: "impersonated-owner-move",
+};
+assert.equal(
+  validateSpatialGenerationRequest({
+    mode: "roleplay",
+    origin: "owner",
+    pendingSpatialTransition: impersonatedMove,
+    impersonate: true,
+  }),
+  null,
+  "Roleplay impersonation is a generated owner turn and may commit its queued move",
+);
+assert.equal(
+  validateSpatialGenerationRequest({
+    mode: "roleplay",
+    origin: "guided",
+    pendingSpatialTransition: null,
+    impersonate: false,
+  }),
+  null,
+  "Guided assistant generation does not submit the queued owner move",
+);
+assert.deepEqual(
+  validateSpatialGenerationRequest({
+    mode: "game",
+    origin: "owner",
+    pendingSpatialTransition: impersonatedMove,
+    impersonate: true,
+  }),
+  {
+    statusCode: 400,
+    error: "Impersonated hierarchical location changes are only available in Roleplay mode.",
+    code: "spatial_mode_unsupported",
+  },
+);
+assert.deepEqual(
+  validateSpatialGenerationRequest({
+    mode: "roleplay",
+    origin: "owner",
+    pendingSpatialTransition: impersonatedMove,
+    regenerateMessageId: "assistant-message",
+  }),
+  {
+    statusCode: 400,
+    error: "A hierarchical location change must be submitted as a new owner turn.",
+    code: "spatial_transition_requires_new_turn",
+  },
+);
+for (const origin of ["guided", "autonomous", "turn_game"] as const) {
+  assert.deepEqual(
+    validateSpatialGenerationRequest({
+      mode: "roleplay",
+      origin,
+      pendingSpatialTransition: impersonatedMove,
+    }),
+    {
+      statusCode: 400,
+      error: "A hierarchical location change must be submitted as a new owner turn.",
+      code: "spatial_transition_requires_new_turn",
+    },
+  );
+}
+assert.equal(resolveSpatialGenerationOrigin({}), "owner");
+assert.equal(resolveSpatialGenerationOrigin({ generationGuide: "Continue as the shopkeeper." }), "guided");
+assert.equal(resolveSpatialGenerationOrigin({ generationGuideSource: "narrator" }), "guided");
+assert.equal(resolveSpatialGenerationOrigin({ turnGameBots: true }), "turn_game");
+assert.equal(resolveSpatialGenerationOrigin({ autonomous: true }), "autonomous");
 assert.deepEqual(
   resolveVisibleGameStateAnchor([
     { id: "assistant-anchor", role: "assistant", activeSwipeIndex: 2 },
@@ -96,6 +181,84 @@ function definition(
   };
 }
 
+const stagedSetupMap = {
+  type: "node" as const,
+  name: "Starting Coast",
+  description: "The setup-generated recovery map.",
+  nodes: [{ id: "region_1", emoji: "⚓", label: "Gloam Harbor", x: 50, y: 50, discovered: true }],
+  edges: [],
+  partyPosition: "region_1",
+};
+const hierarchicalSetupConfig = {
+  genre: "Fantasy",
+  setting: "A fogbound coast",
+  tone: "Heroic",
+  difficulty: "Normal",
+  playerGoals: "Explore",
+  gmMode: "standalone" as const,
+  rating: "sfw" as const,
+  partyCharacterIds: [],
+  enableAgents: true,
+  gameWorldMapMode: "hierarchical" as const,
+};
+const stagedMapPatch = buildInitialGameMapPatch({}, hierarchicalSetupConfig, stagedSetupMap);
+assert.equal(stagedMapPatch.gameMap, null);
+assert.deepEqual(stagedMapPatch.gameMaps, []);
+assert.equal(stagedMapPatch.activeGameMapId, null);
+assert.equal((stagedMapPatch.gameInitialMapFallback as { name: string }).name, "Starting Coast");
+assert.equal(resolveInitialMapLocationName(stagedSetupMap, "region_1"), "Gloam Harbor");
+const standardMapPatch = buildInitialGameMapPatch(
+  {},
+  { ...hierarchicalSetupConfig, gameWorldMapMode: "standard" },
+  stagedSetupMap,
+);
+assert.equal((standardMapPatch.gameMap as { name: string }).name, "Starting Coast");
+assert.equal((standardMapPatch.gameMaps as unknown[]).length, 1);
+assert.equal(standardMapPatch.gameInitialMapFallback, null);
+
+const validGameHierarchy = definition(
+  [location("world", "Known World", { kind: "region", childPresentation: "map" })],
+  { ownerMode: "game", startingLocationId: "world" },
+);
+const hierarchicalStart = resolveGameStartWorldMapPatch({
+  gameSetupConfig: hierarchicalSetupConfig,
+  gameInitialMapFallback: stagedMapPatch.gameInitialMapFallback,
+  gameMap: null,
+  gameMaps: [],
+  activeGameMapId: null,
+  enableAgents: true,
+  activeAgentIds: ["hierarchical-maps"],
+  spatialContext: validGameHierarchy,
+});
+assert.equal(hierarchicalStart.resolution, "hierarchical");
+assert.equal(hierarchicalStart.patch.gameInitialMapFallback, null);
+assert.deepEqual(hierarchicalStart.patch.gameMaps, []);
+
+const fallbackStart = resolveGameStartWorldMapPatch({
+  gameSetupConfig: hierarchicalSetupConfig,
+  gameInitialMapFallback: stagedMapPatch.gameInitialMapFallback,
+  enableAgents: true,
+  activeAgentIds: ["hierarchical-maps"],
+});
+assert.equal(fallbackStart.resolution, "standard_fallback");
+assert.equal((fallbackStart.patch.gameMap as { name: string }).name, "Starting Coast");
+assert.equal((fallbackStart.patch.gameSetupConfig as { gameWorldMapMode: string }).gameWorldMapMode, "standard");
+
+const maplessStart = resolveGameStartWorldMapPatch({
+  gameSetupConfig: hierarchicalSetupConfig,
+  enableAgents: true,
+  activeAgentIds: ["hierarchical-maps"],
+});
+assert.equal(maplessStart.resolution, "standard_mapless");
+assert.equal(maplessStart.patch.gameMap, null);
+assert.equal((maplessStart.patch.gameSetupConfig as { gameWorldMapMode: string }).gameWorldMapMode, "standard");
+
+const standardStart = resolveGameStartWorldMapPatch({
+  gameSetupConfig: { ...hierarchicalSetupConfig, gameWorldMapMode: "standard" },
+  gameMap: stagedSetupMap,
+});
+assert.deepEqual(standardStart, { patch: {}, resolution: "unchanged" });
+
 function issueCodes(value: SpatialContextDefinition): SpatialDefinitionIssueCode[] {
   return validateSpatialContextDefinition(value).issues.map((entry) => entry.code);
 }
@@ -114,6 +277,130 @@ const snapshotInput = {
 };
 assert.equal(spatialContextSnapshotSchema.safeParse(snapshotInput).success, true);
 assert.equal(spatialContextSnapshotSchema.safeParse({ ...snapshotInput, messageId: "" }).success, false);
+assert.deepEqual(
+  resolveAlreadyAppliedSpatialTurn({
+    code: "spatial_transition_already_applied",
+    details: { messageId: snapshotInput.messageId, snapshot: snapshotInput },
+  }),
+  {
+    messageId: "message-1",
+    swipeIndex: 0,
+    currentLocationId: null,
+    definitionRevision: 0,
+  },
+  "Already-applied generated owner turns recover the original persisted message and snapshot",
+);
+assert.equal(
+  resolveAlreadyAppliedSpatialTurn({ code: "spatial_transition_stale_location" }),
+  null,
+  "Rejected spatial transitions must not enter the idempotent success path",
+);
+assert.deepEqual(
+  extractAssistantSpatialDirective('The lift opens onto Level 1.\n[spatial_move: destination_id="tower_level_1"]'),
+  {
+    cleanContent: "The lift opens onto Level 1.",
+    directive: { type: "move", destinationId: "tower_level_1" },
+    matched: true,
+  },
+);
+assert.deepEqual(
+  extractAssistantSpatialDirective(
+    'A hidden observatory waits beyond the door.\n[spatial_discover: name="Hidden Observatory" relation="enter" description="A concealed observatory above the tower."]',
+  ),
+  {
+    cleanContent: "A hidden observatory waits beyond the door.",
+    directive: {
+      type: "discover",
+      name: "Hidden Observatory",
+      relation: "enter",
+      description: "A concealed observatory above the tower.",
+    },
+    matched: true,
+  },
+);
+const ordinaryImpersonatedContent = "\n[Stage direction]\n\n\nContinue through the door.\n";
+assert.deepEqual(
+  extractAssistantSpatialDirective(ordinaryImpersonatedContent),
+  {
+    cleanContent: ordinaryImpersonatedContent,
+    directive: null,
+    matched: false,
+  },
+  "Ordinary bracketed impersonated prose must retain all surrounding whitespace",
+);
+assert.deepEqual(
+  extractAssistantSpatialDirective(
+    'The rewrite keeps this sentence.\n[spatial_move: destination_id="rewrite-must-not-apply"]',
+  ),
+  {
+    cleanContent: "The rewrite keeps this sentence.",
+    directive: { type: "move", destinationId: "rewrite-must-not-apply" },
+    matched: true,
+  },
+  "Text-rewrite output must expose clean content while its directive is discarded by the route",
+);
+const streamedSpatialDirective = createAssistantSpatialDirectiveStreamFilter();
+assert.equal(streamedSpatialDirective.push("We arrive at the infirmary.\n[spa"), "We arrive at the infirmary.\n");
+assert.equal(streamedSpatialDirective.push('tial_move: destination_id="moonwell"'), "");
+assert.equal(streamedSpatialDirective.push("]"), "");
+assert.equal(streamedSpatialDirective.flush(), "");
+const streamedOrdinaryBracket = createAssistantSpatialDirectiveStreamFilter();
+assert.equal(streamedOrdinaryBracket.push("[Stage direction] Continue."), "[Stage direction] Continue.");
+assert.equal(streamedOrdinaryBracket.flush(), "");
+const streamedDirectiveSplitAfterPrefix = createAssistantSpatialDirectiveStreamFilter();
+assert.equal(streamedDirectiveSplitAfterPrefix.push("[spatial_move:\n"), "");
+assert.equal(streamedDirectiveSplitAfterPrefix.push(' destination_id="moonwell"'), "");
+assert.equal(streamedDirectiveSplitAfterPrefix.push("]Arrival text."), "Arrival text.");
+assert.equal(streamedDirectiveSplitAfterPrefix.flush(), "");
+
+const generateRouteSource = readFileSync(
+  new URL("../../packages/server/src/routes/generate.routes.ts", import.meta.url),
+  "utf8",
+);
+const inlineThinkingStart = generateRouteSource.indexOf(
+  "const inlineThinking = extractLeadingThinkingBlocks(fullResponse, customThinkingTags);",
+);
+const inlineThinkingEnd = generateRouteSource.indexOf("// ── LOG_LEVEL=debug", inlineThinkingStart);
+const spatialSanitizationStart = generateRouteSource.indexOf(
+  "const parsedSpatial = extractAssistantSpatialDirective(fullResponse);",
+  inlineThinkingEnd,
+);
+const consolidatedReplacementStart = generateRouteSource.indexOf(
+  "if (contentReplaced) {",
+  spatialSanitizationStart,
+);
+assert.ok(inlineThinkingStart >= 0 && inlineThinkingEnd > inlineThinkingStart, "Inline-thinking route block is present");
+assert.doesNotMatch(
+  generateRouteSource.slice(inlineThinkingStart, inlineThinkingEnd),
+  /type:\s*"content_replace"/u,
+  "Inline-thinking cleanup must not emit content before spatial sanitization",
+);
+assert.ok(
+  spatialSanitizationStart > inlineThinkingEnd && consolidatedReplacementStart > spatialSanitizationStart,
+  "The consolidated content replacement must run after spatial sanitization",
+);
+const textRewriteStart = generateRouteSource.indexOf("// ── Text rewrite/editing agents:");
+const textRewriteEnd = generateRouteSource.indexOf(
+  "if (holdForTextRewrite && !textRewriteApplied",
+  textRewriteStart,
+);
+assert.ok(textRewriteStart >= 0 && textRewriteEnd > textRewriteStart, "Text-rewrite route block is present");
+const textRewriteSource = generateRouteSource.slice(textRewriteStart, textRewriteEnd);
+assert.match(
+  textRewriteSource,
+  /const parsedRewriteSpatial = extractAssistantSpatialDirective\(editedText\);/u,
+  "Text-rewrite output must run through spatial sanitization",
+);
+assert.match(
+  textRewriteSource,
+  /updateMessageContent\(messageId, sanitizedEditedText\)/u,
+  "Text-rewrite persistence must use sanitized content",
+);
+assert.match(
+  textRewriteSource,
+  /type: "text_rewrite",[\s\S]*?editedText: sanitizedEditedText/u,
+  "Text-rewrite events must emit sanitized content",
+);
 
 const validDefinition = definition(
   [
@@ -194,6 +481,42 @@ for (const legacyLocation of legacyDefinitionWithoutLoreRefs.locations as Array<
 }
 const parsedLegacyDefinition = spatialContextDefinitionSchema.parse(legacyDefinitionWithoutLoreRefs);
 assert.ok(parsedLegacyDefinition.locations.every((entry) => entry.lorebookEntryIds.length === 0));
+const visualReferenceDefinition = definition([
+  location("visual_reference", "Visual Reference", {
+    referenceImageId: "gallery-image-1",
+    useReferenceImage: true,
+    mapBackgroundImageId: "gallery-image-2",
+    mapBackgroundPosition: { x: 25, y: 75 },
+  }),
+]);
+assert.equal(spatialContextDefinitionSchema.safeParse(visualReferenceDefinition).success, true);
+assert.equal(
+  spatialContextDefinitionSchema.safeParse({
+    ...visualReferenceDefinition,
+    locations: [{ ...visualReferenceDefinition.locations[0], referenceImageId: "x".repeat(201) }],
+  }).success,
+  false,
+);
+assert.equal(
+  spatialContextDefinitionSchema.safeParse({
+    ...visualReferenceDefinition,
+    locations: [{ ...visualReferenceDefinition.locations[0], mapBackgroundImageId: "x".repeat(201) }],
+  }).success,
+  false,
+);
+assert.equal(
+  spatialContextDefinitionSchema.safeParse({
+    ...visualReferenceDefinition,
+    locations: [{ ...visualReferenceDefinition.locations[0], mapBackgroundPosition: { x: -1, y: 50 } }],
+  }).success,
+  false,
+);
+assert.deepEqual(mergeSpatialLocationReferenceImages("location", ["character-a", "character-b"], 2), [
+  "location",
+  "character-a",
+]);
+assert.deepEqual(mergeSpatialLocationReferenceImages(null, ["character-a", "character-b"], 1), ["character-a"]);
+assert.deepEqual(mergeSpatialLocationReferenceImages("location", ["character-a"], 0), []);
 
 // AI map drafting and normalization are package-owned and tested in Pasta-Devs/Marinara-Agents.
 assert.deepEqual(
@@ -249,7 +572,7 @@ assert.deepEqual(
   {
     ok: false,
     code: "spatial_transition_stale_definition",
-    message: "The hierarchical map changed. Review the available destinations.",
+    message: "The world map changed. Review the available destinations.",
   },
 );
 assert.equal(
@@ -403,7 +726,7 @@ assert.throws(
   (error: unknown) =>
     error instanceof GameMapBindingError &&
     error.code === "feature_unavailable" &&
-    error.message === "Hierarchical Maps is not active.",
+    error.message === "World Maps is not active.",
 );
 
 const fallbackProjection: ResolvedOwnerSpatialProjection = {
@@ -418,6 +741,8 @@ const fallbackProjection: ResolvedOwnerSpatialProjection = {
   ],
   description: "The library.",
   modelMemory: "A hidden key.",
+  referenceImageId: null,
+  useReferenceImage: false,
   lorebookEntryIds: ["lore_library"],
   destinations: [],
   omittedDestinationCount: 0,

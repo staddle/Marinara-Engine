@@ -5,6 +5,7 @@ import { readdir, readFile, stat, copyFile, mkdir } from "fs/promises";
 import { join, extname, basename, relative } from "path";
 import { existsSync, readdirSync } from "fs";
 import { randomUUID } from "crypto";
+import { inflateSync } from "node:zlib";
 import type { DB } from "../../db/connection.js";
 import {
   getExistingCharacterTagKeys,
@@ -18,16 +19,17 @@ import { characters as charactersTable } from "../../db/schema/index.js";
 import { createCharactersStorage } from "../storage/characters.storage.js";
 import { DATA_DIR } from "../../utils/data-dir.js";
 import { getFileTimestampOverrides, parseTrustedTimestamp } from "./import-timestamps.js";
-import { normalizeTextForMatch } from "@marinara-engine/shared";
+import { MAX_FILE_SIZES, normalizeTextForMatch } from "@marinara-engine/shared";
 
 const BG_DIR = join(DATA_DIR, "backgrounds");
 const BG_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif"]);
+const MAX_CHARACTER_CARD_CHUNK_SIZE = Math.ceil(MAX_FILE_SIZES.CHARACTER_JSON / 3) * 4;
 
 // ─── Helpers ───
 
 const CHARA_KEYWORDS = new Set(["ccv3", "chara"]);
 
-/** Read PNG tEXt/iTXt chunks with keyword "ccv3" or "chara" → base64 JSON. Prefers ccv3 (V3). */
+/** Read PNG tEXt/zTXt/iTXt chunks with keyword "ccv3" or "chara" → base64 JSON. Prefers ccv3 (V3). */
 function extractCharaFromPng(buf: Buffer): Record<string, unknown> | null {
   // PNG signature: 8 bytes
   if (buf.length < 8) return null;
@@ -48,6 +50,27 @@ function extractCharaFromPng(buf: Buffer): Record<string, unknown> | null {
           try {
             const json = Buffer.from(b64, "base64").toString("utf-8");
             found.set(keyword, JSON.parse(json));
+          } catch {
+            /* skip malformed */
+          }
+        }
+      }
+    } else if (type === "zTXt") {
+      // zTXt: keyword\0 compressionMethod(1 byte, 0 = zlib deflate) compressedText.
+      // Character Tavern cards store their chara/ccv3 payloads this way.
+      const nullIdx = payload.indexOf(0);
+      if (nullIdx >= 0) {
+        const keyword = payload.subarray(0, nullIdx).toString("ascii");
+        if (CHARA_KEYWORDS.has(keyword) && !found.has(keyword) && payload[nullIdx + 1] === 0) {
+          try {
+            const text = inflateSync(payload.subarray(nullIdx + 2), {
+              maxOutputLength: MAX_CHARACTER_CARD_CHUNK_SIZE,
+            }).toString("utf-8");
+            try {
+              found.set(keyword, JSON.parse(text));
+            } catch {
+              found.set(keyword, JSON.parse(Buffer.from(text, "base64").toString("utf-8")));
+            }
           } catch {
             /* skip malformed */
           }

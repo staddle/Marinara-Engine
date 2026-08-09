@@ -2,6 +2,7 @@ import { ChevronRight, Gamepad2 } from "lucide-react";
 import { Modal } from "../ui/Modal";
 import { useInstalledCapabilityPackages } from "../../hooks/use-capability-packages";
 import { useConversationGamesStore } from "../../stores/conversation-games.store";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface Props {
   chatId: string;
@@ -10,6 +11,7 @@ interface Props {
 }
 
 export function ConversationGamesPicker({ chatId, open, onClose }: Props) {
+  const { t: localizeUi } = useUiTranslation();
   const { data: installed = [] } = useInstalledCapabilityPackages(open);
   const openSetup = useConversationGamesStore((state) => state.openSetup);
   const games = installed.filter(
@@ -25,7 +27,7 @@ export function ConversationGamesPicker({ chatId, open, onClose }: Props) {
   };
 
   return (
-    <Modal open={open} onClose={onClose} title="Start a game" width="max-w-lg">
+    <Modal open={open} onClose={onClose} title={localizeUi("ui.chat.conversationgamespicker.startAGame")} width="max-w-lg">
       <div className="space-y-3">
         <div className="grid gap-2 sm:grid-cols-2">
           {games.map((game) => (
@@ -61,14 +63,11 @@ export function ConversationGamesPicker({ chatId, open, onClose }: Props) {
           ))}
         </div>
         {games.length > 0 ? (
-          <p className="text-xs text-[var(--muted-foreground)]">
-            You can also start these directly with{" "}
+          <p className="text-xs text-[var(--muted-foreground)]">{localizeUi("ui.chat.conversationgamespicker.youCanAlsoStartTheseDirectlyWith")}{" "}
             {games.map((game) => game.manifest.contributions!.conversationGame!.command).join(", ")}.
           </p>
         ) : (
-          <p className="rounded-lg border border-dashed border-[var(--border)] p-4 text-center text-xs text-[var(--muted-foreground)]">
-            No conversation games are installed. Open Agents → Download Agents to add one.
-          </p>
+          <p className="rounded-lg border border-dashed border-[var(--border)] p-4 text-center text-xs text-[var(--muted-foreground)]">{localizeUi("ui.chat.conversationgamespicker.noConversationGamesAreInstalledOpenAgentsDownloadAgents")}</p>
         )}
       </div>
     </Modal>

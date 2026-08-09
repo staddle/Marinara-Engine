@@ -20,8 +20,55 @@ const DEFAULT_CUSTOM_TOOL_TIMEOUT_MS = 60_000;
 export const DEFAULT_CHAT_GENERATION_TIMEOUT_MS = 300_000;
 const MIN_CHAT_GENERATION_TIMEOUT_MS = 10_000;
 const MAX_CHAT_GENERATION_TIMEOUT_MS = 3_600_000;
+export const DEFAULT_AGENT_CALL_TIMEOUT_MS = 300_000;
+export const DEFAULT_GAME_DYNAMIC_IMAGE_PROMPT_TIMEOUT_MS = 45_000;
 const MAX_TIMEOUT_MS = 2_147_483_647;
-let lastInvalidChatGenerationTimeout: string | null = null;
+
+function createValidatedTimeoutGetter(envVar: string, defaultMs: number, minMs: number, maxMs: number) {
+  let lastInvalid: string | null = null;
+  return () => {
+    const raw = normalizeEnvValue(process.env[envVar]);
+    if (raw === null) return defaultMs;
+
+    const parsed = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+    if (Number.isSafeInteger(parsed) && parsed >= minMs && parsed <= maxMs) {
+      lastInvalid = null;
+      return parsed;
+    }
+
+    if (lastInvalid !== raw) {
+      lastInvalid = raw;
+      sharedLogger.warn(
+        "[runtime-config] Ignoring invalid %s=%s; expected %d-%d milliseconds, using %d",
+        envVar,
+        raw,
+        minMs,
+        maxMs,
+        defaultMs,
+      );
+    }
+    return defaultMs;
+  };
+}
+
+const readChatGenerationTimeoutMs = createValidatedTimeoutGetter(
+  "CHAT_GENERATION_TIMEOUT_MS",
+  DEFAULT_CHAT_GENERATION_TIMEOUT_MS,
+  MIN_CHAT_GENERATION_TIMEOUT_MS,
+  MAX_CHAT_GENERATION_TIMEOUT_MS,
+);
+const readAgentCallTimeoutMs = createValidatedTimeoutGetter(
+  "AGENT_CALL_TIMEOUT_MS",
+  DEFAULT_AGENT_CALL_TIMEOUT_MS,
+  MIN_CHAT_GENERATION_TIMEOUT_MS,
+  MAX_CHAT_GENERATION_TIMEOUT_MS,
+);
+const readGameDynamicImagePromptTimeoutMs = createValidatedTimeoutGetter(
+  "GAME_DYNAMIC_IMAGE_PROMPT_TIMEOUT_MS",
+  DEFAULT_GAME_DYNAMIC_IMAGE_PROMPT_TIMEOUT_MS,
+  MIN_CHAT_GENERATION_TIMEOUT_MS,
+  MAX_CHAT_GENERATION_TIMEOUT_MS,
+);
 
 let envLoaded = false;
 // Keys that the .env file currently contributes to process.env. Tracked so a
@@ -234,6 +281,10 @@ export function getHost() {
   return normalizeEnvValue(process.env.HOST) ?? DEFAULT_HOST;
 }
 
+export function getTrustedHosts() {
+  return parseCsv(process.env.TRUSTED_HOSTS);
+}
+
 export function getPort() {
   const parsed = Number.parseInt(process.env.PORT ?? "", 10);
   return Number.isFinite(parsed) ? parsed : DEFAULT_PORT;
@@ -377,10 +428,11 @@ export function isDockerBypassEnabled() {
  * Require normal auth/allowlist handling for Docker bridge requests that look
  * like they were forwarded by a reverse proxy or tunnel container.
  *
- * Default: OFF for compatibility with existing Docker installs.
+ * Default: ON. Set REQUIRE_AUTH_FOR_DOCKER_PROXY=false only when every client
+ * behind the Docker proxy is intentionally inside the trusted boundary.
  */
 export function isDockerProxyAuthRequired() {
-  return isEnabledFlag(process.env.REQUIRE_AUTH_FOR_DOCKER_PROXY);
+  return !isDisabledFlag(process.env.REQUIRE_AUTH_FOR_DOCKER_PROXY);
 }
 
 export function isDebugAgentsEnabled() {
@@ -425,30 +477,22 @@ export function getEmbeddingRequestTimeoutMs() {
 
 /** Main-chat provider timeout. Read per request so .env hot reloads apply without a restart. */
 export function getChatGenerationTimeoutMs() {
-  const raw = normalizeEnvValue(process.env.CHAT_GENERATION_TIMEOUT_MS);
-  if (raw === null) return DEFAULT_CHAT_GENERATION_TIMEOUT_MS;
+  return readChatGenerationTimeoutMs();
+}
 
-  const parsed = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
-  if (
-    Number.isSafeInteger(parsed) &&
-    parsed >= MIN_CHAT_GENERATION_TIMEOUT_MS &&
-    parsed <= MAX_CHAT_GENERATION_TIMEOUT_MS
-  ) {
-    lastInvalidChatGenerationTimeout = null;
-    return parsed;
-  }
+/**
+ * Per-call timeout for agent LLM requests (trackers, HTML reformatter, …).
+ * Unlike the main chat path, these are total-duration caps, so slow local
+ * models need a higher value here even when streaming (#3958). Read per
+ * request so .env hot reloads apply without a restart.
+ */
+export function getAgentCallTimeoutMs() {
+  return readAgentCallTimeoutMs();
+}
 
-  if (lastInvalidChatGenerationTimeout !== raw) {
-    lastInvalidChatGenerationTimeout = raw;
-    sharedLogger.warn(
-      "[runtime-config] Ignoring invalid CHAT_GENERATION_TIMEOUT_MS=%s; expected %d-%d milliseconds, using %d",
-      raw,
-      MIN_CHAT_GENERATION_TIMEOUT_MS,
-      MAX_CHAT_GENERATION_TIMEOUT_MS,
-      DEFAULT_CHAT_GENERATION_TIMEOUT_MS,
-    );
-  }
-  return DEFAULT_CHAT_GENERATION_TIMEOUT_MS;
+/** Dynamic Game image-prompt LLM timeout. Read per request so .env hot reloads apply without a restart. */
+export function getGameDynamicImagePromptTimeoutMs() {
+  return readGameDynamicImagePromptTimeoutMs();
 }
 
 export function getMaxToolRounds() {
@@ -485,6 +529,10 @@ export function isCustomToolScriptEnabled() {
 
 export function isCustomAgentRepositoriesEnabled() {
   return isEnabledFlag(process.env.ENABLE_CUSTOM_AGENT_REPOS);
+}
+
+export function isExternalExtensionsEnvEnabled() {
+  return isEnabledFlag(process.env.ENABLE_EXTERNAL_EXTENSIONS);
 }
 
 export function isSidecarRuntimeInstallEnabled() {

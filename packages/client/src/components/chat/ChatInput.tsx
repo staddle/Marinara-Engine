@@ -21,7 +21,7 @@ import {
 import { createPortal } from "react-dom";
 import { toast } from "sonner";
 import { useQueryClient, type InfiniteData } from "@tanstack/react-query";
-import { useChatStore } from "../../stores/chat.store";
+import { updateCurrentInputSnapshot, useChatStore } from "../../stores/chat.store";
 import { useAgentStore } from "../../stores/agent.store";
 import { useUIStore } from "../../stores/ui.store";
 import { useGenerate } from "../../hooks/use-generate";
@@ -50,11 +50,13 @@ import {
 } from "../../lib/slash-commands";
 import { createInputMacroResolverForChat, isPromptPreviewMacro } from "../../lib/chat-macros";
 import { parseChatMetadata } from "../../lib/chat-display";
-import { cn, getAvatarCropStyle, type AvatarCropValue } from "../../lib/utils";
+import type { AvatarCrop } from "@marinara-engine/shared";
+import { cn, getAvatarCropStyle } from "../../lib/utils";
 import { applyTextareaQuoteFormat } from "../../lib/textarea-quotes";
 import { translateDraftText } from "../../lib/draft-translation";
 import { prepareImageAttachment } from "../../lib/chat-attachment-images";
 import { CARD_ASSET_INSERT_EVENT, type CardAssetInsertDetail } from "../../lib/card-asset-links";
+import { isFileDrag } from "../../lib/chat-resource-drag";
 import { isGenerationSendBlocked } from "../../lib/generation-stream-policy";
 import { requestChatScrollToBottom } from "../../lib/chat-scroll-events";
 import { EmojiPicker } from "../ui/EmojiPicker";
@@ -70,6 +72,7 @@ import { getChatInputShellClass } from "./chat-input-styles";
 import { MariSuggestionChips } from "./MariSuggestionChips";
 import { CapabilityElement } from "../capabilities/CapabilityElement";
 import type { PendingSpatialTransitionDraft } from "../../stores/chat.store";
+import { useTranslation, useTranslation as useUiTranslation } from "react-i18next";
 
 interface Attachment {
   type: string; // MIME type
@@ -97,14 +100,8 @@ const TEXT_ATTACHMENT_EXTENSIONS = new Set([
   "yml",
 ]);
 const PDF_ATTACHMENT_MIME_TYPE = "application/pdf";
-const QUOTE_INPUT_TRIGGER_RE = /["'\u2018\u2019\u201a\u201b\u201c\u201d\u201e\u201f]/;
-
-function shouldFormatQuoteInput(event: FormEvent<HTMLTextAreaElement> | undefined, value: string): boolean {
-  const inputEvent = event?.nativeEvent as InputEvent | undefined;
-  const inputType = typeof inputEvent?.inputType === "string" ? inputEvent.inputType : "";
-  if (inputType.startsWith("delete")) return false;
-  return QUOTE_INPUT_TRIGGER_RE.test(inputEvent?.data ?? value);
-}
+const ROLEPLAY_INPUT_RESIZE_IDLE_MS = 150;
+const ROLEPLAY_INPUT_DELETE_RESIZE_IDLE_MS = 450;
 
 function getFileExtension(fileName: string): string {
   const match = fileName.toLowerCase().match(/\.([a-z0-9]+)$/);
@@ -149,8 +146,16 @@ function getChatInputTextareaMaxHeightPx() {
 }
 
 function resizeChatInputTextarea(el: HTMLTextAreaElement) {
+  const maxHeight = getChatInputTextareaMaxHeightPx();
+
+  // Measure without a vertical scrollbar. If the scrollbar is allowed to
+  // appear during measurement it narrows the textarea, creates an extra wrap,
+  // and can make Firefox alternate between two heights on successive inputs.
+  el.style.overflowY = "hidden";
   el.style.height = "auto";
-  el.style.height = `${Math.min(el.scrollHeight, getChatInputTextareaMaxHeightPx())}px`;
+  const contentHeight = el.scrollHeight;
+  el.style.height = `${Math.min(contentHeight, maxHeight)}px`;
+  el.style.overflowY = contentHeight > maxHeight ? "auto" : "hidden";
 }
 
 function useIsMobileComposerViewport() {
@@ -204,7 +209,7 @@ interface ChatInputProps {
     id: string;
     name: string;
     avatarUrl: string | null;
-    avatarCrop?: AvatarCropValue | null;
+    avatarCrop?: AvatarCrop | null;
   }>;
   onExpressionChange?: (
     characterId: string,
@@ -232,6 +237,8 @@ export const ChatInput = memo(function ChatInput({
   onStartEncounter,
   interactionsLocked = false,
 }: ChatInputProps) {
+  const { t: localizeUi } = useUiTranslation();
+  const { t } = useTranslation();
   const [hasInput, setHasInput] = useState(false);
   const [completions, setCompletions] = useState<SlashCommand[]>([]);
   const [selectedCompletion, setSelectedCompletion] = useState(0);
@@ -241,7 +248,11 @@ export const ChatInput = memo(function ChatInput({
   const [isTranslatingDraft, setIsTranslatingDraft] = useState(false);
   const [emojiOpen, setEmojiOpen] = useState(false);
   const isMobileComposerViewport = useIsMobileComposerViewport();
-  const [pushStoryArmed, setPushStoryArmed] = useState(false);
+  // Push Story arms for the next response with an explicit mode picked from
+  // the selector that opens on click; null means disarmed.
+  const [pushStoryMode, setPushStoryMode] = useState<NarrativeDirectorMode | null>(null);
+  const [pushStoryMenuOpen, setPushStoryMenuOpen] = useState(false);
+  const pushStoryMenuRef = useRef<HTMLDivElement>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [charPickerOpen, setCharPickerOpen] = useState(false);
   const charPickerBtnRef = useRef<HTMLButtonElement>(null);
@@ -251,8 +262,12 @@ export const ChatInput = memo(function ChatInput({
   const inputBarRef = useRef<HTMLDivElement>(null);
   const focusAfterMobileRestoreRef = useRef(false);
   const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const currentInputFrameRef = useRef<number | null>(null);
-  const pendingCurrentInputRef = useRef("");
+  const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const resizeFrameRef = useRef(0);
+  const heldDeleteKeyRef = useRef(false);
+  const heldDeleteDraftRef = useRef<{ chatId: string; text: string } | null>(null);
+  const heldDeleteResizeRef = useRef<HTMLTextAreaElement | null>(null);
+  const hasInputRef = useRef(false);
   const attachmentsRef = useRef<Attachment[]>([]);
   const pendingAttachmentDraftsRef = useRef<Map<string, Attachment[]>>(new Map());
   const activeChatId = useChatStore((s) => s.activeChatId);
@@ -281,7 +296,7 @@ export const ChatInput = memo(function ChatInput({
   );
   const setInputDraft = useChatStore((s) => s.setInputDraft);
   const clearInputDraft = useChatStore((s) => s.clearInputDraft);
-  const setCurrentInput = useChatStore((s) => s.setCurrentInput);
+  const setCurrentInputPresence = useChatStore((s) => s.setCurrentInputPresence);
   const removeFromResponseQueue = useChatStore((s) => s.removeFromResponseQueue);
   const clearResponseQueue = useChatStore((s) => s.clearResponseQueue);
   const activeChat = useChatStore((s) => s.activeChat);
@@ -309,13 +324,19 @@ export const ChatInput = memo(function ChatInput({
     [activeChatCharacters, characterNames],
   );
   const inputPlaceholder = useMemo(() => {
-    if (!activeChatId) return "Select a chat first";
-    if (isMobileComposerViewport) return mode === "roleplay" ? "Write… /cmds" : "Message… /cmds";
-    if (mode === "roleplay") return "Write your response, / for commands";
-    if (activeCharacterNames.length > 1) return `Message @${activeCharacterNames.join(", @")}, / for commands`;
-    if (activeCharacterNames.length === 1) return `Message @${activeCharacterNames[0]}, / for commands`;
-    return "Type here, / for commands.";
-  }, [activeCharacterNames, activeChatId, isMobileComposerViewport, mode]);
+    if (!activeChatId) return t("chat.input.selectChat");
+    if (isMobileComposerViewport) {
+      return t(mode === "roleplay" ? "chat.input.mobile.roleplay" : "chat.input.mobile.message");
+    }
+    if (mode === "roleplay") return t("chat.input.roleplay");
+    if (activeCharacterNames.length > 1) {
+      return t("chat.input.messageCharacters", { names: `@${activeCharacterNames.join(", @")}` });
+    }
+    if (activeCharacterNames.length === 1) {
+      return t("chat.input.messageCharacters", { names: `@${activeCharacterNames[0]}` });
+    }
+    return t("chat.input.default");
+  }, [activeCharacterNames, activeChatId, isMobileComposerViewport, mode, t]);
   const queuedResponseOrder = useMemo(
     () => new Map(responseQueue.map((characterId, index) => [characterId, index + 1])),
     [responseQueue],
@@ -328,6 +349,7 @@ export const ChatInput = memo(function ChatInput({
   const showQuickReplyPostOnly = useUIStore((s) => s.showQuickReplyPostOnly);
   const showQuickReplyGuide = useUIStore((s) => s.showQuickReplyGuide);
   const showQuickReplyImpersonate = useUIStore((s) => s.showQuickReplyImpersonate);
+  const customQuickReplies = useUIStore((s) => s.customQuickReplies);
   const speechToTextEnabled = useUIStore((s) => s.speechToTextEnabled);
   const { data: sttConfig } = useSTTConfig();
   const pushToTalkEnabled = mode === "roleplay" && sttConfig?.enabled === true;
@@ -341,7 +363,6 @@ export const ChatInput = memo(function ChatInput({
   const deleteMessage = useDeleteMessage(activeChatId);
   const updateMessageExtra = useUpdateMessageExtra(activeChatId);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const resizeRafRef = useRef<number>(0);
   const qc = useQueryClient();
   const shouldShowMobileCollapsedComposer =
     isMobileComposerViewport &&
@@ -366,37 +387,35 @@ export const ChatInput = memo(function ChatInput({
   const combatActionActive =
     mode === "roleplay" && combatAgentEnabled === true && typeof onStartEncounter === "function";
   const showRoleplayAgentActions = narrativeDirectorActive || combatActionActive;
-  const narrativeDirectorMode: NarrativeDirectorMode =
-    chatMetadata.narrativeDirectorMode === "random" ? "random" : "natural";
   const consumeNarrativeDirectorMode = useCallback((): NarrativeDirectorMode | undefined => {
-    if (!pushStoryArmed || !narrativeDirectorActive) return undefined;
-    setPushStoryArmed(false);
-    return narrativeDirectorMode;
-  }, [narrativeDirectorActive, narrativeDirectorMode, pushStoryArmed]);
+    if (!pushStoryMode || !narrativeDirectorActive) return undefined;
+    setPushStoryMode(null);
+    return pushStoryMode;
+  }, [narrativeDirectorActive, pushStoryMode]);
   const generateWithNarrativeDirector = useCallback(
     (params: Parameters<typeof generate>[0]) => {
       const directorMode = consumeNarrativeDirectorMode();
-      return generate(directorMode ? { ...params, narrativeDirectorMode: directorMode } : params);
+      if (!directorMode) return generate(params);
+      // Re-arm the chosen mode if the push never reaches a response, so a
+      // failed generation does not silently swallow the user's selection.
+      return generate({ ...params, narrativeDirectorMode: directorMode }).catch((error) => {
+        setPushStoryMode((current) => current ?? directorMode);
+        throw error;
+      });
     },
     [consumeNarrativeDirectorMode, generate],
   );
 
   const syncInputState = useCallback(
     (value: string) => {
-      const nextHasInput = value.trim().length > 0;
-      setHasInput((current) => (current === nextHasInput ? current : nextHasInput));
-      pendingCurrentInputRef.current = value;
-      if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
-        setCurrentInput(value);
-        return;
-      }
-      if (currentInputFrameRef.current !== null) return;
-      currentInputFrameRef.current = window.requestAnimationFrame(() => {
-        currentInputFrameRef.current = null;
-        setCurrentInput(pendingCurrentInputRef.current);
-      });
+      const nextHasInput = /\S/u.test(value);
+      updateCurrentInputSnapshot(value);
+      if (hasInputRef.current === nextHasInput) return;
+      hasInputRef.current = nextHasInput;
+      setHasInput(nextHasInput);
+      setCurrentInputPresence(nextHasInput);
     },
-    [setCurrentInput],
+    [setCurrentInputPresence],
   );
 
   const replaceAttachments = useCallback((next: Attachment[]) => {
@@ -475,6 +494,9 @@ export const ChatInput = memo(function ChatInput({
   const prevChatIdRef = useRef<string | null>(null);
   useEffect(() => {
     if (prevChatIdRef.current !== activeChatId) {
+      heldDeleteKeyRef.current = false;
+      heldDeleteDraftRef.current = null;
+      heldDeleteResizeRef.current = null;
       // Save draft from the previous chat before switching
       if (prevChatIdRef.current && textareaRef.current) {
         const prevText = textareaRef.current.value;
@@ -514,13 +536,11 @@ export const ChatInput = memo(function ChatInput({
     return () => {
       // Cancel pending debounce timers
       if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
-      // Cancel pending resize rAF
-      if (resizeRafRef.current) cancelAnimationFrame(resizeRafRef.current);
-      if (currentInputFrameRef.current !== null) {
-        cancelAnimationFrame(currentInputFrameRef.current);
-        currentInputFrameRef.current = null;
-        useChatStore.getState().setCurrentInput(pendingCurrentInputRef.current);
-      }
+      if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
+      if (resizeFrameRef.current) cancelAnimationFrame(resizeFrameRef.current);
+      heldDeleteKeyRef.current = false;
+      heldDeleteDraftRef.current = null;
+      heldDeleteResizeRef.current = null;
       // Flush draft synchronously
       if (chatId && textarea) {
         const text = textarea.value;
@@ -671,12 +691,14 @@ export const ChatInput = memo(function ChatInput({
 
       const acceptedFiles = Array.from(files).filter((file) => {
         if (file.size > 20 * 1024 * 1024) {
-          toast.error(`${file.name} is too large (max 20 MB)`);
+          toast.error(localizeUi("ui.chat.chatinput.value1IsTooLargeMax20Mb", { value1: file.name }));
           return false;
         }
         if (!isSupportedChatAttachment(file)) {
           toast.error(
-            `${file.name || "That file"} is not supported in chat. Attach images, PDFs, or text files like JSON, TXT, Markdown, or CSV.`,
+            localizeUi("ui.chat.chatinput.value1IsNotSupportedInChatAttachImagesPdfs", {
+              value1: file.name || localizeUi("ui.chat.chatinput.thatFile"),
+            }),
           );
           return false;
         }
@@ -692,7 +714,7 @@ export const ChatInput = memo(function ChatInput({
           try {
             appendAttachmentForChat(originChatId, await prepareImageAttachment(file, displayName));
           } catch {
-            toast.error(`Failed to prepare ${displayName}`);
+            toast.error(localizeUi("ui.chat.chatinput.failedToPrepareValue1", { value1: displayName }));
           } finally {
             adjustPendingAttachmentReads(originChatId, -1);
           }
@@ -703,13 +725,13 @@ export const ChatInput = memo(function ChatInput({
           const data = await readFileAsDataUrl(file);
           appendAttachmentForChat(originChatId, { type: inferAttachmentType(file), data, name: displayName });
         } catch {
-          toast.error(`Failed to read ${displayName}`);
+          toast.error(localizeUi("ui.chat.chatinput.failedToReadValue1", { value1: displayName }));
         } finally {
           adjustPendingAttachmentReads(originChatId, -1);
         }
       }
     },
-    [adjustPendingAttachmentReads, appendAttachmentForChat],
+    [adjustPendingAttachmentReads, appendAttachmentForChat, localizeUi],
   );
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -741,6 +763,7 @@ export const ChatInput = memo(function ChatInput({
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
+      if (!isFileDrag(e.dataTransfer)) return;
       e.preventDefault();
       setIsDragging(false);
       if (!activeChatId) return;
@@ -751,6 +774,7 @@ export const ChatInput = memo(function ChatInput({
   );
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
+    if (!isFileDrag(e.dataTransfer)) return;
     e.preventDefault();
     setIsDragging(true);
   }, []);
@@ -769,7 +793,13 @@ export const ChatInput = memo(function ChatInput({
     return {
       chatId: activeChatId,
       mode,
-      generate: generateWithNarrativeDirector,
+      generate: (params) =>
+        generateWithNarrativeDirector({
+          ...params,
+          ...(params.impersonate && canSubmitSpatialMove && pendingSpatialTransition
+            ? { pendingSpatialTransition: pendingSpatialTransition.transition }
+            : {}),
+        }),
       createMessage: async (data) => {
         await createMessage.mutateAsync(data);
         requestChatScrollToBottom({ chatId: activeChatId, behavior: "auto" });
@@ -794,6 +824,7 @@ export const ChatInput = memo(function ChatInput({
     createMessage,
     activeCharacterNames,
     activeChatCharacters,
+    canSubmitSpatialMove,
     requiresManualGuideTarget,
     removeFromResponseQueue,
     latestAssistantMessage,
@@ -801,31 +832,61 @@ export const ChatInput = memo(function ChatInput({
     onExpressionChange,
     onIllustrate,
     availableCapabilityIds,
+    pendingSpatialTransition,
     qc,
   ]);
 
-  const handleTogglePushStory = useCallback(() => {
+  const handlePushStoryClick = useCallback(() => {
     if (!narrativeDirectorActive || isInputBusy) return;
-    setPushStoryArmed((current) => {
-      const next = !current;
-      if (next) {
-        toast.success(
-          `The next time a character responds, they will push the story forward ${
-            narrativeDirectorMode === "random" ? "randomly" : "naturally"
-          }!`,
-        );
-      } else {
-        toast.info("Push Story disarmed.");
-      }
-      return next;
-    });
-  }, [isInputBusy, narrativeDirectorActive, narrativeDirectorMode]);
+    if (pushStoryMode) {
+      setPushStoryMode(null);
+      setPushStoryMenuOpen(false);
+      toast.info(localizeUi("ui.chat.chatinput.pushStoryDisarmed"));
+      return;
+    }
+    setPushStoryMenuOpen((open) => !open);
+  }, [isInputBusy, narrativeDirectorActive, pushStoryMode, localizeUi]);
+
+  const handleArmPushStory = useCallback(
+    (mode: NarrativeDirectorMode) => {
+      setPushStoryMode(mode);
+      setPushStoryMenuOpen(false);
+      toast.success(
+        localizeUi("ui.chat.chatinput.theNextTimeACharacterRespondsTheyWillPush", {
+          value1:
+            mode === "random"
+              ? localizeUi("ui.chat.chatinput.randomly_4f73f1a")
+              : localizeUi("ui.chat.chatinput.naturally_be60af6"),
+        }),
+      );
+    },
+    [localizeUi],
+  );
+
+  // Dismiss the Push Story mode selector on outside click or Escape.
+  useEffect(() => {
+    if (!pushStoryMenuOpen) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (target && pushStoryMenuRef.current?.contains(target)) return;
+      setPushStoryMenuOpen(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPushStoryMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", handlePointerDown, true);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown, true);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [pushStoryMenuOpen]);
 
   const handleSend = useCallback(async () => {
     const raw = getValue();
     if (!activeChatId || isInputBusy) return;
     if (isReadingAttachments) {
-      toast.info("Still reading attached files. Send will be ready in a moment.");
+      toast.info(localizeUi("ui.chat.chatinput.stillReadingAttachedFilesSendWillBeReadyIn"));
       return;
     }
     // Cancel pending draft debounce so clearInputDraft isn't overwritten
@@ -940,9 +1001,7 @@ export const ChatInput = memo(function ChatInput({
     // Check if the chat has a connection configured
     const chat = useChatStore.getState().activeChat;
     if (chat && !chat.connectionId) {
-      toast.error(
-        "It looks like you haven't connected any model yet. Please head to Chat Settings in the top right corner to do that first!",
-      );
+      toast.error(localizeUi("ui.chat.chatinput.itLooksLikeYouHavenTConnectedAnyModel"));
       return;
     }
 
@@ -959,10 +1018,10 @@ export const ChatInput = memo(function ChatInput({
     if (chatMeta.translateInput && message.trim()) {
       try {
         const { translateText } = await import("../../lib/translate-text");
-        const translated = await translateText(message);
+        const translated = await translateText(message, "input");
         if (translated.trim()) message = translated;
       } catch {
-        toast.error("Failed to translate message — sending original");
+        toast.error(localizeUi("ui.chat.chatinput.failedToTranslateMessageSendingOriginal"));
       }
     }
 
@@ -1082,6 +1141,7 @@ export const ChatInput = memo(function ChatInput({
     canSubmitSpatialMove,
     pendingSpatialTransition,
     availableCapabilityIds,
+    localizeUi,
   ]);
 
   const runQuickSlashCommand = useCallback(
@@ -1159,19 +1219,19 @@ export const ChatInput = memo(function ChatInput({
   const handleImpersonateQuickButton = useCallback(async () => {
     if (!activeChatId || isInputBusy) return;
     if (hasPendingAttachments) {
-      toast.info("Clear or send attachments before using quick impersonate.");
+      toast.info(localizeUi("ui.chat.chatinput.clearOrSendAttachmentsBeforeUsingQuickImpersonate"));
       return;
     }
     const text = textareaRef.current?.value?.trim() ?? "";
     if (!text) return;
     await runQuickSlashCommand(`/impersonate ${text}`, "Impersonate failed");
-  }, [activeChatId, isInputBusy, hasPendingAttachments, runQuickSlashCommand]);
+  }, [activeChatId, isInputBusy, hasPendingAttachments, runQuickSlashCommand, localizeUi]);
 
   const handlePostOnlyButton = useCallback(async () => {
     if (!activeChatId || isInputBusy) return;
     const submittingChatId = activeChatId;
     if (isReadingAttachments) {
-      toast.info("Still reading attached files. Post will be ready in a moment.");
+      toast.info(localizeUi("ui.chat.chatinput.stillReadingAttachedFilesPostWillBeReadyIn"));
       return;
     }
     const raw = textareaRef.current?.value ?? "";
@@ -1203,10 +1263,10 @@ export const ChatInput = memo(function ChatInput({
     if (chatMeta.translateInput && message.trim()) {
       try {
         const { translateText } = await import("../../lib/translate-text");
-        const translated = await translateText(message);
+        const translated = await translateText(message, "input");
         if (translated.trim()) message = translated;
       } catch {
-        toast.error("Failed to translate message; posting original");
+        toast.error(localizeUi("ui.chat.chatinput.failedToTranslateMessagePostingOriginal"));
       }
     }
 
@@ -1275,7 +1335,11 @@ export const ChatInput = memo(function ChatInput({
         setInputDraft(submittingChatId, submittedDraft);
       }
       const msg = error instanceof Error ? error.message : "Failed to post message";
-      toast.error(rollbackFailed ? `${msg}; the partial message may need to be removed before retrying.` : msg);
+      toast.error(
+        rollbackFailed
+          ? localizeUi("ui.chat.chatinput.value1ThePartialMessageMayNeedToBeRemoved", { value1: msg })
+          : msg,
+      );
     }
   }, [
     activeChatId,
@@ -1298,22 +1362,36 @@ export const ChatInput = memo(function ChatInput({
     quoteFormat,
     mode,
     availableCapabilityIds,
+    localizeUi,
   ]);
 
   const handleGuidedGenerationButton = useCallback(async () => {
     if (!activeChatId || isInputBusy) return;
     if (requiresManualGuideTarget) {
-      toast.info("Choose a character from the reply picker to guide a specific reply.");
+      toast.info(localizeUi("ui.chat.chatinput.chooseACharacterFromTheReplyPickerToGuide"));
       return;
     }
     if (hasPendingAttachments) {
-      toast.info("Clear or send attachments before using guided generation.");
+      toast.info(localizeUi("ui.chat.chatinput.clearOrSendAttachmentsBeforeUsingGuidedGeneration"));
       return;
     }
     const text = textareaRef.current?.value?.trim() ?? "";
     if (!text) return;
     await runQuickSlashCommand(`/guided ${text}`, "Guided generation failed");
-  }, [activeChatId, isInputBusy, requiresManualGuideTarget, hasPendingAttachments, runQuickSlashCommand]);
+  }, [activeChatId, isInputBusy, requiresManualGuideTarget, hasPendingAttachments, runQuickSlashCommand, localizeUi]);
+
+  const sendCustomQuickReply = useCallback(
+    async (content: string) => {
+      const el = textareaRef.current;
+      if (!el || !activeChatId || isInputBusy || isReadingAttachments) return;
+      el.value = content;
+      resizeChatInputTextarea(el);
+      syncInputState(content);
+      setInputDraft(activeChatId, content);
+      await handleSend();
+    },
+    [activeChatId, isInputBusy, isReadingAttachments, syncInputState, setInputDraft, handleSend],
+  );
 
   const quickReplyActions = useMemo<QuickReplyAction[]>(() => {
     const actions: QuickReplyAction[] = [];
@@ -1372,6 +1450,29 @@ export const ChatInput = memo(function ChatInput({
         onSelect: handleImpersonateQuickButton,
       });
     }
+    for (const entry of customQuickReplies) {
+      const label = entry.label.trim() || entry.content.trim().slice(0, 24) || "Quick reply";
+      if (!entry.content.trim()) continue;
+      actions.push({
+        id: `custom-${entry.id}`,
+        label,
+        description: "Send a saved custom quick reply",
+        icon: (
+          <span className="text-sm leading-none" aria-hidden="true">
+            {entry.icon?.trim() || "✨"}
+          </span>
+        ),
+        disabled: !activeChatId || isInputBusy || isReadingAttachments,
+        disabledReason: !activeChatId
+          ? "Select or create a chat first."
+          : isInputBusy
+            ? (inputBusyReason ?? undefined)
+            : isReadingAttachments
+              ? "Still reading attached files."
+              : undefined,
+        onSelect: () => sendCustomQuickReply(entry.content),
+      });
+    }
     return actions;
   }, [
     activeChatId,
@@ -1385,12 +1486,83 @@ export const ChatInput = memo(function ChatInput({
     showQuickReplyPostOnly,
     showQuickReplyGuide,
     showQuickReplyImpersonate,
+    customQuickReplies,
+    sendCustomQuickReply,
     handlePostOnlyButton,
     handleGuidedGenerationButton,
     handleImpersonateQuickButton,
   ]);
 
+  const scheduleDraftPersistence = useCallback(
+    (chatId: string, text: string) => {
+      if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
+      draftTimerRef.current = setTimeout(() => {
+        draftTimerRef.current = null;
+        if (text.trim()) {
+          setInputDraft(chatId, text);
+        } else {
+          clearInputDraft(chatId);
+        }
+      }, 300);
+    },
+    [clearInputDraft, setInputDraft],
+  );
+
+  const scheduleTextareaResize = useCallback((el: HTMLTextAreaElement, delay: number) => {
+    if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
+    resizeTimerRef.current = setTimeout(() => {
+      resizeTimerRef.current = null;
+      if (textareaRef.current !== el) return;
+      resizeChatInputTextarea(el);
+    }, delay);
+  }, []);
+
+  const scheduleTextareaFrameResize = useCallback((el: HTMLTextAreaElement) => {
+    if (resizeFrameRef.current) return;
+    resizeFrameRef.current = requestAnimationFrame(() => {
+      resizeFrameRef.current = 0;
+      if (textareaRef.current !== el) return;
+      resizeChatInputTextarea(el);
+    });
+  }, []);
+
+  const releaseHeldDeleteWork = useCallback(() => {
+    if (!heldDeleteKeyRef.current) return;
+    heldDeleteKeyRef.current = false;
+
+    const pendingDraft = heldDeleteDraftRef.current;
+    heldDeleteDraftRef.current = null;
+    if (pendingDraft) {
+      scheduleDraftPersistence(pendingDraft.chatId, pendingDraft.text);
+    }
+
+    const pendingResize = heldDeleteResizeRef.current;
+    heldDeleteResizeRef.current = null;
+    if (pendingResize) {
+      scheduleTextareaResize(pendingResize, ROLEPLAY_INPUT_RESIZE_IDLE_MS);
+    }
+  }, [scheduleDraftPersistence, scheduleTextareaResize]);
+
+  useEffect(() => {
+    window.addEventListener("blur", releaseHeldDeleteWork);
+    return () => window.removeEventListener("blur", releaseHeldDeleteWork);
+  }, [releaseHeldDeleteWork]);
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (mode === "roleplay" && (e.key === "Backspace" || e.key === "Delete") && !heldDeleteKeyRef.current) {
+      heldDeleteKeyRef.current = true;
+      heldDeleteDraftRef.current = null;
+      heldDeleteResizeRef.current = null;
+      if (draftTimerRef.current) {
+        clearTimeout(draftTimerRef.current);
+        draftTimerRef.current = null;
+      }
+      if (resizeTimerRef.current) {
+        clearTimeout(resizeTimerRef.current);
+        resizeTimerRef.current = null;
+      }
+    }
+
     // Autocomplete navigation
     if (completions.length > 0) {
       if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
@@ -1421,48 +1593,73 @@ export const ChatInput = memo(function ChatInput({
       }
     }
 
-    if (enterToSend && e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
+    if (e.key === "Enter") {
+      if (enterToSend && !e.shiftKey) {
+        e.preventDefault();
+        handleSend();
+      } else {
+        const el = textareaRef.current;
+        requestAnimationFrame(() => {
+          if (el && textareaRef.current === el) resizeChatInputTextarea(el);
+        });
+      }
+    }
+  };
+
+  const handleKeyUp = (e: React.KeyboardEvent) => {
+    if (e.key === "Backspace" || e.key === "Delete") {
+      releaseHeldDeleteWork();
     }
   };
 
   const handleInput = (event?: FormEvent<HTMLTextAreaElement>) => {
     const el = textareaRef.current;
     if (!el) return;
-    const fixed = shouldFormatQuoteInput(event, el.value) ? applyTextareaQuoteFormat(el, quoteFormat) : el.value;
+    const inputEvent = event?.nativeEvent as InputEvent | undefined;
+    const isDeleting = inputEvent?.inputType?.startsWith("delete") === true;
+    const shouldDeferDeleteWork = mode === "roleplay" && isDeleting && heldDeleteKeyRef.current;
+    const fixed = applyTextareaQuoteFormat(el, quoteFormat, inputEvent);
     syncInputState(fixed);
+    if (!isDeleting) {
+      // Resize once before Firefox's next paint so newly wrapped text remains
+      // visible without competing with a second, delayed height measurement.
+      scheduleTextareaFrameResize(el);
+    }
 
     // Keep draft in sync so it survives remounts (debounced to avoid store churn)
     if (activeChatId) {
-      if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
       const chatId = activeChatId;
       const text = fixed;
-      draftTimerRef.current = setTimeout(() => {
-        if (text.trim()) {
-          setInputDraft(chatId, text);
-        } else {
-          clearInputDraft(chatId);
-        }
-      }, 300);
+      if (shouldDeferDeleteWork) {
+        heldDeleteDraftRef.current = { chatId, text };
+      } else {
+        scheduleDraftPersistence(chatId, text);
+      }
     }
 
-    // Auto-resize textarea — batched via rAF to avoid layout thrashing on
-    // every keystroke while still responding within the same visual frame.
-    if (resizeRafRef.current) cancelAnimationFrame(resizeRafRef.current);
-    resizeRafRef.current = requestAnimationFrame(() => {
-      if (!el) return;
-      resizeChatInputTextarea(el);
-    });
+    // Insertions already received their single frame resize above. Keep
+    // deletion shrinking off the held-key path so Backspace stays smooth.
+    if (shouldDeferDeleteWork) {
+      heldDeleteResizeRef.current = el;
+    } else if (!isDeleting) {
+      if (resizeTimerRef.current) {
+        clearTimeout(resizeTimerRef.current);
+        resizeTimerRef.current = null;
+      }
+    } else {
+      scheduleTextareaResize(el, ROLEPLAY_INPUT_DELETE_RESIZE_IDLE_MS);
+    }
 
     // Slash command autocomplete
-    const trimmed = fixed.trim();
-    if (trimmed.startsWith("/") && !trimmed.includes(" ")) {
-      const matches = getSlashCompletions(trimmed, { mode, availableCapabilityIds });
-      setCompletions(matches);
-      setSelectedCompletion(0);
-    } else {
-      setCompletions((prev) => (prev.length === 0 ? prev : []));
+    if (completions.length > 0 || /^\s*\//u.test(fixed)) {
+      const trimmed = fixed.trim();
+      if (trimmed.startsWith("/") && !trimmed.includes(" ")) {
+        const matches = getSlashCompletions(trimmed, { mode, availableCapabilityIds });
+        setCompletions(matches);
+        setSelectedCompletion(0);
+      } else if (completions.length > 0) {
+        setCompletions([]);
+      }
     }
   };
 
@@ -1642,18 +1839,20 @@ export const ChatInput = memo(function ChatInput({
                 userMessage: trimmed,
               });
             } catch (error) {
-              toast.error(error instanceof Error ? error.message : "Generation failed");
+              toast.error(
+                error instanceof Error ? error.message : localizeUi("ui.game.gamenarration.generationFailed"),
+              );
             }
             await waitForTTSSettle();
           }
         } catch (error) {
-          toast.error(error instanceof Error ? error.message : "Transcription failed.");
+          toast.error(error instanceof Error ? error.message : localizeUi("ui.chat.chatinput.transcriptionFailed"));
         } finally {
           setCallPhase("listening");
         }
       })();
     },
-    [activeChatId, generateWithNarrativeDirector, transcribeAudio],
+    [activeChatId, generateWithNarrativeDirector, localizeUi, transcribeAudio],
   );
 
   const handleCallVoiceError = useCallback((message: string) => {
@@ -1726,9 +1925,11 @@ export const ChatInput = memo(function ChatInput({
             getChatInputShellClass({ dragging: false, hasContent: false, layout: "roleplay" }),
             "min-h-10 w-full justify-start text-left text-sm text-foreground/55",
           )}
-          aria-label="Show message input"
+          aria-label={t("chat.input.show")}
         >
-          <span className="truncate">{mode === "roleplay" ? "Write… /cmds" : "Message… /cmds"}</span>
+          <span className="truncate">
+            {t(mode === "roleplay" ? "chat.input.mobile.roleplay" : "chat.input.mobile.message")}
+          </span>
         </button>
       </div>
     );
@@ -1746,387 +1947,468 @@ export const ChatInput = memo(function ChatInput({
         />
       ) : (
         <>
-      {/* Slash command autocomplete popup */}
-      {completions.length > 0 && (
-        <div className="mb-2 max-h-[min(18rem,45dvh)] overflow-y-auto rounded-xl border border-foreground/10 bg-[var(--card)] shadow-xl backdrop-blur-xl [-webkit-overflow-scrolling:touch]">
-          {completions.map((cmd, i) => (
-            <button
-              key={cmd.name}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                if (textareaRef.current) {
-                  textareaRef.current.value = `/${cmd.name} `;
-                  handleInput();
-                  textareaRef.current.focus();
-                }
-                setCompletions([]);
-              }}
-              className={cn(
-                "flex w-full min-w-0 items-start gap-2 px-3 py-2.5 text-left text-sm transition-colors",
-                i === selectedCompletion
-                  ? "bg-foreground/10 text-foreground"
-                  : "text-foreground/70 hover:bg-foreground/5",
-              )}
-            >
-              <span className="shrink-0 whitespace-nowrap font-mono font-semibold text-foreground/80">/{cmd.name}</span>
-              <span className="min-w-0 flex-1 text-xs leading-snug opacity-60 [overflow-wrap:anywhere]">
-                {cmd.description}
-              </span>
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* Feedback toast */}
-      {feedback && <SlashCommandFeedback feedback={feedback} onDismiss={() => setFeedback(null)} className="mb-2" />}
-
-      {hierarchicalMapsActive && activeChatId ? (
-        <CapabilityElement
-          packageId="hierarchical-maps"
-          view="runtime"
-          capabilityProps={{
-            chatId: activeChatId,
-            disabled: isInputBusy,
-            pendingTransition: pendingSpatialTransition,
-            onPendingTransitionChange: (pending: unknown) => {
-              if (pending && typeof pending === "object") {
-                useChatStore
-                  .getState()
-                  .setPendingSpatialTransition(activeChatId, pending as PendingSpatialTransitionDraft);
-              } else {
-                useChatStore.getState().clearPendingSpatialTransition(activeChatId);
-              }
-            },
-          }}
-        />
-      ) : null}
-
-      {showRoleplayAgentActions && (
-        <div className="flex flex-wrap justify-center gap-2 py-1">
-          {narrativeDirectorActive && (
-            <button
-              type="button"
-              onClick={handleTogglePushStory}
-              disabled={isInputBusy}
-              aria-pressed={pushStoryArmed}
-              className={cn(
-                ROLEPLAY_AGENT_ACTION_BUTTON_CLASS,
-                pushStoryArmed
-                  ? "bg-foreground/10 text-foreground ring-1 ring-foreground/25"
-                  : "text-foreground/50 hover:bg-foreground/10 hover:text-foreground/80",
-              )}
-              title={
-                narrativeDirectorMode === "random"
-                  ? "Arm a random Narrative Director event for the next response"
-                  : "Arm a natural Narrative Director push for the next response"
-              }
-            >
-              <WandSparkles size="0.875rem" />
-              <span>Push Story</span>
-            </button>
-          )}
-          {combatActionActive && (
-            <button
-              type="button"
-              onClick={() => onStartEncounter?.()}
-              disabled={isInputBusy}
-              className={cn(
-                ROLEPLAY_AGENT_ACTION_BUTTON_CLASS,
-                "text-foreground/50 hover:bg-foreground/10 hover:text-foreground/80 disabled:hover:bg-transparent disabled:hover:text-foreground/50",
-              )}
-              title="Start Combat Encounter"
-            >
-              <Swords size="0.875rem" />
-              <span>Encounter</span>
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* Attachment previews */}
-      {(attachments.length > 0 || isReadingAttachments) && (
-        <div className="mb-2 flex flex-wrap gap-2">
-          {attachments.map((att, i) => (
-            <div
-              key={i}
-              className="group relative flex items-center gap-1.5 rounded-lg bg-foreground/10 px-2 py-1 text-xs text-foreground/70 ring-1 ring-foreground/10"
-            >
-              {att.type.startsWith("image/") ? (
-                <img src={att.data} alt={att.name} className="h-8 w-8 rounded object-cover" />
-              ) : (
-                <FileText
-                  size="1rem"
+          {/* Slash command autocomplete popup */}
+          {completions.length > 0 && (
+            <div className="mb-2 max-h-[min(18rem,45dvh)] overflow-y-auto rounded-xl border border-foreground/10 bg-[var(--card)] shadow-xl backdrop-blur-xl [-webkit-overflow-scrolling:touch]">
+              {completions.map((cmd, i) => (
+                <button
+                  key={cmd.name}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    if (textareaRef.current) {
+                      textareaRef.current.value = `/${cmd.name} `;
+                      handleInput();
+                      textareaRef.current.focus();
+                    }
+                    setCompletions([]);
+                  }}
                   className={cn(
-                    "shrink-0",
-                    att.type === PDF_ATTACHMENT_MIME_TYPE ? "text-[var(--primary)]" : "text-foreground/50",
+                    "flex w-full min-w-0 items-start gap-2 px-3 py-2.5 text-left text-sm transition-colors",
+                    i === selectedCompletion
+                      ? "bg-foreground/10 text-foreground"
+                      : "text-foreground/70 hover:bg-foreground/5",
                   )}
-                />
+                >
+                  <span className="shrink-0 whitespace-nowrap font-mono font-semibold text-foreground/80">
+                    /{cmd.name}
+                  </span>
+                  <span className="min-w-0 flex-1 text-xs leading-snug opacity-60 [overflow-wrap:anywhere]">
+                    {cmd.description}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Feedback toast */}
+          {feedback && (
+            <SlashCommandFeedback feedback={feedback} onDismiss={() => setFeedback(null)} className="mb-2" />
+          )}
+
+          {hierarchicalMapsActive && activeChatId ? (
+            <CapabilityElement
+              packageId="hierarchical-maps"
+              view="runtime"
+              capabilityProps={{
+                chatId: activeChatId,
+                chatMode: mode,
+                disabled: isInputBusy,
+                pendingTransition: pendingSpatialTransition,
+                onPendingTransitionChange: (pending: unknown) => {
+                  if (pending && typeof pending === "object") {
+                    useChatStore
+                      .getState()
+                      .setPendingSpatialTransition(activeChatId, pending as PendingSpatialTransitionDraft);
+                  } else {
+                    useChatStore.getState().clearPendingSpatialTransition(activeChatId);
+                  }
+                },
+              }}
+            />
+          ) : null}
+
+          {showRoleplayAgentActions && (
+            <div className="flex flex-wrap justify-center gap-2 py-1">
+              {narrativeDirectorActive && (
+                <div ref={pushStoryMenuRef} className="relative">
+                  <button
+                    type="button"
+                    onClick={handlePushStoryClick}
+                    disabled={isInputBusy}
+                    aria-pressed={pushStoryMode !== null}
+                    aria-expanded={pushStoryMenuOpen}
+                    aria-haspopup="menu"
+                    className={cn(
+                      ROLEPLAY_AGENT_ACTION_BUTTON_CLASS,
+                      pushStoryMode
+                        ? "bg-foreground/10 text-foreground ring-1 ring-foreground/25"
+                        : "text-foreground/50 hover:bg-foreground/10 hover:text-foreground/80",
+                    )}
+                    title={
+                      pushStoryMode
+                        ? localizeUi("ui.chat.chatinput.disarmTheNarrativeDirectorPush")
+                        : localizeUi("ui.chat.chatinput.chooseHowTheNarrativeDirectorPushesTheStoryIn")
+                    }
+                  >
+                    <WandSparkles size="0.875rem" />
+                    <span>
+                      {pushStoryMode
+                        ? localizeUi("ui.chat.chatinput.pushStoryValue1", {
+                            value1:
+                              pushStoryMode === "random"
+                                ? localizeUi("ui.chat.chatinput.randomly")
+                                : localizeUi("ui.chat.chatinput.naturally"),
+                          })
+                        : localizeUi("ui.agents.contextinjectionpanel.pushStory")}
+                    </span>
+                  </button>
+                  {pushStoryMenuOpen && (
+                    <div
+                      role="menu"
+                      className="absolute bottom-full left-1/2 z-50 mb-2 w-64 -translate-x-1/2 rounded-xl border border-[var(--border)] bg-[var(--card)] p-1 shadow-2xl"
+                    >
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => handleArmPushStory("natural")}
+                        className="flex w-full flex-col items-start gap-0.5 rounded-lg px-3 py-2 text-left transition-colors hover:bg-foreground/10"
+                      >
+                        <span className="text-sm font-medium text-foreground">
+                          {localizeUi("ui.chat.chatinput.naturally")}
+                        </span>
+                        <span className="text-xs text-foreground/60">
+                          {localizeUi("ui.chat.chatinput.pushTheExistingPlotForward")}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => handleArmPushStory("random")}
+                        className="flex w-full flex-col items-start gap-0.5 rounded-lg px-3 py-2 text-left transition-colors hover:bg-foreground/10"
+                      >
+                        <span className="text-sm font-medium text-foreground">
+                          {localizeUi("ui.chat.chatinput.randomly")}
+                        </span>
+                        <span className="text-xs text-foreground/60">
+                          {localizeUi("ui.chat.chatinput.addAPlausibleSurpriseToTheScene")}
+                        </span>
+                      </button>
+                    </div>
+                  )}
+                </div>
               )}
-              <span className="max-w-[7.5rem] truncate">{att.name}</span>
-              <button
-                onClick={() => removeAttachment(i)}
-                className="ml-0.5 rounded-full p-0.5 opacity-60 transition-opacity hover:opacity-100"
-              >
-                <X size="0.75rem" />
-              </button>
-            </div>
-          ))}
-          {isReadingAttachments && (
-            <div className="flex items-center gap-1.5 rounded-lg bg-foreground/10 px-2 py-1 text-xs text-foreground/60 ring-1 ring-foreground/10">
-              <Loader2 size="0.875rem" className="animate-spin" />
-              Reading file...
+              {combatActionActive && (
+                <button
+                  type="button"
+                  onClick={() => onStartEncounter?.()}
+                  disabled={isInputBusy}
+                  className={cn(
+                    ROLEPLAY_AGENT_ACTION_BUTTON_CLASS,
+                    "text-foreground/50 hover:bg-foreground/10 hover:text-foreground/80 disabled:hover:bg-transparent disabled:hover:text-foreground/50",
+                  )}
+                  title={localizeUi("ui.chat.chatinput.startCombatEncounter")}
+                >
+                  <Swords size="0.875rem" />
+                  <span>{localizeUi("ui.chat.chatinput.encounter")}</span>
+                </button>
+              )}
             </div>
           )}
-        </div>
-      )}
 
-      {chipRowHint && (
-        <p className="mb-1 flex items-center gap-1.5 px-0.5 text-xs text-[var(--muted-foreground)]">
-          <Sparkles size="0.75rem" className="shrink-0 text-[var(--primary)]" />
-          <span>{chipRowHint}</span>
-        </p>
-      )}
-      <MariSuggestionChips chips={chipRowChips} onSelect={handleMariChipSelect} disabled={isInputBusy} />
-
-      {/* Main input container */}
-      <div
-        ref={inputBarRef}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
-        className={getChatInputShellClass({
-          dragging: isDragging,
-          hasContent: hasInput || attachments.length > 0,
-          layout: "roleplay",
-        })}
-      >
-        {/* Attachment button */}
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*,application/pdf,.pdf,.txt,.md,.markdown,.json,.jsonl,.csv,.log,.xml,.yaml,.yml"
-          multiple
-          className="hidden"
-          onChange={handleFileUpload}
-        />
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          disabled={!activeChatId || isInputBusy}
-          className={cn(
-            "flex h-9 w-9 items-center justify-center rounded-xl transition-all active:scale-90 disabled:cursor-not-allowed disabled:text-foreground/25 disabled:opacity-50 sm:h-8 sm:w-8",
-            attachments.length
-              ? "bg-foreground/10 text-foreground/75 ring-1 ring-foreground/20"
-              : "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70",
+          {/* Attachment previews */}
+          {(attachments.length > 0 || isReadingAttachments) && (
+            <div className="mb-2 flex flex-wrap gap-2">
+              {attachments.map((att, i) => (
+                <div
+                  key={i}
+                  className="group relative flex items-center gap-1.5 rounded-lg bg-foreground/10 px-2 py-1 text-xs text-foreground/70 ring-1 ring-foreground/10"
+                >
+                  {att.type.startsWith("image/") ? (
+                    <img src={att.data} alt={att.name} className="h-8 w-8 rounded object-cover" />
+                  ) : (
+                    <FileText
+                      size="1rem"
+                      className={cn(
+                        "shrink-0",
+                        att.type === PDF_ATTACHMENT_MIME_TYPE ? "text-[var(--primary)]" : "text-foreground/50",
+                      )}
+                    />
+                  )}
+                  <span className="max-w-[7.5rem] truncate">{att.name}</span>
+                  <button
+                    onClick={() => removeAttachment(i)}
+                    className="ml-0.5 rounded-full p-0.5 opacity-60 transition-opacity hover:opacity-100"
+                  >
+                    <X size="0.75rem" />
+                  </button>
+                </div>
+              ))}
+              {isReadingAttachments && (
+                <div className="flex items-center gap-1.5 rounded-lg bg-foreground/10 px-2 py-1 text-xs text-foreground/60 ring-1 ring-foreground/10">
+                  <Loader2 size="0.875rem" className="animate-spin" />
+                  {localizeUi("ui.chat.chatinput.readingFile")}
+                </div>
+              )}
+            </div>
           )}
-          title="Attach files"
-        >
-          <Paperclip size="1rem" />
-        </button>
 
-        {/* Quick Switchers — desktop: inline, mobile: chevron */}
-        <QuickConnectionSwitcher className="hidden sm:flex" />
-        <QuickPersonaSwitcher className="hidden sm:flex" />
-        <div className="sm:hidden">
-          <QuickSwitcherMobile />
-        </div>
+          {chipRowHint && (
+            <p className="mb-1 flex items-center gap-1.5 px-0.5 text-xs text-[var(--muted-foreground)]">
+              <Sparkles size="0.75rem" className="shrink-0 text-[var(--primary)]" />
+              <span>{chipRowHint}</span>
+            </p>
+          )}
+          <MariSuggestionChips chips={chipRowChips} onSelect={handleMariChipSelect} disabled={isInputBusy} />
 
-        {/* Text input */}
-        <textarea
-          ref={textareaRef}
-          onChange={handleInput}
-          onKeyDown={handleKeyDown}
-          onPaste={handlePaste}
-          onFocus={() => {
-            ensureInputVisible();
-          }}
-          placeholder={inputPlaceholder}
-          disabled={!activeChatId}
-          rows={1}
-          spellCheck
-          autoCorrect="on"
-          className="mari-chat-input-textarea max-h-[12.5rem] min-w-0 flex-1 resize-none bg-transparent py-0 text-sm leading-normal text-foreground/90 placeholder:text-foreground/30 outline-none disabled:cursor-not-allowed disabled:opacity-40"
-        />
-
-        {/* Emoji picker */}
-        <div className="relative hidden shrink-0 sm:block">
-          <button
-            ref={emojiButtonRef}
-            onClick={() => setEmojiOpen((v) => !v)}
-            className={cn(
-              "flex h-8 w-8 items-center justify-center rounded-full transition-colors active:scale-90",
-              emojiOpen
-                ? "bg-foreground/10 text-foreground/75 ring-1 ring-foreground/20"
-                : "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70",
-            )}
-            title="Emoji"
-            aria-label="Emoji"
+          {/* Main input container */}
+          <div
+            ref={inputBarRef}
+            data-chat-resource-drop-exclude
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            onPointerDown={(event) => {
+              const target = event.target as HTMLElement;
+              if (target.closest("button, input, textarea, select, a, [role='button']")) return;
+              event.preventDefault();
+              const textarea = textareaRef.current;
+              if (!textarea || textarea.disabled) return;
+              textarea.focus({ preventScroll: true });
+              const caret = textarea.value.length;
+              textarea.setSelectionRange(caret, caret);
+            }}
+            className={getChatInputShellClass({
+              dragging: isDragging,
+              hasContent: hasInput || attachments.length > 0,
+              layout: "roleplay",
+            })}
           >
-            <Smile size="1.125rem" />
-          </button>
-          <EmojiPicker
-            open={emojiOpen}
-            onClose={() => setEmojiOpen(false)}
-            onSelect={handleEmojiSelect}
-            anchorRef={emojiButtonRef}
-            containerRef={inputBarRef}
-          />
-        </div>
-
-        {/* Character picker — shown in group chats for manual response triggering */}
-        {showCharPicker && (
-          <button
-            ref={charPickerBtnRef}
-            onClick={() => setCharPickerOpen((v) => !v)}
-            className={cn(
-              "flex h-11 w-11 items-center justify-center rounded-full transition-colors sm:h-8 sm:w-8",
-              guideGenerations && hasInput
-                ? "bg-foreground/10 text-foreground/75 ring-1 ring-foreground/20 hover:bg-foreground/15"
-                : charPickerOpen
+            {/* Attachment button */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*,application/pdf,.pdf,.txt,.md,.markdown,.json,.jsonl,.csv,.log,.xml,.yaml,.yml"
+              multiple
+              className="hidden"
+              onChange={handleFileUpload}
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={!activeChatId || isInputBusy}
+              className={cn(
+                "flex h-9 w-9 items-center justify-center rounded-xl transition-all active:scale-90 disabled:cursor-not-allowed disabled:text-foreground/25 disabled:opacity-50 sm:h-8 sm:w-8",
+                attachments.length
                   ? "bg-foreground/10 text-foreground/75 ring-1 ring-foreground/20"
                   : "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70",
-            )}
-            title={guideGenerations && hasInput ? "Trigger character response (guided)" : "Trigger character response"}
-          >
-            <Users size="1rem" />
-          </button>
-        )}
+              )}
+              title={t("chat.input.attachFiles")}
+            >
+              <Paperclip size="1rem" />
+            </button>
 
-        {showDraftTranslateButton && (
-          <button
-            type="button"
-            onClick={() => void handleTranslateDraft()}
-            disabled={!activeChatId || !hasInput || isInputBusy || isTranslatingDraft}
-            className={cn(
-              "flex h-11 w-11 shrink-0 items-center justify-center rounded-xl transition-all duration-200 sm:h-8 sm:w-8",
-              hasInput && !isInputBusy && !isTranslatingDraft
-                ? "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70 active:scale-90"
-                : "text-foreground/25",
-            )}
-            title="Translate draft"
-          >
-            {isTranslatingDraft ? <Loader2 size="0.9375rem" className="animate-spin" /> : <Languages size="1rem" />}
-          </button>
-        )}
-
-        {speechToTextEnabled && (
-          <SpeechToTextButton
-            disabled={!activeChatId || isInputBusy}
-            onTranscript={handleSpeechTranscript}
-            className="rounded-full"
-            iconSize={16}
-          />
-        )}
-
-        {pushToTalkEnabled && (
-          <PushToTalkButton
-            disabled={!activeChatId || isInputBusy}
-            onTranscribed={handleVoiceMessage}
-            className="rounded-full"
-            iconSize={16}
-          />
-        )}
-
-        {pushToTalkEnabled && (
-          <button
-            type="button"
-            onClick={handleStartCall}
-            disabled={!activeChatId || isInputBusy}
-            className={cn(
-              "flex h-11 w-11 shrink-0 items-center justify-center rounded-xl transition-all duration-200 active:scale-90 sm:h-8 sm:w-8",
-              "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70",
-              (!activeChatId || isInputBusy) && "cursor-not-allowed opacity-50",
-            )}
-            title="Start voice call"
-          >
-            <Phone size={16} />
-          </button>
-        )}
-
-        {showQuickRepliesMenu && quickReplyActions.length > 0 && (
-          <QuickReplyMenu actions={quickReplyActions} disabled={!activeChatId || isInputBusy || isReadingAttachments} />
-        )}
-
-        {/* Send / Stop button */}
-
-        <button
-          onClick={isStreaming ? () => useChatStore.getState().stopGeneration(activeChatId ?? undefined) : handleSend}
-          disabled={
-            (!isStreaming && (isInputBusy || isReadingAttachments)) ||
-            (!hasInput && !attachments.length && !canSubmitSpatialMove && !isStreaming && !canRetry && !canContinue) ||
-            !activeChatId
-          }
-          className={cn(
-            "mari-chat-send-btn flex h-9 w-9 shrink-0 items-center justify-center rounded-xl transition-all duration-200 sm:h-8 sm:w-8",
-            isInputBusy
-              ? "text-foreground/75 hover:bg-foreground/10 hover:text-foreground/90"
-              : (hasInput || attachments.length || canSubmitSpatialMove || canRetry || canContinue) &&
-                  activeChatId &&
-                  !isInputBusy &&
-                  !isReadingAttachments
-                ? "text-foreground/75 hover:bg-foreground/10 hover:text-foreground/90 active:scale-90"
-                : "text-foreground/20",
-          )}
-        >
-          {isStreaming ? (
-            <StopCircle size="1rem" />
-          ) : isInputBusy ? (
-            <Loader2 size="1rem" className="animate-spin" />
-          ) : (
-            <Send size="0.9375rem" className={cn(hasInput && "translate-x-[1px]")} />
-          )}
-        </button>
-      </div>
-
-      {/* Character picker dropdown (portal) */}
-      {charPickerOpen &&
-        showCharPicker &&
-        createPortal(
-          <div
-            ref={charPickerMenuRef}
-            className="fixed z-[9999] flex min-w-[220px] max-w-[280px] max-h-[320px] flex-col overflow-hidden rounded-xl border border-foreground/10 bg-[var(--card)] shadow-2xl"
-            style={
-              charPickerPos ? { left: charPickerPos.left, top: charPickerPos.top } : { visibility: "hidden" as const }
-            }
-          >
-            <div className="flex items-center justify-center border-b border-foreground/10 px-3 py-2 text-[0.6875rem] font-semibold">
-              Trigger Response
+            {/* Quick Switchers — desktop: inline, mobile: chevron */}
+            <QuickConnectionSwitcher className="hidden sm:flex" />
+            <QuickPersonaSwitcher className="hidden sm:flex" />
+            <div className="sm:hidden">
+              <QuickSwitcherMobile />
             </div>
-            <div className="overflow-y-auto p-1">
-              {activeChatCharacters!.map((char) => {
-                const queuedOrder = queuedResponseOrder.get(char.id);
-                return (
-                  <button
-                    key={char.id}
-                    onClick={() => handleCharacterResponse(char.id)}
-                    className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-foreground/10"
-                  >
-                    {char.avatarUrl ? (
-                      <span className="relative h-7 w-7 shrink-0 overflow-hidden rounded-full">
-                        <img
-                          src={char.avatarUrl}
-                          alt={char.name}
-                          className="h-full w-full object-cover"
-                          style={getAvatarCropStyle(char.avatarCrop)}
-                        />
-                      </span>
-                    ) : (
-                      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-foreground/10 text-[0.6875rem] font-semibold text-foreground/45">
-                        {(char.name || "?")[0].toUpperCase()}
-                      </div>
-                    )}
-                    <span className="min-w-0 flex-1 truncate text-xs">{char.name}</span>
-                    {queuedOrder && (
-                      <span className="flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full border border-foreground/15 bg-foreground/10 px-1 text-[0.625rem] font-semibold text-foreground/70">
-                        {queuedOrder}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
+
+            {/* Text input */}
+            <textarea
+              ref={textareaRef}
+              data-chat-composer="true"
+              onInput={handleInput}
+              onKeyDown={handleKeyDown}
+              onKeyUp={handleKeyUp}
+              onPaste={handlePaste}
+              onFocus={() => {
+                ensureInputVisible();
+              }}
+              onBlur={releaseHeldDeleteWork}
+              placeholder={inputPlaceholder}
+              disabled={!activeChatId}
+              rows={1}
+              spellCheck
+              autoCorrect="on"
+              className="mari-chat-input-textarea max-h-[12.5rem] min-w-0 flex-1 resize-none bg-transparent py-0 text-sm leading-normal text-foreground/90 placeholder:text-foreground/30 outline-none disabled:cursor-not-allowed disabled:opacity-40"
+            />
+
+            {/* Emoji picker */}
+            <div className="relative hidden shrink-0 sm:block">
+              <button
+                ref={emojiButtonRef}
+                onClick={() => setEmojiOpen((v) => !v)}
+                className={cn(
+                  "flex h-8 w-8 items-center justify-center rounded-full transition-colors active:scale-90",
+                  emojiOpen
+                    ? "bg-foreground/10 text-foreground/75 ring-1 ring-foreground/20"
+                    : "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70",
+                )}
+                title={t("chat.input.emoji")}
+                aria-label={t("chat.input.emoji")}
+              >
+                <Smile size="1.125rem" />
+              </button>
+              <EmojiPicker
+                open={emojiOpen}
+                onClose={() => setEmojiOpen(false)}
+                onSelect={handleEmojiSelect}
+                anchorRef={emojiButtonRef}
+                containerRef={inputBarRef}
+              />
             </div>
-          </div>,
-          document.body,
-        )}
+
+            {/* Character picker — shown in group chats for manual response triggering */}
+            {showCharPicker && (
+              <button
+                ref={charPickerBtnRef}
+                onClick={() => setCharPickerOpen((v) => !v)}
+                className={cn(
+                  "flex h-11 w-11 items-center justify-center rounded-full transition-colors sm:h-8 sm:w-8",
+                  guideGenerations && hasInput
+                    ? "bg-foreground/10 text-foreground/75 ring-1 ring-foreground/20 hover:bg-foreground/15"
+                    : charPickerOpen
+                      ? "bg-foreground/10 text-foreground/75 ring-1 ring-foreground/20"
+                      : "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70",
+                )}
+                title={
+                  guideGenerations && hasInput
+                    ? localizeUi("ui.chat.chatinput.triggerCharacterResponseGuided")
+                    : localizeUi("ui.chat.chatinput.triggerCharacterResponse")
+                }
+              >
+                <Users size="1rem" />
+              </button>
+            )}
+
+            {showDraftTranslateButton && (
+              <button
+                type="button"
+                onClick={() => void handleTranslateDraft()}
+                disabled={!activeChatId || !hasInput || isInputBusy || isTranslatingDraft}
+                className={cn(
+                  "flex h-11 w-11 shrink-0 items-center justify-center rounded-xl transition-all duration-200 sm:h-8 sm:w-8",
+                  hasInput && !isInputBusy && !isTranslatingDraft
+                    ? "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70 active:scale-90"
+                    : "text-foreground/25",
+                )}
+                title={t("chat.input.translateDraft")}
+              >
+                {isTranslatingDraft ? <Loader2 size="0.9375rem" className="animate-spin" /> : <Languages size="1rem" />}
+              </button>
+            )}
+
+            {speechToTextEnabled && (
+              <SpeechToTextButton
+                disabled={!activeChatId || isInputBusy}
+                onTranscript={handleSpeechTranscript}
+                className="rounded-full"
+                iconSize={16}
+              />
+            )}
+
+            {pushToTalkEnabled && (
+              <PushToTalkButton
+                disabled={!activeChatId || isInputBusy}
+                onTranscribed={handleVoiceMessage}
+                className="rounded-full"
+                iconSize={16}
+              />
+            )}
+
+            {pushToTalkEnabled && (
+              <button
+                type="button"
+                onClick={handleStartCall}
+                disabled={!activeChatId || isInputBusy}
+                className={cn(
+                  "flex h-11 w-11 shrink-0 items-center justify-center rounded-xl transition-all duration-200 active:scale-90 sm:h-8 sm:w-8",
+                  "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70",
+                  (!activeChatId || isInputBusy) && "cursor-not-allowed opacity-50",
+                )}
+                title={localizeUi("ui.chat.chatinput.startVoiceCall")}
+              >
+                <Phone size={16} />
+              </button>
+            )}
+
+            {showQuickRepliesMenu && quickReplyActions.length > 0 && (
+              <QuickReplyMenu
+                actions={quickReplyActions}
+                disabled={!activeChatId || isInputBusy || isReadingAttachments}
+              />
+            )}
+
+            {/* Send / Stop button */}
+
+            <button
+              onClick={
+                isStreaming ? () => useChatStore.getState().stopGeneration(activeChatId ?? undefined) : handleSend
+              }
+              disabled={
+                (!isStreaming && (isInputBusy || isReadingAttachments)) ||
+                (!hasInput &&
+                  !attachments.length &&
+                  !canSubmitSpatialMove &&
+                  !isStreaming &&
+                  !canRetry &&
+                  !canContinue) ||
+                !activeChatId
+              }
+              className={cn(
+                "mari-chat-send-btn flex h-9 w-9 shrink-0 items-center justify-center rounded-xl transition-all duration-200 sm:h-8 sm:w-8",
+                isInputBusy
+                  ? "text-foreground/75 hover:bg-foreground/10 hover:text-foreground/90"
+                  : (hasInput || attachments.length || canSubmitSpatialMove || canRetry || canContinue) &&
+                      activeChatId &&
+                      !isInputBusy &&
+                      !isReadingAttachments
+                    ? "text-foreground/75 hover:bg-foreground/10 hover:text-foreground/90 active:scale-90"
+                    : "text-foreground/20",
+              )}
+            >
+              {isStreaming ? (
+                <StopCircle size="1rem" />
+              ) : isInputBusy ? (
+                <Loader2 size="1rem" className="animate-spin" />
+              ) : (
+                <Send size="0.9375rem" className={cn(hasInput && "translate-x-[1px]")} />
+              )}
+            </button>
+          </div>
+
+          {/* Character picker dropdown (portal) */}
+          {charPickerOpen &&
+            showCharPicker &&
+            createPortal(
+              <div
+                ref={charPickerMenuRef}
+                className="fixed z-[9999] flex min-w-[220px] max-w-[280px] max-h-[320px] flex-col overflow-hidden rounded-xl border border-foreground/10 bg-[var(--card)] shadow-2xl"
+                style={
+                  charPickerPos
+                    ? { left: charPickerPos.left, top: charPickerPos.top }
+                    : { visibility: "hidden" as const }
+                }
+              >
+                <div className="flex items-center justify-center border-b border-foreground/10 px-3 py-2 text-[0.6875rem] font-semibold">
+                  {localizeUi("ui.chat.chatinput.triggerResponse")}
+                </div>
+                <div className="overflow-y-auto p-1">
+                  {activeChatCharacters!.map((char) => {
+                    const queuedOrder = queuedResponseOrder.get(char.id);
+                    return (
+                      <button
+                        key={char.id}
+                        onClick={() => handleCharacterResponse(char.id)}
+                        className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-foreground/10"
+                      >
+                        {char.avatarUrl ? (
+                          <span className="relative h-7 w-7 shrink-0 overflow-hidden rounded-full">
+                            <img
+                              src={char.avatarUrl}
+                              alt={char.name}
+                              className="h-full w-full object-cover"
+                              style={getAvatarCropStyle(char.avatarCrop)}
+                            />
+                          </span>
+                        ) : (
+                          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-foreground/10 text-[0.6875rem] font-semibold text-foreground/45">
+                            {(char.name || "?")[0].toUpperCase()}
+                          </div>
+                        )}
+                        <span className="min-w-0 flex-1 truncate text-xs">{char.name}</span>
+                        {queuedOrder && (
+                          <span className="flex h-5 min-w-5 shrink-0 items-center justify-center rounded-full border border-foreground/15 bg-foreground/10 px-1 text-[0.625rem] font-semibold text-foreground/70">
+                            {queuedOrder}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>,
+              document.body,
+            )}
         </>
       )}
     </div>

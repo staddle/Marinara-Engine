@@ -202,6 +202,40 @@ function capGeminiThinkingBudget(requestedBudget: number, maxOutputTokens: numbe
   return Math.max(0, Math.min(requestedBudget, maxThinkingBudget));
 }
 
+function supportsGeminiThinkingDisable(model: string): boolean {
+  const normalized = model.toLowerCase();
+  return (
+    /^gemini-2\.5-flash(?:-lite)?(?:$|-preview|-latest)/u.test(normalized) ||
+    normalized.startsWith("gemini-2.0-flash-thinking")
+  );
+}
+
+export function resolveGeminiThinkingConfig(
+  model: string,
+  options: Pick<ChatOptions, "enableThinking" | "reasoningEffort">,
+  maxOutputTokens: number,
+): Record<string, unknown> | undefined {
+  if (options.reasoningEffort === "none") {
+    return supportsGeminiThinkingDisable(model) ? { thinkingBudget: 0, includeThoughts: false } : undefined;
+  }
+  if (!options.enableThinking && !options.reasoningEffort) return undefined;
+
+  if (/gemini-3/i.test(model)) {
+    const levelMap = { low: "low", medium: "medium", high: "high", xhigh: "high", max: "high" } as const;
+    return {
+      thinkingLevel: options.reasoningEffort ? levelMap[options.reasoningEffort] : "high",
+      includeThoughts: true,
+    };
+  }
+
+  const budgetMap = { low: 1024, medium: 8192, high: 24576, xhigh: 24576, max: 24576 } as const;
+  const requestedBudget = options.reasoningEffort ? budgetMap[options.reasoningEffort] : 8192;
+  return {
+    thinkingBudget: capGeminiThinkingBudget(requestedBudget, maxOutputTokens),
+    includeThoughts: true,
+  };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -493,28 +527,10 @@ export class GoogleProvider extends BaseLLMProvider {
 
     const isGemini3 = /gemini-3/i.test(model);
     const supportsThinking = isGemini3 || /gemini-2\.5|gemini-2\.0-flash-thinking/i.test(model);
-    let thinkingConfig: Record<string, unknown> | undefined;
-    if (
-      this.shouldSendParameter(options, "reasoningEffort") &&
-      supportsThinking &&
-      (options.enableThinking || options.reasoningEffort)
-    ) {
-      if (isGemini3) {
-        const levelMap = { low: "low", medium: "medium", high: "high", xhigh: "high", max: "high" } as const;
-        thinkingConfig = {
-          thinkingLevel: options.reasoningEffort ? levelMap[options.reasoningEffort] : "high",
-          includeThoughts: true,
-        };
-      } else {
-        const budgetMap = { low: 1024, medium: 8192, high: 24576, xhigh: 24576, max: 24576 } as const;
-        const requestedBudget = options.reasoningEffort ? budgetMap[options.reasoningEffort] : 8192;
-        const outputMaxTokens = maxTokens ?? 4096;
-        thinkingConfig = {
-          thinkingBudget: capGeminiThinkingBudget(requestedBudget, outputMaxTokens),
-          includeThoughts: true,
-        };
-      }
-    }
+    const thinkingConfig =
+      this.shouldSendParameter(options, "reasoningEffort") && supportsThinking
+        ? resolveGeminiThinkingConfig(model, options, maxTokens ?? 4096)
+        : undefined;
 
     let base = normalizeGoogleBaseUrl(this.baseUrl);
     if (this.providerKind === "google" && !/\/v\d/.test(base)) base += "/v1beta";
@@ -619,28 +635,10 @@ export class GoogleProvider extends BaseLLMProvider {
     const supportsThinking =
       !suppressModelParameters && (isGemini3 || /gemini-2\.5|gemini-2\.0-flash-thinking/i.test(model));
 
-    let thinkingConfig: Record<string, unknown> | undefined;
-    if (
-      this.shouldSendParameter(options, "reasoningEffort") &&
-      supportsThinking &&
-      (options.enableThinking || options.reasoningEffort)
-    ) {
-      if (isGemini3) {
-        const levelMap = { low: "low", medium: "medium", high: "high", xhigh: "high", max: "high" } as const;
-        thinkingConfig = {
-          thinkingLevel: options.reasoningEffort ? levelMap[options.reasoningEffort] : "high",
-          includeThoughts: true,
-        };
-      } else {
-        const budgetMap = { low: 1024, medium: 8192, high: 24576, xhigh: 24576, max: 24576 } as const;
-        const requestedBudget = options.reasoningEffort ? budgetMap[options.reasoningEffort] : 8192;
-        const outputMaxTokens = maxTokens ?? 4096;
-        thinkingConfig = {
-          thinkingBudget: capGeminiThinkingBudget(requestedBudget, outputMaxTokens),
-          includeThoughts: true,
-        };
-      }
-    }
+    const thinkingConfig =
+      this.shouldSendParameter(options, "reasoningEffort") && supportsThinking
+        ? resolveGeminiThinkingConfig(model, options, maxTokens ?? 4096)
+        : undefined;
 
     // Ensure the base URL includes the /v1beta path segment required by the Gemini API.
     // Proxies like api.linkapi.ai need this appended (SillyTavern does it automatically).

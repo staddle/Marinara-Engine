@@ -6,6 +6,7 @@ import { useState } from "react";
 import { useChatStore } from "../../stores/chat.store";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import type { SceneForkMode } from "@marinara-engine/shared";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface SceneBannerProps {
   /** "origin" = the conversation has an active scene; "scene" = we ARE the scene chat */
@@ -17,6 +18,7 @@ interface SceneBannerProps {
 }
 
 export function SceneBanner({ variant, sceneChatId, sceneChatName, originChatId, description }: SceneBannerProps) {
+  const { t: localizeUi } = useUiTranslation();
   const setActiveChatId = useChatStore((s) => s.setActiveChatId);
 
   if (variant === "scene") {
@@ -34,9 +36,7 @@ export function SceneBanner({ variant, sceneChatId, sceneChatName, originChatId,
           className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider"
           style={{ color: "var(--muted-foreground)" }}
         >
-          <Film size={14} />
-          Scene
-        </div>
+          <Film size={14} />{localizeUi("ui.chat.scenebanner.scene")}</div>
         {description && (
           <p className="mb-3 text-sm leading-relaxed italic" style={{ color: "var(--card-foreground)" }}>
             {description}
@@ -50,11 +50,9 @@ export function SceneBanner({ variant, sceneChatId, sceneChatName, originChatId,
               background: "var(--muted)",
               color: "var(--muted-foreground)",
             }}
-            title="Return to conversation"
+            title={localizeUi("ui.chat.scenebanner.returnToConversation")}
           >
-            <ArrowLeft size={12} />
-            Back to conversation
-          </button>
+            <ArrowLeft size={12} />{localizeUi("ui.chat.scenebanner.backToConversation")}</button>
         )}
       </div>
     );
@@ -72,9 +70,7 @@ export function SceneBanner({ variant, sceneChatId, sceneChatName, originChatId,
     >
       <Film size={18} className="shrink-0" style={{ color: "var(--primary)" }} />
       <div className="min-w-0 flex-1">
-        <p className="text-sm font-medium" style={{ color: "var(--card-foreground)" }}>
-          A scene is in progress
-        </p>
+        <p className="text-sm font-medium" style={{ color: "var(--card-foreground)" }}>{localizeUi("ui.chat.scenebanner.aSceneIsInProgress")}</p>
         {sceneChatName && (
           <p className="truncate text-xs" style={{ color: "var(--muted-foreground)" }}>
             {sceneChatName}
@@ -89,10 +85,8 @@ export function SceneBanner({ variant, sceneChatId, sceneChatName, originChatId,
             background: "var(--primary)",
             color: "var(--primary-foreground)",
           }}
-          title="Go to the active scene"
-        >
-          Go to Scene
-          <ArrowRight size={12} />
+          title={localizeUi("ui.chat.scenebanner.goToTheActiveScene")}
+        >{localizeUi("ui.chat.scenebanner.goToScene")}<ArrowRight size={12} />
         </button>
       )}
     </div>
@@ -115,6 +109,7 @@ export function EndSceneBar({
   onFork?: (id: string, mode: SceneForkMode) => void;
   isForking?: boolean;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const setActiveChatId = useChatStore((s) => s.setActiveChatId);
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
@@ -132,10 +127,9 @@ export function EndSceneBar({
 
   const handleConvert = async () => {
     const confirmed = await showConfirmDialog({
-      title: "Convert this scene into a standalone roleplay?",
-      message:
-        "This will create a new roleplay chat from the current scene and detach the original scene from its conversation. No scene summary or character memory will be written back to the original conversation.",
-      confirmLabel: "Convert",
+      title:localizeUi("ui.chat.endscenebar.convertThisSceneIntoAStandaloneRoleplay"),
+      message:localizeUi("ui.chat.endscenebar.thisWillCreateANewRoleplayChatFromThe"),
+      confirmLabel:localizeUi("ui.chat.endscenebar.convert"),
       cancelLabel: "Cancel",
       tone: "destructive",
     });
@@ -153,11 +147,9 @@ export function EndSceneBar({
             color: "var(--card-foreground)",
             border: "1px solid var(--border)",
           }}
-          title="Return to conversation"
+          title={localizeUi("ui.chat.scenebanner.returnToConversation")}
         >
-          <ArrowLeft size={12} />
-          Back to conversation
-        </button>
+          <ArrowLeft size={12} />{localizeUi("ui.chat.scenebanner.backToConversation")}</button>
       )}
       {!confirmEnd && (
         <button
@@ -171,22 +163,20 @@ export function EndSceneBar({
             color: "var(--card-foreground)",
             border: "1px solid var(--border)",
           }}
-          title="End the scene and generate a summary"
+          title={localizeUi("ui.chat.endscenebar.endTheSceneAndGenerateASummary")}
         >
-          <Film size={14} />
-          End Scene
-        </button>
+          <Film size={14} />{localizeUi("ui.chat.endscenebar.endScene")}</button>
       )}
       {confirmEnd && (
         <div className="flex items-center gap-1.5">
-          <span className="text-[0.6875rem] text-[var(--foreground)]">End and save summary?</span>
+          <span className="text-[0.6875rem] text-[var(--foreground)]">{localizeUi("ui.chat.endscenebar.endAndSaveSummary")}</span>
           <button
             onClick={handleConfirmEnd}
             disabled={isEnding}
             className="rounded-lg px-2 py-0.5 text-[0.6875rem] font-medium transition-all hover:opacity-80"
             style={{ background: "var(--primary)", color: "var(--primary-foreground)" }}
           >
-            {isEnding ? "Saving..." : "Yes"}
+            {isEnding ?localizeUi("ui.noodle.stageprofileform.saving") :localizeUi("ui.game.gamesurfacecomponent.yes")}
           </button>
           <button
             onClick={() => setConfirmEnd(false)}
@@ -197,9 +187,7 @@ export function EndSceneBar({
               color: "var(--card-foreground)",
               border: "1px solid var(--border)",
             }}
-          >
-            No
-          </button>
+          >{localizeUi("ui.game.gamesurfacecomponent.no")}</button>
         </div>
       )}
       {onAbandon && !confirmDiscard && (
@@ -213,11 +201,9 @@ export function EndSceneBar({
           style={{
             color: "var(--muted-foreground)",
           }}
-          title="Discard the scene without saving"
+          title={localizeUi("ui.chat.endscenebar.discardTheSceneWithoutSaving")}
         >
-          <Trash2 size={13} />
-          Discard
-        </button>
+          <Trash2 size={13} />{localizeUi("ui.agents.agenteditor.discard")}</button>
       )}
       {onFork && !confirmDiscard && (
         <button
@@ -227,22 +213,18 @@ export function EndSceneBar({
           style={{
             color: "var(--muted-foreground)",
           }}
-          title="Detach this scene into a standalone roleplay"
+          title={localizeUi("ui.chat.endscenebar.detachThisSceneIntoAStandaloneRoleplay")}
         >
-          <ArrowRightLeft size={13} />
-          Convert
-        </button>
+          <ArrowRightLeft size={13} />{localizeUi("ui.chat.endscenebar.convert")}</button>
       )}
       {onAbandon && confirmDiscard && (
         <div className="flex items-center gap-1.5">
-          <span className="text-[0.6875rem] text-[var(--destructive)]">Discard scene?</span>
+          <span className="text-[0.6875rem] text-[var(--destructive)]">{localizeUi("ui.chat.endscenebar.discardScene")}</span>
           <button
             onClick={() => onAbandon(sceneChatId)}
             className="rounded-lg px-2 py-0.5 text-[0.6875rem] font-medium transition-all hover:opacity-80"
             style={{ background: "var(--destructive)", color: "var(--destructive-foreground)" }}
-          >
-            Yes
-          </button>
+          >{localizeUi("ui.game.gamesurfacecomponent.yes")}</button>
           <button
             onClick={() => setConfirmDiscard(false)}
             className="rounded-lg px-2 py-0.5 text-[0.6875rem] font-medium transition-all hover:opacity-80"
@@ -251,9 +233,7 @@ export function EndSceneBar({
               color: "var(--card-foreground)",
               border: "1px solid var(--border)",
             }}
-          >
-            No
-          </button>
+          >{localizeUi("ui.game.gamesurfacecomponent.no")}</button>
         </div>
       )}
     </div>

@@ -1,5 +1,6 @@
 import { Check, LetterText } from "lucide-react";
 import { ChatSettingsSection } from "../ChatSettingsSection";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface ChatNameSectionProps {
   chatName: string;
@@ -18,11 +19,13 @@ export function ChatNameSection({
   onNameValueChange,
   onSaveName,
 }: ChatNameSectionProps) {
+  const { t: localizeUi } = useUiTranslation();
   return (
     <ChatSettingsSection
-      label="Chat Name"
+      id="chat-name"
+      label={localizeUi("ui.chatSettings.chatnamesection.chatName")}
       icon={<LetterText size="0.875rem" />}
-      help="This name is only visible to you — it won't be sent to the AI or affect the conversation in any way."
+      help={localizeUi("ui.chatSettings.chatnamesection.thisNameIsOnlyVisibleToYouItWon")}
     >
       {editingName ? (
         <div className="flex gap-2">
@@ -35,7 +38,7 @@ export function ChatNameSection({
           />
           <button
             type="button"
-            aria-label="Save chat name"
+            aria-label={localizeUi("ui.chatSettings.chatnamesection.saveChatName")}
             onClick={onSaveName}
             className="rounded-lg bg-[var(--primary)] px-3 py-2 text-xs text-white"
           >

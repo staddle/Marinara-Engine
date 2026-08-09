@@ -9,6 +9,13 @@ const FOCUSABLE_SELECTOR = [
   "[tabindex]:not([tabindex='-1'])",
 ].join(",");
 
+function restoreDialogFocus(
+  restoreFocusRef: RefObject<HTMLElement | null> | undefined,
+  fallback: HTMLElement | null,
+) {
+  window.requestAnimationFrame(() => (restoreFocusRef?.current ?? fallback)?.focus());
+}
+
 export function useDialogFocusScope(
   open: boolean,
   containerRef: RefObject<HTMLElement | null>,
@@ -20,7 +27,6 @@ export function useDialogFocusScope(
     if (!open) return;
 
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const restoreTarget = restoreFocusRef?.current ?? opener;
     const focusInitial = window.requestAnimationFrame(() => {
       const container = containerRef.current;
       if (!container) return;
@@ -77,7 +83,7 @@ export function useDialogFocusScope(
     return () => {
       window.cancelAnimationFrame(focusInitial);
       document.removeEventListener("keydown", trapFocus);
-      window.requestAnimationFrame(() => restoreTarget?.focus());
+      restoreDialogFocus(restoreFocusRef, opener);
     };
   }, [containerRef, initialFocusRef, open, ownedPortalSelector, restoreFocusRef]);
 }

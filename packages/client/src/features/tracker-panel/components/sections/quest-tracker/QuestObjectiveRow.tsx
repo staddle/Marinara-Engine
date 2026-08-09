@@ -4,6 +4,7 @@ import { cn } from "../../../../../lib/utils";
 import { visibleText } from "../../../lib/tracker-display";
 import { InlineEdit } from "../../controls/InlineControls";
 import { useTrackerLockContext } from "../../TrackerLockContext";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 type QuestObjective = QuestProgress["objectives"][number];
 
@@ -44,6 +45,7 @@ export function QuestObjectiveRow({
   textLockKey: string;
   completedLockKey: string;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const { fieldLocks, lockMode, onToggleFieldLock } = useTrackerLockContext();
   const textLocked = isTrackerFieldLocked(fieldLocks, textLockKey);
   const completedLocked = isTrackerFieldLocked(fieldLocks, completedLockKey);
@@ -68,20 +70,20 @@ export function QuestObjectiveRow({
           title={
             lockMode
               ? completedLocked
-                ? "Unlock objective completion"
-                : "Lock objective completion"
+                ?localizeUi("ui.trackerPanel.questobjectiverow.unlockObjectiveCompletion")
+                :localizeUi("ui.trackerPanel.questobjectiverow.lockObjectiveCompletion")
               : objective.completed
-                ? "Mark incomplete"
-                : "Mark complete"
+                ?localizeUi("ui.chat.questcardeditable.markIncomplete")
+                :localizeUi("ui.chat.questcardeditable.markComplete")
           }
           aria-label={
             lockMode
               ? completedLocked
-                ? "Unlock objective completion"
-                : "Lock objective completion"
+                ?localizeUi("ui.trackerPanel.questobjectiverow.unlockObjectiveCompletion")
+                :localizeUi("ui.trackerPanel.questobjectiverow.lockObjectiveCompletion")
               : objective.completed
-                ? "Mark objective incomplete"
-                : "Mark objective complete"
+                ?localizeUi("ui.trackerPanel.questobjectiverow.markObjectiveIncomplete")
+                :localizeUi("ui.trackerPanel.questobjectiverow.markObjectiveComplete")
           }
           aria-pressed={lockMode ? completedLocked : undefined}
         >
@@ -106,8 +108,8 @@ export function QuestObjectiveRow({
         <InlineEdit
           value={objective.text}
           onSave={(text) => onUpdateText(text || "Objective")}
-          placeholder="Objective"
-          title={`Objective: ${visibleText(objective.text, "Objective")}`}
+          placeholder={localizeUi("ui.trackerPanel.questobjectiverow.objective")}
+          title={localizeUi("ui.trackerPanel.questobjectiverow.objectiveValue1", { value1: visibleText(objective.text, "Objective") })}
           showEditHint={false}
           previewLineCount={previewLineCount}
           className={cn(
@@ -135,8 +137,8 @@ export function QuestObjectiveRow({
           type="button"
           onClick={onRemove}
           className={OBJECTIVE_REMOVE_BUTTON_CLASS}
-          title="Remove objective"
-          aria-label="Remove objective"
+          title={localizeUi("ui.trackerPanel.questobjectiverow.removeObjective")}
+          aria-label={localizeUi("ui.trackerPanel.questobjectiverow.removeObjective")}
         >
           <X size="0.5rem" />
         </button>

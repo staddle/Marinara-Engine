@@ -1,8 +1,8 @@
 // ──────────────────────────────────────────────
-// Storage: Chat Presets
+// Storage: chat settings profiles (legacy table/type names retain "ChatPreset")
 // ──────────────────────────────────────────────
 // CRUD for the saved chat-settings bundles applied to new chats.
-// One preset per mode is marked active and used as the starting state.
+// One profile per mode is marked active and used as the starting state.
 import { eq, and, ne, asc } from "../../db/file-query.js";
 import type { DB } from "../../db/connection.js";
 import { chats, chatPresets } from "../../db/schema/index.js";
@@ -17,7 +17,7 @@ import {
   type UpdateChatPresetInput,
 } from "@marinara-engine/shared";
 
-const CHAT_MODES: ChatMode[] = ["conversation", "roleplay", "visual_novel"];
+const CHAT_MODES: ChatMode[] = ["conversation", "roleplay"];
 const EXCLUDED_METADATA_SET = new Set(CHAT_PRESET_EXCLUDED_METADATA_KEYS);
 
 function isPresetExcludedMetadataKey(key: string) {
@@ -26,6 +26,17 @@ function isPresetExcludedMetadataKey(key: string) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseStoredChatMetadata(value: unknown): Record<string, unknown> | null {
+  if (isRecord(value)) return value;
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = JSON.parse(value);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function sanitizePresetAgentIds(value: unknown) {
@@ -84,7 +95,7 @@ function rowToPreset(row: ChatPresetRow) {
   };
 }
 
-/** Strip chat-specific keys from a metadata object before saving into a preset. */
+/** Strip chat-specific keys from a metadata object before saving into a profile. */
 function sanitizePresetMetadata(metadata: Record<string, unknown> | undefined | null) {
   if (!metadata || typeof metadata !== "object") return {};
   const out: Record<string, unknown> = {};
@@ -95,7 +106,7 @@ function sanitizePresetMetadata(metadata: Record<string, unknown> | undefined | 
   return out;
 }
 
-/** Strip chat-specific keys from a settings object before saving into a preset. */
+/** Strip chat-specific keys from a settings object before saving into a profile. */
 function sanitizePresetSettings(input: ChatPresetSettings | undefined | null): ChatPresetSettings {
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const out: ChatPresetSettings = {};
@@ -166,9 +177,11 @@ export function createChatPresetsStorage(db: DB) {
       const existing = await storage.getById(id);
       if (!existing) return null;
       const patch: Record<string, unknown> = { updatedAt: now() };
-      if (data.name !== undefined) patch.name = data.name;
+      // The built-in Default profile keeps its fixed identity even if storage
+      // is called outside the HTTP route's user-facing validation.
+      if (data.name !== undefined && !existing.isDefault) patch.name = data.name;
       if (data.settings !== undefined) {
-        // Default preset must always have empty settings — refuse to write into it.
+        // The Default profile must always have empty settings; refuse to write into it.
         if (existing.isDefault) {
           patch.settings = JSON.stringify({});
         } else {
@@ -179,11 +192,11 @@ export function createChatPresetsStorage(db: DB) {
       return storage.getById(id);
     },
 
-    /** Replace the preset's settings with a sanitized snapshot (used by "Save" button). */
+    /** Replace the profile's settings with a sanitized snapshot (used by the Save button). */
     async saveSettings(id: string, settings: ChatPresetSettings) {
       const existing = await storage.getById(id);
       if (!existing) return null;
-      if (existing.isDefault) return existing; // never mutate the default preset's settings
+      if (existing.isDefault) return existing; // never mutate the Default profile's settings
       const cleaned = sanitizePresetSettings(settings);
       await db
         .update(chatPresets)
@@ -193,29 +206,54 @@ export function createChatPresetsStorage(db: DB) {
     },
 
     async remove(id: string) {
-      const existing = await storage.getById(id);
-      if (!existing) return false;
-      if (existing.isDefault) return false; // refuse to delete the system default
-      await db.delete(chatPresets).where(eq(chatPresets.id, id));
-      // If we deleted the active preset, fall back to the default for that mode.
-      if (existing.isActive) {
-        const fallback = await storage.getDefault(existing.mode);
-        if (fallback) await storage.setActive(fallback.id);
-      }
-      return true;
+      return db.transaction(async (tx) => {
+        const rows = (await tx.select().from(chatPresets).where(eq(chatPresets.id, id))) as ChatPresetRow[];
+        const existing = rows[0];
+        if (!existing || existing.isDefault === "true") return false;
+
+        await tx.delete(chatPresets).where(eq(chatPresets.id, id));
+        if (existing.isActive === "true") {
+          const fallbackRows = (await tx
+            .select()
+            .from(chatPresets)
+            .where(
+              and(eq(chatPresets.mode, existing.mode), eq(chatPresets.isDefault, "true")),
+            )) as ChatPresetRow[];
+          const fallback = fallbackRows[0];
+          if (fallback) {
+            const ts = now();
+            await tx
+              .update(chatPresets)
+              .set({ isActive: "false", updatedAt: ts })
+              .where(eq(chatPresets.mode, existing.mode));
+            await tx
+              .update(chatPresets)
+              .set({ isActive: "true", updatedAt: ts })
+              .where(eq(chatPresets.id, fallback.id));
+          }
+        }
+        return true;
+      });
     },
 
     async setActive(id: string) {
-      const target = await storage.getById(id);
-      if (!target) return null;
-      const ts = now();
-      // Clear any other active flag for this mode, then set this one.
-      await db
-        .update(chatPresets)
-        .set({ isActive: "false", updatedAt: ts })
-        .where(and(eq(chatPresets.mode, target.mode), ne(chatPresets.id, id)));
-      await db.update(chatPresets).set({ isActive: "true", updatedAt: ts }).where(eq(chatPresets.id, id));
-      return storage.getById(id);
+      return db.transaction(async (tx) => {
+        const rows = (await tx.select().from(chatPresets).where(eq(chatPresets.id, id))) as ChatPresetRow[];
+        const target = rows[0];
+        if (!target) return null;
+
+        const ts = now();
+        await tx
+          .update(chatPresets)
+          .set({ isActive: "false", updatedAt: ts })
+          .where(and(eq(chatPresets.mode, target.mode), ne(chatPresets.id, id)));
+        await tx.update(chatPresets).set({ isActive: "true", updatedAt: ts }).where(eq(chatPresets.id, id));
+        const updatedRows = (await tx
+          .select()
+          .from(chatPresets)
+          .where(eq(chatPresets.id, id))) as ChatPresetRow[];
+        return updatedRows[0] ? rowToPreset(updatedRows[0]) : null;
+      });
     },
 
     async duplicate(id: string, newName?: string) {
@@ -229,14 +267,14 @@ export function createChatPresetsStorage(db: DB) {
     },
 
     /**
-     * Replace a chat's preset-controlled settings with those from a preset.
+     * Replace a chat's profile-controlled settings with those from a profile.
      *
      * Chat-specific keys (sprites, summary, tags, scene prompt, ephemeral
      * lorebook overrides, group scenario, etc.) are preserved from the
-     * existing chat metadata. Everything else is reset to the preset's
-     * snapshot, with system defaults filled in for keys the preset doesn't
-     * specify. Selecting the Default preset therefore resets the chat's
-     * preset-controlled settings to their system defaults.
+     * existing chat metadata. Everything else is reset to the profile's
+     * snapshot, with system defaults filled in for keys the profile doesn't
+     * specify. Selecting the Default profile therefore resets the chat's
+     * profile-controlled settings to their system defaults.
      */
     async applyToChat(presetId: string, chatId: string, options: { connectionId?: string | null } = {}) {
       return withChatMetadataPatchQueue(chatId, async () => {
@@ -256,7 +294,7 @@ export function createChatPresetsStorage(db: DB) {
 
         const presetMetadata = (preset.settings.metadata ?? {}) as Record<string, unknown>;
 
-        // Preserve only chat-specific (non-preset) metadata keys.
+        // Preserve only chat-specific (non-profile) metadata keys.
         const preserved: Record<string, unknown> = {};
         for (const [key, value] of Object.entries(currentMetadata)) {
           if (isPresetExcludedMetadataKey(key)) preserved[key] = value;
@@ -303,30 +341,86 @@ export function createChatPresetsStorage(db: DB) {
       });
     },
 
-    /** Ensure a "Default" preset exists for every chat mode and exactly one preset is active per mode. */
+    /** Ensure a Default profile exists for every chat mode and exactly one profile is active per mode. */
     async ensureDefaults() {
       for (const mode of CHAT_MODES) {
-        const existing = await storage.getDefault(mode);
-        let defaultId = existing?.id ?? null;
-        if (!defaultId) {
-          const id = newId();
+        await db.transaction(async (tx) => {
+          const defaultRows = (await tx
+            .select()
+            .from(chatPresets)
+            .where(
+              and(eq(chatPresets.mode, mode), eq(chatPresets.isDefault, "true")),
+            )) as ChatPresetRow[];
+          const canonicalDefault = [...defaultRows].sort(
+            (left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id),
+          )[0];
+          let defaultId = canonicalDefault?.id ?? null;
+          if (canonicalDefault) {
+            if (canonicalDefault.name !== "Default" || canonicalDefault.settings !== "{}") {
+              await tx
+                .update(chatPresets)
+                .set({ name: "Default", settings: JSON.stringify({}) })
+                .where(eq(chatPresets.id, canonicalDefault.id));
+            }
+            const duplicates = defaultRows.filter((row) => row.id !== canonicalDefault.id);
+            if (duplicates.length > 0) {
+              const duplicateIds = new Set(duplicates.map((row) => row.id));
+              const modeChats = await tx.select().from(chats).where(eq(chats.mode, mode));
+              for (const chat of modeChats) {
+                const metadata = parseStoredChatMetadata(chat.metadata);
+                if (!metadata || !duplicateIds.has(String(metadata.appliedChatPresetId ?? ""))) continue;
+                await tx
+                  .update(chats)
+                  .set({
+                    metadata: JSON.stringify({ ...metadata, appliedChatPresetId: canonicalDefault.id }),
+                  })
+                  .where(eq(chats.id, chat.id));
+              }
+              for (const duplicate of duplicates) {
+                await tx.delete(chatPresets).where(eq(chatPresets.id, duplicate.id));
+              }
+            }
+          }
+          if (!defaultId) {
+            const id = newId();
+            const ts = now();
+            await tx.insert(chatPresets).values({
+              id,
+              name: "Default",
+              mode,
+              isDefault: "true",
+              isActive: "false",
+              settings: JSON.stringify({}),
+              createdAt: ts,
+              updatedAt: ts,
+            });
+            defaultId = id;
+          }
+
+          const activeRows = (await tx
+            .select()
+            .from(chatPresets)
+            .where(and(eq(chatPresets.mode, mode), eq(chatPresets.isActive, "true")))) as ChatPresetRow[];
+          if (activeRows.length === 1) return;
+
+          const activeId =
+            activeRows.length === 0
+              ? defaultId
+              : [...activeRows].sort(
+                  (left, right) => right.updatedAt.localeCompare(left.updatedAt),
+                )[0]!.id;
+          if (!activeId) return;
+
           const ts = now();
-          await db.insert(chatPresets).values({
-            id,
-            name: "Default",
-            mode,
-            isDefault: "true",
-            isActive: "false",
-            settings: JSON.stringify({}),
-            createdAt: ts,
-            updatedAt: ts,
-          });
-          defaultId = id;
-        }
-        const active = await storage.getActive(mode);
-        if (!active && defaultId) {
-          await storage.setActive(defaultId);
-        }
+          await tx
+            .update(chatPresets)
+            .set({ isActive: "false", updatedAt: ts })
+            .where(eq(chatPresets.mode, mode));
+          await tx
+            .update(chatPresets)
+            .set({ isActive: "true", updatedAt: ts })
+            .where(eq(chatPresets.id, activeId));
+        });
       }
     },
   };

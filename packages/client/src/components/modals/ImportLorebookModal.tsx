@@ -6,6 +6,7 @@ import { Modal } from "../ui/Modal";
 import { Download, FileJson, CheckCircle, XCircle, Loader2 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "../../lib/api-client";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface Props {
   open: boolean;
@@ -13,6 +14,7 @@ interface Props {
 }
 
 export function ImportLorebookModal({ open, onClose }: Props) {
+  const { t: localizeUi } = useUiTranslation();
   const fileRef = useRef<HTMLInputElement>(null);
   const [status, setStatus] = useState<"idle" | "loading" | "done">("idle");
   const [results, setResults] = useState<Array<{ filename: string; success: boolean; message: string }>>([]);
@@ -89,7 +91,7 @@ export function ImportLorebookModal({ open, onClose }: Props) {
         reset();
         onClose();
       }}
-      title="Import Lorebook"
+      title={localizeUi("ui.modals.importcharactermodal.importLorebook")}
     >
       <div className="flex flex-col gap-4">
         <div
@@ -107,10 +109,9 @@ export function ImportLorebookModal({ open, onClose }: Props) {
           }`}
         >
           <Download size="2rem" className={dragOver ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"} />
-          <p className="text-sm font-medium">Drop one or more lorebook files here or click to browse</p>
+          <p className="text-sm font-medium">{localizeUi("ui.modals.importlorebookmodal.dropOneOrMoreLorebookFilesHereOrClick")}</p>
           <span className="flex items-center gap-1 rounded-full bg-[var(--secondary)] px-2.5 py-1 text-xs text-[var(--muted-foreground)]">
-            <FileJson size="0.75rem" /> .json
-          </span>
+            <FileJson size="0.75rem" /> {localizeUi("ui.modals.importcharactermodal.json")}</span>
         </div>
 
         <input
@@ -127,8 +128,7 @@ export function ImportLorebookModal({ open, onClose }: Props) {
 
         {status === "loading" && (
           <div className="flex items-center gap-2 rounded-lg bg-[var(--secondary)] p-3 text-xs">
-            <Loader2 size="0.875rem" className="animate-spin text-[var(--primary)]" /> Importing...
-          </div>
+            <Loader2 size="0.875rem" className="animate-spin text-[var(--primary)]" /> {localizeUi("ui.modals.importconnectionmodal.importing")}</div>
         )}
         {status === "done" && results.length > 0 && (
           <div className="flex flex-col gap-2">
@@ -140,9 +140,8 @@ export function ImportLorebookModal({ open, onClose }: Props) {
               }`}
             >
               {results.some((result) => result.success) ? <CheckCircle size="0.875rem" /> : <XCircle size="0.875rem" />}
-              {results.filter((result) => result.success).length} succeeded,{" "}
-              {results.filter((result) => !result.success).length} failed
-            </div>
+              {results.filter((result) => result.success).length} {localizeUi("ui.modals.importcharactermodal.succeeded")}{" "}
+              {results.filter((result) => !result.success).length} {localizeUi("ui.modals.importcharactermodal.failed")}</div>
             <div className="max-h-52 overflow-y-auto rounded-lg border border-[var(--border)]">
               {results.map((result) => (
                 <div
@@ -171,9 +170,7 @@ export function ImportLorebookModal({ open, onClose }: Props) {
               onClose();
             }}
             className="rounded-lg px-4 py-2 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)]"
-          >
-            Close
-          </button>
+          >{localizeUi("capabilities.actions.close")}</button>
         </div>
       </div>
     </Modal>

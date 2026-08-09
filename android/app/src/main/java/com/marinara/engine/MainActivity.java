@@ -62,6 +62,8 @@ public class MainActivity extends Activity {
     private static final int TERMUX_INSTALL_STATUS_REQUEST = 1004;
     private static final int NOTIFICATION_PERMISSION_REQUEST = 1005;
     private static final int FILE_SAVE_REQUEST = 1006;
+    private static final String DISPLAY_PREFS = "marinara_display";
+    private static final String STATUS_BAR_VISIBLE = "status_bar_visible";
     private static final String NOTIFICATION_PERMISSION_PREFS = "marinara_notification_permission";
     private static final String NOTIFICATION_PERMISSION_REQUESTED = "requested";
     private static final String MESSAGE_NOTIFICATION_CHANNEL_ID = "marinara_messages";
@@ -101,10 +103,7 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
 
         requestWindowFeature(Window.FEATURE_NO_TITLE);
-        getWindow().setFlags(
-                WindowManager.LayoutParams.FLAG_FULLSCREEN,
-                WindowManager.LayoutParams.FLAG_FULLSCREEN
-        );
+        applyStatusBarVisibility(isStatusBarVisible());
 
         // Root layout
         FrameLayout root = new FrameLayout(this);
@@ -678,7 +677,41 @@ public class MainActivity extends Activity {
         return false;
     }
 
+    private boolean isStatusBarVisible() {
+        return getSharedPreferences(DISPLAY_PREFS, MODE_PRIVATE)
+                .getBoolean(STATUS_BAR_VISIBLE, false);
+    }
+
+    private void setStatusBarVisible(boolean visible) {
+        getSharedPreferences(DISPLAY_PREFS, MODE_PRIVATE)
+                .edit()
+                .putBoolean(STATUS_BAR_VISIBLE, visible)
+                .apply();
+        applyStatusBarVisibility(visible);
+    }
+
+    private void applyStatusBarVisibility(boolean visible) {
+        if (visible) {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+            return;
+        }
+        getWindow().setFlags(
+                WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                WindowManager.LayoutParams.FLAG_FULLSCREEN
+        );
+    }
+
     private class MarinaraAndroidBridge {
+        @JavascriptInterface
+        public boolean isStatusBarVisible() {
+            return MainActivity.this.isStatusBarVisible();
+        }
+
+        @JavascriptInterface
+        public void setStatusBarVisible(boolean visible) {
+            runOnUiThread(() -> MainActivity.this.setStatusBarVisible(visible));
+        }
+
         @JavascriptInterface
         public String getNotificationPermission() {
             return getNotificationPermissionStatus();
@@ -949,6 +982,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        applyStatusBarVisibility(isStatusBarVisible());
         if (pendingStartAfterTermuxInstall && isTermuxInstalled()) {
             pendingStartAfterTermuxInstall = false;
             showBootstrap("Termux installed.\nContinuing Marinara setup…", true);

@@ -5,6 +5,7 @@ import type { GeneratedSceneVideo } from "@marinara-engine/shared";
 import type { ChatImage } from "../../hooks/use-gallery";
 import { useGalleryStore } from "../../stores/gallery.store";
 import { ImagePromptPanel } from "./ImagePromptPanel";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 export function formatChatImageMeta(image: Pick<ChatImage, "model" | "provider" | "width" | "height">) {
   const details: string[] = [];
@@ -56,6 +57,7 @@ export function ChatImageLightbox({
   onPin,
   onClose,
 }: ChatImageLightboxProps) {
+  const { t: localizeUi } = useUiTranslation();
   const pinImage = useGalleryStore((s) => s.pinImage);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const portalRoot = typeof document !== "undefined" ? document.body : null;
@@ -74,7 +76,7 @@ export function ChatImageLightbox({
       className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/80 max-md:pt-[env(safe-area-inset-top)]"
       role="dialog"
       aria-modal="true"
-      aria-label="Image preview"
+      aria-label={localizeUi("ui.chat.chatimagelightbox.imagePreview")}
       tabIndex={-1}
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
@@ -113,9 +115,9 @@ export function ChatImageLightbox({
                   else pinImage(image);
                   onClose();
                 }}
-                aria-label="Pin image to chat"
+                aria-label={localizeUi("ui.chat.chatgallery.pinImageToChat")}
                 className="rounded-lg bg-black/60 p-2 text-white transition-colors hover:bg-black/80"
-                title="Pin to chat"
+                title={localizeUi("ui.chat.chatgallery.pinToChat")}
               >
                 <Pin size="0.875rem" />
               </button>
@@ -124,7 +126,7 @@ export function ChatImageLightbox({
               <a
                 href={image.url}
                 download={getChatImageDownloadName(image)}
-                aria-label="Download image"
+                aria-label={localizeUi("ui.chat.chatgallery.downloadImage")}
                 className="rounded-lg bg-black/60 p-2 text-white transition-colors hover:bg-black/80"
               >
                 <Download size="0.875rem" />
@@ -134,7 +136,7 @@ export function ChatImageLightbox({
               type="button"
               ref={closeButtonRef}
               onClick={onClose}
-              aria-label="Close image"
+              aria-label={localizeUi("ui.chat.chatimagelightbox.closeImage")}
               className="rounded-lg bg-black/60 p-2 text-white transition-colors hover:bg-black/80"
             >
               <X size="0.875rem" />
@@ -163,6 +165,7 @@ export function ChatVideoLightbox({
   onPin,
   onClose,
 }: ChatVideoLightboxProps) {
+  const { t: localizeUi } = useUiTranslation();
   const pinVideo = useGalleryStore((s) => s.pinVideo);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const portalRoot = typeof document !== "undefined" ? document.body : null;
@@ -181,7 +184,7 @@ export function ChatVideoLightbox({
       className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/80 max-md:pt-[env(safe-area-inset-top)]"
       role="dialog"
       aria-modal="true"
-      aria-label="Video preview"
+      aria-label={localizeUi("ui.chat.chatvideolightbox.videoPreview")}
       tabIndex={-1}
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
@@ -222,9 +225,9 @@ export function ChatVideoLightbox({
                   else pinVideo(video);
                   onClose();
                 }}
-                aria-label="Pin video to chat"
+                aria-label={localizeUi("ui.chat.chatgallery.pinVideoToChat")}
                 className="rounded-lg bg-black/60 p-2 text-white transition-colors hover:bg-black/80"
-                title="Pin to chat"
+                title={localizeUi("ui.chat.chatgallery.pinToChat")}
               >
                 <Pin size="0.875rem" />
               </button>
@@ -233,7 +236,7 @@ export function ChatVideoLightbox({
               <a
                 href={video.url}
                 download={getSceneVideoDownloadName(video)}
-                aria-label="Download video"
+                aria-label={localizeUi("ui.chat.chatgallery.downloadVideo")}
                 className="rounded-lg bg-black/60 p-2 text-white transition-colors hover:bg-black/80"
               >
                 <Download size="0.875rem" />
@@ -243,7 +246,7 @@ export function ChatVideoLightbox({
               type="button"
               ref={closeButtonRef}
               onClick={onClose}
-              aria-label="Close video"
+              aria-label={localizeUi("ui.chat.chatvideolightbox.closeVideo")}
               className="rounded-lg bg-black/60 p-2 text-white transition-colors hover:bg-black/80"
             >
               <X size="0.875rem" />

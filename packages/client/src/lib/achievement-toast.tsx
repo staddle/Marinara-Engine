@@ -1,5 +1,6 @@
 import { toast } from "sonner";
 import { ACHIEVEMENT_DEFINITION_BY_ID, type AchievementDefinition, type AchievementProgress } from "@marinara-engine/shared";
+import { translate } from "../localization/i18n";
 
 function getAchievementLabel(achievement: AchievementDefinition) {
   return achievement.rankLabel ? `${achievement.title} ${achievement.rankLabel}` : achievement.title;
@@ -10,7 +11,7 @@ export function showAchievementUnlockToasts(progress: AchievementProgress[]) {
     const achievement = ACHIEVEMENT_DEFINITION_BY_ID.get(item.id);
     if (!achievement) continue;
 
-    toast.success("Achievement unlocked", {
+    toast.success(translate("ui.achievements.unlocked"), {
       description: getAchievementLabel(achievement),
     });
   }

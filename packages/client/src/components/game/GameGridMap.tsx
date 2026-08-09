@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { cn } from "../../lib/utils";
 import type { GridCell, GameMap } from "@marinara-engine/shared";
 import { AnimatedText } from "./AnimatedText";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 const TERRAIN_COLORS: Record<string, string> = {
   grass: "bg-green-900/40",
@@ -42,6 +43,7 @@ export function GameGridMap({
   topRightAction,
   compactFit,
 }: GameGridMapProps) {
+  const { t: localizeUi } = useUiTranslation();
   const cells = map.cells || [];
   const width = map.width || 5;
   const height = map.height || 5;
@@ -139,8 +141,8 @@ export function GameGridMap({
                       disabled={!isMovable}
                       title={
                         cell.discovered
-                          ? `${cell.label}: ${cell.description || cell.terrain}${isMovable ? " (click to select)" : ""}`
-                          : "Undiscovered"
+                          ?localizeUi("ui.game.gamegridmap.value1Value2Value3", { value1: cell.label, value2: cell.description || cell.terrain, value3: isMovable ?localizeUi("ui.game.gamegridmap.clickToSelect") : "" })
+                          :localizeUi("ui.game.gamegridmap.undiscovered")
                       }
                       className={cn(
                         "relative flex aspect-square items-center justify-center rounded text-base transition-all",

@@ -17,18 +17,16 @@ import {
 import { ChevronDown, MessageCircle, Trash2, RefreshCw } from "lucide-react";
 import { useAgentStore } from "../../stores/agent.store";
 import { useUIStore } from "../../stores/ui.store";
-import type { EchoChamberSide } from "../../stores/ui.store";
+import type { EchoChamberSide, EchoChamberSize } from "../../stores/ui.store";
 import { useChatStore } from "../../stores/chat.store";
 import { useChat } from "../../hooks/use-chats";
 import { useGenerate } from "../../hooks/use-generate";
 import { api } from "../../lib/api-client";
 import { cn } from "../../lib/utils";
 import { ROLEPLAY_POPOVER_SHELL } from "./roleplay-popover-styles";
-import {
-  getEchoChamberMessageInterval,
-  resolveEchoChamberPersistedBaseline,
-} from "../../lib/echo-chamber-queue";
+import { getEchoChamberMessageInterval, resolveEchoChamberPersistedBaseline } from "../../lib/echo-chamber-queue";
 import { resolveEchoChamberTopLayout } from "../../lib/echo-chamber-layout";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 const NAME_COLORS = [
   "text-red-400",
@@ -50,7 +48,6 @@ const CORNERS: EchoChamberSide[] = ["top-left", "top-right", "bottom-left", "bot
 // Layout constants (px)
 const WIDGET_BAR_H = 76; // top HUD toolbar: py-2 (16px) + widget buttons h-[3.75rem] (60px)
 const INPUT_BOX_H = 72; // bottom chat input area height
-const HUD_EDGE_GAP = 16; // Aligns with the roleplay HUD edge padding.
 const FLOATING_EDGE_GAP = 16;
 const FLOATING_PANEL_STACK_GAP = 8;
 const TOP_BUTTON_GAP = 6; // Matches the tracker panel gap below the top controls.
@@ -122,17 +119,9 @@ function getDesktopPanelPosition(isTop: boolean, isLeft: boolean, stackBelowTrac
   const alignmentRect = alignmentElement ? readVisibleRect(alignmentElement) : null;
   const trackerPanel = isTop && stackBelowTracker ? getDesktopTrackerPanel(isLeft) : null;
   const edgeOffset =
-    trackerPanel && containerRect
-      ? Math.max(0, Math.round(trackerPanel.offsetLeft - containerRect.left))
-      : alignmentRect && containerRect
-        ? Math.max(0, Math.round(alignmentRect.left - containerRect.left))
-        : null;
-  const rightEdgeOffset =
-    trackerPanel && containerRect
-      ? Math.max(0, Math.round(containerRect.right - trackerPanel.offsetLeft - trackerPanel.offsetWidth))
-      : alignmentRect && containerRect
-        ? Math.max(0, Math.round(containerRect.right - alignmentRect.right))
-        : null;
+    alignmentRect && containerRect
+      ? Math.max(0, Math.round(alignmentRect.left - containerRect.left))
+      : FLOATING_EDGE_GAP;
   const baseTop = isTop && containerRect ? getTopChromeBottomOffset(containerRect, alignmentRect) : undefined;
   const topLayout =
     baseTop !== undefined && containerRect
@@ -150,15 +139,8 @@ function getDesktopPanelPosition(isTop: boolean, isLeft: boolean, stackBelowTrac
   return {
     ...(topLayout && { top: topLayout.top, maxHeight: topLayout.maxHeight }),
     ...(!isTop && { bottom: INPUT_BOX_H + FLOATING_EDGE_GAP }),
-    ...(isLeft && {
-      left: edgeOffset !== null ? `${edgeOffset}px` : `calc(${HUD_EDGE_GAP}px + var(--tracker-panel-hud-clear-left, 0px))`,
-    }),
-    ...(!isLeft && {
-      right:
-        rightEdgeOffset !== null
-          ? `${rightEdgeOffset}px`
-          : `calc(${HUD_EDGE_GAP}px + var(--tracker-panel-hud-clear-right, 0px))`,
-    }),
+    ...(isLeft && { left: `${edgeOffset}px` }),
+    ...(!isLeft && { right: FLOATING_EDGE_GAP }),
     width: `${DESKTOP_PANEL_WIDTH}px`,
   };
 }
@@ -186,10 +168,16 @@ function CornerPicker({ current, onChange }: { current: EchoChamberSide; onChang
 }
 
 export function EchoChamberPanel({ hiddenOnMobile = false }: EchoChamberPanelProps) {
+  const { t: localizeUi } = useUiTranslation();
+  const activeChatId = useChatStore((s) => s.activeChatId);
   const echoChamberSide = useUIStore((s) => s.echoChamberSide);
   const setEchoChamberSide = useUIStore((s) => s.setEchoChamberSide);
   const echoChamberOpen = useUIStore((s) => s.echoChamberOpen);
   const toggleEchoChamber = useUIStore((s) => s.toggleEchoChamber);
+  const rememberedPanelSize = useUIStore((s) =>
+    activeChatId ? (s.echoChamberSizeByChatId[activeChatId] ?? null) : null,
+  );
+  const setEchoChamberSizeForChat = useUIStore((s) => s.setEchoChamberSizeForChat);
   const trackerPanelEnabled = useUIStore((s) => s.trackerPanelEnabled);
   const trackerPanelOpen = useUIStore((s) => s.trackerPanelOpen);
   const trackerPanelSide = useUIStore((s) => s.trackerPanelSide);
@@ -197,9 +185,9 @@ export function EchoChamberPanel({ hiddenOnMobile = false }: EchoChamberPanelPro
   const scrollRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const resizeRef = useRef<{ startX: number; startY: number; width: number; height: number } | null>(null);
-  const [panelSize, setPanelSize] = useState<{ width: number; height: number } | null>(null);
+  const pendingPanelSizeRef = useRef<EchoChamberSize | null>(null);
+  const [panelSize, setPanelSize] = useState<EchoChamberSize | null>(null);
 
-  const activeChatId = useChatStore((s) => s.activeChatId);
   const isAgentProcessing = useAgentStore((s) =>
     activeChatId ? s.processingChatIds.includes(activeChatId) : s.isProcessing,
   );
@@ -333,12 +321,34 @@ export function EchoChamberPanel({ hiddenOnMobile = false }: EchoChamberPanelPro
   const clampPanelSize = useCallback((width: number, height: number) => {
     const area = getRoleplayAreaRect();
     const maxWidth = Math.max(MIN_PANEL_WIDTH, (area?.width ?? window.innerWidth) - FLOATING_EDGE_GAP * 2);
-    const maxHeight = Math.max(MIN_PANEL_HEIGHT, (area?.height ?? window.innerHeight) - INPUT_BOX_H - FLOATING_EDGE_GAP);
+    const maxHeight = Math.max(
+      MIN_PANEL_HEIGHT,
+      (area?.height ?? window.innerHeight) - INPUT_BOX_H - FLOATING_EDGE_GAP,
+    );
     return {
       width: Math.round(Math.min(maxWidth, Math.max(MIN_PANEL_WIDTH, width))),
       height: Math.round(Math.min(maxHeight, Math.max(MIN_PANEL_HEIGHT, height))),
     };
   }, []);
+
+  const commitPanelSize = useCallback(
+    (width: number, height: number) => {
+      const nextSize = clampPanelSize(width, height);
+      pendingPanelSizeRef.current = null;
+      setPanelSize(nextSize);
+      if (activeChatId) setEchoChamberSizeForChat(activeChatId, nextSize);
+    },
+    [activeChatId, clampPanelSize, setEchoChamberSizeForChat],
+  );
+
+  useEffect(() => {
+    pendingPanelSizeRef.current = null;
+    setPanelSize(
+      activeChatId && rememberedPanelSize
+        ? clampPanelSize(rememberedPanelSize.width, rememberedPanelSize.height)
+        : null,
+    );
+  }, [activeChatId, clampPanelSize, rememberedPanelSize]);
 
   const handleResizeStart = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
     const rect = panelRef.current?.getBoundingClientRect();
@@ -357,15 +367,44 @@ export function EchoChamberPanel({ hiddenOnMobile = false }: EchoChamberPanelPro
       event.stopPropagation();
       const horizontalDelta = (event.clientX - start.startX) * (resizeFromLeft ? -1 : 1);
       const verticalDelta = (event.clientY - start.startY) * (resizeFromTop ? -1 : 1);
-      setPanelSize(clampPanelSize(start.width + horizontalDelta, start.height + verticalDelta));
+      const nextSize = clampPanelSize(start.width + horizontalDelta, start.height + verticalDelta);
+      pendingPanelSizeRef.current = nextSize;
+      setPanelSize(nextSize);
     },
     [clampPanelSize, resizeFromLeft, resizeFromTop],
   );
 
-  const handleResizeEnd = useCallback((event: ReactPointerEvent<HTMLButtonElement>) => {
-    resizeRef.current = null;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-  }, []);
+  const handleResizeEnd = useCallback(
+    (event: ReactPointerEvent<HTMLButtonElement>) => {
+      const pendingSize = pendingPanelSizeRef.current;
+      const rect = panelRef.current?.getBoundingClientRect();
+      resizeRef.current = null;
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      if (pendingSize) {
+        commitPanelSize(pendingSize.width, pendingSize.height);
+      } else if (rect) {
+        commitPanelSize(rect.width, rect.height);
+      }
+    },
+    [commitPanelSize],
+  );
+
+  const handleResizeCancel = useCallback(
+    (event: ReactPointerEvent<HTMLButtonElement>) => {
+      const start = resizeRef.current;
+      resizeRef.current = null;
+      pendingPanelSizeRef.current = null;
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      if (start) {
+        setPanelSize(clampPanelSize(start.width, start.height));
+      }
+    },
+    [clampPanelSize],
+  );
 
   const handleResizeKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLButtonElement>) => {
@@ -373,11 +412,13 @@ export function EchoChamberPanel({ hiddenOnMobile = false }: EchoChamberPanelPro
       event.preventDefault();
       const rect = panelRef.current?.getBoundingClientRect();
       if (!rect) return;
-      const widthDelta = event.key === "ArrowRight" ? RESIZE_KEYBOARD_STEP : event.key === "ArrowLeft" ? -RESIZE_KEYBOARD_STEP : 0;
-      const heightDelta = event.key === "ArrowDown" ? RESIZE_KEYBOARD_STEP : event.key === "ArrowUp" ? -RESIZE_KEYBOARD_STEP : 0;
-      setPanelSize(clampPanelSize(rect.width + widthDelta, rect.height + heightDelta));
+      const widthDelta =
+        event.key === "ArrowRight" ? RESIZE_KEYBOARD_STEP : event.key === "ArrowLeft" ? -RESIZE_KEYBOARD_STEP : 0;
+      const heightDelta =
+        event.key === "ArrowDown" ? RESIZE_KEYBOARD_STEP : event.key === "ArrowUp" ? -RESIZE_KEYBOARD_STEP : 0;
+      commitPanelSize(rect.width + widthDelta, rect.height + heightDelta);
     },
-    [clampPanelSize],
+    [commitPanelSize],
   );
 
   useEffect(() => {
@@ -428,9 +469,7 @@ export function EchoChamberPanel({ hiddenOnMobile = false }: EchoChamberPanelPro
     const observeTargets = () => {
       const roleplayAreas = Array.from(document.querySelectorAll<HTMLElement>(ROLEPLAY_AREA_SELECTOR));
       const topAnchors = Array.from(document.querySelectorAll<HTMLElement>(ROLEPLAY_TOP_ANCHOR_SELECTOR));
-      const topRightControls = Array.from(
-        document.querySelectorAll<HTMLElement>(ROLEPLAY_TOP_RIGHT_CONTROLS_SELECTOR),
-      );
+      const topRightControls = Array.from(document.querySelectorAll<HTMLElement>(ROLEPLAY_TOP_RIGHT_CONTROLS_SELECTOR));
       const huds = Array.from(document.querySelectorAll<HTMLElement>(".rpg-hud"));
       const trackerPanels = stackBelowTracker
         ? Array.from(
@@ -504,14 +543,14 @@ export function EchoChamberPanel({ hiddenOnMobile = false }: EchoChamberPanelPro
           "text-[var(--marinara-chat-chrome-button-text)] transition-colors hover:text-[var(--marinara-chat-chrome-button-text-hover)]",
         )}
         style={collapsedStyle}
-        title="Open Echo Chamber"
+        title={localizeUi("ui.chat.echochamberpanel.openEchoChamber")}
       >
         <span className="relative flex h-1.5 w-1.5 shrink-0">
           <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-60" />
           <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-red-500" />
         </span>
         <MessageCircle size="0.75rem" />
-        Echo
+        {localizeUi("ui.chat.echochamberpanel.echo")}
         {visibleMessages.length > 0 && (
           <span className="rounded-full bg-[var(--marinara-chat-chrome-highlight-bg)] px-1.5 py-0.5 text-[0.5625rem] font-normal text-[var(--marinara-chat-chrome-panel-muted)]">
             {visibleMessages.length}
@@ -548,7 +587,7 @@ export function EchoChamberPanel({ hiddenOnMobile = false }: EchoChamberPanelPro
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-red-400 opacity-60" />
             <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-red-500" />
           </span>
-          Echo
+          {localizeUi("ui.chat.echochamberpanel.echo")}
           {visibleMessages.length > 0 && (
             <span className="ml-0.5 text-[0.5625rem] font-normal text-[var(--marinara-chat-chrome-panel-muted)]">
               {visibleMessages.length}
@@ -559,7 +598,7 @@ export function EchoChamberPanel({ hiddenOnMobile = false }: EchoChamberPanelPro
           <button
             onClick={toggleEchoChamber}
             className="rounded p-0.5 text-[var(--marinara-chat-chrome-button-text)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg-hover)] hover:text-[var(--marinara-chat-chrome-button-text-hover)]"
-            title="Collapse Echo Chamber"
+            title={localizeUi("ui.chat.echochamberpanel.collapseEchoChamber")}
           >
             <ChevronDown size="0.5625rem" />
           </button>
@@ -569,7 +608,11 @@ export function EchoChamberPanel({ hiddenOnMobile = false }: EchoChamberPanelPro
               void retryAgents(activeChatId, ["echo-chamber"]);
             }}
             disabled={echoRetryBusy}
-            title={echoRetryBusy ? "A reply or agent is already running" : "Re-run Echo Chamber"}
+            title={
+              echoRetryBusy
+                ? localizeUi("ui.chat.echochamberpanel.aReplyOrAgentIsAlreadyRunning")
+                : localizeUi("ui.chat.echochamberpanel.reRunEchoChamber")
+            }
             className="rounded p-0.5 text-[var(--marinara-chat-chrome-button-text)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg-hover)] hover:text-[var(--marinara-chat-chrome-button-text-hover)] disabled:opacity-30 disabled:cursor-not-allowed"
           >
             <RefreshCw size="0.5625rem" className={echoRetryBusy ? "animate-spin" : ""} />
@@ -588,7 +631,7 @@ export function EchoChamberPanel({ hiddenOnMobile = false }: EchoChamberPanelPro
                 }
               }}
               className="rounded p-0.5 text-[var(--marinara-chat-chrome-button-text)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg-hover)] hover:text-[var(--marinara-chat-chrome-button-text-hover)]"
-              title="Clear messages"
+              title={localizeUi("ui.chat.echochamberpanel.clearMessages")}
             >
               <Trash2 size="0.5625rem" />
             </button>
@@ -604,12 +647,15 @@ export function EchoChamberPanel({ hiddenOnMobile = false }: EchoChamberPanelPro
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-2 pb-1.5 scrollbar-thin">
         {visibleMessages.length === 0 ? (
           <p className="py-1.5 text-center text-[0.625rem] text-[var(--marinara-chat-chrome-panel-muted)]">
-            Waiting for reactions…
+            {localizeUi("ui.chat.echochamberpanel.waitingForReactions")}
           </p>
         ) : (
           <div className="flex flex-col gap-0.5">
             {visibleMessages.map((msg, i) => (
-              <div key={i} className="min-w-0 animate-in fade-in slide-in-from-bottom-1 duration-300 break-words">
+              <div
+                key={i}
+                className="min-w-0 animate-in fade-in slide-in-from-bottom-1 [animation-duration:300ms] break-words"
+              >
                 <span className={cn("text-[0.6875rem] font-bold", nameColorMap.get(msg.characterName))}>
                   {msg.characterName}
                 </span>
@@ -624,8 +670,8 @@ export function EchoChamberPanel({ hiddenOnMobile = false }: EchoChamberPanelPro
       </div>
       <button
         type="button"
-        aria-label="Resize Echo Chamber"
-        title="Drag to resize Echo Chamber"
+        aria-label={localizeUi("ui.chat.echochamberpanel.resizeEchoChamber")}
+        title={localizeUi("ui.chat.echochamberpanel.dragToResizeEchoChamber")}
         className={cn(
           "absolute z-20 flex h-7 w-7 touch-none items-center justify-center rounded-md border border-[var(--marinara-chat-chrome-button-border)] bg-[var(--marinara-chat-chrome-button-bg)] text-[var(--marinara-chat-chrome-button-text)] shadow-md transition-colors hover:border-[var(--marinara-chat-chrome-button-border-hover)] hover:bg-[var(--marinara-chat-chrome-button-bg-hover)] hover:text-[var(--marinara-chat-chrome-button-text-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--marinara-chat-chrome-focus-ring)] md:h-6 md:w-6",
           resizeFromLeft ? "-left-2 cursor-nesw-resize" : "-right-2 cursor-nwse-resize",
@@ -634,7 +680,7 @@ export function EchoChamberPanel({ hiddenOnMobile = false }: EchoChamberPanelPro
         onPointerDown={handleResizeStart}
         onPointerMove={handleResizeMove}
         onPointerUp={handleResizeEnd}
-        onPointerCancel={handleResizeEnd}
+        onPointerCancel={handleResizeCancel}
         onKeyDown={handleResizeKeyDown}
       >
         <span

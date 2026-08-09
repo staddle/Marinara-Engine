@@ -8,6 +8,8 @@ export type BackgroundLibraryFolder = {
 export type BackgroundLibraryOrganization = {
   folders: BackgroundLibraryFolder[];
   assignments: Record<string, string>;
+  /** Background ids the user starred. Independent of the Roleplay default background. */
+  favorites: string[];
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -52,7 +54,18 @@ export function normalizeBackgroundLibraryOrganization(value: unknown): Backgrou
     }
   }
 
-  return { folders, assignments };
+  const favorites = Array.isArray(source.favorites)
+    ? [
+        ...new Set(
+          source.favorites
+            .filter((candidate): candidate is string => typeof candidate === "string")
+            .map((candidate) => candidate.trim().slice(0, 500))
+            .filter(Boolean),
+        ),
+      ]
+    : [];
+
+  return { folders, assignments, favorites };
 }
 
 export function removeBackgroundFolder(
@@ -60,10 +73,28 @@ export function removeBackgroundFolder(
   folderId: string,
 ): BackgroundLibraryOrganization {
   return {
+    ...organization,
     folders: organization.folders.filter((folder) => folder.id !== folderId),
     assignments: Object.fromEntries(
       Object.entries(organization.assignments).filter(([, assignedFolderId]) => assignedFolderId !== folderId),
     ),
+  };
+}
+
+/**
+ * Drop assignments and favorites for backgrounds that no longer exist. Called on the write paths,
+ * which already know the live id set, so listing stays read-only.
+ */
+export function pruneBackgroundLibraryOrganization(
+  organization: BackgroundLibraryOrganization,
+  knownBackgroundIds: Set<string>,
+): BackgroundLibraryOrganization {
+  return {
+    ...organization,
+    assignments: Object.fromEntries(
+      Object.entries(organization.assignments).filter(([backgroundId]) => knownBackgroundIds.has(backgroundId)),
+    ),
+    favorites: organization.favorites.filter((backgroundId) => knownBackgroundIds.has(backgroundId)),
   };
 }
 
@@ -76,5 +107,11 @@ export function moveBackgroundAssignment(
   const folderId = assignments[oldBackgroundId];
   delete assignments[oldBackgroundId];
   if (folderId && newBackgroundId) assignments[newBackgroundId] = folderId;
-  return { ...organization, assignments };
+
+  // Renaming or deleting a file carries its star with it, so a rename does not silently unstar.
+  const wasFavorite = organization.favorites.includes(oldBackgroundId);
+  const favorites = organization.favorites.filter((id) => id !== oldBackgroundId && id !== newBackgroundId);
+  if (wasFavorite && newBackgroundId) favorites.push(newBackgroundId);
+
+  return { ...organization, assignments, favorites };
 }

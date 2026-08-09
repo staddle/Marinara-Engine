@@ -13,6 +13,7 @@
 import { existsSync, statSync, watchFile, unwatchFile } from "node:fs";
 import { logger } from "../lib/logger.js";
 import { getEnvFilePath, getLogLevel, reloadRuntimeEnv, type EnvReloadResult } from "./runtime-config.js";
+import { personalServerExtensionRuntime } from "../services/extensions/personal-server-extension-runtime.js";
 
 // Keys whose values are bound at process / app startup and won't take effect
 // without a full restart, even though we propagate them to process.env.
@@ -46,8 +47,8 @@ const RESTART_REQUIRED_KEYS = new Set<string>([
   "OPENROUTER_VIDEO_POLL_INTERVAL_MS",
   "SEEDANCE_VIDEO_POLL_INTERVAL_MS",
   "COMFYUI_GEN_TIMEOUT",
-  // Fastify reads disableRequestLogging once from the factory options at boot
-  // (app.ts), so toggling this after startup has no effect until a restart.
+  // Fastify reads the LogController configuration once at boot (app.ts), so
+  // toggling this after startup has no effect until a restart.
   "LOG_DISABLE_REQUEST_LOGGING",
 ]);
 
@@ -80,6 +81,12 @@ function applyLogLevel(diff: EnvReloadResult) {
   } catch (err) {
     logger.warn({ err, requested: next }, "[env-watcher] Could not apply new LOG_LEVEL to logger");
   }
+}
+
+function applyExternalExtensionsGate(diff: EnvReloadResult) {
+  const key = "ENABLE_EXTERNAL_EXTENSIONS";
+  if (!diff.updated.includes(key) && !diff.added.includes(key) && !diff.removed.includes(key)) return;
+  void personalServerExtensionRuntime.enforceExternalPolicy();
 }
 
 function logDiff(diff: EnvReloadResult) {
@@ -143,6 +150,7 @@ export function startEnvWatcher(): EnvWatcherHandle {
       const diff = reloadRuntimeEnv();
       logDiff(diff);
       applyLogLevel(diff);
+      applyExternalExtensionsGate(diff);
     } catch (err) {
       logger.error(err, "[env-watcher] Failed to reload .env");
     }
@@ -161,6 +169,7 @@ export function startEnvWatcher(): EnvWatcherHandle {
         const diff = reloadRuntimeEnv();
         logDiff(diff);
         applyLogLevel(diff);
+        applyExternalExtensionsGate(diff);
         return diff;
       } catch (err) {
         logger.error(err, "[env-watcher] Manual reload failed");

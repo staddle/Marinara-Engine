@@ -40,6 +40,7 @@ import { WorldDateTimeTile } from "./WorldDateTimeTiles";
 import { WorldRenderedEdit, WorldValueText } from "./WorldEditableTile";
 import { WorldForecastTile } from "./WorldForecastTile";
 import { WorldLocationPlate } from "./WorldLocationPlate";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 function makeUniqueWorldCustomFieldName(fields: WorldCustomField[]) {
   const names = new Set(fields.map((field) => normalizeCustomFieldName(field.name)).filter(Boolean));
@@ -256,6 +257,7 @@ function WorldCustomFieldPlate({
   onRemove: () => void;
   isNameTaken: (name: string) => boolean;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const { fieldLocks, onUpdateFieldLocks } = useTrackerLockContext();
   const valueLockKey = worldCustomFieldTrackerLockKey(field, "value", fieldIndex);
   const valueLock = useTrackerFieldLock(valueLockKey);
@@ -297,7 +299,7 @@ function WorldCustomFieldPlate({
             <InlineEdit
               value={name}
               onSave={updateName}
-              placeholder="Field"
+              placeholder={localizeUi("ui.trackerPanel.charactertrackercard.field")}
               ariaLabel={`${name} field name`}
               className="min-w-0 px-0.5 py-0 text-[0.625rem] font-semibold uppercase text-[var(--muted-foreground)]/88"
               previewClassName="truncate"
@@ -319,10 +321,10 @@ function WorldCustomFieldPlate({
         )}
         <dd className="min-w-0">
           <WorldRenderedEdit
-            label={`${name} value`}
+            label={localizeUi("ui.trackerPanel.worldcustomfieldplate.value1Value", { value1: name })}
             value={field.value}
             onSave={(value) => onUpdate({ ...field, value })}
-            placeholder="Not recorded"
+            placeholder={localizeUi("ui.trackerPanel.worldcustomfieldplate.notRecorded")}
             className="min-h-8 min-w-0 max-w-full pr-3 text-left font-bold text-[var(--foreground)]/92 drop-shadow-sm"
             inputClassName="text-left text-[0.75rem]"
             showEditHint={!deleteMode}
@@ -339,8 +341,8 @@ function WorldCustomFieldPlate({
             onUpdateFieldLocks?.((locks) => removeTrackerFieldLockPrefix(locks, customPrefix));
             onRemove();
           }}
-          title={`Remove ${name}`}
-          aria-label={`Remove ${name}`}
+          title={localizeUi("ui.trackerPanel.charactertrackercard.removeValue1", { value1: name })}
+          aria-label={localizeUi("ui.trackerPanel.charactertrackercard.removeValue1", { value1: name })}
           className="absolute right-1 top-1/2 z-[4] flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-full bg-[var(--background)]/85 text-[var(--destructive)] shadow-sm ring-1 ring-[var(--border)]/70 backdrop-blur-sm transition-all hover:bg-[var(--accent)] focus-visible:outline-none focus-visible:ring-[var(--border)] active:scale-90 [@media(pointer:coarse)]:h-11 [@media(pointer:coarse)]:w-11"
         >
           <X size="0.625rem" />
@@ -371,6 +373,7 @@ export function WorldStatePanel({
   collapsed?: boolean;
   onToggleCollapsed?: () => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const worldCustomFields = Array.isArray(state?.worldCustomFields) ? state.worldCustomFields : [];
   const presentation = getWorldStatePresentation(
     {
@@ -393,12 +396,12 @@ export function WorldStatePanel({
 
       <SectionHeader
         icon={<MapPin size="0.6875rem" />}
-        title="World"
+        title={localizeUi("ui.trackerPanel.worldstatepanel.world")}
         action={action}
         addAction={
           addMode ? (
             <AddRowButton
-              title="Add world field"
+              title={localizeUi("ui.trackerPanel.worldstatepanel.addWorldField")}
               onClick={() =>
                 onSaveField("worldCustomFields", [
                   ...worldCustomFields,

@@ -32,6 +32,7 @@ interface STWorldInfoEntry {
   selective?: boolean;
   selectiveLogic?: number | string;
   position?: number | string;
+  outletName?: string;
   depth?: number;
   probability?: number | null;
   useProbability?: boolean;
@@ -224,6 +225,7 @@ export function resolvePosition(value: unknown): number {
   if (typeof value === "string") {
     if (value === "after_char") return 1;
     if (value === "at_depth" || value === "depth") return 2;
+    if (value === "outlet") return 7;
     return 0;
   }
   const positionMap: Record<number, number> = {
@@ -234,6 +236,7 @@ export function resolvePosition(value: unknown): number {
     4: 2, // ST @D / at-depth
     5: 0, // ST EMTop
     6: 1, // ST EMBottom
+    7: 7, // ST Outlet
   };
   if (typeof value === "number" && Number.isInteger(value)) return positionMap[value] ?? 0;
   return 0;
@@ -461,6 +464,7 @@ export async function importSTLorebook(
       caseSensitive: resolvedCaseSensitive,
       useRegex: resolvedUseRegex,
       position: resolvedPosition,
+      outletName: normalizeString(entry.outletName),
       depth: asNumber(entry.depth, 4),
       order: resolvedOrder,
       role: resolvedRole,

@@ -134,8 +134,10 @@ export function applyInlineMarkdown(text: string, keyPrefix: string, _depth = 0)
       }
     } else if (match[5] != null) {
       // ── Inline code: `code` (no recursion — content is literal) ──
+      // dir="ltr": code is LTR syntax; inside an RTL paragraph the bidi
+      // algorithm would otherwise reorder it (`--flag value` → `flag value--`).
       nodes.push(
-        <code key={`${keyPrefix}c${key++}`} className="mari-md-inline-code">
+        <code key={`${keyPrefix}c${key++}`} className="mari-md-inline-code" dir="ltr">
           {decodeChatTextHtmlEntities(match[5])}
         </code>,
       );
@@ -233,14 +235,15 @@ interface ListItem {
 
 // ── Table helpers ──
 
-/** Parse alignment from separator cells (e.g. :---, :---:, ---:). */
-function parseTableAlign(sep: string): "left" | "center" | "right" | undefined {
+/** Parse alignment from separator cells (e.g. :---, :---:, ---:). Logical
+ * values so `:---` means "reading start" in RTL content too. */
+function parseTableAlign(sep: string): "start" | "center" | "end" | undefined {
   const trimmed = sep.trim();
   const left = trimmed.startsWith(":");
   const right = trimmed.endsWith(":");
   if (left && right) return "center";
-  if (right) return "right";
-  if (left) return "left";
+  if (right) return "end";
+  if (left) return "start";
   return undefined;
 }
 
@@ -249,7 +252,7 @@ function parseTableAlign(sep: string): "left" | "center" | "right" | undefined {
 function renderCodeBlock(lines: string[], lang: string, blockKey: string): ReactNode {
   const code = lines.join("\n");
   return (
-    <pre key={blockKey} className="mari-md-codeblock">
+    <pre key={blockKey} className="mari-md-codeblock" dir="ltr">
       {lang && <span className="mari-md-codeblock-lang">{lang}</span>}
       <code>{code}</code>
     </pre>
@@ -415,6 +418,7 @@ export function renderMarkdownBlocks(
   let inCodeBlock = false;
   let codeBuffer: string[] = [];
   let codeLang = "";
+  let codeFenceIndent = 0;
   let quoteBuffer: string[] = [];
   let listItems: ListItem[] = [];
   let listOrdered = false;
@@ -475,13 +479,20 @@ export function renderMarkdownBlocks(
 
     // ── Inside fenced code block ──
     if (inCodeBlock) {
-      if (CODE_FENCE_CLOSE_RE.test(line.trimEnd())) {
+      // The close fence may be indented like its opener (fence inside a list
+      // item), so trim both ends before matching.
+      if (CODE_FENCE_CLOSE_RE.test(line.trim())) {
         segments.push(renderCodeBlock(codeBuffer, codeLang, `${keyBase}cb${key++}`));
         codeBuffer = [];
         codeLang = "";
         inCodeBlock = false;
       } else {
-        codeBuffer.push(line);
+        // CommonMark: strip up to the opening fence's indent from each content
+        // line so list-nested code blocks don't render with phantom leading
+        // spaces (and the Copy button doesn't copy them).
+        let stripped = 0;
+        while (stripped < codeFenceIndent && line[stripped] === " ") stripped++;
+        codeBuffer.push(stripped > 0 ? line.slice(stripped) : line);
       }
       continue;
     }
@@ -492,6 +503,7 @@ export function renderMarkdownBlocks(
       flushAll();
       inCodeBlock = true;
       codeLang = codeFenceMatch[1]?.trim() ?? "";
+      codeFenceIndent = line.length - line.trimStart().length;
       continue;
     }
 
@@ -675,7 +687,9 @@ export function applyInlineMarkdownHTML(html: string): string {
         return `<pre class="mari-md-codeblock">${langLabel}<code>${code}</code></pre>`;
       },
     )
-    // Inline code: `code`
+    // Inline code: `code`. No dir attribute here — this path is re-sanitized by
+    // sanitizeChatHtml, whose attribute allowlist strips `dir`; the LTR forcing
+    // for this path comes from the .mari-md-codeblock/.mari-md-inline-code CSS.
     .replace(/`([^`\n]+)`/g, '<code class="mari-md-inline-code">$1</code>');
 
   if (shouldConvertLatexSymbols()) {

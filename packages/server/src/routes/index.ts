@@ -57,6 +57,9 @@ import { professorMariWorkspaceRoutes } from "./professor-mari-workspace.routes.
 import { noodleRoutes } from "./noodle.routes.js";
 import { capabilityPackagesRoutes } from "./capability-packages.routes.js";
 import { customAgentRepositoriesRoutes } from "./custom-agent-repositories.routes.js";
+import { personalExtensionsRoutes } from "./personal-extensions.routes.js";
+import { notificationSoundRoutes } from "./notification-sound.routes.js";
+import { libraryFoldersRoutes } from "./library-folders.routes.js";
 
 export async function registerRoutes(app: FastifyInstance) {
   await app.register(chatsRoutes, { prefix: "/api/chats" });
@@ -67,6 +70,7 @@ export async function registerRoutes(app: FastifyInstance) {
   await app.register(promptsRoutes, { prefix: "/api/prompts" });
   await app.register(connectionsRoutes, { prefix: "/api/connections" });
   await app.register(connectionFoldersRoutes, { prefix: "/api/connection-folders" });
+  await app.register(libraryFoldersRoutes, { prefix: "/api/library-folders" });
   await app.register(agentsRoutes, { prefix: "/api/agents" });
   await app.register(customToolsRoutes, { prefix: "/api/custom-tools" });
   await app.register(generateRoutes, { prefix: "/api/generate" });
@@ -113,6 +117,8 @@ export async function registerRoutes(app: FastifyInstance) {
   await app.register(noodleRoutes, { prefix: "/api/noodle" });
   await app.register(capabilityPackagesRoutes, { prefix: "/api/capability-packages" });
   await app.register(customAgentRepositoriesRoutes, { prefix: "/api/custom-agent-repositories" });
+  await app.register(personalExtensionsRoutes, { prefix: "/api/personal-extensions" });
+  await app.register(notificationSoundRoutes, { prefix: "/api/notification-sound" });
   if (process.env.MARINARA_LITE !== "true" && process.env.MARINARA_LITE !== "1") {
     await app.register(sidecarRoutes, { prefix: "/api/sidecar" });
   }

@@ -1,6 +1,7 @@
 import { useRef, useState, type ChangeEvent, type DragEvent, type ReactNode } from "react";
 import { toast } from "sonner";
 import { cn } from "../../lib/utils";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface ImageUploadDropzoneProps {
   label: string;
@@ -46,6 +47,7 @@ export function ImageUploadDropzone({
   ariaLabel,
   fileKind = "image",
 }: ImageUploadDropzoneProps) {
+  const { t: localizeUi } = useUiTranslation();
   const inputRef = useRef<HTMLInputElement>(null);
   const dragDepthRef = useRef(0);
   const [isDragging, setIsDragging] = useState(false);
@@ -55,13 +57,13 @@ export function ImageUploadDropzone({
     const supportedFiles = getSupportedFiles(files, fileKind);
     if (supportedFiles.length === 0) {
       if (files && files.length > 0) {
-        toast.error(fileKind === "image" ? "Drop image files to upload." : "Drop video files to upload.");
+        toast.error(fileKind === "image" ?localizeUi("ui.ui.imageuploaddropzone.dropImageFilesToUpload") :localizeUi("ui.ui.imageuploaddropzone.dropVideoFilesToUpload"));
       }
       return;
     }
     if (files && supportedFiles.length < files.length) {
       toast.warning(
-        fileKind === "image" ? "Only image files can be uploaded here." : "Only video files can be uploaded here.",
+        fileKind === "image" ?localizeUi("ui.ui.imageuploaddropzone.onlyImageFilesCanBeUploadedHere") :localizeUi("ui.ui.imageuploaddropzone.onlyVideoFilesCanBeUploadedHere"),
       );
     }
     onFilesSelected(supportedFiles);

@@ -13,6 +13,7 @@ import { useUIStore } from "@/stores/ui.store";
 import { api } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import { MusicSourceButton, MusicSourceGlyph } from "@/components/music/MusicSourceButton";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 // The YouTube IFrame API attaches itself to window; it has no bundled types.
 type YTPlayer = {
@@ -142,6 +143,7 @@ function loadYouTubeApi(): Promise<void> {
  * and plays it in an in-app IFrame player. No OAuth, no external device.
  */
 export function YouTubePlayer({ mobile = false }: { mobile?: boolean } = {}) {
+  const { t: localizeUi } = useUiTranslation();
   const youtubePlay = useAgentStore((s) => s.youtubePlay);
   const youtubeVolume = useAgentStore((s) => s.youtubeVolume);
   const clearYoutube = useAgentStore((s) => s.clearYoutube);
@@ -414,8 +416,8 @@ export function YouTubePlayer({ mobile = false }: { mobile?: boolean } = {}) {
           MUSIC_NEUTRAL_ICON_CLASS,
           MUSIC_NEUTRAL_ICON_HOVER_CLASS,
         )}
-        title={volumeMuted ? "Unmute" : "Mute"}
-        aria-label={volumeMuted ? "Unmute" : "Mute"}
+        title={volumeMuted ?localizeUi("ui.game.gamevolumemixer.unmute") :localizeUi("ui.game.gamevolumemixer.mute")}
+        aria-label={volumeMuted ?localizeUi("ui.game.gamevolumemixer.unmute") :localizeUi("ui.game.gamevolumemixer.mute")}
       >
         <VolumeIcon size="0.75rem" />
       </button>
@@ -427,8 +429,8 @@ export function YouTubePlayer({ mobile = false }: { mobile?: boolean } = {}) {
         value={playerVolume}
         onChange={(event) => setPlayerVolume(Number(event.target.value))}
         className="mari-youtube-volume-slider w-full"
-        title="Volume"
-        aria-label="YouTube volume"
+        title={localizeUi("game.toolbar.volume")}
+        aria-label={localizeUi("ui.chat.youtubeplayer.youtubeVolume")}
         style={{ "--range-progress": `${playerVolume}%` } as CSSProperties}
       />
     </div>
@@ -472,7 +474,7 @@ export function YouTubePlayer({ mobile = false }: { mobile?: boolean } = {}) {
             MUSIC_NEUTRAL_ACTION_BG_CLASS,
             MUSIC_NEUTRAL_ACTION_TEXT_CLASS,
           )}
-          aria-label={paused ? "Play" : "Pause"}
+          aria-label={paused ?localizeUi("ui.chat.localmusicplayer.play") :localizeUi("ui.chat.localmusicplayer.pause")}
         >
           {paused ? <Play size="0.8125rem" className="translate-x-px" /> : <Pause size="0.8125rem" />}
         </button>
@@ -486,7 +488,7 @@ export function YouTubePlayer({ mobile = false }: { mobile?: boolean } = {}) {
             MUSIC_NEUTRAL_ICON_CLASS,
             MUSIC_NEUTRAL_ICON_HOVER_CLASS,
           )}
-          aria-label={showVideo ? "Hide video" : "Show video"}
+          aria-label={showVideo ?localizeUi("ui.chat.youtubeplayer.hideVideo") :localizeUi("ui.chat.youtubeplayer.showVideo")}
         >
           {showVideo ? <ChevronUp size="0.8125rem" /> : <ChevronDown size="0.8125rem" />}
         </button>
@@ -500,7 +502,7 @@ export function YouTubePlayer({ mobile = false }: { mobile?: boolean } = {}) {
             MUSIC_NEUTRAL_ICON_CLASS,
             MUSIC_NEUTRAL_ICON_HOVER_CLASS,
           )}
-          aria-label="Stop"
+          aria-label={localizeUi("ui.chat.summarypopover.stop")}
         >
           <X size="0.8125rem" />
         </button>
@@ -571,9 +573,7 @@ export function YouTubePlayer({ mobile = false }: { mobile?: boolean } = {}) {
               >
                 <div className="mb-1 flex items-center gap-1">
                   <GripVertical size="0.875rem" className={MUSIC_NEUTRAL_ICON_CLASS} />
-                  <span className={cn("flex-1 truncate text-[0.625rem] font-medium", MUSIC_NEUTRAL_ICON_CLASS)}>
-                    YouTube
-                  </span>
+                  <span className={cn("flex-1 truncate text-[0.625rem] font-medium", MUSIC_NEUTRAL_ICON_CLASS)}>{localizeUi("ui.chat.youtubeplayer.youtube")}</span>
                   <button
                     type="button"
                     onPointerDown={(event) => event.stopPropagation()}
@@ -589,7 +589,7 @@ export function YouTubePlayer({ mobile = false }: { mobile?: boolean } = {}) {
                       MUSIC_NEUTRAL_ICON_CLASS,
                       MUSIC_NEUTRAL_ICON_HOVER_CLASS,
                     )}
-                    title="Close player"
+                    title={localizeUi("ui.chat.localmusicplayer.closePlayer")}
                   >
                     <X size="0.875rem" />
                   </button>

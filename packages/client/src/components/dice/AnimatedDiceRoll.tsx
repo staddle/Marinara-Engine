@@ -4,6 +4,7 @@ import type { DiceRollResult } from "@marinara-engine/shared";
 import { cn } from "../../lib/utils";
 import { DiceGlyph, type DiceGlyphPhase, type DiceGlyphSize } from "./DiceGlyph";
 import { getFaceLabel } from "./dice-shapes";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 type DiceRollMode = "chat" | "game" | "compact";
 
@@ -72,6 +73,7 @@ export function AnimatedDiceRoll({
   hero,
   highlightValue,
 }: AnimatedDiceRollProps) {
+  const { t: localizeUi } = useUiTranslation();
   const sides = parseDiceSides(notation);
   const reducedMotion = useReducedMotion();
   const shouldAnimate = animate && !reducedMotion;
@@ -135,7 +137,7 @@ export function AnimatedDiceRoll({
         <span>{notation}</span>
       </div>
 
-      <div className="dice-stage" aria-label={`Rolled ${notation}: ${rollText}`}>
+      <div className="dice-stage" aria-label={localizeUi("ui.dice.animateddiceroll.rolledValue1Value2", { value1: notation, value2: rollText })}>
         {rolls.map((roll, index) => {
           const shown = displayValues[index] ?? roll;
           const emphasized = highlightValue == null || roll === highlightValue;
@@ -162,7 +164,7 @@ export function AnimatedDiceRoll({
       </div>
 
       {onDismiss && (
-        <button type="button" onClick={onDismiss} className="dice-roll-dismiss" aria-label="Dismiss dice roll result">
+        <button type="button" onClick={onDismiss} className="dice-roll-dismiss" aria-label={localizeUi("ui.dice.animateddiceroll.dismissDiceRollResult")}>
           <X size={14} />
         </button>
       )}

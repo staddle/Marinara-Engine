@@ -18,6 +18,12 @@ import {
 import { ConversationMessageActions } from "./ConversationMessageActions";
 import { MessageReactions } from "./MessageReactions";
 import { ReactionAddButton } from "./ReactionAddButton";
+import {
+  MESSAGE_SELECTION_CHECKBOX_CLASS,
+  MESSAGE_SELECTION_CHECKBOX_SELECTED_CLASS,
+  MESSAGE_SELECTION_SURFACE_CLASS,
+} from "./message-selection-styles";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 export function ConversationMessageGrouped({
   ctx,
@@ -26,6 +32,7 @@ export function ConversationMessageGrouped({
   ctx: MessageRenderContext;
   msgRef: RefObject<HTMLDivElement | null>;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const {
     message,
     extra,
@@ -40,6 +47,9 @@ export function ConversationMessageGrouped({
     groupedSegments,
     visibleSegments,
     charByName,
+    charIdByName,
+    selfCharacterId,
+    galleryIndex,
     mentionNames,
     emojiMap,
     stickerMap,
@@ -64,6 +74,7 @@ export function ConversationMessageGrouped({
     canRegenerate,
     isLastAssistantMessage,
     thinking,
+    thinkingButtonRef,
     generationReplay,
     isGuided,
     regenerateButtonTitle,
@@ -114,13 +125,16 @@ export function ConversationMessageGrouped({
     <div
       ref={msgRef}
       data-component="ConversationMessage.Grouped"
+      data-message-id={message.id}
+      data-message-role={message.role}
       className={cn(
         "relative px-4 py-0.5 transition-colors hover:bg-[var(--secondary)]/30",
         isBubbleStyle && "hover:bg-transparent",
         !noHoverGroup && "group",
         isGrouped ? "mt-0" : "mt-3",
         isStreaming && "bg-[var(--secondary)]/20",
-        multiSelectMode && isSelected && "bg-[var(--destructive)]/10",
+        multiSelectMode && isSelected && MESSAGE_SELECTION_SURFACE_CLASS,
+        hideActions && thinking && "max-sm:pb-8",
       )}
       onClick={handleMobileTap}
     >
@@ -131,19 +145,20 @@ export function ConversationMessageGrouped({
             type="button"
             role="checkbox"
             aria-checked={isSelected}
-            aria-label={isSelected ? "Deselect message" : "Select message"}
+            aria-label={isSelected ?localizeUi("ui.chat.chatmessage.deselectMessage") :localizeUi("ui.chat.chatmessage.selectMessage")}
             onClick={(e) => {
               e.stopPropagation();
               onToggleSelect?.();
             }}
             className={cn(
-              "h-5 w-5 rounded border-2 flex items-center justify-center transition-colors cursor-pointer",
-              isSelected
-                ? "border-[var(--destructive)] bg-[var(--destructive)]"
-                : "border-[var(--muted-foreground)]/40 bg-[var(--secondary)]",
+              MESSAGE_SELECTION_CHECKBOX_CLASS,
+              "flex items-center justify-center",
+              isSelected && MESSAGE_SELECTION_CHECKBOX_SELECTED_CLASS,
             )}
           >
-            {isSelected && <span className="text-white text-xs font-bold">✓</span>}
+            {isSelected && (
+              <span className="text-xs font-bold text-[var(--marinara-chat-chrome-panel-bg)]">✓</span>
+            )}
           </button>
         </div>
       )}
@@ -151,7 +166,7 @@ export function ConversationMessageGrouped({
       {hiddenFromAIHeader && !isHiddenCollapsed && (
         <div className="mb-1 flex items-center gap-1 pl-14 text-[0.6875rem] text-amber-500/80">
           {hiddenFromAIHeader}
-          <span>Hidden from AI</span>
+          <span>{localizeUi("ui.chat.conversationmessagegrouped.hiddenFromAi")}</span>
         </div>
       )}
 
@@ -162,6 +177,9 @@ export function ConversationMessageGrouped({
       ) : (
         (groupedSegments ?? []).slice(0, visibleSegments).map((grp, i) => {
           const segChar = grp.speaker && charByName ? charByName.get(normalizeTextForMatch(grp.speaker)) : null;
+          const segSelfId =
+            (grp.speaker && charIdByName ? charIdByName.get(normalizeTextForMatch(grp.speaker)) : null) ??
+            selfCharacterId;
           const segAvatar = segChar?.avatarUrl ?? null;
           const segAvatarCropStyle = getAvatarCropStyle(segChar?.avatarCrop);
           const segName = segChar?.convoDisplayName?.trim() || segChar?.name || grp.speaker || "";
@@ -211,6 +229,8 @@ export function ConversationMessageGrouped({
                   emojiMap={emojiMap}
                   stickerMap={stickerMap}
                   onImageOpen={(url) => onImageOpen(url)}
+                  selfCharacterId={selfCharacterId}
+                galleryIndex={galleryIndex}
                 />
               </div>
             );
@@ -262,6 +282,8 @@ export function ConversationMessageGrouped({
                         emojiMap={emojiMap}
                         stickerMap={stickerMap}
                         onImageOpen={(url) => onImageOpen(url)}
+                        selfCharacterId={segSelfId}
+                      galleryIndex={galleryIndex}
                       />
                     </div>
                   </div>
@@ -338,6 +360,8 @@ export function ConversationMessageGrouped({
                             emojiMap={emojiMap}
                             stickerMap={stickerMap}
                             onImageOpen={(url) => onImageOpen(url)}
+                            selfCharacterId={segSelfId}
+                          galleryIndex={galleryIndex}
                           />
                         </div>
                       </div>
@@ -354,6 +378,8 @@ export function ConversationMessageGrouped({
                           emojiMap={emojiMap}
                           stickerMap={stickerMap}
                           onImageOpen={(url) => onImageOpen(url)}
+                          selfCharacterId={segSelfId}
+                        galleryIndex={galleryIndex}
                         />
                       </div>
                     ))}
@@ -380,7 +406,10 @@ export function ConversationMessageGrouped({
 
           {!isHiddenCollapsed && (
             <div className="ml-14">
-              <ConversationMessageTranslation translatedText={translatedText} isTranslating={isTranslating} />
+              <ConversationMessageTranslation
+                translatedText={ctx.showTranslationOnly ? null : translatedText}
+                isTranslating={isTranslating}
+              />
             </div>
           )}
 
@@ -413,18 +442,20 @@ export function ConversationMessageGrouped({
       )}
 
       {/* Action bar */}
-      {!hideActions && (
+      {(!hideActions || !!thinking) && (
         <ConversationMessageActions
           isBubbleStyle={isBubbleStyle}
           isUser={false}
           showActions={showActions}
-          forceShowActions={forceShowActions}
+          forceShowActions={hideActions && !!thinking ? true : forceShowActions}
+          thinkingOnly={hideActions && !!thinking}
           copied={copied}
           translatedText={translatedText}
           isHiddenFromAI={isHiddenFromAI}
           canRegenerate={canRegenerate}
           isLastAssistantMessage={isLastAssistantMessage}
           thinking={thinking}
+          thinkingButtonRef={thinkingButtonRef}
           generationReplay={generationReplay}
           isGuided={isGuided}
           regenerateButtonTitle={regenerateButtonTitle}

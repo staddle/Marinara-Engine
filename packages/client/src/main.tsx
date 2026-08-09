@@ -5,6 +5,9 @@ import { App, AppRecoveryBoundary } from "./App";
 import { startKeepAlive } from "./lib/keep-alive";
 import { installCsrfFetchShim } from "./lib/csrf-fetch";
 import { registerPreloadErrorRecovery } from "./lib/browser-runtime";
+import { initializeLocalization } from "./localization/i18n";
+import { LocalizationProvider } from "./localization/LocalizationProvider";
+import { useUIStore } from "./stores/ui.store";
 import "./styles/globals.css";
 
 // Installed capability clients can outlive the Engine build that produced
@@ -78,14 +81,26 @@ function registerServiceWorker() {
   });
 }
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <AppRecoveryBoundary>
-        <App />
-      </AppRecoveryBoundary>
-    </QueryClientProvider>
-  </React.StrictMode>,
-);
+async function renderApplication() {
+  const requestedLanguage = useUIStore.getState().language;
+  const activeLanguage = await initializeLocalization(requestedLanguage);
+  if (activeLanguage !== requestedLanguage) {
+    useUIStore.getState().setLanguage(activeLanguage);
+  }
 
-registerServiceWorker();
+  ReactDOM.createRoot(document.getElementById("root")!).render(
+    <React.StrictMode>
+      <QueryClientProvider client={queryClient}>
+        <LocalizationProvider>
+          <AppRecoveryBoundary>
+            <App />
+          </AppRecoveryBoundary>
+        </LocalizationProvider>
+      </QueryClientProvider>
+    </React.StrictMode>,
+  );
+
+  registerServiceWorker();
+}
+
+void renderApplication();

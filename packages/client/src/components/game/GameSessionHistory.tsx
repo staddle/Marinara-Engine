@@ -24,6 +24,7 @@ import type { GameInitialSetupSnapshot, GameMap, GameNpc, PartyArc, SessionSumma
 import { toast } from "sonner";
 import { AnimatedText } from "./AnimatedText";
 import { GameSetupSummary } from "./GameSetupSummary";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 function normalizeText(value: unknown, fallback = ""): string {
   if (typeof value === "string") {
@@ -238,6 +239,7 @@ export function GameSessionHistory({
   onClose,
   embedded = false,
 }: GameSessionHistoryProps) {
+  const { t: localizeUi } = useUiTranslation();
   const [expandedSession, setExpandedSession] = useState<number | null>(null);
   const [editingSession, setEditingSession] = useState<number | null>(null);
   const [draft, setDraft] = useState<SessionSummaryDraft | null>(null);
@@ -311,7 +313,7 @@ export function GameSessionHistory({
         }
         statsSnapshot = parsed as Record<string, unknown>;
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Stats snapshot must be valid JSON.");
+        toast.error(error instanceof Error ? error.message :localizeUi("ui.game.gamesessionhistory.statsSnapshotMustBeValidJson"));
         return;
       }
     }
@@ -364,7 +366,7 @@ export function GameSessionHistory({
       });
       setEditingSecrets(false);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not save current session spoilers.");
+      toast.error(error instanceof Error ? error.message :localizeUi("ui.game.gamesessionhistory.couldNotSaveCurrentSessionSpoilers"));
     }
   };
 
@@ -390,9 +392,9 @@ export function GameSessionHistory({
         <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
           <div className="flex items-center gap-2">
             <History size={16} className="text-[var(--muted-foreground)]" />
-            <span className="text-sm font-semibold text-[var(--foreground)]">Session History</span>
+            <span className="text-sm font-semibold text-[var(--foreground)]">{localizeUi("ui.game.gamesurfacecomponent.sessionHistory")}</span>
             <span className="text-xs text-[var(--muted-foreground)]">
-              ({sorted.length} past session{sorted.length !== 1 ? "s" : ""})
+              ({sorted.length} {localizeUi("ui.game.gamesessionhistory.pastSession")}{sorted.length !== 1 ?localizeUi("ui.noodle.stageprofileview.s") : ""})
             </span>
           </div>
           <button
@@ -408,9 +410,7 @@ export function GameSessionHistory({
         <div className="flex flex-col gap-2">
           <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/45">
             <div className="flex flex-wrap items-center gap-3 px-4 py-3">
-              <span className="text-sm font-semibold text-[var(--foreground)]">
-                Session {currentSessionNumber} (Current)
-              </span>
+              <span className="text-sm font-semibold text-[var(--foreground)]">{localizeUi("game.toolbar.session")} {currentSessionNumber} {localizeUi("ui.game.gamemappanel.current")}</span>
               <span className="text-xs text-[var(--muted-foreground)]">{currentSessionDateStr}</span>
               <div className="ml-auto flex items-center gap-1.5">
                 <button
@@ -422,8 +422,8 @@ export function GameSessionHistory({
                     }
                   }}
                   className="flex h-7 w-7 items-center justify-center rounded-md bg-[var(--secondary)] text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-                  title={spoilersVisible ? "Hide Spoilers" : "Show Spoilers"}
-                  aria-label={spoilersVisible ? "Hide Spoilers" : "Show Spoilers"}
+                  title={spoilersVisible ?localizeUi("ui.game.gamesessionhistory.hideSpoilers") :localizeUi("ui.game.gamesessionhistory.showSpoilers")}
+                  aria-label={spoilersVisible ?localizeUi("ui.game.gamesessionhistory.hideSpoilers") :localizeUi("ui.game.gamesessionhistory.showSpoilers")}
                 >
                   {spoilersVisible ? <EyeOff size={13} /> : <Eye size={13} />}
                 </button>
@@ -445,13 +445,11 @@ export function GameSessionHistory({
             {spoilersVisible && (
               <div className="border-t border-[var(--border)] px-4 py-3">
                 {!currentSecrets ? (
-                  <p className="text-xs text-[var(--muted-foreground)]">No GM spoiler state has been generated yet.</p>
+                  <p className="text-xs text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesessionhistory.noGmSpoilerStateHasBeenGeneratedYet")}</p>
                 ) : editingSecrets ? (
                   <div className="flex flex-col gap-3">
                     <label className="flex flex-col gap-1">
-                      <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                        World Overview
-                      </span>
+                      <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesessionhistory.worldOverview")}</span>
                       <textarea
                         value={secretDraft?.worldOverview ?? ""}
                         onChange={(event) =>
@@ -463,9 +461,7 @@ export function GameSessionHistory({
                       />
                     </label>
                     <label className="flex flex-col gap-1">
-                      <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                        Story Arc
-                      </span>
+                      <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesessionhistory.storyArc")}</span>
                       <textarea
                         value={secretDraft?.storyArc ?? ""}
                         onChange={(event) =>
@@ -477,9 +473,7 @@ export function GameSessionHistory({
                       />
                     </label>
                     <label className="flex flex-col gap-1">
-                      <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                        Plot Twists
-                      </span>
+                      <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesessionhistory.plotTwists")}</span>
                       <textarea
                         value={secretDraft?.plotTwists ?? ""}
                         onChange={(event) =>
@@ -487,14 +481,12 @@ export function GameSessionHistory({
                         }
                         rows={5}
                         disabled={savingCurrentSecrets}
-                        placeholder="One plot twist per line"
+                        placeholder={localizeUi("ui.game.gamesessionhistory.onePlotTwistPerLine")}
                         className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] outline-none transition-colors focus:border-[var(--foreground)]/40"
                       />
                     </label>
                     <label className="flex flex-col gap-1">
-                      <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                        Party Arcs JSON
-                      </span>
+                      <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesessionhistory.partyArcsJson")}</span>
                       <textarea
                         value={secretDraft?.partyArcs ?? ""}
                         onChange={(event) =>
@@ -506,9 +498,7 @@ export function GameSessionHistory({
                       />
                     </label>
                     <label className="flex flex-col gap-1">
-                      <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                        Maps JSON
-                      </span>
+                      <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesessionhistory.mapsJson")}</span>
                       <textarea
                         value={secretDraft?.maps ?? ""}
                         onChange={(event) =>
@@ -520,9 +510,7 @@ export function GameSessionHistory({
                       />
                     </label>
                     <label className="flex flex-col gap-1">
-                      <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                        NPCs JSON
-                      </span>
+                      <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesessionhistory.npcsJson")}</span>
                       <textarea
                         value={secretDraft?.npcs ?? ""}
                         onChange={(event) =>
@@ -534,9 +522,7 @@ export function GameSessionHistory({
                       />
                     </label>
                     <label className="flex flex-col gap-1">
-                      <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                        Character Cards JSON
-                      </span>
+                      <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesessionhistory.characterCardsJson")}</span>
                       <textarea
                         value={secretDraft?.characterCards ?? ""}
                         onChange={(event) =>
@@ -553,16 +539,14 @@ export function GameSessionHistory({
                         onClick={handleCancelEditingSecrets}
                         disabled={savingCurrentSecrets}
                         className="rounded-md bg-[var(--secondary)] px-2.5 py-1.5 text-[0.6875rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-50"
-                      >
-                        Cancel
-                      </button>
+                      >{localizeUi("chat.delete.dialog.cancel")}</button>
                       <button
                         type="button"
                         onClick={() => void handleSaveCurrentSecrets()}
                         disabled={savingCurrentSecrets}
                         className="rounded-md bg-[var(--foreground)]/12 px-2.5 py-1.5 text-[0.6875rem] font-medium text-[var(--foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--foreground)]/18 disabled:opacity-50"
                       >
-                        {savingCurrentSecrets ? "Saving..." : "Save Spoilers"}
+                        {savingCurrentSecrets ?localizeUi("ui.noodle.stageprofileform.saving") :localizeUi("ui.game.gamesessionhistory.saveSpoilers")}
                       </button>
                     </div>
                   </div>
@@ -574,18 +558,16 @@ export function GameSessionHistory({
                           type="button"
                           onClick={handleStartEditingSecrets}
                           className="rounded-md bg-[var(--secondary)] px-2.5 py-1.5 text-[0.6875rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-                        >
-                          Edit Spoilers
-                        </button>
+                        >{localizeUi("ui.game.gamesessionhistory.editSpoilers")}</button>
                       )}
                     </div>
-                    <SpoilerTextSection label="World Overview" value={currentSecrets.worldOverview} />
-                    <SpoilerTextSection label="Story Arc" value={currentSecrets.storyArc} />
-                    <SpoilerListSection label="Plot Twists" values={currentSecrets.plotTwists} />
-                    <SpoilerJsonSection label="Party Arcs" value={currentSecrets.partyArcs} />
-                    <SpoilerJsonSection label="Maps" value={currentSecrets.maps} />
-                    <SpoilerJsonSection label="NPCs" value={currentSecrets.npcs} />
-                    <SpoilerJsonSection label="Character Cards" value={currentSecrets.characterCards} />
+                    <SpoilerTextSection label={localizeUi("ui.game.gamesessionhistory.worldOverview")} value={currentSecrets.worldOverview} />
+                    <SpoilerTextSection label={localizeUi("ui.game.gamesessionhistory.storyArc")} value={currentSecrets.storyArc} />
+                    <SpoilerListSection label={localizeUi("ui.game.gamesessionhistory.plotTwists")} values={currentSecrets.plotTwists} />
+                    <SpoilerJsonSection label={localizeUi("ui.game.gamesessionhistory.partyArcs")} value={currentSecrets.partyArcs} />
+                    <SpoilerJsonSection label={localizeUi("ui.game.gamesessionhistory.maps")} value={currentSecrets.maps} />
+                    <SpoilerJsonSection label={localizeUi("ui.game.gamesessionhistory.npcs")} value={currentSecrets.npcs} />
+                    <SpoilerJsonSection label={localizeUi("ui.game.gamesessionhistory.characterCards")} value={currentSecrets.characterCards} />
                   </div>
                 )}
               </div>
@@ -607,10 +589,8 @@ export function GameSessionHistory({
                 )}
                 <SlidersHorizontal size={14} className="shrink-0 text-[var(--primary)]" />
                 <span className="min-w-0 flex-1">
-                  <span className="block text-sm font-semibold text-[var(--foreground)]">Initial Game Setup</span>
-                  <span className="block text-xs text-[var(--muted-foreground)]">
-                    Review, copy, or share the settings that created this campaign.
-                  </span>
+                  <span className="block text-sm font-semibold text-[var(--foreground)]">{localizeUi("ui.game.gamesessionhistory.initialGameSetup")}</span>
+                  <span className="block text-xs text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesessionhistory.reviewCopyOrShareTheSettingsThatCreatedThis")}</span>
                 </span>
               </button>
               {initialSetupVisible && (
@@ -624,8 +604,8 @@ export function GameSessionHistory({
           {sorted.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-2 py-12 text-[var(--muted-foreground)]">
               <ScrollText size={24} className="opacity-50" />
-              <span className="text-sm">No completed sessions yet</span>
-              <span className="text-xs">Conclude your current session to see a summary here.</span>
+              <span className="text-sm">{localizeUi("ui.game.gamesessionhistory.noCompletedSessionsYet")}</span>
+              <span className="text-xs">{localizeUi("ui.game.gamesessionhistory.concludeYourCurrentSessionToSeeASummaryHere")}</span>
             </div>
           ) : (
             sorted.map((session) => {
@@ -658,13 +638,11 @@ export function GameSessionHistory({
                     ) : (
                       <ChevronRight size={14} className="text-[var(--muted-foreground)]" />
                     )}
-                    <span className="text-sm font-medium text-[var(--foreground)]">
-                      Session {session.sessionNumber}
+                    <span className="text-sm font-medium text-[var(--foreground)]">{localizeUi("game.toolbar.session")} {session.sessionNumber}
                     </span>
                     <span className="text-xs text-[var(--muted-foreground)]">{dateStr}</span>
                     <span className="ml-auto text-xs text-[var(--muted-foreground)]">
-                      {session.keyDiscoveries.length} discoveries
-                    </span>
+                      {session.keyDiscoveries.length} {localizeUi("ui.game.gamesessionhistory.discoveries")}</span>
                   </button>
 
                   {canRegenerateLorebook && lorebookRun?.status === "failed" && (
@@ -673,7 +651,7 @@ export function GameSessionHistory({
                       className="flex items-center gap-2 border-t border-[var(--border)] px-4 py-2"
                     >
                       <AlertTriangle size={14} className="shrink-0 text-[var(--destructive)]" />
-                      <span className="mr-auto text-xs font-semibold text-[var(--foreground)]">Lorebook Keeper failed</span>
+                      <span className="mr-auto text-xs font-semibold text-[var(--foreground)]">{localizeUi("ui.game.gamesessionhistory.lorebookKeeperFailed")}</span>
                       <button
                         type="button"
                         onClick={() => void onRegenerateLorebook?.(session.sessionNumber)}
@@ -681,7 +659,7 @@ export function GameSessionHistory({
                         className="inline-flex items-center gap-1.5 rounded-md bg-[var(--primary)]/14 px-2 py-1 text-xs font-semibold text-[var(--primary)] hover:bg-[var(--primary)]/22 disabled:opacity-50"
                       >
                         <RefreshCw size={12} className={isRegeneratingLorebook ? "animate-spin" : undefined} />
-                        {isRegeneratingLorebook ? "Retrying..." : "Retry Lorebook Keeper"}
+                        {isRegeneratingLorebook ?localizeUi("ui.game.gamesessionhistory.retrying") :localizeUi("ui.game.gamesessionhistory.retryLorebookKeeper")}
                       </button>
                     </div>
                   )}
@@ -691,21 +669,17 @@ export function GameSessionHistory({
                       <div className="mb-3">
                         <div className="mb-1 flex items-center justify-between gap-3">
                           <div className="flex items-center gap-1.5 text-xs font-medium text-[var(--muted-foreground)]">
-                            <ScrollText size={12} />
-                            Summary
-                          </div>
+                            <ScrollText size={12} />{localizeUi("ui.game.gamesessionhistory.summary")}</div>
                           {!isEditing && (
                             <div className="flex flex-wrap items-center justify-end gap-2">
                               {onReplaySession && (
                                 <button
                                   type="button"
                                   onClick={() => onReplaySession(session.sessionNumber)}
-                                  title={`Replay Session ${session.sessionNumber} from the beginning`}
+                                  title={localizeUi("ui.game.gamesessionhistory.replaySessionValue1FromTheBeginning", { value1: session.sessionNumber })}
                                   className="inline-flex items-center gap-1 rounded-md bg-[var(--primary)]/12 px-2 py-1 text-[0.6875rem] font-semibold text-[var(--primary)] ring-1 ring-[var(--primary)]/25 transition-colors hover:bg-[var(--primary)]/20"
                                 >
-                                  <Play size={11} fill="currentColor" />
-                                  Replay Session
-                                </button>
+                                  <Play size={11} fill="currentColor" />{localizeUi("ui.game.gamesessionhistory.replaySession")}</button>
                               )}
                               {canRegenerateLorebook && lorebookRun && lorebookRun.status !== "failed" && (
                                 <span
@@ -718,44 +692,44 @@ export function GameSessionHistory({
                                     <RefreshCw size={11} className="animate-spin" />
                                   )}
                                   {lorebookRun.status === "success"
-                                    ? `Lorebook ${lorebookRun.entryCount ?? 0}`
-                                    : "Lorebook running"}
+                                    ?localizeUi("ui.game.gamesessionhistory.lorebookValue1", { value1: lorebookRun.entryCount ?? 0 })
+                                    :localizeUi("ui.game.gamesessionhistory.lorebookRunning")}
                                 </span>
                               )}
                               {canRegenerateLorebook && lorebookRun?.status !== "failed" && (
                                 <button
                                   onClick={() => void onRegenerateLorebook?.(session.sessionNumber)}
                                   disabled={isRegeneratingLorebook}
-                                  title="Regenerate the Game Lorebook Keeper entries for this latest session"
+                                  title={localizeUi("ui.game.gamesessionhistory.regenerateTheGameLorebookKeeperEntriesForThisLatest")}
                                   className="inline-flex items-center gap-1 rounded-md bg-[var(--secondary)] px-2 py-1 text-[0.6875rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-50"
                                 >
                                   <BookOpen
                                     size={11}
                                     className={isRegeneratingLorebook ? "animate-pulse" : undefined}
                                   />
-                                  {isRegeneratingLorebook ? "Regenerating Lorebook..." : "Regenerate Lorebook"}
+                                  {isRegeneratingLorebook ?localizeUi("ui.game.gamesessionhistory.regeneratingLorebook") :localizeUi("ui.game.gamesessionhistory.regenerateLorebook")}
                                 </button>
                               )}
                               {onUpdatePlotArcs && (
                                 <button
                                   onClick={() => void onUpdatePlotArcs(session.sessionNumber)}
                                   disabled={isUpdatingPlotArcs || isRegenerating}
-                                  title="Update game plot arcs from this session"
+                                  title={localizeUi("ui.game.gamesessionhistory.updateGamePlotArcsFromThisSession")}
                                   className="inline-flex items-center gap-1 rounded-md bg-[var(--secondary)] px-2 py-1 text-[0.6875rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-50"
                                 >
                                   <GitBranch size={11} className={isUpdatingPlotArcs ? "animate-pulse" : undefined} />
-                                  {isUpdatingPlotArcs ? "Updating..." : "Update Plot Arcs"}
+                                  {isUpdatingPlotArcs ?localizeUi("ui.game.gamesessionhistory.updating") :localizeUi("ui.game.gamesessionhistory.updatePlotArcs")}
                                 </button>
                               )}
                               {onRegenerateSession && (
                                 <button
                                   onClick={() => void onRegenerateSession(session.sessionNumber)}
                                   disabled={isRegenerating}
-                                  title="Regenerate this session conclusion"
+                                  title={localizeUi("ui.game.gamesessionhistory.regenerateThisSessionConclusion")}
                                   className="inline-flex items-center gap-1 rounded-md bg-[var(--secondary)] px-2 py-1 text-[0.6875rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-50"
                                 >
                                   <RefreshCw size={11} className={isRegenerating ? "animate-spin" : undefined} />
-                                  {isRegenerating ? "Regenerating..." : "Regenerate"}
+                                  {isRegenerating ?localizeUi("ui.game.gamecharactersheet.regenerating") :localizeUi("ui.agents.secretplotpanel.regenerate")}
                                 </button>
                               )}
                               {onSaveSession && (
@@ -763,9 +737,7 @@ export function GameSessionHistory({
                                   onClick={() => handleStartEditing(session)}
                                   disabled={isRegenerating}
                                   className="rounded-md bg-[var(--secondary)] px-2 py-1 text-[0.6875rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-50"
-                                >
-                                  Edit Details
-                                </button>
+                                >{localizeUi("ui.game.gamesessionhistory.editDetails")}</button>
                               )}
                             </div>
                           )}
@@ -773,9 +745,7 @@ export function GameSessionHistory({
                         {isEditing ? (
                           <div className="flex flex-col gap-2">
                             <label className="flex flex-col gap-1">
-                              <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                                Summary
-                              </span>
+                              <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesessionhistory.summary")}</span>
                               <textarea
                                 value={draft?.summary ?? ""}
                                 onChange={(event) =>
@@ -787,9 +757,7 @@ export function GameSessionHistory({
                               />
                             </label>
                             <label className="flex flex-col gap-1">
-                              <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                                Resume Point
-                              </span>
+                              <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesessionhistory.resumePoint")}</span>
                               <textarea
                                 value={draft?.resumePoint ?? ""}
                                 onChange={(event) =>
@@ -797,14 +765,12 @@ export function GameSessionHistory({
                                 }
                                 disabled={isSaving}
                                 rows={4}
-                                placeholder="How the next session should resume"
+                                placeholder={localizeUi("ui.game.gamesessionhistory.howTheNextSessionShouldResume")}
                                 className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] outline-none transition-colors focus:border-[var(--foreground)]/40"
                               />
                             </label>
                             <label className="flex flex-col gap-1">
-                              <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                                Party Dynamics
-                              </span>
+                              <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesessionhistory.partyDynamics")}</span>
                               <textarea
                                 value={draft?.partyDynamics ?? ""}
                                 onChange={(event) =>
@@ -816,9 +782,7 @@ export function GameSessionHistory({
                               />
                             </label>
                             <label className="flex flex-col gap-1">
-                              <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                                Party State
-                              </span>
+                              <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesessionhistory.partyState")}</span>
                               <textarea
                                 value={draft?.partyState ?? ""}
                                 onChange={(event) =>
@@ -830,9 +794,7 @@ export function GameSessionHistory({
                               />
                             </label>
                             <label className="flex flex-col gap-1">
-                              <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                                Key Discoveries
-                              </span>
+                              <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesessionhistory.keyDiscoveries")}</span>
                               <textarea
                                 value={draft?.keyDiscoveries ?? ""}
                                 onChange={(event) =>
@@ -840,14 +802,12 @@ export function GameSessionHistory({
                                 }
                                 disabled={isSaving}
                                 rows={4}
-                                placeholder="One continuity fact per line, including discoveries, twists, and reveals"
+                                placeholder={localizeUi("ui.game.gamesessionhistory.oneContinuityFactPerLineIncludingDiscoveriesTwistsAnd")}
                                 className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] outline-none transition-colors focus:border-[var(--foreground)]/40"
                               />
                             </label>
                             <label className="flex flex-col gap-1">
-                              <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                                Character Moments
-                              </span>
+                              <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesessionhistory.characterMoments")}</span>
                               <textarea
                                 value={draft?.characterMoments ?? ""}
                                 onChange={(event) =>
@@ -855,14 +815,12 @@ export function GameSessionHistory({
                                 }
                                 disabled={isSaving}
                                 rows={4}
-                                placeholder="One moment per line"
+                                placeholder={localizeUi("ui.game.gamesessionhistory.oneMomentPerLine")}
                                 className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] outline-none transition-colors focus:border-[var(--foreground)]/40"
                               />
                             </label>
                             <label className="flex flex-col gap-1">
-                              <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                                Little Details To Recall
-                              </span>
+                              <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesessionhistory.littleDetailsToRecall")}</span>
                               <textarea
                                 value={draft?.littleDetails ?? ""}
                                 onChange={(event) =>
@@ -870,14 +828,12 @@ export function GameSessionHistory({
                                 }
                                 disabled={isSaving}
                                 rows={4}
-                                placeholder="One small preference, habit, promise, or past detail per line"
+                                placeholder={localizeUi("ui.game.gamesessionhistory.oneSmallPreferenceHabitPromiseOrPastDetailPer")}
                                 className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] outline-none transition-colors focus:border-[var(--foreground)]/40"
                               />
                             </label>
                             <label className="flex flex-col gap-1">
-                              <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                                NPC Updates
-                              </span>
+                              <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesessionhistory.npcUpdates")}</span>
                               <textarea
                                 value={draft?.npcUpdates ?? ""}
                                 onChange={(event) =>
@@ -885,14 +841,12 @@ export function GameSessionHistory({
                                 }
                                 disabled={isSaving}
                                 rows={4}
-                                placeholder="One update per line"
+                                placeholder={localizeUi("ui.game.gamesessionhistory.oneUpdatePerLine")}
                                 className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm leading-relaxed text-[var(--foreground)] outline-none transition-colors focus:border-[var(--foreground)]/40"
                               />
                             </label>
                             <label className="flex flex-col gap-1">
-                              <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                                Stats Snapshot JSON
-                              </span>
+                              <span className="text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesessionhistory.statsSnapshotJson")}</span>
                               <textarea
                                 value={draft?.statsSnapshot ?? ""}
                                 onChange={(event) =>
@@ -908,15 +862,13 @@ export function GameSessionHistory({
                                 onClick={handleCancelEditing}
                                 disabled={isSaving}
                                 className="rounded-md bg-[var(--secondary)] px-2.5 py-1.5 text-[0.6875rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-50"
-                              >
-                                Cancel
-                              </button>
+                              >{localizeUi("chat.delete.dialog.cancel")}</button>
                               <button
                                 onClick={() => void handleSaveSession(session)}
                                 disabled={isSaving || !(draft?.summary ?? "").trim()}
                                 className="rounded-md bg-[var(--foreground)]/12 px-2.5 py-1.5 text-[0.6875rem] font-medium text-[var(--foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--foreground)]/18 disabled:cursor-not-allowed disabled:opacity-50"
                               >
-                                {isSaving ? "Saving..." : "Save Details"}
+                                {isSaving ?localizeUi("ui.noodle.stageprofileform.saving") :localizeUi("ui.game.gamesessionhistory.saveDetails")}
                               </button>
                             </div>
                           </div>
@@ -928,9 +880,7 @@ export function GameSessionHistory({
                             />
                             {session.resumePoint && (
                               <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2">
-                                <div className="mb-1 text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
-                                  Resume Point
-                                </div>
+                                <div className="mb-1 text-[0.6875rem] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesessionhistory.resumePoint")}</div>
                                 <AnimatedText
                                   html={session.resumePoint}
                                   className="text-xs leading-relaxed text-[var(--foreground)]"
@@ -944,9 +894,7 @@ export function GameSessionHistory({
                       {session.partyDynamics && (
                         <div className="mb-3">
                           <div className="mb-1 flex items-center gap-1.5 text-xs font-medium text-[var(--muted-foreground)]">
-                            <Users size={12} />
-                            Party Dynamics
-                          </div>
+                            <Users size={12} />{localizeUi("ui.game.gamesessionhistory.partyDynamics")}</div>
                           <AnimatedText html={session.partyDynamics} className="text-sm text-[var(--foreground)]" />
                         </div>
                       )}
@@ -954,9 +902,7 @@ export function GameSessionHistory({
                       {session.keyDiscoveries.length > 0 && (
                         <div className="mb-3">
                           <div className="mb-1 flex items-center gap-1.5 text-xs font-medium text-[var(--muted-foreground)]">
-                            <Sparkles size={12} />
-                            Key Discoveries
-                          </div>
+                            <Sparkles size={12} />{localizeUi("ui.game.gamesessionhistory.keyDiscoveries")}</div>
                           <ul className="flex flex-col gap-1 pl-4">
                             {session.keyDiscoveries.map((discovery, i) => (
                               <li key={i} className="list-disc text-xs text-[var(--foreground)]">
@@ -970,9 +916,7 @@ export function GameSessionHistory({
                       {session.characterMoments.length > 0 && (
                         <div className="mb-3">
                           <div className="mb-1 flex items-center gap-1.5 text-xs font-medium text-[var(--muted-foreground)]">
-                            <Users size={12} />
-                            Character Moments
-                          </div>
+                            <Users size={12} />{localizeUi("ui.game.gamesessionhistory.characterMoments")}</div>
                           <ul className="flex flex-col gap-1 pl-4">
                             {session.characterMoments.map((moment, i) => (
                               <li key={i} className="list-disc text-xs text-[var(--foreground)]">
@@ -986,9 +930,7 @@ export function GameSessionHistory({
                       {session.littleDetails.length > 0 && (
                         <div className="mb-3">
                           <div className="mb-1 flex items-center gap-1.5 text-xs font-medium text-[var(--muted-foreground)]">
-                            <Sparkles size={12} />
-                            Little Details To Recall
-                          </div>
+                            <Sparkles size={12} />{localizeUi("ui.game.gamesessionhistory.littleDetailsToRecall")}</div>
                           <ul className="flex flex-col gap-1 pl-4">
                             {session.littleDetails.map((detail, i) => (
                               <li key={i} className="list-disc text-xs text-[var(--foreground)]">
@@ -1001,7 +943,7 @@ export function GameSessionHistory({
 
                       {session.npcUpdates.length > 0 && (
                         <div className="mb-3">
-                          <div className="mb-1 text-xs font-medium text-[var(--muted-foreground)]">NPC Updates</div>
+                          <div className="mb-1 text-xs font-medium text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesessionhistory.npcUpdates")}</div>
                           <ul className="flex flex-col gap-1 pl-4">
                             {session.npcUpdates.map((update, i) => (
                               <li key={i} className="list-disc text-xs text-[var(--foreground)]">
@@ -1014,7 +956,7 @@ export function GameSessionHistory({
 
                       {session.nextSessionRequest && (
                         <div className="mb-3 rounded-lg border border-amber-500/25 bg-amber-500/10 px-3 py-2">
-                          <div className="mb-1 text-xs font-medium text-amber-500">Next Session Request</div>
+                          <div className="mb-1 text-xs font-medium text-amber-500">{localizeUi("ui.game.gamesessionhistory.nextSessionRequest")}</div>
                           <div className="text-xs leading-relaxed text-[var(--foreground)]">
                             {session.nextSessionRequest}
                           </div>
@@ -1023,7 +965,7 @@ export function GameSessionHistory({
 
                       {Object.keys(session.statsSnapshot).length > 0 && (
                         <div className="mb-3">
-                          <div className="mb-1 text-xs font-medium text-[var(--muted-foreground)]">Stats Snapshot</div>
+                          <div className="mb-1 text-xs font-medium text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesessionhistory.statsSnapshot")}</div>
                           <pre className="overflow-x-auto rounded-lg bg-[var(--secondary)] p-3 font-mono text-[0.6875rem] leading-relaxed text-[var(--foreground)] whitespace-pre-wrap break-words">
                             {JSON.stringify(session.statsSnapshot, null, 2)}
                           </pre>
@@ -1032,7 +974,7 @@ export function GameSessionHistory({
 
                       {session.partyState && (
                         <div className="mt-3 rounded bg-[var(--card)] p-2 text-xs text-[var(--muted-foreground)]">
-                          <span className="font-medium">Party Status:</span> <AnimatedText html={session.partyState} />
+                          <span className="font-medium">{localizeUi("ui.game.gamesessionhistory.partyStatus")}</span> <AnimatedText html={session.partyState} />
                         </div>
                       )}
                     </div>

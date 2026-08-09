@@ -10,6 +10,7 @@ import type { STTConfig } from "@marinara-engine/shared";
 import { STT_API_KEY_MASK } from "@marinara-engine/shared";
 import { HelpTooltip } from "../../ui/HelpTooltip";
 import { SettingsSwitch } from "./SettingControls";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 function FieldRow({ label, help, children }: { label: string; help?: string; children: React.ReactNode }) {
   return (
@@ -26,6 +27,7 @@ function FieldRow({ label, help, children }: { label: string; help?: string; chi
 const INPUT_CLS = "mari-chrome-field w-full px-3 py-2.5 text-sm placeholder:text-[var(--muted-foreground)]";
 
 export function STTConfigCard() {
+  const { t: localizeUi } = useUiTranslation();
   const { data: savedConfig, isLoading } = useSTTConfig();
   const updateConfig = useUpdateSTTConfig();
 
@@ -83,7 +85,7 @@ export function STTConfigCard() {
         }, 2000);
       } catch {
         setSaveStatus("error");
-        toast.error("Failed to save speech-to-text settings.");
+        toast.error(localizeUi("ui.panels.sttconfigcard.failedToSaveSpeechToTextSettings"));
       }
     }, 600);
   };
@@ -104,9 +106,14 @@ export function STTConfigCard() {
         </div>
 
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium">Speech to Text</div>
+          <div className="text-sm font-medium">{localizeUi("ui.panels.sttconfigcard.speechToText")}</div>
           <div className="truncate text-[0.6875rem] text-[var(--muted-foreground)]">
-            {enabled ? `${model || "whisper-1"} · ${baseUrl || "No server configured"}` : "Talk to characters via a self-hosted Whisper server"}
+            {enabled
+              ? localizeUi("ui.agents.featureagentdetailhost.value1Value2", {
+                  value1: model || localizeUi("ui.panels.sttconfigcard.whisper1"),
+                  value2: baseUrl || localizeUi("ui.panels.sttconfigcard.noServerConfigured"),
+                })
+              : localizeUi("ui.panels.sttconfigcard.talkToCharactersViaASelfHostedWhisperServer")}
           </div>
         </div>
 
@@ -118,14 +125,20 @@ export function STTConfigCard() {
               mark({ enabled: checked });
             }}
             ariaLabel={enabled ? "Disable speech to text" : "Enable speech to text"}
-            title={enabled ? "Disable speech to text" : "Enable speech to text"}
+            title={
+              enabled
+                ? localizeUi("ui.panels.sttconfigcard.disableSpeechToText")
+                : localizeUi("ui.panels.sttconfigcard.enableSpeechToText")
+            }
             className="rounded-lg p-1 hover:bg-[var(--secondary)]"
           />
 
           <button
             onClick={() => setExpanded((v) => !v)}
             className="mari-chrome-control mari-chrome-control--small h-8 min-h-0 w-8 p-0"
-            title={expanded ? "Collapse" : "Expand"}
+            title={
+              expanded ? localizeUi("ui.panels.ttsconfigcard.collapse") : localizeUi("ui.panels.ttsconfigcard.expand")
+            }
           >
             {expanded ? <ChevronUp size="0.875rem" /> : <ChevronDown size="0.875rem" />}
           </button>
@@ -136,8 +149,8 @@ export function STTConfigCard() {
       {expanded && (
         <div className="mt-3 space-y-4 border-t border-sky-400/10 pt-3">
           <FieldRow
-            label="Base URL"
-            help="Root URL of an OpenAI-Whisper-API-compatible transcription server (must serve POST {baseUrl}/audio/transcriptions), e.g. a self-hosted faster-whisper-server or whisper-asr-webservice instance."
+            label={localizeUi("ui.panels.ttsconfigcard.baseUrl")}
+            help={localizeUi("ui.panels.sttconfigcard.rootUrlOfAnOpenaiWhisperApiCompatibleTranscription")}
           >
             <div className="relative">
               <Globe size="0.875rem" className="absolute left-3 top-1/2 -translate-y-1/2 text-sky-400" />
@@ -148,14 +161,14 @@ export function STTConfigCard() {
                   mark({ baseUrl: e.target.value });
                 }}
                 className={cn(INPUT_CLS, "pl-8 font-mono")}
-                placeholder="http://localhost:9000/v1"
+                placeholder={localizeUi("ui.panels.sttconfigcard.httpLocalhost9000V1")}
               />
             </div>
           </FieldRow>
 
           <FieldRow
-            label="API Key"
-            help="Optional API key for the transcription server. Encrypted at rest. Keep the masked value to preserve the current key, or clear the field to remove it."
+            label={localizeUi("ui.panels.ttsconfigcard.apiKey")}
+            help={localizeUi("ui.panels.sttconfigcard.optionalApiKeyForTheTranscriptionServerEncryptedAt")}
           >
             <div className="relative">
               <Key size="0.875rem" className="absolute left-3 top-1/2 -translate-y-1/2 text-sky-400" />
@@ -167,12 +180,15 @@ export function STTConfigCard() {
                 }}
                 type="password"
                 className={cn(INPUT_CLS, "pl-8")}
-                placeholder="Enter API key or leave blank"
+                placeholder={localizeUi("ui.panels.sttconfigcard.enterApiKeyOrLeaveBlank")}
               />
             </div>
           </FieldRow>
 
-          <FieldRow label="Model" help="Whisper model name to request from the server, e.g. whisper-1, base, small, medium, large-v3.">
+          <FieldRow
+            label={localizeUi("ui.panels.ttsconfigcard.model")}
+            help={localizeUi("ui.panels.sttconfigcard.whisperModelNameToRequestFromTheServerE")}
+          >
             <input
               value={model}
               onChange={(e) => {
@@ -180,13 +196,13 @@ export function STTConfigCard() {
                 mark({ model: e.target.value });
               }}
               className={INPUT_CLS}
-              placeholder="whisper-1"
+              placeholder={localizeUi("ui.panels.sttconfigcard.whisper1")}
             />
           </FieldRow>
 
           <FieldRow
-            label="Language"
-            help="Optional ISO-639-1 language hint (e.g. en, de, ja). Leave blank to let the server auto-detect."
+            label={localizeUi("settings.application.language.label")}
+            help={localizeUi("ui.panels.sttconfigcard.optionalIso6391LanguageHintEGEn")}
           >
             <input
               value={language}
@@ -195,13 +211,12 @@ export function STTConfigCard() {
                 mark({ language: e.target.value });
               }}
               className={INPUT_CLS}
-              placeholder="Auto-detect"
+              placeholder={localizeUi("ui.panels.sttconfigcard.autoDetect")}
             />
           </FieldRow>
 
           <p className="rounded-lg border border-dashed border-sky-400/20 bg-sky-400/5 px-2.5 py-2 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
-            Once enabled, a mic button appears in the roleplay chat input — click to record, click again to stop; your
-            recording is transcribed here and sent as your message.
+            {localizeUi("ui.panels.sttconfigcard.onceEnabledAMicButtonAppearsInTheRoleplay")}
           </p>
 
           <div className="flex items-center gap-2 pt-1">
@@ -209,16 +224,20 @@ export function STTConfigCard() {
             {saveStatus === "saving" && (
               <span className="flex items-center gap-1 text-[0.6875rem] text-[var(--muted-foreground)]">
                 <Loader2 size="0.625rem" className="animate-spin" />
-                Saving…
+                {localizeUi("chat.settings.inlineEditor.saving")}
               </span>
             )}
             {saveStatus === "saved" && (
               <span className="flex items-center gap-1 text-[0.6875rem] text-emerald-400">
                 <Check size="0.625rem" />
-                Saved
+                {localizeUi("chat.settings.inlineEditor.saved")}
               </span>
             )}
-            {saveStatus === "error" && <span className="text-[0.6875rem] text-[var(--destructive)]">Save failed</span>}
+            {saveStatus === "error" && (
+              <span className="text-[0.6875rem] text-[var(--destructive)]">
+                {localizeUi("ui.panels.ttsconfigcard.saveFailed")}
+              </span>
+            )}
           </div>
         </div>
       )}

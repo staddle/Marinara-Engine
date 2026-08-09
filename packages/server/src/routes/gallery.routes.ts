@@ -7,7 +7,9 @@ import { writeFile } from "fs/promises";
 import { basename, extname, join } from "path";
 import { z } from "zod";
 import {
+  findImageStyleProfile,
   LOCAL_SIDECAR_CONNECTION_ID,
+  resolveGameSetupArtStylePrompt,
   VIDEO_GENERATION_SETTINGS_KEY,
   normalizeVideoGenerationUserSettings,
   type GameSceneVideoAspectRatio,
@@ -19,6 +21,7 @@ import { createCharactersStorage } from "../services/storage/characters.storage.
 import { createCharacterGalleryStorage } from "../services/storage/character-gallery.storage.js";
 import { createPersonaGalleryStorage } from "../services/storage/persona-gallery.storage.js";
 import { createConnectionsStorage } from "../services/storage/connections.storage.js";
+import { createAgentsStorage } from "../services/storage/agents.storage.js";
 import { createGameSceneVideosStorage } from "../services/storage/game-scene-videos.storage.js";
 import { createPromptOverridesStorage } from "../services/storage/prompt-overrides.storage.js";
 import { createAppSettingsStorage } from "../services/storage/app-settings.storage.js";
@@ -30,30 +33,52 @@ import {
   type VideoReferenceImage,
 } from "../services/video/video-generation.js";
 import { resolveGameVideoRuntime } from "../services/video/game-video-runtime.js";
-import { generateImage, saveImageToDisk } from "../services/image/image-generation.js";
+import { generateImage, removeSavedImageFromDisk, saveImageToDisk } from "../services/image/image-generation.js";
+import { resolveGalleryImagePath } from "../services/image/gallery-image-path.js";
 import { resolveConnectionImageDefaults } from "../services/image/image-generation-defaults.js";
 import { loadImageGenerationUserSettings } from "../services/image/image-generation-settings.js";
-import { compileImagePrompt } from "../services/image/image-prompt-compiler.js";
+import {
+  compileImagePrompt,
+  formatImageStylePromptGuidance,
+  resolveImageStyleGuidanceText,
+} from "../services/image/image-prompt-compiler.js";
 import {
   resolveImagePromptReviewSize,
   resolveReviewedImagePromptSubmission,
 } from "../services/image/image-prompt-review.js";
+import { buildBackgroundProviderPrompt } from "../services/game/game-asset-generation.js";
 import { runImageGenerationRequest } from "../services/image/image-generation-queue.js";
+import { generateIllustratorImageVariants } from "../services/image/illustrator-image-variants.js";
 import { persistGeneratedImageToEntityGalleries } from "../services/image/generated-image-entity-gallery.js";
+import { deleteChatGalleryImageEverywhere } from "../services/image/chat-gallery-cascade-deletion.js";
+import {
+  findGalleryRowByFilename,
+  resolveStoredGalleryFile,
+  storedGalleryFilename,
+} from "../services/image/gallery-file-lifecycle.js";
 import {
   resolveImageConnectionFallback,
   resolveVideoConnectionFallback,
 } from "../services/generation/media-connection-fallback.js";
 import { resolveIllustratorPromptRuntime } from "../services/generation/illustrator-prompt-runtime.js";
+import { resolveIllustratorImageConnectionId } from "../services/generation/illustrator-background-generation.js";
 import { resolveConversationSelfieSystemPrompt } from "../services/conversation/selfie-prompt.js";
-import { suppressesReferencePromptLine, resolveIllustratorCharacterReferences } from "./generate/illustrator-references.js";
+import {
+  suppressesReferencePromptLine,
+  resolveIllustratorCharacterReferences,
+} from "./generate/illustrator-references.js";
 import { resolveBaseUrl } from "./generate/generate-route-utils.js";
 import {
   compactVideoPromptText,
   excerptIllustrationPromptForVideo,
   resolveGalleryVideoNarrationSummary,
+  resolveGalleryVideoSourceExchange,
 } from "../services/video/prompt-context.js";
 import { resolveSceneVideoPrompt, SceneVideoPromptReviewError } from "../services/video/scene-video-prompt-review.js";
+import {
+  buildRoleplayVideoDirectionMessages,
+  resolveRoleplayVideoDirection,
+} from "../services/video/roleplay-video-direction.js";
 import { isDebugAgentsEnabled } from "../config/runtime-config.js";
 import { newId } from "../utils/id-generator.js";
 import { DATA_DIR } from "../utils/data-dir.js";
@@ -102,7 +127,7 @@ type GenerateSceneVideoInput = z.infer<typeof generateSceneVideoSchema>;
 
 class GallerySceneVideoRequestError extends Error {
   constructor(
-    readonly statusCode: 400 | 404,
+    readonly statusCode: 400 | 404 | 502,
     message: string,
   ) {
     super(message);
@@ -119,6 +144,51 @@ const generateConversationSelfieSchema = z.object({
   queueImageGenerationRequests: z.boolean().optional().default(true),
   debugMode: z.boolean().optional().default(false),
 });
+
+const mapsArtworkContextSchema = z
+  .object({
+    locationName: z.string().trim().max(200),
+    locationDescription: z.string().trim().max(7_000),
+    locationType: z.string().trim().max(120),
+    parentLocationName: z.string().trim().max(200),
+    parentLocationDescription: z.string().trim().max(7_000),
+    locationPath: z.string().trim().max(2_000),
+  })
+  .strict();
+
+const generateGalleryImageSchema = z.object({
+  prompt: z.string().trim().min(1).max(7_000),
+  title: z.string().trim().min(1).max(200).optional(),
+  mapsArtworkContext: mapsArtworkContextSchema.optional(),
+  promptOverride: z.string().trim().min(1).max(200_000).optional(),
+  negativePromptOverride: z.string().max(200_000).optional(),
+  debugMode: z.boolean().optional().default(false),
+});
+
+const previewGalleryImagesSchema = z.object({
+  items: z
+    .array(
+      z.object({
+        id: z.string().trim().min(1).max(200),
+        title: z.string().trim().min(1).max(200),
+        prompt: z.string().trim().min(1).max(7_000),
+        mapsArtworkContext: mapsArtworkContextSchema.optional(),
+      }),
+    )
+    .min(1)
+    .max(500),
+  debugMode: z.boolean().optional().default(false),
+});
+
+class GalleryImageRequestError extends Error {
+  constructor(
+    readonly statusCode: 400 | 404,
+    message: string,
+  ) {
+    super(message);
+    this.name = "GalleryImageRequestError";
+  }
+}
 
 function sceneVideoUrl(chatId: string, filePath: string): string {
   const filename = filePath.split(/[\\/]/).pop() ?? "";
@@ -177,10 +247,9 @@ function parseChatMetadata(raw: unknown): Record<string, unknown> {
   return typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
 }
 
-function buildGalleryImageUrl(image: { filePath: string }, fallbackChatId: string) {
-  const parts = image.filePath.split("/").filter(Boolean);
-  const ownerChatId = parts.length > 1 ? parts[0]! : fallbackChatId;
-  const filename = parts[parts.length - 1] ?? image.filePath;
+function buildGalleryImageUrl(image: { chatId?: string; filePath: string }, fallbackChatId: string) {
+  const ownerChatId = image.chatId || fallbackChatId;
+  const filename = storedGalleryFilename(image.filePath);
   return `/api/gallery/file/${encodeURIComponent(ownerChatId)}/${encodeURIComponent(filename)}`;
 }
 
@@ -245,6 +314,36 @@ function readTrimmedString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
+async function resolveGalleryImageConnection(
+  app: FastifyInstance,
+  chatMode: string,
+  metadata: Record<string, unknown>,
+) {
+  const agents = createAgentsStorage(app.db);
+  const connections = createConnectionsStorage(app.db);
+  const illustrator = await agents.getByType("illustrator").catch((err) => {
+    logger.warn(err, "[gallery/generate-image] Failed to read Illustrator settings");
+    return null;
+  });
+  const configuredId = resolveIllustratorImageConnectionId(
+    chatMode,
+    metadata,
+    parseJsonRecord(illustrator?.settings).imageConnectionId,
+  );
+  let connection = configuredId ? await connections.getWithKey(configuredId) : null;
+  if (configuredId && connection?.provider !== "image_generation") {
+    connection = null;
+  }
+  if (configuredId && !connection) {
+    logger.warn(
+      "[gallery/generate-image] Image connection %s could not be resolved; using the default Images connection",
+      configuredId,
+    );
+  }
+  connection ??= await connections.getDefaultForImageGeneration();
+  return { connection, connections };
+}
+
 function readStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
@@ -280,22 +379,6 @@ function sceneTitleFromGalleryImage(image: ChatGalleryImageRow): string {
 
 function sourceGalleryImagePathForMetadata(image: ChatGalleryImageRow): string {
   return `gallery/${image.filePath.replace(/\\/g, "/")}`;
-}
-
-function resolveGalleryImagePath(image: ChatGalleryImageRow): string | null {
-  const normalizedPath = image.filePath.replace(/\\/g, "/");
-  const filename = basename(normalizedPath);
-  const candidates = new Set([normalizedPath, `${image.chatId}/${filename}`]);
-  for (const candidate of candidates) {
-    if (!candidate || candidate.includes("..") || candidate.includes("\0")) continue;
-    try {
-      const resolved = assertInsideDir(GALLERY_DIR, join(GALLERY_DIR, candidate));
-      if (existsSync(resolved)) return resolved;
-    } catch {
-      // Ignore invalid gallery path candidates and try the next one.
-    }
-  }
-  return null;
 }
 
 function imageMimeTypeForPath(path: string): VideoReferenceImage["mimeType"] | null {
@@ -431,6 +514,131 @@ export async function galleryRoutes(app: FastifyInstance) {
   const characterGallery = createCharacterGalleryStorage(app.db);
   const personaGallery = createPersonaGalleryStorage(app.db);
 
+  async function resolveGalleryImageGenerationContext(chatId: string, debugMode: boolean) {
+    const chat = await chats.getById(chatId);
+    if (!chat) throw new GalleryImageRequestError(404, "Chat not found");
+    if (!new Set(["roleplay", "game"]).has(chat.mode)) {
+      throw new GalleryImageRequestError(400, "Gallery image generation is available in Roleplay and Game modes.");
+    }
+
+    const metadata = parseChatMetadata(chat.metadata);
+    if (chat.mode === "game" && metadata.enableSpriteGeneration !== true) {
+      throw new GalleryImageRequestError(400, "Enable Game Illustrator in Chat Settings before creating map artwork.");
+    }
+    if (chat.mode === "game" && !readTrimmedString(metadata.gameImageConnectionId)) {
+      throw new GalleryImageRequestError(400, "Choose the Game Illustrator image connection in Chat Settings first.");
+    }
+    const { connection: imageConnection, connections } = await resolveGalleryImageConnection(app, chat.mode, metadata);
+    if (!imageConnection) {
+      throw new GalleryImageRequestError(
+        400,
+        "Choose an image connection for Illustrator or set a default Images connection first.",
+      );
+    }
+
+    const debugOverrideEnabled = debugMode || isDebugAgentsEnabled();
+    const debugLog = (message: string, ...args: unknown[]) => {
+      logDebugOverride(debugOverrideEnabled, message, ...args);
+    };
+    const imageSettings = await loadImageGenerationUserSettings(app.db);
+    const imageDefaults = resolveConnectionImageDefaults(imageConnection);
+    const setupConfig = parseJsonRecord(metadata.gameSetupConfig);
+    const styleProfileId =
+      readTrimmedString(setupConfig.imageStyleProfileId) ??
+      readTrimmedString(metadata.imageStyleProfileId) ??
+      imageDefaults?.styleProfileId ??
+      imageSettings.styleProfiles.defaultProfileId;
+    const styleProfile = findImageStyleProfile(imageSettings.styleProfiles, styleProfileId);
+    const artStyle = resolveGameSetupArtStylePrompt(setupConfig);
+    const genre = readTrimmedString(setupConfig.genre);
+    const setting = readTrimmedString(setupConfig.setting);
+    const worldOverview = readTrimmedString(metadata.gameWorldOverview);
+    const imagePromptInstructions = readTrimmedString(metadata.gameImagePromptInstructions);
+    const imageModel = imageConnection.model || "";
+    const imageBaseUrl = imageConnection.baseUrl || "https://image.pollinations.ai";
+    const imageSource = imageConnection.imageGenerationSource || imageModel;
+    const imageServiceHint = imageConnection.imageService || imageSource;
+    const imageFallback = await resolveImageConnectionFallback(connections, imageConnection.id);
+
+    return {
+      chat,
+      imageConnection,
+      imageSettings,
+      imageDefaults,
+      styleProfileId,
+      styleProfile,
+      artStyle,
+      genre,
+      setting,
+      worldOverview,
+      imagePromptInstructions,
+      imageModel,
+      imageBaseUrl,
+      imageSource,
+      imageServiceHint,
+      imageFallback,
+      debugLog,
+      promptOverridesStorage: createPromptOverridesStorage(app.db),
+    };
+  }
+
+  async function compileGalleryImageRequest(
+    context: Awaited<ReturnType<typeof resolveGalleryImageGenerationContext>>,
+    input: {
+      title?: string;
+      prompt: string;
+      mapsArtworkContext?: z.infer<typeof mapsArtworkContextSchema>;
+      promptOverride?: string;
+      negativePromptOverride?: string;
+    },
+  ) {
+    const compiled = await buildBackgroundProviderPrompt({
+      chatId: context.chat.id,
+      locationSlug: input.title?.trim() || "Gallery image",
+      sceneDescription: input.prompt.trim(),
+      mapsArtworkContext: {
+        locationName: input.mapsArtworkContext?.locationName || input.title?.trim() || "Gallery image",
+        locationDescription: input.mapsArtworkContext?.locationDescription || input.prompt.trim(),
+        locationType: input.mapsArtworkContext?.locationType || "Location",
+        parentLocationName: input.mapsArtworkContext?.parentLocationName || "",
+        parentLocationDescription: input.mapsArtworkContext?.parentLocationDescription || "",
+        locationPath:
+          input.mapsArtworkContext?.locationPath || input.mapsArtworkContext?.locationName || input.title?.trim() || "",
+        genre: context.genre ?? "",
+        campaignArtStyle: context.artStyle,
+        imageInstructions: context.imagePromptInstructions ?? "",
+      },
+      imgModel: context.imageModel,
+      imgBaseUrl: context.imageBaseUrl,
+      imgApiKey: context.imageConnection.apiKey || "",
+      imgSource: context.imageSource,
+      imgService: context.imageServiceHint,
+      imgEndpointId: context.imageConnection.imageEndpointId || undefined,
+      imgComfyWorkflow: context.imageConnection.comfyuiWorkflow || undefined,
+      imgDefaults: context.imageDefaults,
+      imgFallback: context.imageFallback,
+      styleProfiles: context.imageSettings.styleProfiles,
+      styleProfileId: context.styleProfileId,
+      promptOverridesStorage: context.promptOverridesStorage,
+      size: context.imageSettings.background,
+      preserveFullBackgroundPrompt: true,
+    });
+    const reviewed = resolveReviewedImagePromptSubmission({
+      generatedPrompt: compiled.prompt,
+      generatedNegativePrompt: compiled.negativePrompt,
+      promptOverride: input.promptOverride,
+      negativePromptOverride: input.negativePromptOverride,
+    });
+    const size = resolveImagePromptReviewSize({
+      connection: context.imageConnection,
+      prompt: reviewed.prompt,
+      width: context.imageSettings.background.width,
+      height: context.imageSettings.background.height,
+      imageDefaults: context.imageDefaults,
+    });
+    return { ...compiled, ...reviewed, ...size };
+  }
+
   async function collectChatAssetParticipants(chat: { id: string; characterIds?: unknown; personaId?: string | null }) {
     const characterIds = new Set(parseStringArray(chat.characterIds));
     const personaIds = new Set<string>();
@@ -474,7 +682,7 @@ export async function galleryRoutes(app: FastifyInstance) {
     return Array.from(names).slice(0, 10);
   }
 
-  async function prepareGallerySceneVideoRequest(input: GenerateSceneVideoInput) {
+  async function prepareGallerySceneVideoRequest(input: GenerateSceneVideoInput, signal?: AbortSignal) {
     if (!isValidChatId(input.chatId)) {
       throw new GallerySceneVideoRequestError(400, "Invalid chatId");
     }
@@ -525,31 +733,98 @@ export async function galleryRoutes(app: FastifyInstance) {
     const messages = await chats.listMessages(input.chatId);
     const swipes = await chats.listSwipesByMessageIds(messages.map((message) => message.id));
     const characterNames = await collectChatSceneCharacterNames(chat);
-    const promptDraft = await loadGameVideoPrompt({
-      promptOverridesStorage,
-      meta,
-      debugMode: input.debugMode,
-      ctx: {
-        sceneTitle: compactVideoPromptText(sceneTitleFromGalleryImage(galleryImage), videoRuntime.promptLimits.title),
-        narrationSummary: resolveGalleryVideoNarrationSummary(
-          messages,
-          swipes,
-          galleryImage.id,
-          videoRuntime.promptLimits.narrationSummary,
-        ),
-        illustrationPrompt:
-          excerptIllustrationPromptForVideo(galleryImage.prompt, videoRuntime.promptLimits.illustrationPrompt) ||
-          "Use the supplied first-frame gallery image as the visual source.",
-        charactersLine: characterNames.length
-          ? characterNames.join(", ")
-          : "preserve any visible characters from the supplied image",
-        settingLine: buildRoleplayVideoSettingLine(chat, meta, videoRuntime.promptLimits.artStyle),
-        artStyleLine: "match the supplied gallery image",
+    let promptDraft = input.promptOverride?.trim() ?? "";
+    if (!promptDraft && chat.mode === "roleplay") {
+      const defaultPromptConnection =
+        chat.connectionId && chat.connectionId !== LOCAL_SIDECAR_CONNECTION_ID
+          ? await connections.getWithKey(chat.connectionId)
+          : null;
+      let promptRuntime;
+      try {
+        promptRuntime = await resolveIllustratorPromptRuntime({
+          chatMetadata: meta,
+          defaultConnection: defaultPromptConnection,
+          defaultConnectionId: chat.connectionId,
+          connections,
+          resolveBaseUrl,
+        });
+      } catch (err) {
+        logger.warn(err, "[gallery/roleplay-video-director] Prompt Model is unavailable for chat %s", input.chatId);
+        throw new GallerySceneVideoRequestError(
+          400,
+          "Choose a text Prompt Model or main chat connection before planning a Roleplay animation.",
+        );
+      }
+      const sourceExchange = resolveGalleryVideoSourceExchange(messages, swipes, galleryImage.id);
+      const directionMessages = await buildRoleplayVideoDirectionMessages(promptOverridesStorage, {
         durationSeconds,
         aspectRatio,
-        sourceIllustrationLine: `Use the selected gallery image (${galleryImage.id}) as the first frame/reference image.`,
-      },
-    });
+        sourceExchange:
+          sourceExchange.content || "Animate the illustrated Roleplay scene without advancing into a new story beat.",
+        referenceImagePrompt: galleryImage.prompt ?? "",
+        characterNames,
+        setting: buildRoleplayVideoSettingLine(chat, meta, videoRuntime.promptLimits.artStyle),
+      });
+      const [systemMessage, userMessage] = directionMessages;
+      const debugOverrideEnabled = input.debugMode === true || isDebugAgentsEnabled();
+      logDebugOverride(
+        debugOverrideEnabled,
+        "[debug/gallery/roleplay-video-director] system:\n%s\nuser:\n%s",
+        systemMessage.content,
+        userMessage.content,
+      );
+      try {
+        const result = await promptRuntime.provider.chatComplete(directionMessages, {
+          model: promptRuntime.model,
+          ...(promptRuntime.suppressModelParameters ? {} : { temperature: 0.5, maxTokens: 1_200 }),
+          suppressModelParameters: promptRuntime.suppressModelParameters,
+          signal,
+          enableCaching: promptRuntime.enableCaching,
+          anthropicExtendedCacheTtl: promptRuntime.anthropicExtendedCacheTtl,
+        });
+        promptDraft = resolveRoleplayVideoDirection(result.content, videoRuntime.promptLimits.finalPrompt);
+      } catch (err) {
+        logger.warn(err, "[gallery/roleplay-video-director] Failed to plan animation for chat %s", input.chatId);
+        const message =
+          err instanceof Error && err.message.trim()
+            ? err.message.trim()
+            : "The Roleplay animation Prompt Model failed to plan this clip.";
+        throw new GallerySceneVideoRequestError(502, message);
+      }
+      if (!promptDraft) {
+        throw new GallerySceneVideoRequestError(
+          502,
+          "The Roleplay animation Prompt Model returned an empty direction.",
+        );
+      }
+      logDebugOverride(debugOverrideEnabled, "[debug/gallery/roleplay-video-director] final prompt:\n%s", promptDraft);
+    } else if (!promptDraft) {
+      promptDraft = await loadGameVideoPrompt({
+        promptOverridesStorage,
+        meta,
+        debugMode: input.debugMode,
+        ctx: {
+          sceneTitle: compactVideoPromptText(sceneTitleFromGalleryImage(galleryImage), videoRuntime.promptLimits.title),
+          narrationSummary: resolveGalleryVideoNarrationSummary(
+            messages,
+            swipes,
+            galleryImage.id,
+            videoRuntime.promptLimits.narrationSummary,
+          ),
+          illustrationPrompt:
+            excerptIllustrationPromptForVideo(galleryImage.prompt, videoRuntime.promptLimits.illustrationPrompt) ||
+            "Use the supplied first-frame gallery image as the visual source.",
+          charactersLine: characterNames.length
+            ? characterNames.join(", ")
+            : "preserve any visible characters from the supplied image",
+          settingLine: buildRoleplayVideoSettingLine(chat, meta, videoRuntime.promptLimits.artStyle),
+          artStyleLine: "match the supplied gallery image",
+          durationSeconds,
+          aspectRatio,
+          sourceIllustrationLine: `Use the selected gallery image (${galleryImage.id}) as the first frame/reference image.`,
+        },
+      });
+    }
     const prompt = resolveSceneVideoPrompt({
       generatedPrompt: promptDraft,
       promptOverride: input.promptOverride,
@@ -606,9 +881,12 @@ export async function galleryRoutes(app: FastifyInstance) {
       if (!ALLOWED_EXTS.has(extname(filename).toLowerCase())) {
         return reply.status(400).send({ error: "Unsupported file type" });
       }
-      const filePath = join(GALLERY_DIR, chatId, filename);
-      if (!existsSync(filePath)) return reply.status(404).send({ error: "Not found" });
-      return reply.sendFile(filename, join(GALLERY_DIR, chatId));
+      const image = findGalleryRowByFilename(await storage.listByChatId(chatId), filename);
+      const storedFile = image ? resolveStoredGalleryFile(image.filePath, GALLERY_DIR) : null;
+      if (!storedFile || !existsSync(storedFile.absolutePath)) {
+        return reply.status(404).send({ error: "Not found" });
+      }
+      return reply.sendFile(storedFile.filename, storedFile.directory);
     }
 
     if (parts[0] === "sprites" && (parts[1] === "facial" || parts[1] === "fullbody") && parts[2]) {
@@ -717,6 +995,21 @@ export async function galleryRoutes(app: FastifyInstance) {
     return { videos: videos.map((video) => serializeSceneVideo(video)) };
   });
 
+  app.delete<{ Params: { chatId: string; id: string } }>("/scene-videos/:chatId/:id", async (req, reply) => {
+    const { chatId, id } = req.params;
+    if (!isValidChatId(chatId)) return reply.status(400).send({ error: "Invalid chatId" });
+
+    const sceneVideos = createGameSceneVideosStorage(app.db);
+    const video = await sceneVideos.getById(id);
+    if (!video || video.chatId !== chatId) return reply.status(404).send({ error: "Scene video not found" });
+
+    await sceneVideos.remove(video.id);
+    await removeSavedVideoFromDisk(video.filePath).catch((error) => {
+      logger.warn(error, "[gallery/scene-videos] Failed to remove video file %s", video.filePath);
+    });
+    return { success: true };
+  });
+
   app.get<{ Params: { chatId: string; filename: string } }>(
     "/scene-videos/file/:chatId/:filename",
     async (req, reply) => {
@@ -742,8 +1035,9 @@ export async function galleryRoutes(app: FastifyInstance) {
 
   app.post("/generate-scene-video/preview", async (req, reply) => {
     const input = generateSceneVideoSchema.parse(req.body);
+    const signal = createResponseAbortSignal(reply, SCENE_VIDEO_GENERATION_TIMEOUT_MS, "Scene video prompt preview");
     try {
-      const prepared = await prepareGallerySceneVideoRequest(input);
+      const prepared = await prepareGallerySceneVideoRequest(input, signal);
       return {
         prompt: prepared.prompt,
         galleryImageId: prepared.galleryImage.id,
@@ -763,9 +1057,14 @@ export async function galleryRoutes(app: FastifyInstance) {
 
   app.post("/generate-scene-video", async (req, reply) => {
     const input = generateSceneVideoSchema.parse(req.body);
+    const sceneVideoAbortSignal = createResponseAbortSignal(
+      reply,
+      SCENE_VIDEO_GENERATION_TIMEOUT_MS,
+      "Scene video generation",
+    );
     let prepared: Awaited<ReturnType<typeof prepareGallerySceneVideoRequest>>;
     try {
-      prepared = await prepareGallerySceneVideoRequest(input);
+      prepared = await prepareGallerySceneVideoRequest(input, sceneVideoAbortSignal);
     } catch (err) {
       if (err instanceof GallerySceneVideoRequestError || err instanceof SceneVideoPromptReviewError) {
         return reply.status(err.statusCode).send({ error: err.message });
@@ -773,11 +1072,6 @@ export async function galleryRoutes(app: FastifyInstance) {
       throw err;
     }
 
-    const sceneVideoAbortSignal = createResponseAbortSignal(
-      reply,
-      SCENE_VIDEO_GENERATION_TIMEOUT_MS,
-      "Scene video generation",
-    );
     const requestDebug = input.debugMode === true;
     const debugOverrideEnabled = requestDebug || isDebugAgentsEnabled();
     const debugLogsEnabled = debugOverrideEnabled || logger.isLevelEnabled("debug");
@@ -787,8 +1081,18 @@ export async function galleryRoutes(app: FastifyInstance) {
     const sceneVideos = createGameSceneVideosStorage(app.db);
     const { videoConnectionId, galleryImage, videoRuntime, durationSeconds, aspectRatio, prompt, videoFallback } =
       prepared;
-    const { source, serviceHint, baseUrl, apiKey, model, resolution, publicReferenceUpload, comfyWorkflow } =
-      videoRuntime;
+    const {
+      source,
+      serviceHint,
+      baseUrl,
+      apiKey,
+      model,
+      resolution,
+      publicReferenceUpload,
+      comfyWorkflow,
+      comfyLoras,
+      comfyFps,
+    } = videoRuntime;
 
     const galleryImagePath = resolveGalleryImagePath(galleryImage);
     if (!galleryImagePath) {
@@ -827,6 +1131,8 @@ export async function galleryRoutes(app: FastifyInstance) {
         aspectRatio,
         resolution,
         comfyWorkflow,
+        comfyLoras,
+        fps: comfyFps,
         referenceImage,
         publicReferenceUpload,
         queue: input.queueMediaGenerationRequests,
@@ -922,12 +1228,30 @@ export async function galleryRoutes(app: FastifyInstance) {
     const selfiePositivePrompt = readTrimmedString(meta.selfiePositivePrompt) ?? selfieTags.join(", ").trim();
     const selfieNegativePrompt = readTrimmedString(meta.selfieNegativePrompt) ?? "";
     const promptOverridesStorage = createPromptOverridesStorage(app.db);
-    const selfieSystemPrompt = await resolveConversationSelfieSystemPrompt({
+    const imageDefaults = resolveConnectionImageDefaults(imageConn);
+    const imageSettings = await loadImageGenerationUserSettings(app.db);
+    const configuredStyleProfileId =
+      ((meta.gameSetupConfig as Record<string, unknown> | undefined)?.imageStyleProfileId as string | undefined) ??
+      (meta.imageStyleProfileId as string | undefined) ??
+      null;
+    const styleProfileId =
+      (typeof configuredStyleProfileId === "string" && configuredStyleProfileId.trim()
+        ? configuredStyleProfileId.trim()
+        : undefined) ??
+      imageDefaults?.styleProfileId ??
+      imageSettings.styleProfiles.defaultProfileId;
+    // Style feeds the prompt-building model as guidance rather than being pasted
+    // verbatim into the final image prompt (#4028).
+    const styleGuidance = resolveImageStyleGuidanceText(imageSettings.styleProfiles, styleProfileId);
+    const baseSelfieSystemPrompt = await resolveConversationSelfieSystemPrompt({
       promptOverridesStorage,
       chatPromptTemplate: selfiePromptTemplate,
       appearance,
       charName: characterName,
     });
+    const selfieSystemPrompt = styleGuidance
+      ? `${baseSelfieSystemPrompt}${formatImageStylePromptGuidance(styleGuidance)}`
+      : baseSelfieSystemPrompt;
 
     const selfieAbortSignal = createResponseAbortSignal(reply, SCENE_VIDEO_GENERATION_TIMEOUT_MS, "Selfie generation");
     let promptRuntime;
@@ -1032,16 +1356,6 @@ export async function galleryRoutes(app: FastifyInstance) {
       }
     }
 
-    const imageDefaults = resolveConnectionImageDefaults(imageConn);
-    const imageSettings = await loadImageGenerationUserSettings(app.db);
-    const configuredStyleProfileId =
-      ((meta.gameSetupConfig as Record<string, unknown> | undefined)?.imageStyleProfileId as string | undefined) ??
-      (meta.imageStyleProfileId as string | undefined) ??
-      null;
-    const styleProfileId =
-      typeof configuredStyleProfileId === "string" && configuredStyleProfileId.trim()
-        ? configuredStyleProfileId.trim()
-        : imageSettings.styleProfiles.defaultProfileId;
     const selfieResolution = readTrimmedString(meta.selfieResolution) ?? "";
     const [selfieWidth, selfieHeight] = selfieResolution.split("x").map(Number) as [number, number];
     const width = Number.isSafeInteger(selfieWidth) && selfieWidth > 0 ? selfieWidth : imageSettings.selfie.width;
@@ -1053,6 +1367,8 @@ export async function galleryRoutes(app: FastifyInstance) {
       styleProfiles: imageSettings.styleProfiles,
       styleProfileId,
       imageDefaults,
+      omitProfileStyleText: true,
+      omitProfileSubjectTags: true,
     });
     const imageModel = imageConn.model || "";
     const imageBaseUrl = imageConn.baseUrl || "https://image.pollinations.ai";
@@ -1099,48 +1415,66 @@ export async function galleryRoutes(app: FastifyInstance) {
 
     try {
       const imageConnectionQueueKey = imageConn.id?.trim() || `${imageServiceHint}:${imageBaseUrl}:${imageModel}`;
-      const imageResult = await runImageGenerationRequest({
-        connectionKey: imageConnectionQueueKey,
-        queue: input.queueImageGenerationRequests,
-        signal: selfieAbortSignal,
-        task: () =>
-          generateImage(imageSource, imageBaseUrl, imageConn.apiKey || "", imageServiceHint, {
-            prompt: providerPrompt,
-            negativePrompt: providerNegativePrompt || undefined,
-            model: imageModel,
-            width,
-            height,
-            imageEndpointId: imageConn.imageEndpointId || undefined,
-            comfyWorkflow: imageConn.comfyuiWorkflow || undefined,
-            imageDefaults,
-            referenceImages,
+      const imageResults = await generateIllustratorImageVariants({
+        count: meta.illustratorImagesPerGeneration,
+        generate: () =>
+          runImageGenerationRequest({
+            connectionKey: imageConnectionQueueKey,
+            queue: input.queueImageGenerationRequests,
             signal: selfieAbortSignal,
-            fallback: imageFallback,
+            task: () =>
+              generateImage(imageSource, imageBaseUrl, imageConn.apiKey || "", imageServiceHint, {
+                prompt: providerPrompt,
+                negativePrompt: providerNegativePrompt || undefined,
+                model: imageModel,
+                width,
+                height,
+                imageEndpointId: imageConn.imageEndpointId || undefined,
+                comfyWorkflow: imageConn.comfyuiWorkflow || undefined,
+                imageDefaults,
+                referenceImages,
+                signal: selfieAbortSignal,
+                fallback: imageFallback,
+              }),
           }),
+        onVariantError: (error, index) =>
+          logger.warn(error, "[gallery/selfie] Variant %d failed for chat %s", index + 1, chatId),
       });
-      const filePath = saveImageToDisk(chatId, imageResult.base64, imageResult.ext);
-      const image = await storage.create({
+      const savedImages = [];
+      for (const imageResult of imageResults) {
+        const filePath = saveImageToDisk(chatId, imageResult.base64, imageResult.ext, { shared: true });
+        const image = await storage.create({
+          chatId,
+          filePath,
+          prompt: providerPrompt,
+          provider: imageConn.provider ?? "image_generation",
+          model: imageModel || "unknown",
+          width,
+          height,
+        });
+        if (!image) throw new Error("Generated selfie metadata could not be saved");
+        await persistGeneratedImageToEntityGalleries({
+          sourceFilePath: filePath,
+          sourceChatImageId: image.id,
+          characterIds: [character.id],
+          characterGallery,
+          personaGallery,
+          prompt: providerPrompt,
+          provider: imageConn.provider ?? "image_generation",
+          model: imageModel || "unknown",
+          width,
+          height,
+        });
+        savedImages.push(image);
+      }
+      const image = savedImages[0];
+      if (!image) throw new Error("Image provider did not return a selfie");
+      logger.info(
+        "[gallery/selfie] Generated %d selfie image(s) for %s in chat %s",
+        savedImages.length,
+        characterName,
         chatId,
-        filePath,
-        prompt: providerPrompt,
-        provider: imageConn.provider ?? "image_generation",
-        model: imageModel || "unknown",
-        width,
-        height,
-      });
-      if (!image) throw new Error("Generated selfie metadata could not be saved");
-      await persistGeneratedImageToEntityGalleries({
-        sourceFilePath: filePath,
-        characterIds: [character.id],
-        characterGallery,
-        personaGallery,
-        prompt: providerPrompt,
-        provider: imageConn.provider ?? "image_generation",
-        model: imageModel || "unknown",
-        width,
-        height,
-      });
-      logger.info("[gallery/selfie] Generated selfie for %s in chat %s", characterName, chatId);
+      );
       return {
         ...image,
         url: buildGalleryImageUrl(image, chatId),
@@ -1149,6 +1483,148 @@ export async function galleryRoutes(app: FastifyInstance) {
       logger.warn(err, "[gallery/selfie] Selfie generation failed for chat %s", chatId);
       const message = err instanceof Error ? err.message : "Selfie generation failed";
       return reply.status(502).send({ error: message });
+    }
+  });
+
+  app.post<{ Params: { chatId: string } }>("/:chatId/generate-image/preview", async (req, reply) => {
+    const { chatId } = req.params;
+    if (!isValidChatId(chatId)) return reply.status(400).send({ error: "Invalid chatId" });
+
+    const input = previewGalleryImagesSchema.parse(req.body);
+    try {
+      const context = await resolveGalleryImageGenerationContext(chatId, input.debugMode);
+      const items = await Promise.all(
+        input.items.map(async (item) => {
+          const compiled = await compileGalleryImageRequest(context, item);
+          return {
+            id: item.id,
+            kind: "background" as const,
+            title: item.title,
+            sourcePrompt: item.prompt,
+            prompt: compiled.prompt,
+            negativePrompt: compiled.negativePrompt,
+            width: compiled.width,
+            height: compiled.height,
+          };
+        }),
+      );
+      return {
+        requestCount: items.length,
+        connection: {
+          id: context.imageConnection.id,
+          name: context.imageConnection.name,
+          model: context.imageModel || "Default model",
+          source:
+            context.imageConnection.imageService ||
+            context.imageConnection.imageGenerationSource ||
+            context.imageConnection.provider,
+        },
+        styleProfile: {
+          id: context.styleProfile.id,
+          name: context.styleProfile.name,
+        },
+        campaign: {
+          included: Boolean(context.artStyle),
+          artStyleIncluded: Boolean(context.artStyle),
+        },
+        chatSettings: {
+          imageInstructionsIncluded: Boolean(context.imagePromptInstructions),
+        },
+        width: items[0]?.width ?? context.imageSettings.background.width,
+        height: items[0]?.height ?? context.imageSettings.background.height,
+        items,
+      };
+    } catch (err) {
+      if (err instanceof GalleryImageRequestError) {
+        return reply.status(err.statusCode).send({ error: err.message });
+      }
+      logger.warn(err, "[gallery/generate-image] Failed to preview Gallery image requests for chat %s", chatId);
+      return reply.status(500).send({ error: "Gallery image prompt preview failed" });
+    }
+  });
+
+  app.post<{ Params: { chatId: string } }>("/:chatId/generate-image", async (req, reply) => {
+    const { chatId } = req.params;
+    if (!isValidChatId(chatId)) return reply.status(400).send({ error: "Invalid chatId" });
+
+    const input = generateGalleryImageSchema.parse(req.body);
+    let context: Awaited<ReturnType<typeof resolveGalleryImageGenerationContext>>;
+    let compiledPrompt: Awaited<ReturnType<typeof compileGalleryImageRequest>>;
+    try {
+      context = await resolveGalleryImageGenerationContext(chatId, input.debugMode);
+      compiledPrompt = await compileGalleryImageRequest(context, input);
+    } catch (err) {
+      if (err instanceof GalleryImageRequestError) {
+        return reply.status(err.statusCode).send({ error: err.message });
+      }
+      logger.warn(err, "[gallery/generate-image] Failed to compile Gallery image request for chat %s", chatId);
+      return reply.status(500).send({ error: "Gallery image prompt compilation failed" });
+    }
+
+    const signal = createResponseAbortSignal(reply, SCENE_VIDEO_GENERATION_TIMEOUT_MS, "Gallery image generation");
+
+    context.debugLog("[debug/gallery/generate-image] prompt:\n%s", compiledPrompt.prompt);
+    if (compiledPrompt.negativePrompt) {
+      context.debugLog("[debug/gallery/generate-image] negative prompt:\n%s", compiledPrompt.negativePrompt);
+    }
+
+    let savedFilePath: string | null = null;
+    let metadataSaved = false;
+    try {
+      const connectionKey =
+        context.imageConnection.id?.trim() ||
+        `${context.imageServiceHint}:${context.imageBaseUrl}:${context.imageModel}`;
+      const generated = await runImageGenerationRequest({
+        connectionKey,
+        queue: true,
+        signal,
+        task: () =>
+          generateImage(
+            context.imageSource,
+            context.imageBaseUrl,
+            context.imageConnection.apiKey || "",
+            context.imageServiceHint,
+            {
+              prompt: compiledPrompt.prompt,
+              negativePrompt: compiledPrompt.negativePrompt || undefined,
+              model: context.imageModel,
+              width: compiledPrompt.width,
+              height: compiledPrompt.height,
+              imageEndpointId: context.imageConnection.imageEndpointId || undefined,
+              comfyWorkflow: context.imageConnection.comfyuiWorkflow || undefined,
+              imageDefaults: context.imageDefaults,
+              signal,
+              fallback: context.imageFallback,
+            },
+          ),
+      });
+      const filePath = saveImageToDisk(chatId, generated.base64, generated.ext);
+      savedFilePath = filePath;
+      const image = await storage.create({
+        chatId,
+        filePath,
+        prompt: compiledPrompt.prompt,
+        provider: context.imageConnection.provider ?? "image_generation",
+        model: context.imageModel || "unknown",
+        width: compiledPrompt.width,
+        height: compiledPrompt.height,
+      });
+      if (!image) throw new Error("Generated Gallery image metadata could not be saved");
+      metadataSaved = true;
+      logger.info("[gallery/generate-image] Generated Gallery image for chat %s", chatId);
+      return { ...image, url: buildGalleryImageUrl(image, chatId) };
+    } catch (err) {
+      if (savedFilePath && !metadataSaved) {
+        try {
+          removeSavedImageFromDisk(savedFilePath);
+        } catch (cleanupErr) {
+          logger.warn(cleanupErr, "[gallery/generate-image] Failed to clean up orphaned image file %s", savedFilePath);
+        }
+      }
+      logger.warn(err, "[gallery/generate-image] Image generation failed for chat %s", chatId);
+      return reply.status(502).send({
+        error: err instanceof Error ? err.message : "Gallery image generation failed",
+      });
     }
   });
 
@@ -1256,16 +1732,27 @@ export async function galleryRoutes(app: FastifyInstance) {
   // Serve a gallery image
   app.get<{ Params: { chatId: string; filename: string } }>("/file/:chatId/:filename", async (req, reply) => {
     const { chatId, filename } = req.params;
-    if (filename.includes("..") || filename.includes("/") || chatId.includes("..") || chatId.includes("/")) {
+    if (
+      filename.includes("..") ||
+      filename.includes("/") ||
+      filename.includes("\\") ||
+      chatId.includes("..") ||
+      chatId.includes("/") ||
+      chatId.includes("\\")
+    ) {
       return reply.status(400).send({ error: "Invalid path" });
     }
 
-    const filePath = join(GALLERY_DIR, chatId, filename);
-    if (!existsSync(filePath)) {
+    let image = findGalleryRowByFilename(await storage.listByChatId(chatId), filename);
+    if (!image) {
+      image = (await storage.listByFilePath(`${chatId}/${filename}`))[0] ?? null;
+    }
+    const storedFile = image ? resolveStoredGalleryFile(image.filePath, GALLERY_DIR) : null;
+    if (!storedFile || !existsSync(storedFile.absolutePath)) {
       return reply.status(404).send({ error: "Not found" });
     }
 
-    return reply.sendFile(filename, join(GALLERY_DIR, chatId));
+    return reply.sendFile(storedFile.filename, storedFile.directory);
   });
 
   // Delete a gallery image
@@ -1276,26 +1763,7 @@ export async function galleryRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "Not found" });
     }
 
-    const filename = getStoredFilename(image.filePath);
-    const fallbackFilePath = `${image.chatId}/${filename}`;
-    const filePathCandidates = new Set([image.filePath, fallbackFilePath]);
-
-    for (const candidate of filePathCandidates) {
-      try {
-        const filePath = assertInsideDir(GALLERY_DIR, join(GALLERY_DIR, candidate));
-        if (existsSync(filePath)) {
-          unlinkSync(filePath);
-        }
-      } catch (err) {
-        logger.warn(err, "Skipped gallery file unlink for %s (%s): path escapes gallery dir", id, candidate);
-      }
-    }
-
-    await storage.removeByChatAndFilePath(image.chatId, image.filePath);
-    if (fallbackFilePath !== image.filePath) {
-      await storage.removeByChatAndFilePath(image.chatId, fallbackFilePath);
-    }
-    await storage.remove(id);
-    return { success: true };
+    const deleted = await deleteChatGalleryImageEverywhere({ db: app.db, image });
+    return { success: true, ...deleted };
   });
 }

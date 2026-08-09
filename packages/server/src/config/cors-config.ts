@@ -20,6 +20,7 @@
 import type { FastifyRequest } from "fastify";
 import { getCorsConfig, getServerProtocol } from "./runtime-config.js";
 import { logger } from "../lib/logger.js";
+import { isRequestHostTrusted } from "../middleware/host-validation.js";
 
 // Bounded log throttle: same pattern as csrf-protection.ts. Each unique
 // rejected origin is logged once. When the cap is reached we drop the oldest
@@ -91,7 +92,7 @@ export function corsDelegate(req: FastifyRequest, callback: CorsDelegateCallback
   }
 
   const selfOrigin = selfOriginFromRequest(req);
-  if (selfOrigin && origin === selfOrigin) {
+  if (selfOrigin && origin === selfOrigin && isRequestHostTrusted(req)) {
     return callback(null, {
       origin: true,
       credentials: getCorsConfig().credentials,

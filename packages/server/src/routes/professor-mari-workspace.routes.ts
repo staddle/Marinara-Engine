@@ -8,11 +8,13 @@ import { startSseKeepalive, startSseReply, trySendSseEvent } from "./generate/ss
 import { getProfessorMariWorkspaceService } from "../services/professor-mari/workspace-agent.service.js";
 import { getProfessorMariWorkspaceSkillsService } from "../services/professor-mari/workspace-skills.service.js";
 import { getMariDbService } from "../services/mari-db/mari-db.service.js";
+import { personalServerExtensionRuntime } from "../services/extensions/personal-server-extension-runtime.js";
 
 const promptSchema = z.object({
   chatId: z.string().min(1),
   message: z.string().min(1),
   connectionId: z.string().optional().nullable(),
+  existingUserMessageId: z.string().min(1).optional(),
   attachments: z
     .array(
       z.object({
@@ -137,6 +139,7 @@ export async function professorMariWorkspaceRoutes(app: FastifyInstance) {
         text: body.message,
         connectionId: body.connectionId ?? null,
         attachments: body.attachments,
+        existingUserMessageId: body.existingUserMessageId,
         onEvent: send,
       });
       send({ type: "done", data: { ok: true } });
@@ -152,20 +155,35 @@ export async function professorMariWorkspaceRoutes(app: FastifyInstance) {
 
   app.get("/approvals", async (req, reply) => {
     if (!privileged(req, reply)) return;
-    return getMariDbService(app.db).getPendingApprovals();
+    return [
+      ...getMariDbService(app.db).getPendingApprovals(),
+      ...getProfessorMariWorkspaceService(app).getSecurityReviews(),
+    ];
   });
 
   app.post<{ Params: { id: string } }>("/approvals/:id/approve", async (req, reply) => {
     if (!privileged(req, reply)) return;
+    const securityResult = await getProfessorMariWorkspaceService(app).approveSecurityReview(req.params.id);
+    if (securityResult) {
+      if (!securityResult.ok) return reply.status(409).send(securityResult);
+      return securityResult;
+    }
     const result = await getMariDbService(app.db).keepAppliedReviewAndWait(req.params.id);
     if (!result) return reply.status(404).send({ error: "Applied change review not found" });
+    if (result.approval.affectedTables.installed_extensions) await personalServerExtensionRuntime.reloadAll();
     return { ok: true, ...result };
   });
 
   app.post<{ Params: { id: string } }>("/approvals/:id/reject", async (req, reply) => {
     if (!privileged(req, reply)) return;
+    const securityResult = getProfessorMariWorkspaceService(app).rejectSecurityReview(req.params.id);
+    if (securityResult) {
+      if (!securityResult.ok) return reply.status(409).send(securityResult);
+      return securityResult;
+    }
     const result = await getMariDbService(app.db).restoreAppliedReview(req.params.id);
     if (!result) return reply.status(404).send({ error: "Applied change review not found" });
+    if (result.approval.affectedTables.installed_extensions) await personalServerExtensionRuntime.reloadAll();
     return { ok: true, ...result, completed: true };
   });
 

@@ -10,6 +10,7 @@ import { cn } from "../../../../lib/utils";
 import { visibleText } from "../../lib/tracker-display";
 import { InlineEdit, InlineNumber } from "../controls/InlineControls";
 import { useTrackerLockContext } from "../TrackerLockContext";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 export function PersonaInventoryRow({
   item,
@@ -26,6 +27,7 @@ export function PersonaInventoryRow({
   deleteMode: boolean;
   fullWidth?: boolean;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const { fieldLocks, lockMode, onToggleFieldLock, onUpdateFieldLocks } = useTrackerLockContext();
   const nameLockKey = inventoryTrackerLockKey(item, "name", itemIndex);
   const quantityLockKey = inventoryTrackerLockKey(item, "quantity", itemIndex);
@@ -55,7 +57,7 @@ export function PersonaInventoryRow({
           value={item.name}
           onSave={updateName}
           className="h-4 w-full min-w-0 px-0.5 py-0 text-[0.625rem] font-medium leading-4 text-[color:var(--tracker-profile-text)] hover:bg-[var(--accent)]/25"
-          placeholder="Item"
+          placeholder={localizeUi("ui.trackerPanel.personainventoryrow.item")}
           title={visibleText(item.name, "Item")}
           scrollOnHover
           showEditHint={false}
@@ -69,7 +71,7 @@ export function PersonaInventoryRow({
             onChange={(quantity) => onUpdate({ ...item, quantity })}
             min={0}
             className="justify-self-end px-0 text-right text-[0.625rem] leading-4 text-[color:var(--tracker-profile-number-text)] hover:bg-transparent focus:bg-transparent focus:ring-0"
-            title={`${item.name} quantity`}
+            title={localizeUi("ui.trackerPanel.personainventoryrow.value1Quantity", { value1: item.name })}
             locked={isTrackerFieldLocked(fieldLocks, quantityLockKey)}
             lockMode={lockMode}
             onToggleLock={() => onToggleFieldLock?.(quantityLockKey)}
@@ -81,8 +83,8 @@ export function PersonaInventoryRow({
           type="button"
           onClick={onRemove}
           className="absolute right-0.5 top-1/2 flex h-3.5 w-3.5 -translate-y-1/2 items-center justify-center rounded text-[var(--destructive)] transition-colors hover:bg-[var(--destructive)]/10"
-          title={`Remove ${item.name}`}
-          aria-label={`Remove ${item.name}`}
+          title={localizeUi("ui.trackerPanel.charactertrackercard.removeValue1", { value1: item.name })}
+          aria-label={localizeUi("ui.trackerPanel.charactertrackercard.removeValue1", { value1: item.name })}
         >
           <X size="0.65rem" />
         </button>

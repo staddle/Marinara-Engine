@@ -31,6 +31,7 @@
   - [Community \& Support](#community--support)
   - [Contributors](#contributors)
   - [License](#license)
+  - [Trademark \& Branding](#trademark--branding)
 
 ---
 
@@ -101,7 +102,7 @@
 
 ## Latest Release
 
-Current stable release: **[v2.3.4](https://github.com/Pasta-Devs/Marinara-Engine/releases/tag/v2.3.4)**.
+Current stable release: **[v2.4.1](https://github.com/Pasta-Devs/Marinara-Engine/releases/tag/v2.4.1)**.
 
 See [CHANGELOG.md](CHANGELOG.md) for detailed release notes. Tagged releases use the `vX.Y.Z` format and are published on the [Releases](https://github.com/Pasta-Devs/Marinara-Engine/releases) page with a Windows installer, Android bootstrap APK, and named versioned source ZIP. Android APKs are Termux bootstrap + WebView shells: they can download Termux from F-Droid, launch Android's installer, start the Termux setup flow after required permission prompts, then open the local Marinara server on the same device.
 
@@ -135,7 +136,7 @@ Each guide covers installation, updating, and LAN access for that platform. See 
 
 Upgrading from an older release? See [Upgrading Marinara Engine](docs/UPGRADING.md) for the platform-by-platform upgrade path.
 
-Security defaults are intentionally local-first: loopback access works out of the box, ordinary LAN and public clients require Basic Auth unless you explicitly opt back in, and Tailscale (`100.64.0.0/10`) plus same-host Docker bridge/gateway traffic are trusted by default for easier private installs. Set `BYPASS_AUTH_TAILSCALE=false` or `BYPASS_AUTH_DOCKER=false` if you want those clients to authenticate too. `ALLOW_UNAUTHENTICATED_PRIVATE_NETWORK=true` restores unauthenticated access for other trusted private networks; public clients still require `ALLOW_UNAUTHENTICATED_REMOTE=true`. Powerful actions such as backups, bulk import, update apply, sidecar install/download/delete, haptics, and custom tool mutation also require `ADMIN_SECRET`; see [Access Control](docs/CONFIGURATION.md#access-control).
+Security defaults are intentionally local-first: loopback access works out of the box, ordinary LAN and public clients require Basic Auth unless you explicitly opt back in, and direct Tailscale (`100.64.0.0/10`) plus same-host Docker bridge/gateway traffic are trusted by default for easier private installs. Proxy-forwarded Docker traffic requires normal authorization by default. Set `BYPASS_AUTH_TAILSCALE=false` or `BYPASS_AUTH_DOCKER=false` if you want direct clients to authenticate too; set `REQUIRE_AUTH_FOR_DOCKER_PROXY=false` only when every upstream client is trusted. `ALLOW_UNAUTHENTICATED_PRIVATE_NETWORK=true` restores unauthenticated access for other trusted private networks; public clients still require `ALLOW_UNAUTHENTICATED_REMOTE=true`. Powerful actions such as backups, bulk import, update apply, sidecar install/download/delete, haptics, and custom tool mutation also require `ADMIN_SECRET`; see [Access Control](docs/CONFIGURATION.md#access-control).
 
 ---
 
@@ -147,15 +148,15 @@ Three chat modes — **Conversation** (Discord-style DMs), **Roleplay** (immersi
 
 ### Visual & Immersive
 
-Character expression sprites with automatic emotion switching, custom scene backgrounds, dynamic weather overlays, gallery illustrations, short scene videos from generated illustrations, Game Mode storyboards with selectable keyframe and video prompt styles, two visual themes (Y2K Marinara and SillyTavern classic), and light/dark mode.
+Character expression sprites with automatic emotion switching, custom scene backgrounds, dynamic weather overlays, gallery illustrations, short scene videos from generated illustrations, Game Mode storyboards, inline Roleplay storyboard episodes with selectable prompt layers, two visual themes (Y2K Marinara and SillyTavern classic), and light/dark mode.
 
 ### AI Agent System
 
-An optional one-click catalog of 29 first-party agents and feature packages. Fresh installs stay lightweight with no bundled agents. Open **Agents → Download Agents** to install only what you want or uninstall packages you no longer need. Installed official packages automatically update to the newest compatible catalog version when the Marinara server starts, while remaining available at their current version when the server is offline. Existing installations retain their agents during Engine upgrades. Package sources, artifacts, and the complete catalog are published in [Pasta-Devs/Marinara-Agents](https://github.com/Pasta-Devs/Marinara-Agents). You can also create or import custom agents.
+An optional one-click catalog of 31 first-party agents and feature packages. Fresh installs stay lightweight with no bundled agents. Open **Agents → Download Agents** to install only what you want or uninstall packages you no longer need. When a compatible update appears, Marinara asks before downloading it. Choosing **No** keeps the installed version and leaves **Update** available in Download Agents for later; installed packages also remain available while the server is offline. Existing installations retain their agents during Engine upgrades. Stable Engine builds use the released Agent catalog, while git installations on the Engine `staging` update channel automatically use the matching Marinara-Agents `staging` catalog and artifacts for testing. Package sources, artifacts, and the complete catalog are published in [Pasta-Devs/Marinara-Agents](https://github.com/Pasta-Devs/Marinara-Agents). You can also create custom Agents. External Agent imports require the **Allow custom Agent imports** Danger Zone toggle and an explicit capability review; official downloads and Agents you create yourself are unaffected.
 
 - **Writer Agents:** Prose Guardian, Continuity Checker, Narrative Director, Knowledge Retrieval, Knowledge Router, and Card Evolution Auditor.
-- **Tracker Agents:** World State, Expression Engine, Quest Tracker, Background, Character Tracker, Persona Stats, Custom Tracker, and Hierarchical Maps.
-- **Misc Agents:** Echo Chamber, Illustrator, Lorebook Keeper, Combat, Immersive HTML, Music DJ, Haptic Feedback, CYOA Choices, Calls, UNO, Chess, Poker, 8-Ball Pool, Tic-Tac-Toe, and Rock-Paper-Scissors.
+- **Tracker Agents:** World State, Expression Engine, Quest Tracker, Background, Character Tracker, Persona Stats, Custom Tracker, and World Maps.
+- **Misc Agents:** Echo Chamber, Illustrator, Lorebook Keeper, Long-Term Memory, Combat, Immersive HTML, Music DJ, Haptic Feedback, CYOA Choices, Storyboard, Calls, UNO, Chess, Poker, 8-Ball Pool, Tic-Tac-Toe, and Rock-Paper-Scissors.
 
 See the [Downloadable Agents Reference](docs/agents/built-in-agents.md) for modes, behavior, and setup guidance for every package, or browse the [official Agent repository](https://github.com/Pasta-Devs/Marinara-Agents) directly.
 
@@ -163,9 +164,13 @@ See the [Downloadable Agents Reference](docs/agents/built-in-agents.md) for mode
 
 Preset system with drag-and-drop prompt ordering, lorebooks with keyword triggers, an AI lorebook maker, world info inspector, regex scripts, and a macro/template system.
 
+### Local Customization
+
+Personal Extensions are disabled-by-default drafts authored for you by Professor Mari. Every executable change invalidates approval, and only the exact reviewed SHA-256 fingerprint can run inside Marinara's restricted browser or OS sandbox. Third-party imports stay hidden until the host and user deliberately open both External Extensions safety gates. Legacy tools can request separately disclosed **Full page access** for DOM compatibility, but that mode is deliberately unsandboxed and should be enabled only for exact code you trust. See the [Personal Extensions guide](docs/extending/personal-extensions.md).
+
 ### Connections & Providers
 
-OpenAI, OpenAI ChatGPT subscription login, Anthropic, Claude Subscription through the local Claude Agent SDK, Google Gemini, Google Vertex AI, OpenRouter, NanoGPT, Mistral, Cohere, xAI / Grok, the bundled downloadable Local Model sidecar, Pollinations, Stability AI, Together AI, NovelAI, Venice.ai, ComfyUI image and local video workflows, SD Web UI, Draw Things (Apple Silicon, Metal + Apple Neural Engine), Google AI Studio video models (Gemini Omni and Veo), xAI Imagine video, OpenRouter video, Seedance 2.0 video, and custom OpenAI-compatible endpoints. API keys are encrypted at rest with AES-256. Per-chat connection overrides.
+OpenAI, OpenAI ChatGPT subscription login, Anthropic, Claude Subscription through the local Claude Agent SDK, Google Gemini, Google Vertex AI, OpenRouter, NanoGPT, Mistral, Cohere, xAI / Grok, the bundled downloadable Local Model sidecar, Pollinations, Stability AI, Together AI, NovelAI, Venice.ai, Z.AI image generation, ComfyUI image and local video workflows, SD Web UI, Draw Things (Apple Silicon, Metal + Apple Neural Engine), Google AI Studio video models (Gemini Omni and Veo), xAI Imagine video, OpenRouter video, Seedance 2.0 video, and custom OpenAI-compatible endpoints. API keys are encrypted at rest with AES-256. Per-chat connection overrides.
 
 ### Export & Data
 
@@ -184,7 +189,7 @@ The full guide library is browsable inside the app: open **Documentation** from 
 | [docs/conversation/getting-started.md](docs/conversation/getting-started.md)         | Conversation Mode setup, DMs, groups, profiles (display name, about me, behavior), calls, selfies, and table games |
 | [docs/roleplay/getting-started.md](docs/roleplay/getting-started.md)                 | Roleplay Mode setup, sprites, HUD, agents, and connected chats                                                     |
 | [docs/game/getting-started.md](docs/game/getting-started.md)                         | Game Mode setup, world-gen, party play, storyboards, and troubleshooting                                           |
-| [docs/agents/built-in-agents.md](docs/agents/built-in-agents.md)                     | Complete reference for all 29 downloadable first-party agents and feature packages                                 |
+| [docs/agents/built-in-agents.md](docs/agents/built-in-agents.md)                     | Complete reference for all 31 downloadable first-party agents and feature packages                                 |
 | [docs/noodle/overview.md](docs/noodle/overview.md)                                   | Noodle social timeline: setup, posting, interactions, images, and chat carryover                                   |
 | [docs/prompts/generation-parameters.md](docs/prompts/generation-parameters.md)       | Sampler and output-parameter reference across providers                                                            |
 | [docs/REMOTE_ACCESS.md](docs/REMOTE_ACCESS.md)                                       | Remote access, Basic Auth, IP allowlists, and admin access                                                         |
@@ -194,7 +199,8 @@ The full guide library is browsable inside the app: open **Documentation** from 
 | [docs/media/style-profiles.md](docs/media/style-profiles.md)                         | Image style profiles and prompt grammar                                                                            |
 | [docs/media/tts-setup.md](docs/media/tts-setup.md)                                   | Text to speech (TTS) setup and voices                                                                              |
 | [docs/media/scene-video.md](docs/media/scene-video.md)                               | Scene-video provider setup and the Gallery animation workflow                                                      |
-| [docs/game/storyboard.md](docs/game/storyboard.md)                                   | Step-by-step guide to manual and automatic Game Mode storyboards                                                   |
+| [docs/game/storyboard.md](docs/game/storyboard.md)                                   | Storyboard Agent installation, global defaults, and Roleplay and Game Mode workflows                               |
+| [docs/game/ltx-2-3-storyboards.md](docs/game/ltx-2-3-storyboards.md)                   | Krea 2 first frames, local LTX 2.3 ComfyUI animation, and tested Game Mode settings                               |
 | [docs/agents/agents-overview.md](docs/agents/agents-overview.md)                     | Agent system overview: phases, per-chat enablement, built-in and custom agents                                     |
 | [docs/extending/custom-tools.md](docs/extending/custom-tools.md)                     | Function calling, custom tools, webhooks, scripts, and agent tool enablement                                       |
 | [docs/prompts/presets.md](docs/prompts/presets.md)                                   | Preset editor, prompt sections, groups, ordering, and variables                                                    |
@@ -206,6 +212,7 @@ The full guide library is browsable inside the app: open **Documentation** from 
 | [docs/FAQ.md](docs/FAQ.md)                                                           | Frequently asked questions (LAN access, etc.)                                                                      |
 | [docs/prompts/macros.md](docs/prompts/macros.md)                                     | Prompt macro syntax, including weighted random choices                                                             |
 | [docs/home/professor-mari.md](docs/home/professor-mari.md)                           | Built-in assistant capabilities, limits, and safety notes                                                          |
+| [docs/development/localization.md](docs/development/localization.md)                 | Supported UI languages and contribution steps for new or corrected translations                                    |
 | [docs/development/frontend.md](docs/development/frontend.md)                         | Frontend architecture, components, hooks, and API reference                                                        |
 | [docs/development/architecture-map.md](docs/development/architecture-map.md)         | Code ownership map and module-boundary refactor groundwork                                                         |
 | [android/README.md](android/README.md)                                               | Android Termux bootstrap + WebView shell guide                                                                     |
@@ -238,4 +245,17 @@ The full guide library is browsable inside the app: open **Documentation** from 
 
 ## License
 
-[AGPL-3.0](LICENSE)
+Marinara Engine source code is licensed under the [GNU AGPLv3](LICENSE).
+
+## Trademark & Branding
+
+The software license does not grant permission to imply that a third-party
+product or hosted service is official, endorsed, certified, or supported by
+Pasta-Devs. Ordinary truthful descriptive and nominative references to Marinara
+Engine remain welcome. When a reference is used to market or operate a hosted
+service, its operator and independent status must be clear. See the [Trademark
+and Branding Policy](TRADEMARKS.md) for the complete guidelines.
+
+_olud.ai is an independent third-party service and is not endorsed by Pasta-Devs._
+
+[![olud.ai](https://olud.ai/badge.php?tool=pasta-devs-marinara-engine)](https://olud.ai/project/pasta-devs-marinara-engine.html)

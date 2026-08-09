@@ -8,7 +8,9 @@ import { ChevronDown, ChevronRight, FolderOpen, Folder } from "lucide-react";
 import { usePersonas, usePersonaGroups } from "../../hooks/use-characters";
 import { useUpdateChat, useChat } from "../../hooks/use-chats";
 import { useChatStore } from "../../stores/chat.store";
-import { cn, getAvatarCropStyle, parseAvatarCropJson } from "../../lib/utils";
+import { normalizeAvatarCrop } from "@marinara-engine/shared";
+import { cn, getAvatarCropStyle } from "../../lib/utils";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface Persona {
   id: string;
@@ -37,6 +39,7 @@ interface ParsedGroup {
 const UNGROUPED_PERSONA_GROUP_ID = "__ungrouped-personas__";
 
 export function QuickPersonaSwitcher({ className }: { className?: string }) {
+  const { t: localizeUi } = useUiTranslation();
   const [open, setOpen] = useState(false);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const btnRef = useRef<HTMLButtonElement>(null);
@@ -189,7 +192,7 @@ export function QuickPersonaSwitcher({ className }: { className?: string }) {
               src={persona.avatarPath}
               alt={persona.name}
               className="h-full w-full object-cover"
-              style={getAvatarCropStyle(parseAvatarCropJson(persona.avatarCrop))}
+              style={getAvatarCropStyle(normalizeAvatarCrop(persona.avatarCrop))}
             />
           </div>
         ) : (
@@ -220,8 +223,8 @@ export function QuickPersonaSwitcher({ className }: { className?: string }) {
         onClick={() => setOpen((v) => !v)}
         title={
           activePersona
-            ? `${activePersona.name}${activePersona.comment ? " — " + activePersona.comment : ""}`
-            : "Quick Persona Switcher"
+            ?localizeUi("ui.chat.quickpersonaswitcher.value1Value2", { value1: activePersona.name, value2: activePersona.comment ? " — " + activePersona.comment : "" })
+            :localizeUi("ui.chat.quickpersonaswitcher.quickPersonaSwitcher")
         }
         className={cn(
           "relative flex h-8 w-8 items-center justify-center rounded-full overflow-hidden transition-all border-2",
@@ -234,7 +237,7 @@ export function QuickPersonaSwitcher({ className }: { className?: string }) {
             src={activePersona.avatarPath}
             alt={activePersona.name}
             className="h-full w-full object-cover rounded-full"
-            style={getAvatarCropStyle(parseAvatarCropJson(activePersona.avatarCrop))}
+            style={getAvatarCropStyle(normalizeAvatarCrop(activePersona.avatarCrop))}
           />
         ) : (
           <div className="flex h-full w-full items-center justify-center rounded-full bg-foreground/10 text-[0.75rem] font-semibold text-foreground/45">
@@ -249,7 +252,7 @@ export function QuickPersonaSwitcher({ className }: { className?: string }) {
           <div
             ref={menuRef}
             role="menu"
-            aria-label="Personas"
+            aria-label={localizeUi("navigation.topbar.personas")}
             tabIndex={-1}
             onPointerDown={(event) => event.stopPropagation()}
             onKeyDown={(event) => {
@@ -262,9 +265,7 @@ export function QuickPersonaSwitcher({ className }: { className?: string }) {
             className="fixed z-[9999] flex min-w-[280px] max-w-[340px] max-h-[400px] flex-col overflow-hidden rounded-xl border border-foreground/10 bg-[var(--card)] shadow-2xl"
             style={pos ? { left: pos.left, top: pos.top } : { visibility: "hidden" as const }}
           >
-            <div className="flex items-center justify-center border-b border-foreground/10 px-3 py-2 text-[0.6875rem] font-semibold">
-              Personas
-            </div>
+            <div className="flex items-center justify-center border-b border-foreground/10 px-3 py-2 text-[0.6875rem] font-semibold">{localizeUi("navigation.topbar.personas")}</div>
             <div className="overflow-y-auto p-1">
               {/* None option */}
               <button
@@ -281,8 +282,8 @@ export function QuickPersonaSwitcher({ className }: { className?: string }) {
                   ?
                 </div>
                 <div className="flex min-w-0 flex-1 flex-col">
-                  <span className={cn("text-xs font-semibold", !activePersonaId && "text-foreground")}>None</span>
-                  <span className="text-[0.625rem] text-foreground/45">No persona selected</span>
+                  <span className={cn("text-xs font-semibold", !activePersonaId && "text-foreground")}>{localizeUi("ui.game.gamesurfacecomponent.none")}</span>
+                  <span className="text-[0.625rem] text-foreground/45">{localizeUi("ui.chat.quickpersonaswitcher.noPersonaSelected")}</span>
                 </div>
                 {!activePersonaId && <span className="ml-auto text-[0.6875rem]">✓</span>}
               </button>
@@ -312,7 +313,7 @@ export function QuickPersonaSwitcher({ className }: { className?: string }) {
                             src={firstMember.avatarPath}
                             alt={group.name}
                             className="h-full w-full object-cover"
-                            style={getAvatarCropStyle(parseAvatarCropJson(firstMember.avatarCrop))}
+                            style={getAvatarCropStyle(normalizeAvatarCrop(firstMember.avatarCrop))}
                           />
                         </div>
                       ) : (
@@ -330,7 +331,7 @@ export function QuickPersonaSwitcher({ className }: { className?: string }) {
                           {group.name} ({group.members.length})
                         </span>
                         <span className="text-[0.625rem] text-foreground/45">
-                          {group.members.length} persona{group.members.length !== 1 ? "s" : ""}
+                          {group.members.length} {localizeUi("ui.chat.quickpersonaswitcher.persona")}{group.members.length !== 1 ?localizeUi("ui.noodle.stageprofileview.s") : ""}
                         </span>
                       </div>
                       <span className="ml-auto shrink-0 text-foreground/45">
@@ -348,9 +349,7 @@ export function QuickPersonaSwitcher({ className }: { className?: string }) {
               })}
 
               {personas.length === 0 && (
-                <div className="px-3 py-4 text-center text-[0.6875rem] italic text-foreground/45">
-                  No personas found.
-                </div>
+                <div className="px-3 py-4 text-center text-[0.6875rem] italic text-foreground/45">{localizeUi("ui.chat.quickpersonaswitcher.noPersonasFound")}</div>
               )}
             </div>
           </div>,

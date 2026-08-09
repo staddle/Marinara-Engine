@@ -1,8 +1,7 @@
 // ──────────────────────────────────────────────
 // Professor Mari native command workspace runtime
 // ──────────────────────────────────────────────
-import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { delimiter, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,10 +19,7 @@ import { parseTextualToolCalls } from "../llm/textual-tool-call-parser.js";
 import { createLLMProvider } from "../llm/provider-registry.js";
 import { getLocalSidecarProvider, LOCAL_SIDECAR_MODEL } from "../llm/local-sidecar.js";
 import { createChatsStorage } from "../storage/chats.storage.js";
-import {
-  mergeCustomParameters,
-  normalizeServiceTier,
-} from "../../routes/generate/generate-route-utils.js";
+import { mergeCustomParameters, normalizeServiceTier } from "../../routes/generate/generate-route-utils.js";
 import {
   appendReadableAttachmentsToContent,
   extractFileAttachmentInputs,
@@ -40,6 +36,12 @@ import { DATA_DIR } from "../../utils/data-dir.js";
 import { logger } from "../../lib/logger.js";
 import { PROFESSOR_MARI_AGENT_CATALOG_KNOWLEDGE } from "./official-agent-knowledge.js";
 import {
+  formatDocumentationRead,
+  formatDocumentationSearch,
+  readCanonicalDocumentation,
+  searchCanonicalDocumentation,
+} from "./documentation-tools.js";
+import {
   GENERATION_PARAMETER_SEND_KEYS,
   findKnownModel,
   LOCAL_SIDECAR_CONNECTION_ID,
@@ -53,6 +55,7 @@ import {
 } from "@marinara-engine/shared";
 import type {
   MariDbCommandResult,
+  MariDependencyTarget,
   MariGuidedPlanStep,
   MariSuggestionChip,
   MariWorkspaceConnectionSummary,
@@ -64,6 +67,13 @@ import type {
 import { getMariDbService } from "../mari-db/mari-db.service.js";
 import { getProfessorMariWorkspaceSkillsService } from "./workspace-skills.service.js";
 import { sidecarModelService } from "../sidecar/sidecar-model.service.js";
+import { getWorkspaceShellSandboxStatus, spawnWorkspaceSandboxedShell } from "./workspace-shell-sandbox.js";
+import { personalServerExtensionRuntime } from "../extensions/personal-server-extension-runtime.js";
+import {
+  isPackageManagerMutationCommand,
+  WorkspaceChangeReviewService,
+  workspacePathAccessPolicy,
+} from "./workspace-change-review.service.js";
 
 type DbConnectionWithKey = typeof apiConnections.$inferSelect & { apiKey: string };
 type WorkspaceConnection = Pick<
@@ -91,7 +101,7 @@ type WorkspaceCommandCall = {
   arguments: Record<string, unknown>;
   raw?: string;
 };
-type WorkspaceCommandResult = {
+export type WorkspaceCommandResult = {
   id: string;
   name: MariWorkspaceToolName;
   input: Record<string, unknown>;
@@ -122,11 +132,24 @@ type AssistantWorkspaceAction = {
   assistantHistoryContent: string;
 };
 
-const WORKSPACE_TOOLS: MariWorkspaceToolName[] = ["read", "grep", "find", "ls", "edit", "write", "bash", "app_data"];
+const WORKSPACE_TOOLS: MariWorkspaceToolName[] = [
+  "docs_search",
+  "docs_read",
+  "read",
+  "grep",
+  "find",
+  "ls",
+  "edit",
+  "write",
+  "bash",
+  "dependency",
+  "app_data",
+];
 const RUNTIME_API_KEY = "local-marinara-runtime";
 const SESSION_ID = "professor-mari-workspace";
 const MAX_COMMAND_ROUNDS = 12;
 const MAX_PROTOCOL_REPAIR_ROUNDS = 2;
+const MAX_VERIFICATION_REPAIR_ROUNDS = 2;
 const MAX_REPEATED_COMMAND_FAILURES = 3;
 const MAX_HISTORY_MESSAGES = 40;
 const MAX_PARALLEL_READONLY_COMMANDS = 4;
@@ -149,6 +172,33 @@ const SKIPPED_DIRS = new Set([
 ]);
 
 const WORKSPACE_TOOL_DEFINITIONS: WorkspaceToolDefinition[] = [
+  {
+    name: "docs_search",
+    description:
+      "Search Marinara's canonical local README and English documentation. Use this first for user-facing feature, configuration, installation, and troubleshooting questions. Results include the source path, heading, line, and a bounded excerpt.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", minLength: 2, maxLength: 200 },
+        limit: { type: "integer", minimum: 1, maximum: 8 },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "docs_read",
+    description:
+      "Read a canonical local documentation file or one exact heading with bounded output. Paths must be README.md or English Markdown files under docs/. Cite the returned path and heading in the answer.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        heading: { type: "string" },
+        maxChars: { type: "integer", minimum: 1000, maximum: 16000 },
+      },
+      required: ["path"],
+    },
+  },
   {
     name: "read",
     description: "Read a text file from the workspace with optional 1-indexed line offset and line limit.",
@@ -210,6 +260,7 @@ const WORKSPACE_TOOL_DEFINITIONS: WorkspaceToolDefinition[] = [
       type: "object",
       properties: {
         path: { type: "string" },
+        reason: { type: "string" },
         edits: {
           type: "array",
           items: {
@@ -227,13 +278,14 @@ const WORKSPACE_TOOL_DEFINITIONS: WorkspaceToolDefinition[] = [
     description: "Create or overwrite a workspace text file. Parent directories are created automatically.",
     parameters: {
       type: "object",
-      properties: { path: { type: "string" }, content: { type: "string" } },
+      properties: { path: { type: "string" }, content: { type: "string" }, reason: { type: "string" } },
       required: ["path", "content"],
     },
   },
   {
     name: "bash",
-    description: "Run a simple portable shell command in the workspace. Prefer mari commands over raw storage edits.",
+    description:
+      "Run a simple shell command in an OS sandbox with network access denied and filesystem writes confined to the workspace. Prefer structured tools.",
     parameters: {
       type: "object",
       properties: { command: { type: "string" }, timeout: { type: "integer", minimum: 1, maximum: 300 } },
@@ -241,9 +293,25 @@ const WORKSPACE_TOOL_DEFINITIONS: WorkspaceToolDefinition[] = [
     },
   },
   {
+    name: "dependency",
+    description:
+      "Request an exact public npm dependency for Marinara. Nothing is installed until the user approves the resolved version and integrity.",
+    parameters: {
+      type: "object",
+      properties: {
+        packageName: { type: "string" },
+        version: { type: "string", description: "Exact semver, or latest to resolve an exact version." },
+        target: { type: "string", enum: ["root", "client", "server", "shared"] },
+        dev: { type: "boolean" },
+        reason: { type: "string" },
+      },
+      required: ["packageName", "target"],
+    },
+  },
+  {
     name: "app_data",
     description:
-      "Read or change live app data through structured actions, without shell commands. Use this for characters, personas, lorebooks, lorebook entries, themes, agents, and prompt presets.",
+      "Read or change live app data through structured actions, without shell commands. Use this for characters, character folders, personas, lorebooks, lorebook entries, themes, Personal Extension drafts, agents, and prompt presets.",
     parameters: {
       type: "object",
       properties: {
@@ -255,6 +323,8 @@ const WORKSPACE_TOOL_DEFINITIONS: WorkspaceToolDefinition[] = [
             "character.search",
             "character.create",
             "character.update",
+            "character.folder.list",
+            "character.moveToFolder",
             "persona.list",
             "persona.active",
             "persona.get",
@@ -275,6 +345,11 @@ const WORKSPACE_TOOL_DEFINITIONS: WorkspaceToolDefinition[] = [
             "theme.create",
             "theme.update",
             "theme.setActive",
+            "personal_extension.list",
+            "personal_extension.get",
+            "personal_extension.search",
+            "personal_extension.create",
+            "personal_extension.update",
             "agent.list",
             "agent.get",
             "agent.search",
@@ -289,15 +364,29 @@ const WORKSPACE_TOOL_DEFINITIONS: WorkspaceToolDefinition[] = [
         },
         id: { type: "string" },
         characterId: { type: "string" },
+        folderId: { type: "string" },
+        folderName: { type: "string" },
         personaId: { type: "string" },
         lorebookId: { type: "string" },
         entryId: { type: "string" },
         agentId: { type: "string" },
         presetId: { type: "string" },
+        extensionId: { type: "string" },
         query: { type: "string" },
         limit: { type: "integer", minimum: 1 },
         name: { type: "string" },
+        version: { type: "string" },
+        description: { type: "string" },
+        runtime: { type: "string", enum: ["client", "server"] },
+        capabilities: {
+          type: "array",
+          items: { type: "string", enum: ["read_active_characters", "read_active_persona"] },
+          description:
+            "Optional Browser Extension data permissions. Request only what the extension needs. Server Extensions cannot request these capabilities.",
+        },
         css: { type: "string" },
+        js: { type: "string" },
+        serverJs: { type: "string" },
         activate: { type: "boolean" },
         apply: { type: "boolean" },
         reason: { type: "string" },
@@ -349,15 +438,6 @@ function powershellQuote(value: string) {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
-function killWindowsProcessTree(pid: number | undefined) {
-  if (!pid) return;
-  const child = spawn("taskkill", ["/pid", String(pid), "/t", "/f"], {
-    stdio: "ignore",
-    windowsHide: true,
-  });
-  child.on("error", () => undefined);
-}
-
 const WINDOWS_POSIX_COMMAND_PATTERNS: Array<{ label: string; pattern: RegExp }> = [
   { label: "here-documents", pattern: /<<\s*['"]?[A-Za-z_]/ },
   { label: "command substitution", pattern: /\$\(|`[^`]+`/ },
@@ -391,8 +471,13 @@ ${PROFESSOR_MARI_AGENT_CATALOG_KNOWLEDGE}
 
 Workspace defaults:
 - Marinara's first-party agents and larger optional features are downloaded from **Agents → Download Agents**. Fresh installs start without them; maps, Conversation calls, and Conversation games are packages too. Tell users to install the desired package, enable it for the chat, and restart Marinara Engine when the catalog prompts them. Existing pre-package installs are migrated automatically without losing settings or history.
-- Use the structured \`app_data\` workspace command, not shell, for character/persona/lorebook/lorebook-entry/theme/agent/preset reads, creation, and updates.
+- Use the structured \`app_data\` workspace command, not shell, for character/character-folder/persona/lorebook/lorebook-entry/theme/Personal Extension/agent/preset reads, creation, and updates.
 - Use Mari CLI commands for images, wiki reads, code/workspace tasks, agents, tools, raw DB work, or anything \`app_data\` does not cover. Only write raw files when no CLI/helper path fits.
+- You may create and update Personal Extension drafts with \`personal_extension.create\` and \`personal_extension.update\`. These actions always disable changed code and clear its approval. Browser Extensions receive active chat and Character IDs through \`marinara.context\`; request \`read_active_characters\` or \`read_active_persona\` only when the extension truly needs bounded active-record fields. Never claim to approve, enable, or run an extension: only the user can review the exact code hash and requested permissions, then choose **Review and Run** in **Settings → Addons → Personal Extensions**.
+- For user-facing Browser Extension UI, use \`marinara.ui.registerContribution(...)\`. It can add a trusted Marinara-rendered top-bar button, Extensions menu item, right-side panel, or button in the Chats, Bots, Characters, Personas, Lorebooks, Presets, Connections, Agents, and Settings surfaces. For a side-panel \`button\`, set \`surface\` to the requested surface and choose \`position: "header"\`, \`"before-content"\`, or \`"after-content"\`; omit both fields for the top bar. The \`icon\` may be any kebab-case Lucide icon name supported by Marinara. Panels may contain headings, text, preformatted output, buttons, text inputs, selects, toggles, sliders, color controls, and spacers. Use \`onActivate\` and \`onEvent\` for behavior and update the returned handle when the view changes. Never write extension code that expects \`document\`, \`window\`, \`innerHTML\`, host CSS selectors, React internals, unrestricted \`fetch\`, or direct Marinara API access; those capabilities are deliberately absent.
+- Raw \`bash\` commands run in an OS sandbox with network access denied, inherited secrets removed, and filesystem writes confined to the workspace. If the sandbox is unavailable, raw shell fails closed; use structured workspace tools.
+- Use the \`dependency\` tool when a source change needs a public npm package. Raw package-manager installs are blocked. The tool resolves an exact version and integrity, then waits for the user to approve installation with lifecycle scripts disabled.
+- Ordinary source files can still be edited directly. Dependency manifests, lockfiles, launchers, installers, and CI workflows are staged for a separate user review instead of being changed silently. Never bypass that review through \`bash\`.
 - Inspect before claiming facts. Verify after changing anything.
 - Do not ask the user to choose between \`apply:true\` and \`apply:false\`. Those are internal command flags, not chat questions.
 - For structured app-data writes the user requested, use \`apply:true\` so Marinara can save the change and show the user an in-chat Keep/Restore review card when the change is reversible. Use \`apply:false\` only when the user explicitly asks for a preview/dry run or when you are inspecting a risky change before deciding what to do.
@@ -401,19 +486,21 @@ Workspace defaults:
 - When the user asks you to write or revise a character or persona About Me, inspect that entity first, compose a short self-authored Conversation profile in their own voice, and save it to the real \`aboutMe\` field with \`character.update\` or \`persona.update\`. Do not create a separate document, put it in description, or ask for a special About Me model connection.
 
 Command families:
-- \`app_data\`: no-shell structured actions for characters, personas, lorebooks, lorebook entries, themes, agents, and prompt presets. Prefer this before shell commands for those objects.
+- \`app_data\`: no-shell structured actions for characters, character folders, personas, lorebooks, lorebook entries, themes, Personal Extension drafts, agents, and prompt presets. Prefer this before shell commands for those objects.
 - \`mari db\`: generic live app data and storage-backed rows, including customization tables such as \`agent_configs\` and \`custom_tools\` when no narrower helper exists.
 - \`mari themes\`: synced custom themes and active theme state.
 - \`mari images\`: image-generation connections, HITL image prompt previews, generated/edited preview assets, and assignment/deletion for avatars, personas, lorebooks, sprites, backgrounds, and galleries.
 - \`mari wiki\`: read-only Fandom/MediaWiki discovery and page reads.
-- \`mari characters\`: list, get, search, create, update, delete. Prefer this helper for character edits, including backstory, appearance, and About Me changes.
+- \`mari characters\`: list, get, search, create, update, delete. Prefer this helper for character edits, including backstory, appearance, and About Me changes. Use \`app_data\` \`character.folder.list\` and \`character.moveToFolder\` for character folders.
 - \`mari personas\`: list, active, get, search, create, update, delete. Prefer this helper for persona edits.
 - \`mari lorebooks\`: list, get, entries <lorebook-id>, search, create, update <lorebook-id>, add-entry <lorebook-id>, update-entry <entry-id>, delete-entry <entry-id>, link-character, unlink-character, delete.
 - \`mari presets\`: no dedicated shell helper — use \`app_data\` \`preset.*\` for preset reads/writes. \`preset.create\` and \`preset.update\` can include \`groups\`, \`sections\`, and \`choiceBlocks\` for preset variables. Use \`mari db\` only for advanced raw-table repairs after inspecting schemas.
 - \`mari chats\`: read-only list/get/messages/search.
+- When the user limits chat evidence, preserve that boundary in every retrieval call. For "the last N messages", use \`mari chats messages <chat-id> --last N\`. For "after post #N", use \`mari chats messages <chat-id> --after-post N\`; post numbers are 1-indexed and match the numbers shown in chat. For a large requested range, page only inside it with \`--limit <page-size> --offset <already-read>\`. Never replace a requested recent/post-number range with an unbounded chat read.
 - \`mari agents\`: no dedicated shell helper — use \`app_data\` \`agent.*\` for agent configs.
 - \`mari tools\`: customization helper; if unavailable, use \`mari db\` with the related table.
 - \`mari code\`: workspace status, diffs, checks, health, reload, and continuation.
+- \`dependency\`: request an exact public npm package for root, client, server, or shared. The package is not installed until the user approves the resolved version and registry integrity.
 
 Built-in help:
 Use \`mari --help\`, \`mari <group> --help\`, or \`mari <group> <command> --help\` for exact syntax. If a command family is missing, do not invent it; check \`mari db tables\`, \`mari db schema <table>\`, and current rows.
@@ -421,11 +508,13 @@ Use \`mari --help\`, \`mari <group> --help\`, or \`mari <group> <command> --help
 Raw DB row contracts:
 - \`agent_configs.phase\` must be one of \`pre_generation\`, \`parallel\`, or \`post_processing\`. Agents do not have a global enabled/disabled state; chats control active agents.
 - Raw text booleans such as \`custom_tools.enabled\` are stored as \`"true"\` or \`"false"\`.
-- Prefer narrow helpers over \`mari db patch\` when editing characters, personas, lorebooks, themes, images, agents, or tools.
+- Prefer narrow helpers over \`mari db patch\` when editing characters, personas, lorebooks, themes, Personal Extensions, images, agents, or tools.
+- Never use raw DB actions to set \`installed_extensions.enabled\` or \`approvedHash\`. Personal Extension execution approval belongs exclusively to the Settings → Addons review screen.
 - Generic \`mari db patch\` only accepts real table columns; app-visible nested fields must stay inside their owning JSON column instead of being written as invented top-level columns.
 
 Workspace files:
-Use workspace files to understand Marinara internals, answer source-code questions, or find content that is not available through CLI/app-data commands. Do not inspect source files instead of live app data when the user asks about saved characters, chats, agents, tools, presets, lorebooks, or other app content.`;
+For user-facing questions about Marinara features, configuration, installation, or troubleshooting, use \`docs_search\` and then \`docs_read\` before broad workspace searches. Cite the documentation path and heading in the answer. Use built-in or CLI help when exact command syntax matters. Inspect source only when canonical documentation is missing or ambiguous, or when the user explicitly asks about internals; if source inspection was required, say that the answer used an implementation-level source.
+Use other workspace files to understand Marinara internals, answer source-code questions, or find content that is not available through documentation, CLI, or app-data commands. Do not inspect source files instead of live app data when the user asks about saved characters, chats, agents, tools, presets, lorebooks, or other app content.`;
 
 function workspaceCommandProtocolPrompt() {
   const toolDocs = WORKSPACE_TOOL_DEFINITIONS.map(
@@ -439,7 +528,7 @@ Required schema:
 {
   "say": "visible text for the user, or empty string for silent work",
   "commands": [
-    { "name": "read|grep|find|ls|edit|write|bash|app_data", "arguments": {} }
+    { "name": "docs_search|docs_read|read|grep|find|ls|edit|write|bash|dependency|app_data", "arguments": {} }
   ],
   "suggestions": [
     { "label": "short button text", "prompt": "exact message to send if tapped", "entity": "characters|lorebooks|personas|presets|connections|agents|settings|chat", "tone": "danger|caution|success" }
@@ -465,15 +554,18 @@ Field rules:
 ${MARI_GUIDED_SEQUENCES}
 
 \`app_data\` quick reference:
-- Reads: \`character.list|get|search\`, \`persona.list|active|get|search\`, \`lorebook.list|get|entries|search\`, \`theme.list|active|get\`, \`agent.list|get|search\`, \`preset.list|get|search\`.
-- Writes: \`character.create|update\`, \`persona.create|update\`, \`lorebook.create|update|addEntry|updateEntry\`, \`theme.create|update|setActive\`, \`agent.create|update\`, \`preset.create|update\`.
+- Reads: \`character.list|get|search|folder.list\`, \`persona.list|active|get|search\`, \`lorebook.list|get|entries|search\`, \`theme.list|active|get\`, \`personal_extension.list|get|search\`, \`agent.list|get|search\`, \`preset.list|get|search\`.
+- Writes: \`character.create|update|moveToFolder\`, \`persona.create|update\`, \`lorebook.create|update|addEntry|updateEntry\`, \`theme.create|update|setActive\`, \`personal_extension.create|update\`, \`agent.create|update\`, \`preset.create|update\`.
+- Character folders: call \`character.folder.list\` to resolve the destination, then \`character.moveToFolder\` with \`characterId\` and either \`folderId\` or \`folderName\`. A move removes the character from its previous folder. When the user explicitly asks for the move, set \`apply:true\`, then verify with \`character.folder.list\`.
 - Put write fields in \`data\` for creates and \`patch\` for updates. Use \`entryId\` for \`lorebook.updateEntry\`; use \`lorebookId\` only for a lorebook or for \`lorebook.addEntry\`.
 - New creates: use \`apply:true\` immediately for \`character.create\`, \`persona.create\`, \`lorebook.create\`, \`lorebook.addEntry\`, \`agent.create\`, \`preset.create\`, and non-activating \`theme.create\` when the user asked you to create it. Verify with a read before claiming success.
 - Character generation: put the full card in \`data\`; do not create a name-only placeholder. \`firstMes\` and \`firstMessage\` both map to the opening message.
 - About Me writing: read the target character or persona first, write the bio in their own voice, then put it in \`patch.aboutMe\` on the matching update action with \`apply:true\`.
 - Lorebook generation: put the complete \`entries\` array inside \`data\` on \`lorebook.create\`. Marinara saves the lorebook and its entries together, so do not create an empty lorebook and promise to fill it later.
 - For \`preset.create\`, put prompt sections in \`data.sections\` and preset variables in \`data.choiceBlocks\`. Each choice block needs \`variableName\`, \`question\`, and \`options\` with \`label\`/\`value\` pairs.
+- Custom image agents are supported by the live runtime. Use \`data.resultType: "image_prompt"\`, enable \`settings.customCapabilities.trigger_image_generation\`, and have the agent return \`shouldGenerate\` plus \`prompt\`. Marker-triggered agents should also set \`activationKeywords\`. Do not claim that only Illustrator can generate image prompts.
 - Existing-data changes: use \`apply:true\` for requested \`*.update\`, \`lorebook.updateEntry\`, and \`theme.setActive\`. Marinara will save first and show the user an in-chat Keep/Restore review card for reversible changes.
+- Personal Extensions: create or update the complete draft with \`apply:true\`, verify it with \`personal_extension.get\`, then tell the user the draft remains disabled until they review and run the exact hash and requested capabilities in Settings → Addons. Browser UI should use \`marinara.ui.registerContribution\` for \`button\`, \`menu-item\`, or \`panel\` slots; a button targets the top bar when \`surface\` and \`position\` are omitted. A side-panel button sets \`surface\` to \`chats\`, \`bots\`, \`characters\`, \`personas\`, \`lorebooks\`, \`presets\`, \`connections\`, \`agents\`, or \`settings\`, and sets \`position\` to \`header\`, \`before-content\`, or \`after-content\`. Panel controls are host-rendered and return values through \`onEvent\`. Use \`marinara.context\` for active IDs and request \`read_active_characters\` or \`read_active_persona\` only for bounded active-record reads. Do not offer or invent an approval action, DOM access, direct app-data access, or network access.
 - Use \`apply:false\` only for explicit preview/dry-run requests or when you need to inspect validation before making a risky change.
 - Do not say "preview" unless you show the concrete fields/content in \`say\` or the UI has returned an explicit preview artifact.
 
@@ -482,10 +574,13 @@ Examples:
 {"say":"I found the lorebook. I'll read its entries now.","commands":[{"name":"app_data","arguments":{"action":"lorebook.entries","lorebookId":"lorebook-id","limit":100}}],"stop":false}
 {"say":"","commands":[{"name":"app_data","arguments":{"action":"persona.create","data":{"name":"Dr. Marisia Voss","description":"A successful alternate version of Mari.","personality":"Confident, witty, organized, still warmly sarcastic."},"reason":"User requested a test persona","apply":true}}],"stop":false}
 {"say":"","commands":[{"name":"app_data","arguments":{"action":"character.create","data":{"name":"Dr. Voss","description":"A brilliant field researcher.","personality":"Exacting, curious, dryly funny.","firstMes":"You are late. Sit down.","appearance":"Silver hair and a white laboratory coat."},"reason":"User requested a character","apply":true}}],"stop":false}
+Verified lorebook creation sequence (three turns):
 {"say":"","commands":[{"name":"app_data","arguments":{"action":"lorebook.create","data":{"name":"The Glass City","description":"People and places in the setting.","entries":[{"name":"The Glass City","content":"A rain-soaked city built from black glass.","keys":["Glass City","black glass"]}]},"reason":"User requested a lorebook","apply":true}}],"stop":false}
+{"say":"","commands":[{"name":"app_data","arguments":{"action":"lorebook.search","query":"The Glass City"}}],"stop":false}
+{"say":"Done — I created the lorebook and the verification read found it.","commands":[],"stop":true}
 {"say":"","commands":[{"name":"app_data","arguments":{"action":"preset.create","data":{"name":"Test preset","sections":[{"name":"Main","content":"You are {{char}}.","role":"system"}],"choiceBlocks":[{"variableName":"tone","question":"Tone","options":[{"label":"Warm","value":"warm"},{"label":"Sharp","value":"sharp"}]}]},"reason":"User requested a preset with variables","apply":true}}],"stop":false}
+{"say":"","commands":[{"name":"app_data","arguments":{"action":"agent.create","data":{"name":"Image Marker","description":"Turns IMG_PROMPT markers into image prompts.","resultType":"image_prompt","activationKeywords":["IMG_PROMPT:"],"activationScanDepth":4,"settings":{"customCapabilities":{"trigger_image_generation":true}}},"reason":"User requested a marker-triggered image agent","apply":true}}],"stop":false}
 {"say":"","commands":[{"name":"app_data","arguments":{"action":"lorebook.updateEntry","entryId":"entry-id","patch":{"content":"new content"},"reason":"Update requested by user","apply":false}}],"stop":false}
-{"say":"Done — I created it and verified it saved.","commands":[],"stop":true}
 
 Available command schemas:
 ${toolDocs}
@@ -786,6 +881,7 @@ function createProviderForConnection(connection: WorkspaceConnection): BaseLLMPr
     bool(connection.claudeFastMode),
     bool(connection.treatAsLocalEndpoint),
     connection.defaultParameters,
+    connection.id,
   );
 }
 
@@ -850,12 +946,7 @@ function tryParseJsonPayload(raw: string): Record<string, unknown> | null {
   } catch {
     // Fall through to the conservative container-closing recovery.
   }
-  const candidates = [
-    raw,
-    repaired,
-    closeOpenJsonContainers(raw),
-    repaired && closeOpenJsonContainers(repaired),
-  ];
+  const candidates = [raw, repaired, closeOpenJsonContainers(raw), repaired && closeOpenJsonContainers(repaired)];
   for (const candidate of candidates) {
     if (!candidate) continue;
     try {
@@ -997,7 +1088,8 @@ function jsonPayloadStopValue(payload: Record<string, unknown>): boolean | undef
   return undefined;
 }
 
-const COMMAND_BLOCK_RE = /<(read|grep|find|ls|edit|write|bash|app_data)>\s*([\s\S]*?)\s*<\/\1>/gi;
+const COMMAND_BLOCK_RE =
+  /<(docs_search|docs_read|read|grep|find|ls|edit|write|bash|dependency|app_data)>\s*([\s\S]*?)\s*<\/\1>/gi;
 
 function parseXmlCommandCalls(content: string): WorkspaceCommandCall[] {
   const calls: WorkspaceCommandCall[] = [];
@@ -1025,17 +1117,17 @@ function parseQuotedParam(params: string, key: string): string | undefined {
 
 function parseBracketCommandCalls(content: string): WorkspaceCommandCall[] {
   const calls: WorkspaceCommandCall[] = [];
-  const re = /\[(read|grep|find|ls|bash):\s*([^\]\r\n]+)\]/gi;
+  const re = /\[(docs_search|docs_read|read|grep|find|ls|bash):\s*([^\]\r\n]+)\]/gi;
   for (const [index, match] of [...content.matchAll(re)].entries()) {
     const name = match[1];
     if (!name || !isWorkspaceToolName(name)) continue;
     const params = match[2] ?? "";
     const args: Record<string, unknown> = {};
-    for (const key of ["path", "pattern", "glob", "command"]) {
+    for (const key of ["path", "heading", "query", "pattern", "glob", "command"]) {
       const value = parseQuotedParam(params, key);
       if (value !== undefined) args[key] = value;
     }
-    for (const key of ["offset", "limit", "context", "timeout"]) {
+    for (const key of ["offset", "limit", "maxChars", "context", "timeout"]) {
       const numberMatch = params.match(new RegExp(`${key}=(-?[0-9]+)`, "i"));
       if (numberMatch) args[key] = Number.parseInt(numberMatch[1] ?? "", 10);
     }
@@ -1095,7 +1187,7 @@ function stripWorkspaceCommands(content: string): string {
   const withoutJson = removeJsonActionFrames(content).content;
   return withoutJson
     .replace(COMMAND_BLOCK_RE, "")
-    .replace(/\[(read|grep|find|ls|bash):\s*[^\]\r\n]+\]/gi, "")
+    .replace(/\[(docs_search|docs_read|read|grep|find|ls|bash):\s*[^\]\r\n]+\]/gi, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
@@ -1332,7 +1424,14 @@ function isWithin(parent: string, child: string): boolean {
 }
 
 function isReadOnlyWorkspaceCommand(command: WorkspaceCommandCall): boolean {
-  if (command.name === "read" || command.name === "grep" || command.name === "find" || command.name === "ls")
+  if (
+    command.name === "docs_search" ||
+    command.name === "docs_read" ||
+    command.name === "read" ||
+    command.name === "grep" ||
+    command.name === "find" ||
+    command.name === "ls"
+  )
     return true;
   if (command.name !== "app_data") return false;
   return appDataActionLooksReadOnly(command.arguments.action);
@@ -1371,11 +1470,68 @@ function bashLooksMutating(command: string): boolean {
 }
 
 function isMutatingWorkspaceCommand(command: WorkspaceCommandCall): boolean {
-  if (command.name === "edit" || command.name === "write") return true;
+  if (command.name === "edit" || command.name === "write" || command.name === "dependency") return true;
   if (command.name === "app_data") return !isReadOnlyWorkspaceCommand(command);
   if (command.name !== "bash") return false;
   const rawCommand = command.arguments.command;
   return typeof rawCommand === "string" && bashLooksMutating(rawCommand);
+}
+
+export type WorkspaceMutationVerification = "none" | "unverified" | "verified";
+
+function commandCallForResult(result: WorkspaceCommandResult): WorkspaceCommandCall {
+  return { id: result.id, name: result.name, arguments: result.input };
+}
+
+function isAppliedWorkspaceMutation(result: WorkspaceCommandResult): boolean {
+  if (!result.success || result.name === "dependency") return false;
+  const command = commandCallForResult(result);
+  if (!isMutatingWorkspaceCommand(command)) return false;
+  if (result.name !== "app_data") return true;
+  return /"saved"\s*:\s*true/u.test(result.output);
+}
+
+export function resolveWorkspaceMutationVerification(
+  results: readonly WorkspaceCommandResult[],
+): WorkspaceMutationVerification {
+  let mutationSeen = false;
+  let verifiedAfterMutation = false;
+  for (const result of results) {
+    if (isAppliedWorkspaceMutation(result)) {
+      mutationSeen = true;
+      verifiedAfterMutation = false;
+      continue;
+    }
+    if (mutationSeen && result.success && isReadOnlyWorkspaceCommand(commandCallForResult(result))) {
+      verifiedAfterMutation = true;
+    }
+  }
+  return !mutationSeen ? "none" : verifiedAfterMutation ? "verified" : "unverified";
+}
+
+export function workspaceTextClaimsMutationCompletion(text: string): boolean {
+  const normalized = text.trim().replace(/\s+/gu, " ");
+  if (!normalized) return false;
+  if (/^(?:all\s+)?(?:done|complete|completed|finished)\b/iu.test(normalized)) return true;
+  const completedMutation =
+    "created|updated|changed|deleted|removed|renamed|wrote|written|fixed|implemented|built|installed|imported|exported|saved|enabled|disabled|assigned|linked|unlinked|generated|moved|copied|replaced|verified";
+  return (
+    new RegExp(`\\b(?:i(?:'ve| have)?|we(?:'ve| have)?|it(?:'s| is)?|that(?:'s| is)?)\\s+(?:successfully\\s+)?(?:${completedMutation})\\b`, "iu").test(
+      normalized,
+    ) ||
+    new RegExp(`\\b(?:is|was|has been)\\s+(?:successfully\\s+)?(?:${completedMutation})\\b`, "iu").test(normalized)
+  );
+}
+
+export function workspaceActionNeedsVerification(
+  action: Pick<AssistantWorkspaceAction, "commands" | "stop" | "visibleText">,
+  results: readonly WorkspaceCommandResult[],
+): WorkspaceMutationVerification | null {
+  if (action.commands.length > 0 || !action.stop || !workspaceTextClaimsMutationCompletion(action.visibleText)) {
+    return null;
+  }
+  const verification = resolveWorkspaceMutationVerification(results);
+  return verification === "verified" ? null : verification;
 }
 
 function workspaceCommandValidationIssue(command: WorkspaceCommandCall): string | null {
@@ -1386,6 +1542,10 @@ function workspaceCommandValidationIssue(command: WorkspaceCommandCall): string 
   };
 
   switch (command.name) {
+    case "docs_search":
+      return requireString("query");
+    case "docs_read":
+      return requireString("path");
     case "read":
       return requireString("path");
     case "grep":
@@ -1511,6 +1671,7 @@ function parseDirectMariArgv(command: string, cwd: string): string[] | null {
 export class ProfessorMariWorkspaceService {
   private enabled = true;
   private workspaceRoot = getMonorepoRoot();
+  private readonly workspaceChangeReviews = new WorkspaceChangeReviewService(this.workspaceRoot);
   private lastError: string | null = null;
   private active = false;
   private abortController: AbortController | null = null;
@@ -1519,7 +1680,10 @@ export class ProfessorMariWorkspaceService {
 
   setEnabled(enabled: boolean, workspaceRoot?: string | null) {
     this.enabled = enabled;
-    if (workspaceRoot?.trim()) this.workspaceRoot = resolve(workspaceRoot);
+    if (workspaceRoot?.trim()) {
+      this.workspaceRoot = resolve(workspaceRoot);
+      this.workspaceChangeReviews.setWorkspaceRoot(this.workspaceRoot);
+    }
     if (!enabled) void this.abort();
   }
 
@@ -1540,12 +1704,16 @@ export class ProfessorMariWorkspaceService {
       workspace: this.workspaceRoot,
       dataDir: DATA_DIR,
       tools: WORKSPACE_TOOLS,
+      shellSandbox: getWorkspaceShellSandboxStatus(),
       dbAccess: "server-managed",
       connection: connectionSummary(connection),
       skills: skillsResponse.skills.map(({ content: _content, ...summary }) => summary),
       skillDiagnostics: skillsResponse.diagnostics,
       active: this.active,
-      pendingApprovals: getMariDbService(this.app.db).getPendingApprovals(),
+      pendingApprovals: [
+        ...getMariDbService(this.app.db).getPendingApprovals(),
+        ...this.workspaceChangeReviews.getPendingApprovals(),
+      ],
       history: await getMariDbService(this.app.db).getHistory(),
       error: this.lastError,
     };
@@ -1563,30 +1731,58 @@ export class ProfessorMariWorkspaceService {
     if (options?.clearHistory === true) await getMariDbService(this.app.db).clearHistory();
   }
 
+  approveSecurityReview(id: string) {
+    return this.workspaceChangeReviews.approve(id);
+  }
+
+  getSecurityReviews() {
+    return this.workspaceChangeReviews.getPendingApprovals();
+  }
+
+  rejectSecurityReview(id: string) {
+    return this.workspaceChangeReviews.reject(id);
+  }
+
   async prompt(args: {
     chatId: string;
     text: string;
     connectionId?: string | null;
     attachments?: ProfessorMariPromptAttachment[];
+    existingUserMessageId?: string;
     onEvent: PromptEventSink;
   }) {
     if (!this.enabled) throw new Error("Professor Mari workspace mode is disabled.");
     const chatStorage = createChatsStorage(this.app.db);
+    const connection = await this.resolveConnection(args.connectionId);
+    if (!connection) throw new Error("Set up a language connection before using Professor Mari workspace mode.");
+
     const attachments = normalizeProfessorMariAttachments(args.attachments);
-    const userMessage = await chatStorage.createMessage({
-      chatId: args.chatId,
-      role: "user",
-      characterId: null,
-      content: args.text,
-    });
-    if (attachments.length > 0 && userMessage) {
+    let userMessage = args.existingUserMessageId
+      ? await chatStorage.getMessage(args.existingUserMessageId)
+      : null;
+    if (args.existingUserMessageId) {
+      if (!userMessage || userMessage.chatId !== args.chatId || userMessage.role !== "user") {
+        throw new Error("Existing Professor Mari user message was not found in this chat.");
+      }
+      const chatMessages = await chatStorage.listMessages(args.chatId);
+      if (chatMessages[chatMessages.length - 1]?.id !== userMessage.id) {
+        throw new Error("Only the latest Professor Mari user message can be reused.");
+      }
+    } else {
+      userMessage = await chatStorage.createMessage({
+        chatId: args.chatId,
+        role: "user",
+        characterId: null,
+        content: args.text,
+      });
+      if (!userMessage) throw new Error("Professor Mari could not save the user message.");
+    }
+    const promptText = userMessage.content;
+    if (attachments.length > 0) {
       const extra = { attachments };
       await chatStorage.updateMessageExtra(userMessage.id, extra);
       await chatStorage.updateSwipeExtra(userMessage.id, 0, extra);
     }
-
-    const connection = await this.resolveConnection(args.connectionId);
-    if (!connection) throw new Error("Set up a language connection before using Professor Mari workspace mode.");
 
     const controller = new AbortController();
     this.abortController?.abort();
@@ -1595,7 +1791,6 @@ export class ProfessorMariWorkspaceService {
 
     const workspaceTrace: MariWorkspaceTraceItem[] = [];
     let assistantText = "";
-    let streamedVisibleText = "";
     let thinkingText = "";
     let totalUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     const commandResultsForContinuity: WorkspaceCommandResult[] = [];
@@ -1619,7 +1814,7 @@ export class ProfessorMariWorkspaceService {
       if (thinkingText.trim()) extraUpdate.thinking = thinkingText;
       if (storedTrace.length > 0) extraUpdate.mariWorkspaceTimeline = storedTrace;
       const continuity = buildWorkspaceContinuitySnapshot({
-        userText: args.text,
+        userText: promptText,
         assistantText: persistedText,
         commandResults: commandResultsForContinuity,
       });
@@ -1641,15 +1836,11 @@ export class ProfessorMariWorkspaceService {
       });
       const repeatedFailureCounts = new Map<string, number>();
       let protocolRepairRounds = 0;
+      let verificationRepairRounds = 0;
 
       for (let round = 0; round < MAX_COMMAND_ROUNDS; round += 1) {
         if (controller.signal.aborted) throw new Error("aborted");
-        streamedVisibleText = "";
-        const onToken = (chunk: string) => {
-          streamedVisibleText += chunk;
-          args.onEvent({ type: "token", data: chunk });
-        };
-        const result = await this.chatCompleteWorkspace(provider, messages, baseOptions, onToken);
+        const result = await this.chatCompleteWorkspace(provider, messages, baseOptions, () => {});
         const usage = mapUsage(result.usage);
         totalUsage = {
           promptTokens: totalUsage.promptTokens + usage.promptTokens,
@@ -1703,6 +1894,29 @@ export class ProfessorMariWorkspaceService {
           for (const chunk of chunkText(content)) args.onEvent({ type: "token", data: chunk });
           break;
         }
+        const verificationIssue = workspaceActionNeedsVerification(action, commandResultsForContinuity);
+        if (verificationIssue) {
+          verificationRepairRounds += 1;
+          if (verificationRepairRounds <= MAX_VERIFICATION_REPAIR_ROUNDS) {
+            messages.push({ role: "assistant", content: action.assistantHistoryContent });
+            messages.push({
+              role: "user",
+              content:
+                verificationIssue === "none"
+                  ? "Your previous reply claimed the requested workspace change was complete, but no mutating command succeeded in this run. Do not repeat the completion claim. Use a read command to inspect the requested state; if it is missing, perform the mutation, then verify it with another read before setting stop to true."
+                  : "A mutating workspace command succeeded, but no successful read verified the resulting state. Run a confirmatory read now. Only claim completion after that read confirms the change.",
+              contextKind: "history",
+            });
+            continue;
+          }
+          const content =
+            "Professor Mari could not verify the requested workspace change, so I stopped before showing an unsupported completion claim. Ask her to continue and she can use the saved workspace trace.";
+          assistantText = appendVisibleText(assistantText, content);
+          appendTraceStatus(workspaceTrace, content);
+          args.onEvent({ type: "status", data: { content, kind: "retry", level: "warning" } });
+          for (const chunk of chunkText(content)) args.onEvent({ type: "token", data: chunk });
+          break;
+        }
         if (action.commands.length === 0 && !action.stop) {
           if (!action.protocolValid) {
             protocolRepairRounds += 1;
@@ -1734,10 +1948,10 @@ export class ProfessorMariWorkspaceService {
         if (action.visibleText) {
           assistantText = appendVisibleText(assistantText, action.visibleText);
           appendTraceText(workspaceTrace, `${action.visibleText}\n`);
+          for (const chunk of chunkText(action.visibleText)) args.onEvent({ type: "token", data: chunk });
         }
         if (action.suggestions.length > 0) args.onEvent({ type: "suggestions", data: action.suggestions });
         if (action.plan.length > 0) args.onEvent({ type: "plan", data: action.plan });
-        streamedVisibleText = "";
 
         messages.push({ role: "assistant", content: action.assistantHistoryContent });
 
@@ -1787,7 +2001,7 @@ export class ProfessorMariWorkspaceService {
             content:
               "You reached the workspace command round limit. Do not issue more commands. Summarize what you learned or what remains blocked.",
           });
-          const finalResult = await this.chatCompleteWorkspace(provider, messages, baseOptions, onToken);
+          const finalResult = await this.chatCompleteWorkspace(provider, messages, baseOptions, () => {});
           const finalUsage = mapUsage(finalResult.usage);
           totalUsage = {
             promptTokens: totalUsage.promptTokens + finalUsage.promptTokens,
@@ -1795,10 +2009,20 @@ export class ProfessorMariWorkspaceService {
             totalTokens: totalUsage.totalTokens + finalUsage.totalTokens,
           };
           const finalAction = parseAssistantWorkspaceAction(finalResult.content ?? "");
-          if (finalAction.visibleText) {
+          const finalVerificationIssue = workspaceActionNeedsVerification(finalAction, commandResultsForContinuity);
+          if (finalVerificationIssue) {
+            const content =
+              "Professor Mari reached the workspace command limit without verification, so I stopped before showing an unsupported completion claim. Ask her to continue from the saved trace.";
+            assistantText = appendVisibleText(assistantText, content);
+            appendTraceStatus(workspaceTrace, content);
+            args.onEvent({ type: "status", data: { content, kind: "retry", level: "warning" } });
+            for (const chunk of chunkText(content)) args.onEvent({ type: "token", data: chunk });
+          } else if (finalAction.visibleText) {
             assistantText = appendVisibleText(assistantText, finalAction.visibleText);
             appendTraceText(workspaceTrace, finalAction.visibleText);
-            if (finalAction.suggestions.length > 0) args.onEvent({ type: "suggestions", data: finalAction.suggestions });
+            for (const chunk of chunkText(finalAction.visibleText)) args.onEvent({ type: "token", data: chunk });
+            if (finalAction.suggestions.length > 0)
+              args.onEvent({ type: "suggestions", data: finalAction.suggestions });
             if (finalAction.plan.length > 0) args.onEvent({ type: "plan", data: finalAction.plan });
           } else if (finalAction.commands.length > 0) {
             const content =
@@ -1808,7 +2032,6 @@ export class ProfessorMariWorkspaceService {
             args.onEvent({ type: "status", data: { content, kind: "info", level: "warning" } });
             for (const chunk of chunkText(content)) args.onEvent({ type: "token", data: chunk });
           }
-          streamedVisibleText = "";
         }
       }
 
@@ -1830,10 +2053,6 @@ export class ProfessorMariWorkspaceService {
       args.onEvent({ type: "metadata", data: { connection: connectionSummary(connection) ?? undefined } });
     } catch (err) {
       if (controller.signal.aborted) {
-        if (streamedVisibleText.trim()) {
-          assistantText = appendVisibleText(assistantText, streamedVisibleText);
-          streamedVisibleText = "";
-        }
         const hadPartialWorkspaceState =
           assistantText.trim().length > 0 || thinkingText.trim().length > 0 || workspaceTrace.length > 0;
         const content = assistantText.trim()
@@ -2058,6 +2277,20 @@ ${sections.join("\n\n")}
 
   private async runWorkspaceCommand(command: WorkspaceCommandCall, signal: AbortSignal): Promise<string> {
     switch (command.name) {
+      case "docs_search": {
+        const query = stringArg(command.arguments, "query");
+        const limit = numberArg(command.arguments, "limit", 5, 1, 8);
+        return formatDocumentationSearch(query, await searchCanonicalDocumentation(this.workspaceRoot, query, limit));
+      }
+      case "docs_read":
+        return formatDocumentationRead(
+          await readCanonicalDocumentation(
+            this.workspaceRoot,
+            stringArg(command.arguments, "path"),
+            stringArg(command.arguments, "heading") || undefined,
+            numberArg(command.arguments, "maxChars", 8_000, 1_000, 16_000),
+          ),
+        );
       case "read":
         return this.commandRead(command.arguments);
       case "ls":
@@ -2070,6 +2303,8 @@ ${sections.join("\n\n")}
         return this.commandWrite(command.arguments);
       case "edit":
         return this.commandEdit(command.arguments);
+      case "dependency":
+        return this.commandDependency(command.arguments);
       case "app_data":
         return this.commandAppData(command.arguments);
       case "bash":
@@ -2088,6 +2323,26 @@ ${sections.join("\n\n")}
     const workspaceRoot = resolve(this.workspaceRoot);
     if (!isWithin(workspaceRoot, absolute)) {
       throw new Error(`Path escapes the workspace: ${inputPath}`);
+    }
+    const canonicalRoot = existsSync(workspaceRoot) ? realpathSync(workspaceRoot) : workspaceRoot;
+    let existingAncestor = absolute;
+    while (!existsSync(existingAncestor) && existingAncestor !== dirname(existingAncestor)) {
+      existingAncestor = dirname(existingAncestor);
+    }
+    const canonicalAncestor = existsSync(existingAncestor) ? realpathSync(existingAncestor) : existingAncestor;
+    if (!isWithin(canonicalRoot, canonicalAncestor)) {
+      throw new Error(`Path escapes the workspace through a symbolic link: ${inputPath}`);
+    }
+    // Classify both the requested path and its canonical target: a symlink that
+    // stays inside the workspace can still point at an environment-secret file
+    // or Git internals, and reads would follow it.
+    const canonicalTarget =
+      existingAncestor === absolute ? canonicalAncestor : join(canonicalAncestor, relative(existingAncestor, absolute));
+    if (
+      workspacePathAccessPolicy(workspaceRoot, absolute) === "forbidden" ||
+      workspacePathAccessPolicy(canonicalRoot, canonicalTarget) === "forbidden"
+    ) {
+      throw new Error("Professor Mari cannot access environment-secret files or Git internals.");
     }
     if (options.forbidStorageMutation) {
       const storageRoot = resolve(getFileStorageDir());
@@ -2183,6 +2438,7 @@ ${sections.join("\n\n")}
         if (files.length >= limit) return;
         if (entry.isDirectory() && SKIPPED_DIRS.has(entry.name)) continue;
         const absolute = join(dir, entry.name);
+        if (workspacePathAccessPolicy(this.workspaceRoot, absolute) === "forbidden") continue;
         if (entry.isDirectory()) await visit(absolute);
         else if (entry.isFile()) files.push(absolute);
       }
@@ -2262,6 +2518,19 @@ ${sections.join("\n\n")}
       forbidStorageMutation: true,
     });
     const content = stringArg(args, "content");
+    if (workspacePathAccessPolicy(this.workspaceRoot, filePath) === "sensitive") {
+      const approval = await this.workspaceChangeReviews.stageSensitiveFileChange({
+        absolutePath: filePath,
+        afterContent: content,
+        reason: stringArg(args, "reason") || "Professor Mari proposed a supply-chain-sensitive file change",
+        sessionId: SESSION_ID,
+      });
+      return [
+        `Staged sensitive file change for user approval: ${approval.path}`,
+        `Approval: ${approval.id}`,
+        "The file was not changed. Continue with unrelated source work, but do not claim this change is applied.",
+      ].join("\n");
+    }
     await mkdir(dirname(filePath), { recursive: true });
     await writeFile(filePath, content, "utf8");
     return `Wrote ${Buffer.byteLength(content, "utf8")} bytes to ${this.displayPath(filePath)}.`;
@@ -2295,6 +2564,19 @@ ${sections.join("\n\n")}
       cursor = range.end;
     }
     next += text.slice(cursor);
+    if (workspacePathAccessPolicy(this.workspaceRoot, filePath) === "sensitive") {
+      const approval = await this.workspaceChangeReviews.stageSensitiveFileChange({
+        absolutePath: filePath,
+        afterContent: next,
+        reason: stringArg(args, "reason") || "Professor Mari proposed a supply-chain-sensitive file change",
+        sessionId: SESSION_ID,
+      });
+      return [
+        `Staged sensitive file change for user approval: ${approval.path}`,
+        `Approval: ${approval.id}`,
+        "The file was not changed. Continue with unrelated source work, but do not claim this change is applied.",
+      ].join("\n");
+    }
     await writeFile(filePath, next, "utf8");
     return `Applied ${ranges.length} edit${ranges.length === 1 ? "" : "s"} to ${this.displayPath(filePath)}.`;
   }
@@ -2319,6 +2601,11 @@ ${sections.join("\n\n")}
   private async commandBash(args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
     const command = stringArg(args, "command");
     if (!command.trim()) throw new Error("bash requires command");
+    if (isPackageManagerMutationCommand(command)) {
+      throw new Error(
+        "Raw package-manager installs are blocked, including cached installs. Use the dependency tool so the user can approve an exact public npm version and integrity.",
+      );
+    }
     const compatibilityIssue = windowsShellCompatibilityIssue(command);
     if (compatibilityIssue) throw new Error(compatibilityIssue);
     const storageIssue = this.storageMutationIssue(command);
@@ -2326,14 +2613,15 @@ ${sections.join("\n\n")}
     const storageTableJsonIssue = this.storageTableJsonFileIssue(command);
     if (storageTableJsonIssue) throw new Error(storageTableJsonIssue);
     const timeoutSeconds = numberArg(args, "timeout", DEFAULT_BASH_TIMEOUT_SECONDS, 1, MAX_BASH_TIMEOUT_SECONDS);
-    const mariCliBinDir = await this.ensureMariCliShim();
-    const env = this.withMariRuntimeEnv({ ...process.env }, mariCliBinDir);
     const directMariArgv = parseDirectMariArgv(command, this.workspaceRoot);
     if (directMariArgv) return this.commandMariDirect(command, directMariArgv);
+    const sandboxed = await spawnWorkspaceSandboxedShell({
+      command,
+      workspaceRoot: this.workspaceRoot,
+      env: process.env,
+    });
     return new Promise<string>((resolveRun, rejectRun) => {
-      const shell = process.platform === "win32" ? process.env.ComSpec || "cmd.exe" : "bash";
-      const shellArgs = process.platform === "win32" ? ["/d", "/s", "/c", command] : ["-lc", command];
-      const child = spawn(shell, shellArgs, { cwd: this.workspaceRoot, env, windowsHide: true });
+      const child = sandboxed.child;
       let stdout = "";
       let stderr = "";
       let settled = false;
@@ -2343,10 +2631,9 @@ ${sections.join("\n\n")}
         settled = true;
         clearTimeout(timer);
         signal.removeEventListener("abort", abortHandler);
-        callback();
+        void sandboxed.cleanup().finally(callback);
       };
       const killChild = () => {
-        if (process.platform === "win32") killWindowsProcessTree(child.pid);
         child.kill();
       };
       const abortHandler = () => {
@@ -2374,6 +2661,7 @@ ${sections.join("\n\n")}
           const output = compactOutput(
             [
               `Command: ${command}`,
+              `Sandbox: ${sandboxed.backend} (network denied; writes confined to workspace)`,
               `Exit code: ${exitCode}${timedOut ? ` (timeout after ${timeoutSeconds}s)` : ""}`,
               stdout ? `\nstdout:\n${stdout.trimEnd()}` : "",
               stderr ? `\nstderr:\n${stderr.trimEnd()}` : "",
@@ -2384,6 +2672,24 @@ ${sections.join("\n\n")}
         }),
       );
     });
+  }
+
+  private async commandDependency(args: Record<string, unknown>): Promise<string> {
+    const approval = await this.workspaceChangeReviews.requestDependencyInstall({
+      packageName: stringArg(args, "packageName"),
+      version: stringArg(args, "version") || "latest",
+      target: stringArg(args, "target") as MariDependencyTarget,
+      dev: booleanArg(args, "dev"),
+      reason: stringArg(args, "reason") || null,
+      sessionId: SESSION_ID,
+    });
+    return [
+      `Dependency request staged for user approval: ${approval.packageName}@${approval.version}`,
+      `Target: ${approval.target} (${approval.dependencyType})`,
+      `Integrity: ${approval.integrity}`,
+      `Approval: ${approval.id}`,
+      "Nothing has been installed. Do not import the package or claim it is available until the user approves it.",
+    ].join("\n");
   }
 
   private async commandMariDirect(command: string, argv: string[]): Promise<string> {
@@ -2409,14 +2715,17 @@ ${sections.join("\n\n")}
   }
 
   private async commandAppData(args: Record<string, unknown>): Promise<string> {
+    const action = typeof args.action === "string" ? args.action : "unknown";
     const result = await getMariDbService(this.app.db).executeAction({
       ...args,
       cwd: this.workspaceRoot,
       sessionId: SESSION_ID,
     });
+    if (result.ok !== false && (action === "personal_extension.create" || action === "personal_extension.update")) {
+      await personalServerExtensionRuntime.reloadAll();
+    }
     const printable =
       isRecord(result) && "output" in result && !("summary" in result) ? result.output : compactMutationResult(result);
-    const action = typeof args.action === "string" ? args.action : "unknown";
     const output = compactOutput(
       [
         `Command: app_data ${action}`,

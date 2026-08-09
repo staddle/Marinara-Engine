@@ -31,7 +31,7 @@ import {
   chatKeys,
 } from "../../hooks/use-chats";
 
-import { useChatStore } from "../../stores/chat.store";
+import { getCurrentInputSnapshot, useChatStore } from "../../stores/chat.store";
 import { useGenerate } from "../../hooks/use-generate";
 import { useGenerateGallerySelfie } from "../../hooks/use-gallery";
 import {
@@ -45,6 +45,7 @@ import {
 import { usePageActivity } from "../../hooks/use-page-activity";
 import { useRenderTimer, useWhyRender } from "../../lib/perf-diagnostics";
 import { usePresenceClock } from "../../hooks/use-presence-clock";
+import { useKeepLatestChatMessageVisible } from "../../hooks/use-visual-viewport-chat-bottom";
 import { api, ApiError } from "../../lib/api-client";
 import { getChatDisplayName, getConnectedChatDisplayName, parseChatMetadata } from "../../lib/chat-display";
 import { getChatCharacterIds } from "../../lib/chat-macros";
@@ -52,6 +53,7 @@ import { resolveSpriteExpression } from "../../lib/sprite-expression-match";
 import { parseCharacterDisplayData } from "../../lib/character-display";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { parseMessageExtraRecord } from "../../lib/chat-message-extra";
+import { normalizeSpriteExpressionMap, resolveSpriteExpressionState } from "../../lib/sprite-expression-state";
 import { chatBackgroundMetadataToUrl, chatBackgroundUrlToMetadata } from "../../lib/backgrounds";
 import { useGameStateStore } from "../../stores/game-state.store";
 import { useGalleryStore } from "../../stores/gallery.store";
@@ -62,6 +64,7 @@ import {
   BUILT_IN_AGENTS,
   PROFESSOR_MARI_ID,
   buildGuidedGenerationInstructionMessage,
+  normalizeAvatarCrop,
   normalizeManualTrackerAgentTypes,
   type AchievementEvent,
   type GeneratedSceneVideo,
@@ -71,9 +74,9 @@ import {
 } from "@marinara-engine/shared";
 import { resolveLiveConversationStatus } from "../../lib/conversation-presence-status";
 import { useUIStore } from "../../stores/ui.store";
-import { useAgentStore } from "../../stores/agent.store";
+import { useAgentStore, EMPTY_AGENT_TYPES } from "../../stores/agent.store";
 import { illustratorRetryTargetsForFailures } from "../../lib/agent-failures";
-import { cn, parseAvatarCropJson } from "../../lib/utils";
+import { cn } from "../../lib/utils";
 import { Modal } from "../ui/Modal";
 import { useEncounter } from "../../hooks/use-encounter";
 import { useScene } from "../../hooks/use-scene";
@@ -89,11 +92,17 @@ import {
   shouldAutoplayGeneratedTTS,
 } from "../../lib/tts-autoplay";
 import { CHAT_SCROLL_TO_BOTTOM_EVENT, type ChatScrollToBottomDetail } from "../../lib/chat-scroll-events";
-import { CHAT_FLOATING_UI_DISMISS_EVENT } from "../../lib/chat-floating-ui-events";
-import { CHAT_TOOLBAR_ACTION_EVENT, readChatToolbarFloatingPanelAnchor } from "./ChatToolbarControls";
-import { mirrorSpritePlacements, normalizeSpritePlacements } from "./sprite-placement";
+import { CHAT_RESOURCE_AGENT_SETUP_EVENT } from "../../lib/chat-resource-drag";
+import { blurActiveChatFloatingUiControl, CHAT_FLOATING_UI_DISMISS_EVENT } from "../../lib/chat-floating-ui-events";
+import {
+  CHAT_TOOLBAR_ACTION_EVENT,
+  readAnnouncedChatToolbarPanelAction,
+  readChatToolbarFloatingPanelAnchor,
+} from "./ChatToolbarControls";
+import { mirrorCharacterSpritePlacements, mirrorSpritePlacements, normalizeSpritePlacements } from "./sprite-placement";
 import {
   loadLocalSpriteVisualSettings,
+  normalizeSpriteCharacterVisualSettingsMap,
   saveLocalSpriteVisualSettings,
   type LocalSpriteVisualSettings,
 } from "./local-sprite-visual-settings";
@@ -112,6 +121,7 @@ import type {
   PeekPromptData,
 } from "./chat-area.types";
 import { RecentChats } from "./RecentChats";
+import { HomeNewChatLauncher } from "./HomeNewChatLauncher";
 import { HomeCreditsModal } from "./HomeCreditsModal";
 import { HomeProfessorMariChat } from "./HomeProfessorMariChat";
 import { HomeAchievements } from "./HomeAchievements";
@@ -124,6 +134,8 @@ import {
   type ImagePromptOverride,
   type ImagePromptReviewItem,
 } from "../ui/ImagePromptReviewModal";
+import { useTranslation, useTranslation as useUiTranslation } from "react-i18next";
+import { ChatResourceDropOverlay } from "./ChatResourceDropOverlay";
 
 export type { CharacterMap };
 
@@ -234,17 +246,6 @@ function startsNewAssistantBubble(message: { extra?: unknown } | null | undefine
   return parseMessageExtraRecord(message?.extra).startsNewAssistantBubble === true;
 }
 
-function normalizeMessageSpriteExpressions(value: unknown): Record<string, string> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  const expressions: Record<string, string> = {};
-  for (const [key, expression] of Object.entries(value as Record<string, unknown>)) {
-    if (typeof expression !== "string") continue;
-    const trimmed = expression.trim();
-    if (key && trimmed) expressions[key] = trimmed;
-  }
-  return expressions;
-}
-
 function getPersonaSnapshotName(extra: Record<string, unknown>): string | null {
   const snapshot = extra.personaSnapshot;
   if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return null;
@@ -258,7 +259,7 @@ function resolveExpressionAvatarSpriteUrl(sprites: SpriteInfo[] | undefined, exp
 }
 
 function suppressBuiltInProfessorMariForMode(mode: string | undefined): boolean {
-  return mode === "game" || mode === "roleplay" || mode === "visual_novel";
+  return mode === "game" || mode === "roleplay";
 }
 
 const INTUITIVE_SWIPE_MIN_DISTANCE = 56;
@@ -270,8 +271,19 @@ function isMediaPromptPreviewTimeout(error: unknown): boolean {
   return error instanceof DOMException && error.name === "TimeoutError";
 }
 
-const shouldIgnoreIntuitiveSwipeTarget = (target: EventTarget | null): boolean => {
+const shouldIgnoreIntuitiveSwipeTarget = (
+  target: EventTarget | null,
+  { allowEmptyMainComposer = false }: { allowEmptyMainComposer?: boolean } = {},
+): boolean => {
   if (!(target instanceof Element)) return false;
+  if (
+    allowEmptyMainComposer &&
+    target instanceof HTMLTextAreaElement &&
+    target.dataset.chatComposer === "true" &&
+    target.value.length === 0
+  ) {
+    return false;
+  }
   return Boolean(
     target.closest(
       [
@@ -351,7 +363,7 @@ function toCharacterMapValue(char: CharacterRow): CharacterMapValue {
       nameColor: extensions.nameColor || undefined,
       dialogueColor: extensions.dialogueColor || undefined,
       boxColor: extensions.boxColor || undefined,
-      avatarCrop: extensions.avatarCrop || null,
+      avatarCrop: normalizeAvatarCrop(extensions.avatarCrop),
       conversationStatus: extensions.conversationStatus || undefined,
       conversationActivity: extensions.conversationActivity || undefined,
     };
@@ -426,7 +438,7 @@ function preloadCharacterScheduleEditorModal() {
 
 const CharacterScheduleEditorModal = lazy(preloadCharacterScheduleEditorModal);
 
-type FloatingPanelAnchor = { right: number; top: number } | null;
+type FloatingPanelAnchor = ReturnType<typeof readChatToolbarFloatingPanelAnchor>;
 type OpenSettingsOptions = { initialSection?: ChatSettingsInitialSection };
 
 type HomeGlistenStar = {
@@ -496,11 +508,17 @@ function HomeStarfield() {
 }
 
 export function ChatArea() {
+  const { t: localizeUi } = useUiTranslation();
+  const { t } = useTranslation();
   useRenderTimer("chat-area"); // [#3104 diagnostic]
   const activeChatId = useChatStore((s) => s.activeChatId);
   const streamingChatId = useChatStore((s) => s.streamingChatId);
   const isStreamingGlobal = useChatStore((s) => s.isStreaming);
   const isStreaming = isStreamingGlobal && streamingChatId === activeChatId;
+  const isBackgroundIllustration = useChatStore((s) =>
+    activeChatId ? s.backgroundIllustrationChatIds.has(activeChatId) : false,
+  );
+  const isTextStreaming = isStreaming && !isBackgroundIllustration;
   const isPageActive = usePageActivity();
   const regenerateMessageId = useChatStore((s) => s.regenerateMessageId);
   const chatBackground = useUIStore((s) => s.chatBackground);
@@ -636,30 +654,35 @@ export function ChatArea() {
   const handleOpenSettingsPanel = useCallback(
     (event?: ReactMouseEvent<HTMLElement>, options?: OpenSettingsOptions) => {
       void preloadChatSettingsDrawer();
+      const nextOpen = event ? !settingsOpen : true;
       setGalleryOpen(false);
       setGalleryAnchor(null);
-      setSettingsAnchor(readFloatingPanelAnchor(event));
-      setSettingsInitialSection(options?.initialSection ?? null);
-      setSettingsOpen(true);
+      setSettingsAnchor(nextOpen ? readFloatingPanelAnchor(event) : null);
+      setSettingsInitialSection(nextOpen ? (options?.initialSection ?? null) : null);
+      setSettingsOpen(nextOpen);
     },
-    [readFloatingPanelAnchor],
+    [readFloatingPanelAnchor, settingsOpen],
   );
   const handleOpenGalleryPanel = useCallback(
     (event?: ReactMouseEvent<HTMLElement>) => {
+      const nextOpen = event ? !galleryOpen : true;
       setSettingsOpen(false);
       setSettingsAnchor(null);
       setSettingsInitialSection(null);
-      setGalleryAnchor(readFloatingPanelAnchor(event));
-      setGalleryOpen(true);
+      setGalleryAnchor(nextOpen ? readFloatingPanelAnchor(event) : null);
+      setGalleryOpen(nextOpen);
     },
-    [readFloatingPanelAnchor],
+    [galleryOpen, readFloatingPanelAnchor],
   );
   const handleCloseSettingsPanel = useCallback(() => {
+    blurActiveChatFloatingUiControl();
     setSettingsOpen(false);
     setSettingsAnchor(null);
     setSettingsInitialSection(null);
   }, []);
+
   const handleCloseGalleryPanel = useCallback(() => {
+    blurActiveChatFloatingUiControl();
     setGalleryOpen(false);
     setGalleryAnchor(null);
   }, []);
@@ -669,15 +692,32 @@ export function ChatArea() {
     setHomeProfessorChatOpen(false);
     setHomeProfessorChatActive(false);
   }, [activeChatId]);
-  const closeFloatingChatDrawers = useCallback(() => {
-    setSettingsOpen(false);
-    setSettingsAnchor(null);
-    setSettingsInitialSection(null);
-    setGalleryOpen(false);
-    setGalleryAnchor(null);
+  const closeFloatingChatDrawers = useCallback((event?: Event) => {
+    const preservedPanel = event ? readAnnouncedChatToolbarPanelAction(event) : null;
+    blurActiveChatFloatingUiControl();
+    if (preservedPanel !== "settings") {
+      setSettingsOpen(false);
+      setSettingsAnchor(null);
+      setSettingsInitialSection(null);
+    }
+    if (preservedPanel !== "gallery") {
+      setGalleryOpen(false);
+      setGalleryAnchor(null);
+    }
     setPeekPromptData(null);
     setDeleteDialogMessageId(null);
   }, []);
+  // A dropped agent parks a setup request; open chat settings so its modal can run.
+  useEffect(() => {
+    const openAgentSetup = (event: Event) => {
+      const chatId = (event as CustomEvent<{ chatId?: string }>).detail?.chatId;
+      if (chatId && chatId !== useChatStore.getState().activeChatId) return;
+      handleOpenSettingsPanel();
+    };
+    window.addEventListener(CHAT_RESOURCE_AGENT_SETUP_EVENT, openAgentSetup);
+    return () => window.removeEventListener(CHAT_RESOURCE_AGENT_SETUP_EVENT, openAgentSetup);
+  }, [handleOpenSettingsPanel]);
+
   useEffect(() => {
     window.addEventListener(CHAT_TOOLBAR_ACTION_EVENT, closeFloatingChatDrawers);
     window.addEventListener(CHAT_FLOATING_UI_DISMISS_EVENT, closeFloatingChatDrawers);
@@ -694,7 +734,7 @@ export function ChatArea() {
   const lastModeRef = useRef<string>("conversation");
   if (rawMode) lastModeRef.current = rawMode;
   const chatMode = rawMode ?? lastModeRef.current;
-  const isRoleplay = chatMode === "roleplay" || chatMode === "visual_novel";
+  const isRoleplay = chatMode === "roleplay";
   const suppressBuiltInProfessorMari = suppressBuiltInProfessorMariForMode(chatMode);
   const isGameChat = chatMode === "game";
   const messagePageSize = messagesPerPage;
@@ -746,7 +786,9 @@ export function ChatArea() {
   const setActiveChatId = useChatStore((s) => s.setActiveChatId);
   const pendingNewChatMode = useChatStore((s) => s.pendingNewChatMode);
   const failedAgentTypes = useAgentStore((s) =>
-    activeChatId && s.failedAgentChatId && s.failedAgentChatId !== activeChatId ? [] : s.failedAgentTypes,
+    activeChatId && s.failedAgentChatId && s.failedAgentChatId !== activeChatId
+      ? EMPTY_AGENT_TYPES
+      : s.failedAgentTypes,
   );
   const agentProcessing = useAgentStore((s) =>
     activeChatId ? s.processingChatIds.includes(activeChatId) : s.isProcessing,
@@ -840,9 +882,7 @@ export function ChatArea() {
   const chatCharIds = useMemo(() => getChatCharacterIds({ characterIds: chatCharacterIdsRaw }), [chatCharacterIdsRaw]);
   const chatPersonaId = useMemo(() => resolveChatPersonaId(chat), [chat]);
   const { data: chatPersona } = usePersona(chatPersonaId);
-  const { data: activePersonaFallback } = useActivePersona(
-    !!chat?.id && !chatPersonaId && chatMode === "conversation",
-  );
+  const { data: activePersonaFallback } = useActivePersona(!!chat?.id && !chatPersonaId && chatMode === "conversation");
 
   const activeCharacterQueries = useQueries({
     queries: chatCharIds.map((id) => ({
@@ -898,7 +938,7 @@ export function ChatArea() {
           scenario: snapshot.scenario ?? "",
           example: snapshot.example ?? "",
           avatarUrl: snapshot.avatarUrl ?? null,
-          avatarCrop: snapshot.avatarCrop ?? null,
+          avatarCrop: normalizeAvatarCrop(snapshot.avatarCrop),
           nameColor: snapshot.nameColor,
           dialogueColor: snapshot.dialogueColor,
           boxColor: snapshot.boxColor,
@@ -981,14 +1021,14 @@ export function ChatArea() {
       if (c.id === PROFESSOR_MARI_ID) return [];
       try {
         const parsed = typeof c.data === "string" ? JSON.parse(c.data) : c.data;
-        const display = parseCharacterDisplayData(c);
+        const display = parseCharacterDisplayData({ data: parsed, comment: c.comment });
         return [
           {
             id: c.id,
             name: display.name,
             comment: display.comment,
             avatarUrl: c.avatarPath ?? undefined,
-            avatarCrop: parsed.extensions?.avatarCrop || null,
+            avatarCrop: display.avatarCrop ?? null,
             nameColor: parsed.extensions?.nameColor || undefined,
             dialogueColor: parsed.extensions?.dialogueColor || undefined,
             description: parsed.description ?? "",
@@ -1010,8 +1050,7 @@ export function ChatArea() {
     // falls back to the globally active account Persona.
     const persona = chatPersona ?? (chatMode === "conversation" ? activePersonaFallback : null);
     if (!persona) return undefined;
-    const avatarCrop =
-      typeof persona.avatarCrop === "string" ? parseAvatarCropJson(persona.avatarCrop) : (persona.avatarCrop ?? null);
+    const avatarCrop = normalizeAvatarCrop(persona.avatarCrop);
     return {
       id: persona.id,
       name: persona.name,
@@ -1111,23 +1150,23 @@ export function ChatArea() {
     : chatMeta.spritePlacements;
   const spritePlacements = useMemo(() => normalizeSpritePlacements(spritePlacementsSource), [spritePlacementsSource]);
   const hasCustomSpritePlacements = Object.keys(spritePlacements).length > 0;
-  // Prefer per-swipe expressions from the last assistant message's extra (survives swipe switching),
-  // falling back to chat-level metadata for backward compatibility.
-  const spriteExpressions: Record<string, string> = useMemo(() => {
-    if (messages?.length) {
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const m = messages[i]!;
-        if (m.role === "assistant") {
-          const extra = typeof m.extra === "string" ? JSON.parse(m.extra) : (m.extra ?? {});
-          if (extra.spriteExpressions && Object.keys(extra.spriteExpressions).length > 0) {
-            return extra.spriteExpressions as Record<string, string>;
-          }
-          break; // only check the last assistant message
-        }
-      }
-    }
-    return chatMeta.spriteExpressions ?? {};
-  }, [messages, chatMeta.spriteExpressions]);
+  const hasLocalCharacterVisualSettings = Object.prototype.hasOwnProperty.call(
+    localSpriteVisualSettings,
+    "characterOverrides",
+  );
+  const spriteCharacterVisualSettingsSource = hasLocalCharacterVisualSettings
+    ? localSpriteVisualSettings.characterOverrides
+    : chatMeta.spriteCharacterVisualSettings;
+  const spriteCharacterVisualSettings = useMemo(
+    () => normalizeSpriteCharacterVisualSettingsMap(spriteCharacterVisualSettingsSource),
+    [spriteCharacterVisualSettingsSource],
+  );
+  // Expression Engine results are sparse updates. Fold every loaded per-swipe update so
+  // a round that omits a character preserves that character's previous expression.
+  const spriteExpressions = useMemo(
+    () => resolveSpriteExpressionState(messages, chatMeta.spriteExpressions),
+    [messages, chatMeta.spriteExpressions],
+  );
   const groupChatMode: string | undefined = chatCharIds.length > 1 ? (chatMeta.groupChatMode ?? "merged") : undefined;
 
   const updateMeta = useUpdateChatMetadata();
@@ -1164,17 +1203,20 @@ export function ChatArea() {
   const roleplayVideoReviewResolveRef = useRef<((overrides: ImagePromptOverride[] | null) => void) | null>(null);
   const conversationSelfieReviewResolveRef = useRef<((overrides: ImagePromptOverride[] | null) => void) | null>(null);
 
-  const openRoleplayVideoPromptReview = useCallback((items: ImagePromptReviewItem[]) => {
-    if (roleplayVideoReviewResolveRef.current) {
-      toast.error("Finish or cancel the current video prompt review first.");
-      return Promise.resolve(null);
-    }
-    return new Promise<ImagePromptOverride[] | null>((resolve) => {
-      roleplayVideoReviewResolveRef.current = resolve;
-      setRoleplayVideoReviewSubmitting(false);
-      setRoleplayVideoReviewItems(items);
-    });
-  }, []);
+  const openRoleplayVideoPromptReview = useCallback(
+    (items: ImagePromptReviewItem[]) => {
+      if (roleplayVideoReviewResolveRef.current) {
+        toast.error(localizeUi("ui.chat.chatarea.finishOrCancelTheCurrentVideoPromptReviewFirst"));
+        return Promise.resolve(null);
+      }
+      return new Promise<ImagePromptOverride[] | null>((resolve) => {
+        roleplayVideoReviewResolveRef.current = resolve;
+        setRoleplayVideoReviewSubmitting(false);
+        setRoleplayVideoReviewItems(items);
+      });
+    },
+    [localizeUi],
+  );
 
   const closeRoleplayVideoPromptReview = useCallback((overrides: ImagePromptOverride[] | null) => {
     const resolve = roleplayVideoReviewResolveRef.current;
@@ -1192,17 +1234,20 @@ export function ChatArea() {
     resolve(overrides);
   }, []);
 
-  const openConversationSelfiePromptReview = useCallback((items: ImagePromptReviewItem[]) => {
-    if (conversationSelfieReviewResolveRef.current) {
-      toast.error("Finish or cancel the current selfie prompt review first.");
-      return Promise.resolve(null);
-    }
-    return new Promise<ImagePromptOverride[] | null>((resolve) => {
-      conversationSelfieReviewResolveRef.current = resolve;
-      setConversationSelfieReviewSubmitting(false);
-      setConversationSelfieReviewItems(items);
-    });
-  }, []);
+  const openConversationSelfiePromptReview = useCallback(
+    (items: ImagePromptReviewItem[]) => {
+      if (conversationSelfieReviewResolveRef.current) {
+        toast.error(localizeUi("ui.chat.chatarea.finishOrCancelTheCurrentSelfiePromptReviewFirst"));
+        return Promise.resolve(null);
+      }
+      return new Promise<ImagePromptOverride[] | null>((resolve) => {
+        conversationSelfieReviewResolveRef.current = resolve;
+        setConversationSelfieReviewSubmitting(false);
+        setConversationSelfieReviewItems(items);
+      });
+    },
+    [localizeUi],
+  );
 
   const closeConversationSelfiePromptReview = useCallback((overrides: ImagePromptOverride[] | null) => {
     const resolve = conversationSelfieReviewResolveRef.current;
@@ -1241,12 +1286,12 @@ export function ChatArea() {
 
   const handleGenerateRoleplaySceneVideo = useCallback(
     async (source?: { galleryImageId?: string }) => {
-      if (!activeChatId || !chat || (chatMode !== "roleplay" && chatMode !== "visual_novel")) return;
+      if (!activeChatId || !chat || chatMode !== "roleplay") return;
       if (roleplaySceneVideoGeneratingRef.current) return;
       const sceneVideoConnectionId =
         typeof chatMeta.sceneVideoConnectionId === "string" ? chatMeta.sceneVideoConnectionId.trim() : "";
       if (!sceneVideoConnectionId) {
-        toast.error("Choose a Scene Video connection in Chat Settings first.");
+        toast.error(localizeUi("ui.chat.chatarea.chooseASceneVideoConnectionInChatSettingsFirst"));
         return;
       }
 
@@ -1269,7 +1314,7 @@ export function ChatArea() {
             );
           } catch (error) {
             if (!isMediaPromptPreviewTimeout(error)) throw error;
-            toast.error("Video prompt preview timed out. Continuing with the default prompt.");
+            toast.error(localizeUi("ui.chat.chatarea.videoPromptPreviewTimedOutContinuingWithTheDefault"));
           }
           if (preview) {
             const details = [`${preview.durationSeconds}s`, preview.aspectRatio, preview.resolution].filter(
@@ -1299,9 +1344,13 @@ export function ChatArea() {
         galleryStore.pinVideo(result.video);
         galleryStore.syncLatestViewer({ ...result.video, kind: "video" as const });
         void queryClient.invalidateQueries({ queryKey: ["gallery", "scene-videos", activeChatId] });
-        toast.success("Scene video generated.", { duration: 1800 });
+        toast.success(localizeUi("ui.chat.chatarea.sceneVideoGenerated"), { duration: 1800 });
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Scene video generation failed.");
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : localizeUi("ui.game.gamesurfacecomponent.sceneVideoGenerationFailed"),
+        );
       } finally {
         closeRoleplayVideoPromptReview(null);
         roleplaySceneVideoGeneratingRef.current = false;
@@ -1315,6 +1364,7 @@ export function ChatArea() {
       closeRoleplayVideoPromptReview,
       openRoleplayVideoPromptReview,
       queryClient,
+      localizeUi,
     ],
   );
 
@@ -1347,7 +1397,7 @@ export function ChatArea() {
             );
           } catch (error) {
             if (!isMediaPromptPreviewTimeout(error)) throw error;
-            toast.error("Selfie prompt preview timed out. Continuing with the default prompt.");
+            toast.error(localizeUi("ui.chat.chatarea.selfiePromptPreviewTimedOutContinuingWithTheDefault"));
           }
           if (preview?.items.length) {
             const overrides = await openConversationSelfiePromptReview(preview.items);
@@ -1371,12 +1421,13 @@ export function ChatArea() {
       closeConversationSelfiePromptReview,
       generateGallerySelfie,
       openConversationSelfiePromptReview,
+      localizeUi,
     ],
   );
 
   // Creator-notes card CSS: resolve the per-chat mode (default "chat") and map
-  // the chat mode onto the @chat-mode filter surface (visual novel shares the
-  // roleplay surface). One injector element, reused across every render path.
+  // it onto the @chat-mode filter surface. One injector element is reused
+  // across every render path.
   const cardCssMode: CardCssMode =
     chatMeta.cardCssMode === "exclusive" || chatMeta.cardCssMode === "chat" ? chatMeta.cardCssMode : "disabled";
   const cardCssChatMode: ChatModeFilter =
@@ -1406,11 +1457,29 @@ export function ChatArea() {
   // Sync translation config from chat metadata to the translation store
   useEffect(() => {
     if (!chat?.id) return;
+    const legacyTargetLanguage = chatMeta.translationTargetLang?.trim() || "en";
+    const legacySystemPrompt = typeof chatMeta.translationPrompt === "string" ? chatMeta.translationPrompt : undefined;
+    const inputSystemPrompt =
+      chatMeta.translationInputPrompt === undefined
+        ? legacySystemPrompt
+        : typeof chatMeta.translationInputPrompt === "string"
+          ? chatMeta.translationInputPrompt
+          : undefined;
+    const outputSystemPrompt =
+      chatMeta.translationOutputPrompt === undefined
+        ? legacySystemPrompt
+        : typeof chatMeta.translationOutputPrompt === "string"
+          ? chatMeta.translationOutputPrompt
+          : undefined;
     useTranslationStore.getState().setConfig({
       provider: chatMeta.translationProvider ?? "google",
-      targetLanguage: chatMeta.translationTargetLang ?? "en",
+      // A cleared settings field stores "" — fall back to the legacy/default
+      // language so translation never runs with an empty target.
+      inputTargetLanguage: chatMeta.translationInputTargetLang?.trim() || legacyTargetLanguage,
+      outputTargetLanguage: chatMeta.translationOutputTargetLang?.trim() || legacyTargetLanguage,
       connectionId: chatMeta.translationConnectionId,
-      systemPrompt: typeof chatMeta.translationPrompt === "string" ? chatMeta.translationPrompt : undefined,
+      inputSystemPrompt,
+      outputSystemPrompt,
       deeplApiKey: chatMeta.translationDeeplApiKey,
       deeplxUrl: chatMeta.translationDeeplxUrl,
     });
@@ -1418,8 +1487,12 @@ export function ChatArea() {
     chat?.id,
     chatMeta.translationProvider,
     chatMeta.translationTargetLang,
+    chatMeta.translationInputTargetLang,
+    chatMeta.translationOutputTargetLang,
     chatMeta.translationConnectionId,
     chatMeta.translationPrompt,
+    chatMeta.translationInputPrompt,
+    chatMeta.translationOutputPrompt,
     chatMeta.translationDeeplApiKey,
     chatMeta.translationDeeplxUrl,
   ]);
@@ -1436,9 +1509,13 @@ export function ChatArea() {
       useTranslationStore.getState().clearAll();
       prevChatIdRef.current = chat?.id;
     }
-    useTranslationStore
-      .getState()
-      .seedFromMessages(messages as unknown as Array<{ id: string; extra?: string | Record<string, unknown> | null }>);
+    useTranslationStore.getState().seedFromMessages(
+      messages as unknown as Array<{
+        id: string;
+        content?: string;
+        extra?: string | Record<string, unknown> | null;
+      }>,
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chat?.id, msgPageCount]);
 
@@ -1455,11 +1532,7 @@ export function ChatArea() {
   useEffect(() => {
     if (!chat?.id) return;
     const savedUrl = chatBackgroundMetadataToUrl(chatMeta.background);
-    const restoredUrl =
-      savedUrl ??
-      (chat.mode === "roleplay" || chat.mode === "visual_novel"
-        ? useUIStore.getState().defaultRoleplayBackground
-        : null);
+    const restoredUrl = savedUrl ?? (chat.mode === "roleplay" ? useUIStore.getState().defaultRoleplayBackground : null);
     restoredChatBackgroundRef.current = { chatId: chat.id, url: restoredUrl, isSyncing: true };
     useUIStore.getState().setChatBackground(restoredUrl);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1512,7 +1585,6 @@ export function ChatArea() {
   }, []);
 
   const expressionSaveTimer = useRef<ReturnType<typeof setTimeout>>(null);
-  const spritePlacementSaveTimer = useRef<ReturnType<typeof setTimeout>>(null);
   const pendingExpressions = useRef<Record<string, string>>(spriteExpressions);
   const pendingSpritePlacements = useRef<Record<string, SpritePlacement>>(spritePlacements);
 
@@ -1532,7 +1604,6 @@ export function ChatArea() {
   useEffect(() => {
     return () => {
       if (expressionSaveTimer.current) clearTimeout(expressionSaveTimer.current);
-      if (spritePlacementSaveTimer.current) clearTimeout(spritePlacementSaveTimer.current);
     };
   }, []);
 
@@ -1577,10 +1648,7 @@ export function ChatArea() {
     (placementKey: string, placement: SpritePlacement) => {
       if (!chat?.id) return;
       pendingSpritePlacements.current = { ...pendingSpritePlacements.current, [placementKey]: placement };
-      if (spritePlacementSaveTimer.current) clearTimeout(spritePlacementSaveTimer.current);
-      spritePlacementSaveTimer.current = setTimeout(() => {
-        patchLocalSpriteVisualSettings({ spritePlacements: pendingSpritePlacements.current });
-      }, 250);
+      patchLocalSpriteVisualSettings({ spritePlacements: pendingSpritePlacements.current });
     },
     [chat?.id, patchLocalSpriteVisualSettings],
   );
@@ -1588,22 +1656,70 @@ export function ChatArea() {
   const handleResetSpritePlacements = useCallback(() => {
     if (!chat?.id) return;
     pendingSpritePlacements.current = {};
-    if (spritePlacementSaveTimer.current) clearTimeout(spritePlacementSaveTimer.current);
     patchLocalSpriteVisualSettings({ spritePlacements: {} });
   }, [chat?.id, patchLocalSpriteVisualSettings]);
 
   const handleSetSpritePosition = useCallback(
-    (nextSide: SpriteSide) => {
-      if (!chat?.id || nextSide === spritePosition) return;
-      const nextPlacements = hasCustomSpritePlacements ? mirrorSpritePlacements(spritePlacements) : spritePlacements;
+    (nextSide: SpriteSide, characterId?: string) => {
+      if (!chat?.id) return;
+
+      if (characterId) {
+        const currentSettings = spriteCharacterVisualSettings[characterId] ?? {};
+        const currentSide = currentSettings.spritePosition ?? spritePosition;
+        if (nextSide === currentSettings.spritePosition) return;
+        const nextPlacements =
+          nextSide === currentSide ? spritePlacements : mirrorCharacterSpritePlacements(spritePlacements, characterId);
+        pendingSpritePlacements.current = nextPlacements;
+        patchLocalSpriteVisualSettings({
+          characterOverrides: {
+            ...spriteCharacterVisualSettings,
+            [characterId]: { ...currentSettings, spritePosition: nextSide },
+          },
+          spritePlacements: nextPlacements,
+        });
+        return;
+      }
+
+      if (nextSide === spritePosition) return;
+      const explicitSideCharacterIds = Object.entries(spriteCharacterVisualSettings)
+        .filter(([, settings]) => settings.spritePosition)
+        .map(([id]) => id);
+      const nextPlacements = hasCustomSpritePlacements
+        ? mirrorSpritePlacements(spritePlacements, explicitSideCharacterIds)
+        : spritePlacements;
       pendingSpritePlacements.current = nextPlacements;
-      if (spritePlacementSaveTimer.current) clearTimeout(spritePlacementSaveTimer.current);
       patchLocalSpriteVisualSettings({
         spritePosition: nextSide,
         spritePlacements: nextPlacements,
       });
     },
-    [chat?.id, hasCustomSpritePlacements, patchLocalSpriteVisualSettings, spritePlacements, spritePosition],
+    [
+      chat?.id,
+      hasCustomSpritePlacements,
+      patchLocalSpriteVisualSettings,
+      spriteCharacterVisualSettings,
+      spritePlacements,
+      spritePosition,
+    ],
+  );
+
+  const handleResetSpriteCharacterVisualSettings = useCallback(
+    (characterId: string) => {
+      if (!chat?.id || !spriteCharacterVisualSettings[characterId]) return;
+      const currentSettings = spriteCharacterVisualSettings[characterId];
+      const nextPlacements =
+        currentSettings.spritePosition && currentSettings.spritePosition !== spritePosition
+          ? mirrorCharacterSpritePlacements(spritePlacements, characterId)
+          : spritePlacements;
+      const nextCharacterVisualSettings = { ...spriteCharacterVisualSettings };
+      delete nextCharacterVisualSettings[characterId];
+      pendingSpritePlacements.current = nextPlacements;
+      patchLocalSpriteVisualSettings({
+        characterOverrides: nextCharacterVisualSettings,
+        spritePlacements: nextPlacements,
+      });
+    },
+    [chat?.id, patchLocalSpriteVisualSettings, spriteCharacterVisualSettings, spritePlacements, spritePosition],
   );
 
   // Set of active agent type IDs for this chat.
@@ -1647,6 +1763,7 @@ export function ChatArea() {
       expressionSpriteOpacity,
       fullBodySpriteOpacity,
       expressionAvatarsEnabled: expressionAvatarsPreferenceEnabled,
+      characterOverrides: spriteCharacterVisualSettings,
     }),
     [
       expressionAvatarsPreferenceEnabled,
@@ -1654,6 +1771,7 @@ export function ChatArea() {
       expressionSpriteScale,
       fullBodySpriteOpacity,
       fullBodySpriteScale,
+      spriteCharacterVisualSettings,
       spritePlacements,
       spritePosition,
     ],
@@ -1691,7 +1809,7 @@ export function ChatArea() {
     if (!expressionAvatarsEnabled) return undefined;
     return (message, characterId) => {
       const extra = parseMessageExtraRecord(message.extra);
-      const expressions = normalizeMessageSpriteExpressions(extra.spriteExpressions);
+      const expressions = normalizeSpriteExpressionMap(extra.spriteExpressions);
       const characterName = characterMap.get(characterId)?.name;
       const personaName =
         characterId === personaInfo?.id ? (getPersonaSnapshotName(extra) ?? personaInfo.name) : undefined;
@@ -1752,7 +1870,7 @@ export function ChatArea() {
             await flushPatch();
           } catch {
             if (swipeActionSeq.current === actionId) {
-              toast.error("Could not save tracker changes before deleting the swipe.");
+              toast.error(localizeUi("ui.chat.chatarea.couldNotSaveTrackerChangesBeforeDeletingTheSwipe"));
             }
             return;
           }
@@ -1763,7 +1881,7 @@ export function ChatArea() {
         await refreshVisibleGameState();
       } catch {
         if (swipeActionSeq.current !== actionId) return;
-        toast.error("Could not delete the swipe.");
+        toast.error(localizeUi("ui.chat.chatarea.couldNotDeleteTheSwipe"));
       } finally {
         if (swipeActionSeq.current === actionId) {
           useGameStateStore.getState().clearRefreshingChat(refreshChatId);
@@ -1778,6 +1896,7 @@ export function ChatArea() {
     deleteSwipe,
     refreshVisibleGameState,
     shouldRefreshGameStateOnSwipe,
+    localizeUi,
   ]);
 
   const handleDeleteMore = useCallback(() => {
@@ -1893,16 +2012,16 @@ export function ChatArea() {
         !options?.skipTouchConfirm &&
         window.matchMedia("(pointer: coarse)").matches &&
         !(await showConfirmDialog({
-          title: "Regenerate Message",
-          message: "Regenerate this message as a new swipe?",
-          confirmLabel: "Regenerate",
+          title: localizeUi("ui.chat.chatarea.regenerateMessage"),
+          message: localizeUi("ui.chat.chatarea.regenerateThisMessageAsANewSwipe"),
+          confirmLabel: localizeUi("ui.agents.secretplotpanel.regenerate"),
         }))
       ) {
         return;
       }
       try {
         // Regenerate as a new swipe on the existing message
-        const currentInput = useChatStore.getState().currentInput;
+        const currentInput = getCurrentInputSnapshot();
         const hasInput = currentInput ? currentInput.trim().length > 0 : false;
         await generate(
           guideGenerations && hasInput
@@ -1919,7 +2038,7 @@ export function ChatArea() {
         // Error toast is shown by the generate hook
       }
     },
-    [activeChatId, isStreaming, generate, guideGenerations],
+    [activeChatId, isStreaming, generate, guideGenerations, localizeUi],
   );
 
   const handleRetryAgents = useCallback(async () => {
@@ -1943,9 +2062,7 @@ export function ChatArea() {
     const types =
       manualTypes.length > 0
         ? manualTypes
-        : Array.from(enabledAgentTypes).filter(
-            (type) => isBuiltInTrackerAgentType(type) || !isBuiltInAgentType(type),
-          );
+        : Array.from(enabledAgentTypes).filter((type) => isBuiltInTrackerAgentType(type) || !isBuiltInAgentType(type));
     if (types.length === 0) return;
     await retryAgents(activeChatId, types);
   }, [activeChatId, isStreaming, agentProcessing, enabledAgentTypes, manualTrackerTypes, retryAgents]);
@@ -1973,7 +2090,7 @@ export function ChatArea() {
               await flushPatch();
             } catch {
               if (swipeActionSeq.current === actionId) {
-                toast.error("Could not save tracker changes before switching swipes.");
+                toast.error(localizeUi("ui.chat.chatarea.couldNotSaveTrackerChangesBeforeSwitchingSwipes"));
               }
               return;
             }
@@ -2005,7 +2122,7 @@ export function ChatArea() {
           await refreshVisibleGameState();
         } catch {
           if (swipeActionSeq.current !== actionId) return;
-          toast.error("Could not switch swipes.");
+          toast.error(localizeUi("ui.chat.chatarea.couldNotSwitchSwipes"));
         } finally {
           if (swipeActionSeq.current === actionId) {
             useGameStateStore.getState().clearRefreshingChat(refreshChatId);
@@ -2013,7 +2130,7 @@ export function ChatArea() {
         }
       })();
     },
-    [activeChatId, setActiveSwipe, refreshVisibleGameState, shouldRefreshGameStateOnSwipe],
+    [activeChatId, setActiveSwipe, refreshVisibleGameState, shouldRefreshGameStateOnSwipe, localizeUi],
   );
 
   const handleEdit = useCallback(
@@ -2049,9 +2166,9 @@ export function ChatArea() {
       if (!chatId || branchChat.isPending || branchPendingRef.current) return;
       branchPendingRef.current = true;
       const confirmed = await showConfirmDialog({
-        title: "Create a new branch?",
-        message: "This will copy the chat through this message and open the new branch.",
-        confirmLabel: "Create branch",
+        title: localizeUi("ui.chat.chatarea.createANewBranch"),
+        message: localizeUi("ui.chat.chatarea.thisWillCopyTheChatThroughThisMessageAnd"),
+        confirmLabel: localizeUi("ui.chat.chatarea.createBranch"),
       });
       if (!confirmed || useChatStore.getState().activeChatId !== chatId) {
         branchPendingRef.current = false;
@@ -2063,10 +2180,14 @@ export function ChatArea() {
         {
           onSuccess: (newChat) => {
             if (newChat) useChatStore.getState().setActiveChatId(newChat.id);
-            toast.success("Branch created.");
+            toast.success(localizeUi("ui.chat.chatarea.branchCreated"));
           },
           onError: (error) => {
-            toast.error(error instanceof Error ? `Branch failed: ${error.message}` : "Branch failed.");
+            toast.error(
+              error instanceof Error
+                ? localizeUi("ui.chat.chatarea.branchFailedValue1", { value1: error.message })
+                : localizeUi("ui.chat.chatarea.branchFailed"),
+            );
           },
           onSettled: () => {
             branchPendingRef.current = false;
@@ -2075,7 +2196,7 @@ export function ChatArea() {
         },
       );
     },
-    [activeChatId, branchChat],
+    [activeChatId, branchChat, localizeUi],
   );
 
   const handleCloneSceneFromHere = useCallback(
@@ -2203,7 +2324,8 @@ export function ChatArea() {
       if (event.defaultPrevented) return;
 
       if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-      if (shouldIgnoreIntuitiveSwipeTarget(event.target)) return;
+      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      if (shouldIgnoreIntuitiveSwipeTarget(event.target, { allowEmptyMainComposer: true })) return;
 
       if (event.repeat && event.key === "ArrowRight" && latestAssistantMessageForSwipes) {
         const swipeCount = latestAssistantMessageForSwipes.swipeCount ?? 1;
@@ -2232,7 +2354,7 @@ export function ChatArea() {
       if (event.repeat || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
       if (!latestMessageForEdit) return;
       // Don't try to edit a message that's currently streaming/regenerating.
-      if (isStreaming || agentProcessing) return;
+      if (isTextStreaming || (agentProcessing && !isBackgroundIllustration)) return;
 
       const target = event.target;
       if (target instanceof Element) {
@@ -2264,9 +2386,10 @@ export function ChatArea() {
     agentProcessing,
     chatMode,
     editLastMessageOnArrowUp,
+    isBackgroundIllustration,
     intuitiveSwipeBlocked,
     isRoleplay,
-    isStreaming,
+    isTextStreaming,
     latestMessageForEdit,
   ]);
 
@@ -2391,6 +2514,7 @@ export function ChatArea() {
     },
     [scrollToMessagesBottom],
   );
+  useKeepLatestChatMessageVisible(scrollRef, isNearBottomRef, scheduleScrollToMessagesBottom);
   useEffect(() => {
     const handleScrollRequest = (event: Event) => {
       const detail = (event as CustomEvent<ChatScrollToBottomDetail>).detail;
@@ -2534,8 +2658,7 @@ export function ChatArea() {
     if (!cfg?.enabled) return;
 
     const mode = chatModeRef.current;
-    const shouldAutoplay =
-      mode === "roleplay" || mode === "visual_novel" ? cfg.autoplayRP : mode === "game" ? false : cfg.autoplayConvo;
+    const shouldAutoplay = mode === "roleplay" ? cfg.autoplayRP : mode === "game" ? false : cfg.autoplayConvo;
     if (!shouldAutoplay) return;
 
     const msgs = messagesRef.current ?? [];
@@ -2648,7 +2771,12 @@ export function ChatArea() {
 
     const targetNumber = gotoRequest.messageNumber;
     if (totalMessageCount > 0 && targetNumber > totalMessageCount) {
-      toast.error(`Message #${targetNumber} doesn't exist — this chat has ${totalMessageCount} messages.`);
+      toast.error(
+        localizeUi("ui.chat.chatarea.messageValue1DoesnTExistThisChatHasValue2", {
+          value1: targetNumber,
+          value2: totalMessageCount,
+        }),
+      );
       useChatStore.getState().clearGotoRequest();
       return;
     }
@@ -2695,6 +2823,7 @@ export function ChatArea() {
     hasNextPage,
     isFetchingNextPage,
     fetchNextPage,
+    localizeUi,
   ]);
 
   // ═══════════════════════════════════════════════
@@ -2720,7 +2849,9 @@ export function ChatArea() {
           )}
           <div className="space-y-1">
             <p className="text-sm font-medium text-[var(--foreground)]">
-              {hasOpenError ? "Could not open this chat" : "Opening chat..."}
+              {hasOpenError
+                ? localizeUi("ui.chat.chatarea.couldNotOpenThisChat")
+                : localizeUi("ui.chat.chatarea.openingChat")}
             </p>
             {hasOpenError && <p className="max-w-sm text-xs text-[var(--muted-foreground)]">{errorMessage}</p>}
           </div>
@@ -2730,7 +2861,7 @@ export function ChatArea() {
               onClick={() => setActiveChatId(null)}
               className="mari-chrome-control mari-chrome-control--small text-xs"
             >
-              Back to chats
+              {localizeUi("ui.chat.chatarea.backToChats")}
             </button>
           )}
         </div>
@@ -2781,7 +2912,7 @@ export function ChatArea() {
                   >
                     <img
                       src={showEmptyStateEffects ? "/logo-splash.gif" : "/logo.png"}
-                      alt="Marinara Engine"
+                      alt={localizeUi("app.documentTitle")}
                       width={80}
                       height={80}
                       decoding="async"
@@ -2800,12 +2931,15 @@ export function ChatArea() {
                       isPageActive && "mari-logo-gradient-text--active",
                     )}
                   >
-                    Marinara Engine
+                    {localizeUi("app.documentTitle")}
                   </h3>
                   <p className="mari-chrome-text-muted mt-0.5 text-[0.625rem] tracking-wide opacity-65">
-                    v{APP_VERSION}
+                    {localizeUi("ui.characters.charactereditor.v")}
+                    {APP_VERSION}
                   </p>
                 </div>
+
+                <HomeNewChatLauncher />
 
                 {/* Recent Chats */}
                 <RecentChats />
@@ -2842,36 +2976,36 @@ export function ChatArea() {
                 <div className="flex w-full max-w-2xl flex-col items-center gap-1">
                   <div className="mari-chrome-text-muted flex flex-wrap items-center justify-center gap-x-3 gap-y-0.5 text-center text-[0.625rem] leading-tight sm:text-xs">
                     <span>
-                      Created by{" "}
+                      {t("home.footer.createdBy")}{" "}
                       <a
                         href="https://spicymarinara.github.io/"
                         target="_blank"
                         rel="noopener noreferrer"
                         className="mari-chrome-text underline decoration-[var(--marinara-chat-chrome-panel-muted)]/30 transition-colors hover:text-[var(--marinara-chat-chrome-button-text-hover)] hover:decoration-[var(--marinara-chat-chrome-button-border-hover)]"
                       >
-                        Marinara
+                        {localizeUi("ui.chat.chatarea.marinara")}
                       </a>
                     </span>
                     <span>
-                      Partnered with{" "}
+                      {t("home.footer.partneredWith")}{" "}
                       <a
                         href="https://linkapi.ai/"
                         target="_blank"
                         rel="noopener noreferrer"
                         className="mari-chrome-text underline decoration-[var(--marinara-chat-chrome-panel-muted)]/30 transition-colors hover:text-[var(--marinara-chat-chrome-button-text-hover)] hover:decoration-[var(--marinara-chat-chrome-button-border-hover)]"
                       >
-                        LinkAPI
+                        {localizeUi("ui.panels.connectionspanel.linkapi")}
                       </a>
                     </span>
                     <span>
-                      Art and logo by{" "}
+                      {t("home.footer.artBy")}{" "}
                       <a
                         href="https://huntercolliex.carrd.co/"
                         target="_blank"
                         rel="noopener noreferrer"
                         className="mari-chrome-text underline decoration-[var(--marinara-chat-chrome-panel-muted)]/30 transition-colors hover:text-[var(--marinara-chat-chrome-button-text-hover)] hover:decoration-[var(--marinara-chat-chrome-button-border-hover)]"
                       >
-                        HunterCollieX
+                        {localizeUi("ui.chat.chatarea.huntercolliex")}
                       </a>
                     </span>
                   </div>
@@ -2886,7 +3020,7 @@ export function ChatArea() {
                       <svg width="0.875rem" height="0.875rem" viewBox="0 0 24 24" fill="currentColor">
                         <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.333-.947 2.418-2.157 2.418z" />
                       </svg>
-                      Discord
+                      {localizeUi("ui.chat.chatarea.discord")}
                     </a>
                     <a
                       href="https://ko-fi.com/marinara_spaghetti"
@@ -2898,7 +3032,7 @@ export function ChatArea() {
                       <svg width="0.875rem" height="0.875rem" viewBox="0 0 24 24" fill="currentColor">
                         <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z" />
                       </svg>
-                      Support
+                      {t("home.actions.support")}
                     </a>
                     <button
                       type="button"
@@ -2909,7 +3043,7 @@ export function ChatArea() {
                       className="mari-chrome-control mari-chrome-control--small text-xs"
                     >
                       <List size="0.875rem" />
-                      Credits
+                      {t("home.actions.credits")}
                     </button>
                   </div>
 
@@ -2917,12 +3051,13 @@ export function ChatArea() {
                     {/* In-app documentation */}
                     <button
                       type="button"
+                      data-tour="home-documentation"
                       onClick={() => useUIStore.getState().openModal("docs-viewer")}
                       className="mari-chrome-control mari-chrome-control--small text-xs"
-                      title="Browse the documentation"
+                      title={t("home.actions.documentationHelp")}
                     >
                       <BookOpen size="0.875rem" />
-                      Documentation
+                      {t("home.actions.documentation")}
                     </button>
 
                     {/* Restart tutorial */}
@@ -2930,10 +3065,10 @@ export function ChatArea() {
                       type="button"
                       onClick={() => useUIStore.getState().setHasCompletedOnboarding(false)}
                       className="mari-chrome-control mari-chrome-control--small text-xs"
-                      title="Replay tutorial"
+                      title={t("home.actions.replayTutorialHelp")}
                     >
                       <HelpCircle size="0.875rem" />
-                      Replay Tutorial
+                      {t("home.actions.replayTutorial")}
                     </button>
                   </div>
                 </div>
@@ -3016,6 +3151,7 @@ export function ChatArea() {
       />
     </Suspense>
   ) : null;
+  const resourceDropOverlay = chat ? <ChatResourceDropOverlay chat={chat} /> : null;
 
   // ═══════════════════════════════════════════════
   // Game mode — RPG surface with GM narration, map, party chat
@@ -3028,6 +3164,7 @@ export function ChatArea() {
         <>
           {cardCssInjector}
           {scheduleModal}
+          {resourceDropOverlay}
           <GameSurface
             activeChatId={activeChatId}
             chat={chat!}
@@ -3042,6 +3179,9 @@ export function ChatArea() {
             connectedChatName={connectedChatName}
             onOpenSettings={handleOpenSettingsPanel}
             onCloseSettings={handleCloseSettingsPanel}
+            externalGalleryOpen={galleryOpen}
+            externalGalleryAnchor={galleryAnchor}
+            onCloseExternalGallery={handleCloseGalleryPanel}
             onSwitchChat={chat.connectedChatId ? () => setActiveChatId(chat.connectedChatId!) : undefined}
             onDeleteMessage={handleDelete}
             onPeekPrompt={handlePeekPrompt}
@@ -3053,7 +3193,7 @@ export function ChatArea() {
             chat={chat}
             settingsOpen={settingsOpen}
             settingsAnchor={settingsAnchor}
-            galleryOpen={galleryOpen}
+            galleryOpen={false}
             galleryAnchor={galleryAnchor}
             wizardOpen={wizardOpen}
             peekPromptData={peekPromptData}
@@ -3074,7 +3214,6 @@ export function ChatArea() {
             onCloseSettings={handleCloseSettingsPanel}
             onCloseGallery={handleCloseGalleryPanel}
             onOpenScheduleEditor={handleOpenScheduleEditor}
-            onIllustrate={() => retryAgents(activeChatId, ["illustrator"])}
             onWizardFinish={() => {
               setWizardOpen(false);
               handleOpenSettingsPanel();
@@ -3103,6 +3242,7 @@ export function ChatArea() {
       <>
         {cardCssInjector}
         {scheduleModal}
+        {resourceDropOverlay}
         <Suspense fallback={surfaceFallback}>
           <ChatConversationSurface
             activeChatId={activeChatId}
@@ -3190,7 +3330,7 @@ export function ChatArea() {
   }
 
   // ═══════════════════════════════════════════════
-  // Roleplay / Visual Novel mode — existing layout
+  // Roleplay mode — existing layout
   // ═══════════════════════════════════════════════
   const shouldAnimateMessages = !hasAnimatedRef.current;
   if (messages?.length) hasAnimatedRef.current = true;
@@ -3199,6 +3339,7 @@ export function ChatArea() {
     <>
       {cardCssInjector}
       {scheduleModal}
+      {resourceDropOverlay}
       <Suspense fallback={surfaceFallback}>
         <ChatRoleplaySurface
           activeChatId={activeChatId}
@@ -3237,7 +3378,8 @@ export function ChatArea() {
           isLoading={isLoading}
           hasNextPage={!!hasNextPage}
           isFetchingNextPage={isFetchingNextPage}
-          isStreaming={isStreaming}
+          isStreaming={isTextStreaming}
+          generationVisualsPaused={isStreaming || agentProcessing}
           agentProcessing={agentProcessing}
           regenerateMessageId={regenerateMessageId}
           shouldAnimateMessages={shouldAnimateMessages}
@@ -3285,7 +3427,11 @@ export function ChatArea() {
           onCloseSettings={handleCloseSettingsPanel}
           onCloseGallery={handleCloseGalleryPanel}
           onOpenScheduleEditor={handleOpenScheduleEditor}
-          onIllustrate={() => retryAgents(activeChatId, ["illustrator"])}
+          onIllustrate={() =>
+            retryAgents(activeChatId, ["illustrator"], {
+              illustratorRetryTargets: ["illustration"],
+            })
+          }
           onGenerateBackground={handleGenerateRoleplayBackground}
           onGenerateVideo={() => handleGenerateRoleplaySceneVideo()}
           onAnimateImage={(image) => handleGenerateRoleplaySceneVideo({ galleryImageId: image.id })}
@@ -3295,6 +3441,7 @@ export function ChatArea() {
           }}
           onClosePeekPrompt={() => setPeekPromptData(null)}
           onResetSpritePlacements={handleResetSpritePlacements}
+          onResetSpriteCharacterVisualSettings={handleResetSpriteCharacterVisualSettings}
           onSpriteSideChange={handleSetSpritePosition}
           onToggleSpriteArrange={() => setSpriteArrangeMode((prev) => !prev)}
           spriteVisualSettings={effectiveSpriteVisualSettings}
@@ -3361,11 +3508,17 @@ function AgentInjectionReviewModal({
   onContinue: () => void;
   onClose: () => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   return (
-    <Modal open onClose={onClose} title="Writer Agent Review" width="max-w-3xl">
+    <Modal
+      open
+      onClose={onClose}
+      title={localizeUi("ui.chat.agentinjectionreviewmodal.writerAgentReview")}
+      width="max-w-3xl"
+    >
       <div className="flex flex-col gap-3">
         <p className="text-xs leading-relaxed text-[var(--muted-foreground)]">
-          Edit the writer guidance before the main reply starts.
+          {localizeUi("ui.chat.agentinjectionreviewmodal.editTheWriterGuidanceBeforeTheMainReplyStarts")}
         </p>
         <div className="flex max-h-[55dvh] flex-col gap-2 overflow-y-auto pr-1">
           {request.injections.map((injection) => (
@@ -3393,7 +3546,7 @@ function AgentInjectionReviewModal({
             className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-3 py-2 text-xs text-[var(--foreground)] transition-colors hover:bg-[var(--accent)]"
           >
             <X size="0.875rem" />
-            Close
+            {localizeUi("capabilities.actions.close")}
           </button>
           <button
             type="button"
@@ -3401,7 +3554,7 @@ function AgentInjectionReviewModal({
             className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-2 text-xs font-medium text-[var(--primary-foreground)] transition-opacity hover:opacity-90"
           >
             <Check size="0.875rem" />
-            Continue
+            {localizeUi("ui.noodle.wizardfooter.continue")}
           </button>
         </div>
       </div>

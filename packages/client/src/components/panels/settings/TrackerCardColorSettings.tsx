@@ -27,6 +27,7 @@ import {
   normalizeMaybeJsonStringArray,
 } from "../../../features/tracker-panel/lib/tracker-metadata";
 import { TrackerCardColorControls, type TrackerCardColorEntityLabel } from "../../ui/TrackerCardColorControls";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 type TrackerCardColorSaveState = "idle" | "saving" | "saved" | "error";
 
@@ -113,10 +114,11 @@ function resolvePresentCharacterId(
 }
 
 export function TrackerCardColorSettings() {
+  const { t: localizeUi } = useUiTranslation();
   const activeChatId = useChatStore((s) => s.activeChatId);
   const settingsTab = useUIStore((s) => s.settingsTab);
   const { data: activeChat } = useChat(activeChatId);
-  const { currentGameState, isLoadingGameState } = useTrackerGameState(activeChatId);
+  const { currentGameState, gameStateLoadStatus, retryGameState } = useTrackerGameState(activeChatId);
   const { data: personasData } = usePersonas(!!activeChatId);
   const { data: charactersData } = useCharacters(!!activeChatId);
   const updatePersona = useUpdatePersona();
@@ -389,9 +391,7 @@ export function TrackerCardColorSettings() {
     <div className="mt-2 flex flex-col gap-1.5 rounded-lg bg-[var(--background)]/36 p-1.5 ring-1 ring-[var(--border)]">
       <div className="flex min-h-5 items-center justify-between gap-2 px-0.5">
         <span className="inline-flex min-w-0 items-center gap-1 text-[0.625rem] font-medium text-[var(--foreground)]">
-          <Palette size="0.6875rem" className="text-[var(--primary)]" />
-          Card colors
-        </span>
+          <Palette size="0.6875rem" className="text-[var(--primary)]" />{localizeUi("ui.panels.trackercardcolorsettings.cardColors")}</span>
         {saveMessage && (
           <span
             className={cn(
@@ -416,26 +416,31 @@ export function TrackerCardColorSettings() {
       </div>
 
       {!activeChatId ? (
-        <p className="rounded-md bg-[var(--secondary)]/42 px-2 py-2 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
-          Select a chat to edit tracker card colors.
-        </p>
-      ) : isLoadingGameState && targets.length === 0 ? (
-        <p className="mari-chrome-text-muted rounded-md bg-[var(--secondary)]/42 px-2 py-2 text-[0.625rem] leading-relaxed">
-          Loading current tracker cards...
-        </p>
+        <p className="rounded-md bg-[var(--secondary)]/42 px-2 py-2 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">{localizeUi("ui.panels.trackercardcolorsettings.selectAChatToEditTrackerCardColors")}</p>
+      ) : gameStateLoadStatus === "error" ? (
+        <div className="flex flex-wrap items-center justify-center gap-2 rounded-md bg-[var(--secondary)]/42 px-2 py-2 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+          <span>{localizeUi("ui.chat.agentsuitemodal.couldNotLoadTrackerData")}</span>
+          <button
+            type="button"
+            onClick={retryGameState}
+            className="rounded-sm bg-[var(--foreground)]/8 px-2 py-1 font-medium text-[var(--foreground)]/75 ring-1 ring-[var(--border)]/70 transition-colors hover:bg-[var(--foreground)]/12 hover:text-[var(--foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] active:scale-95"
+          >
+            {localizeUi("capabilities.actions.tryAgain")}
+          </button>
+        </div>
+      ) : gameStateLoadStatus === "loading" ? (
+        <p className="mari-chrome-text-muted rounded-md bg-[var(--secondary)]/42 px-2 py-2 text-[0.625rem] leading-relaxed">{localizeUi("ui.panels.trackercardcolorsettings.loadingCurrentTrackerCards")}</p>
       ) : targets.length === 0 ? (
-        <p className="rounded-md bg-[var(--secondary)]/42 px-2 py-2 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
-          No active persona or present character IDs are available for this chat.
-        </p>
+        <p className="rounded-md bg-[var(--secondary)]/42 px-2 py-2 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">{localizeUi("ui.panels.trackercardcolorsettings.noActivePersonaOrPresentCharacterIdsAreAvailable")}</p>
       ) : (
         <>
           <label className="grid gap-1">
-            <span className="px-0.5 text-[0.625rem] text-[var(--muted-foreground)]">Editing</span>
+            <span className="px-0.5 text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.panels.imagestyleprofileseditor.editing")}</span>
             <select
               value={selectedTargetKey}
               onChange={(event) => setSelectedTargetKey(event.target.value)}
               disabled={saveState === "saving" || hasUnsavedChanges}
-              title={hasUnsavedChanges ? "Save or revert before choosing another card." : undefined}
+              title={hasUnsavedChanges ?localizeUi("ui.panels.trackercardcolorsettings.saveOrRevertBeforeChoosingAnotherCard") : undefined}
               className="min-w-0 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2 py-1.5 text-[0.6875rem] text-[var(--foreground)] outline-none transition-shadow focus:ring-1 focus:ring-[var(--primary)] disabled:cursor-not-allowed disabled:opacity-65"
             >
               {targets.map((target) => (
@@ -452,11 +457,11 @@ export function TrackerCardColorSettings() {
                 type="button"
                 onClick={handleRevert}
                 disabled={!hasUnsavedChanges || saveState === "saving"}
-                title="Revert to previous save"
+                title={localizeUi("ui.panels.trackercardcolorsettings.revertToPreviousSave")}
                 className="inline-flex h-6 min-w-0 items-center gap-1 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-1.5 text-[0.625rem] font-semibold text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-45"
               >
                 <RotateCcw size="0.6875rem" />
-                <span>Revert</span>
+                <span>{localizeUi("ui.panels.trackercardcolorsettings.revert")}</span>
               </button>
               <button
                 type="button"
@@ -469,7 +474,7 @@ export function TrackerCardColorSettings() {
                 ) : (
                   <Save size="0.6875rem" />
                 )}
-                <span>Save</span>
+                <span>{localizeUi("ui.noodle.noodlehome.save")}</span>
               </button>
             </div>
           )}

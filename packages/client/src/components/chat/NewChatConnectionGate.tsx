@@ -8,6 +8,7 @@ import { useUIStore } from "../../stores/ui.store";
 import { useSidecarStore } from "../../stores/sidecar.store";
 import { appendLocalSidecarConnectionOption } from "../../lib/connection-filters";
 import { cn } from "../../lib/utils";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 type Mode = "conversation" | "roleplay" | "game";
 
@@ -23,12 +24,14 @@ interface NewChatConnectionGateProps {
 }
 
 export function NewChatConnectionGate({ mode, onClose }: NewChatConnectionGateProps) {
+  const { t: localizeUi } = useUiTranslation();
   const { data: connections, isLoading } = useConnections();
   const createChat = useCreateChat();
   const { data: chatPresetsData } = useChatPresets();
   const applyChatPreset = useApplyChatPreset();
   const openRightPanel = useUIStore((s) => s.openRightPanel);
   const setSidebarOpen = useUIStore((s) => s.setSidebarOpen);
+  const pendingNewChatOrigin = useChatStore((s) => s.pendingNewChatOrigin);
   const sidecarModelDownloaded = useSidecarStore((state) => state.modelDownloaded);
   const sidecarModelDisplayName = useSidecarStore((state) => state.modelDisplayName);
   const [connectionId, setConnectionId] = useState<string>("");
@@ -36,7 +39,7 @@ export function NewChatConnectionGate({ mode, onClose }: NewChatConnectionGatePr
   const connectionRows = useMemo(
     () =>
       appendLocalSidecarConnectionOption(
-        (connections ?? []) as Array<{ id: string; name: string; provider?: string }>,
+        (connections ?? []) as Array<{ id: string; name: string; provider?: string; isDefault?: boolean | string }>,
         mode !== "game" && sidecarModelDownloaded,
         sidecarModelDisplayName,
       ),
@@ -48,7 +51,9 @@ export function NewChatConnectionGate({ mode, onClose }: NewChatConnectionGatePr
       setConnectionId("");
       return;
     }
-    setConnectionId((current) => current || connectionRows[0]!.id);
+    const isDefault = (row: { isDefault?: boolean | string }) => row.isDefault === true || row.isDefault === "true";
+    const preferred = connectionRows.find(isDefault) ?? connectionRows[0]!;
+    setConnectionId((current) => current || preferred.id);
   }, [connectionRows]);
 
   const handleCreate = () => {
@@ -71,7 +76,11 @@ export function NewChatConnectionGate({ mode, onClose }: NewChatConnectionGatePr
         onSuccess: (chat) => {
           const store = useChatStore.getState();
           store.setPendingNewChatMode(null);
-          if (typeof window !== "undefined" && window.innerWidth < 768) setSidebarOpen(false);
+          if (pendingNewChatOrigin === "home") {
+            setSidebarOpen(true);
+          } else if (typeof window !== "undefined" && window.innerWidth < 768) {
+            setSidebarOpen(false);
+          }
           store.setActiveChatId(chat.id);
           store.setShouldOpenSettings(true);
           store.setShouldOpenWizard(true);
@@ -94,10 +103,8 @@ export function NewChatConnectionGate({ mode, onClose }: NewChatConnectionGatePr
         <div className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-sm flex-col overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--card)] shadow-2xl sm:max-h-[min(90dvh,38rem)]">
           <div className="flex shrink-0 items-center justify-between border-b border-[var(--border)] px-4 py-3">
             <div>
-              <h3 className="text-sm font-semibold">Set Up {MODE_META[mode].label}</h3>
-              <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
-                Choose a connection before we create the chat.
-              </p>
+              <h3 className="text-sm font-semibold">{localizeUi("ui.chat.newchatconnectiongate.setUp")} {MODE_META[mode].label}</h3>
+              <p className="text-[0.6875rem] text-[var(--muted-foreground)]">{localizeUi("ui.chat.newchatconnectiongate.chooseAConnectionBeforeWeCreateTheChat")}</p>
             </div>
             <button
               onClick={onClose}
@@ -111,32 +118,24 @@ export function NewChatConnectionGate({ mode, onClose }: NewChatConnectionGatePr
             {showEmptyState ? (
               <div className="rounded-xl border border-[var(--primary)]/20 bg-[var(--primary)]/8 p-4">
                 <div className="mb-2 flex items-center gap-2 text-sm font-medium text-[var(--foreground)]">
-                  <Plug size="0.875rem" className="text-[var(--primary)]" />
-                  No connections found
-                </div>
-                <p className="text-xs text-[var(--muted-foreground)]">
-                  Create a connection first, then come back here and we&apos;ll continue without creating a ghost chat.
-                </p>
+                  <Plug size="0.875rem" className="text-[var(--primary)]" />{localizeUi("ui.chat.newchatconnectiongate.noConnectionsFound")}</div>
+                <p className="text-xs text-[var(--muted-foreground)]">{localizeUi("ui.chat.newchatconnectiongate.createAConnectionFirstThenComeBackHereAnd")}</p>
                 <button
                   onClick={() => openRightPanel("connections")}
                   className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-lg border border-[var(--primary)]/30 bg-[var(--primary)]/10 px-3 py-2 text-xs font-medium text-[var(--primary)] transition-all hover:bg-[var(--primary)]/20"
                 >
-                  <Plug size="0.75rem" />
-                  Open Connections
-                </button>
+                  <Plug size="0.75rem" />{localizeUi("ui.chat.newchatconnectiongate.openConnections")}</button>
               </div>
             ) : (
               <div className="space-y-1.5">
-                <label className="text-[0.6875rem] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">
-                  Connection
-                </label>
+                <label className="text-[0.6875rem] font-medium uppercase tracking-wider text-[var(--muted-foreground)]">{localizeUi("ui.chat.conversationquicksetup.connection")}</label>
                 <select
                   value={connectionId}
                   onChange={(e) => setConnectionId(e.target.value)}
                   disabled={createChat.isPending}
                   className="w-full rounded-lg bg-[var(--secondary)] px-3 py-2.5 text-xs outline-none ring-1 ring-[var(--border)] transition-shadow focus:ring-[var(--primary)]/40"
                 >
-                  <option value="">Select a connection…</option>
+                  <option value="">{localizeUi("ui.chat.customemojiselectionsettings.selectAConnection")}</option>
                   {connectionRows.map((connection) => (
                     <option key={connection.id} value={connection.id}>
                       {connection.name}
@@ -151,9 +150,7 @@ export function NewChatConnectionGate({ mode, onClose }: NewChatConnectionGatePr
             <button
               onClick={onClose}
               className="rounded-lg px-3 py-1.5 text-xs text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)] hover:text-[var(--foreground)]"
-            >
-              Cancel
-            </button>
+            >{localizeUi("chat.delete.dialog.cancel")}</button>
             <button
               onClick={handleCreate}
               disabled={showEmptyState || !connectionId || createChat.isPending}
@@ -164,9 +161,7 @@ export function NewChatConnectionGate({ mode, onClose }: NewChatConnectionGatePr
                   : "bg-[var(--primary)] text-[var(--primary-foreground)] hover:opacity-90",
               )}
             >
-              {createChat.isPending ? <Loader2 size="0.75rem" className="animate-spin" /> : MODE_META[mode].icon}
-              Create Chat
-            </button>
+              {createChat.isPending ? <Loader2 size="0.75rem" className="animate-spin" /> : MODE_META[mode].icon}{localizeUi("ui.chat.newchatconnectiongate.createChat")}</button>
           </div>
         </div>
       </div>

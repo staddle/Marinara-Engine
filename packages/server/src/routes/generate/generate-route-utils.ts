@@ -3,7 +3,9 @@ import {
   GENERATION_PARAMETER_SEND_KEYS,
   SUMMARY_TAIL_MESSAGES,
   applyTrackerFieldLocksToGameStatePatch,
+  compileChatSummaryEntries,
   generationParametersSchema,
+  normalizeChatSummaryEntries,
   normalizeTextForMatch,
   normalizeSummaryTailMessages,
   normalizeWorldCustomFields,
@@ -528,7 +530,7 @@ export function isMessageHiddenFromAIForCharacter(
 }
 
 export function isRoleplaySummaryMode(chatMode: string): boolean {
-  return chatMode === "roleplay" || chatMode === "visual_novel";
+  return chatMode === "roleplay";
 }
 
 /**
@@ -564,6 +566,22 @@ export function computeSummaryHideIds(args: {
   return messages
     .filter((message) => entryIdSet.has(message.id) && !tailIdSet.has(message.id))
     .map((message) => message.id);
+}
+
+/** Return the one-based range covered by selected messages in the full chat order. */
+export function computeSummaryMessageRange(
+  allMessages: readonly { id: string }[],
+  selectedMessages: readonly { id: string }[],
+): { startIndex: number; endIndex: number } | null {
+  const messageIndexes = new Map(allMessages.map((message, index) => [message.id, index + 1]));
+  const selectedIndexes = selectedMessages
+    .map((message) => messageIndexes.get(message.id))
+    .filter((index): index is number => index !== undefined);
+  if (selectedIndexes.length === 0) return null;
+  return {
+    startIndex: Math.min(...selectedIndexes),
+    endIndex: Math.max(...selectedIndexes),
+  };
 }
 
 /**
@@ -625,9 +643,25 @@ export function selectRollingSummaryMessages<T extends { id: string; extra?: unk
   return visible.slice(-Math.max(size, sinceBoundary));
 }
 
-export function resolveRoleplayChatSummary(chatMode: string, chatMetadata: Record<string, unknown>): string | null {
+export function resolveRoleplayChatSummary(
+  chatMode: string,
+  chatMetadata: Record<string, unknown>,
+  options: { excludeMessageIds?: readonly string[] } = {},
+): string | null {
   if (!isRoleplaySummaryMode(chatMode)) return null;
-  return ((chatMetadata.summary as string) ?? "").trim() || null;
+  const summary = ((chatMetadata.summary as string) ?? "").trim() || null;
+  const excludedMessageIds = new Set((options.excludeMessageIds ?? []).filter(Boolean));
+  if (excludedMessageIds.size === 0) return summary;
+
+  const entries = normalizeChatSummaryEntries(chatMetadata.summaryEntries);
+  // Legacy summaries have no per-message provenance, so they cannot be
+  // safely retained while regenerating a historical message.
+  if (entries.length === 0) return null;
+  const retainedEntries = entries.filter((entry) => {
+    const coveredMessageIds = [...(entry.messageIds ?? []), ...(entry.hiddenMessageIds ?? [])];
+    return !coveredMessageIds.some((messageId) => excludedMessageIds.has(messageId));
+  });
+  return retainedEntries.length === entries.length ? summary : compileChatSummaryEntries(retainedEntries);
 }
 
 function escapeRegex(value: string): string {
@@ -859,7 +893,7 @@ export function shouldRestoreRegenerationCharacterTarget(
   configuredMode: unknown,
   characterIds: string[],
 ): boolean {
-  const isRoleplayGroup = chatMode === "roleplay" || chatMode === "visual_novel";
+  const isRoleplayGroup = chatMode === "roleplay";
   return !(isRoleplayGroup && characterIds.length > 1 && resolveGroupGenerationMode(chatMode, configuredMode) === "merged");
 }
 
@@ -942,7 +976,9 @@ export function formatSeparateAgentInjection(agentType: string, text: string, wr
         ? { heading: "Knowledge Retrieval", tag: "knowledge_retrieval" }
         : agentType === "director"
           ? { heading: "Narrative Director", tag: "narrative_director" }
-          : { heading: agentType, tag: agentType.replace(/[^a-z0-9_-]/gi, "_") };
+          : agentType === "long-term-memory"
+            ? { heading: "Long-Term Memory", tag: "long_term_memory" }
+            : { heading: agentType, tag: agentType.replace(/[^a-z0-9_-]/gi, "_") };
 
   if (wrapFormat === "none") return `${meta.heading}:\n${text}`;
   if (wrapFormat === "markdown") return `## ${meta.heading}\n${text}`;
@@ -1064,6 +1100,11 @@ export function parseStoredGenerationParameters(raw: unknown): StoredGenerationP
   }
   if (isPlainRecord(source.customParameters)) {
     out.customParameters = mergeCustomParameters({}, source.customParameters);
+  }
+  if (isPlainRecord(source.managedCustomParameters)) {
+    const managedCustomParameters =
+      generationParametersSchema.shape.managedCustomParameters.safeParse(source.managedCustomParameters);
+    if (managedCustomParameters.success) out.managedCustomParameters = managedCustomParameters.data;
   }
   if (isPlainRecord(source.enabledParameters)) {
     const enabledParameters: GenerationParameterSendMap = {};
@@ -1251,6 +1292,64 @@ type TrackerCharacterCardIdentity = {
   avatarCrop?: unknown;
 };
 
+function getExplicitNameAliases(value: unknown): string[] {
+  if (typeof value !== "string") return [];
+  const aliases = new Set<string>();
+  const patterns = [
+    /"([^"\n]{1,80})"/gu,
+    /“([^”\n]{1,80})”/gu,
+    /'([^'\n]{1,80})'/gu,
+    /‘([^’\n]{1,80})’/gu,
+    /\(([^()\n]{1,80})\)/gu,
+  ];
+  for (const pattern of patterns) {
+    for (const match of value.matchAll(pattern)) {
+      const alias = normalizeTextForMatch(match[1]);
+      if (alias) aliases.add(alias);
+    }
+  }
+  return [...aliases];
+}
+
+function buildUniqueCanonicalNames(names: readonly string[]): Map<string, string> {
+  const namesByKey = new Map<string, string>();
+  const duplicateKeys = new Set<string>();
+  for (const name of names) {
+    const trimmedName = name.trim();
+    const key = normalizeTextForMatch(trimmedName);
+    if (!key) continue;
+    if (namesByKey.has(key)) duplicateKeys.add(key);
+    else namesByKey.set(key, trimmedName);
+  }
+  for (const key of duplicateKeys) namesByKey.delete(key);
+  return namesByKey;
+}
+
+function resolveExplicitCanonicalName(value: unknown, namesByKey: Map<string, string>): string | null {
+  const exactName = namesByKey.get(normalizeTextForMatch(value));
+  if (exactName) return exactName;
+
+  const aliasMatches = getExplicitNameAliases(value)
+    .map((alias) => namesByKey.get(alias))
+    .filter((candidate): candidate is string => !!candidate);
+  const uniqueMatches = new Set(aliasMatches);
+  return uniqueMatches.size === 1 ? aliasMatches[0]! : null;
+}
+
+/** Canonicalize only structured Game Mode VN speaker labels, leaving prose and ambiguous aliases unchanged. */
+export function canonicalizeGamePartySpeakerLabels(content: string, canonicalNames: readonly string[]): string {
+  const namesByKey = buildUniqueCanonicalNames(canonicalNames);
+  if (!content || namesByKey.size === 0) return content;
+
+  return content.replace(
+    /^(\s*)\[([^\]\r\n]+)\](\s+\[(?:main|side|thought|whisper:[^\]\r\n]+)\]\s+\[[^\]\r\n]+\]\s*:)/gmu,
+    (line, indentation: string, speakerName: string, suffix: string) => {
+      const canonicalName = resolveExplicitCanonicalName(speakerName, namesByKey);
+      return canonicalName ? `${indentation}[${canonicalName}]${suffix}` : line;
+    },
+  );
+}
+
 export function applyTrackerCharacterCardIdentity(
   characters: Array<Record<string, unknown>>,
   cards: TrackerCharacterCardIdentity[],
@@ -1265,16 +1364,42 @@ export function applyTrackerCharacterCardIdentity(
     else cardsByName.set(name, card);
   }
   for (const name of duplicateNames) cardsByName.delete(name);
+  const canonicalCardNamesByKey = new Map([...cardsByName].map(([key, card]) => [key, card.name]));
 
   const matchedIds = new Set<string>();
+  const canonicalCharacters: Array<Record<string, unknown>> = [];
+  const canonicalIndexByCardId = new Map<string, number>();
   for (const character of characters) {
-    const card = cardsById.get(trackerCharacterIdKey(character)) ?? cardsByName.get(trackerCharacterNameKey(character));
-    if (!card) continue;
-    character.characterId = card.id;
-    character.avatarPath = card.avatarPath ?? null;
-    character.avatarCrop = card.avatarCrop ?? null;
+    const explicitCanonicalName = resolveExplicitCanonicalName(character.name, canonicalCardNamesByKey);
+    const card =
+      cardsById.get(trackerCharacterIdKey(character)) ??
+      cardsByName.get(trackerCharacterNameKey(character)) ??
+      (explicitCanonicalName ? cardsByName.get(normalizeTextForMatch(explicitCanonicalName)) : undefined);
+    if (!card) {
+      canonicalCharacters.push(character);
+      continue;
+    }
+
+    const canonicalCharacter = {
+      ...character,
+      characterId: card.id,
+      name: card.name,
+      avatarPath: card.avatarPath ?? null,
+      avatarCrop: card.avatarCrop ?? null,
+    };
+    const existingIndex = canonicalIndexByCardId.get(card.id);
+    if (existingIndex === undefined) {
+      canonicalIndexByCardId.set(card.id, canonicalCharacters.length);
+      canonicalCharacters.push(canonicalCharacter);
+    } else {
+      canonicalCharacters[existingIndex] = {
+        ...canonicalCharacters[existingIndex],
+        ...canonicalCharacter,
+      };
+    }
     matchedIds.add(card.id);
   }
+  characters.splice(0, characters.length, ...canonicalCharacters);
   return matchedIds;
 }
 

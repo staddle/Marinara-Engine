@@ -14,14 +14,16 @@ import { useChatStore } from "../../stores/chat.store";
 import { useGameModeStore } from "../../stores/game-mode.store";
 import { useUIStore } from "../../stores/ui.store";
 import { api } from "../../lib/api-client";
-import { cn, getAvatarCropStyle, type AvatarCropValue } from "../../lib/utils";
+import type { AvatarCrop } from "@marinara-engine/shared";
+import { cn, getAvatarCropStyle } from "../../lib/utils";
 import { AnimatePresence, motion } from "framer-motion";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 type ChatNotification = {
   chatId: string;
   characterName: string;
   avatarUrl: string | null;
-  avatarCrop?: AvatarCropValue | null;
+  avatarCrop?: AvatarCrop | null;
   count: number;
   kind?: "message" | "call";
   callId?: string | null;
@@ -29,6 +31,7 @@ type ChatNotification = {
 };
 
 export function ChatNotificationBubbles() {
+  const { t: localizeUi } = useUiTranslation();
   const queryClient = useQueryClient();
   const chatNotifications = useChatStore((s) => s.chatNotifications);
   const setActiveChatId = useChatStore((s) => s.setActiveChatId);
@@ -70,7 +73,7 @@ export function ChatNotificationBubbles() {
       navigateToChat(notif.chatId);
       setMobileExpanded(false);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not answer the call.");
+      toast.error(error instanceof Error ? error.message :localizeUi("ui.chat.chatnotificationbubbles.couldNotAnswerTheCall"));
     } finally {
       setPendingCallAction(null);
     }
@@ -85,7 +88,7 @@ export function ChatNotificationBubbles() {
       refreshCallState(notif.chatId);
       setMobileExpanded(false);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not decline the call.");
+      toast.error(error instanceof Error ? error.message :localizeUi("ui.chat.chatnotificationbubbles.couldNotDeclineTheCall"));
     } finally {
       setPendingCallAction(null);
     }
@@ -148,7 +151,7 @@ export function ChatNotificationBubbles() {
               transition={{ type: "spring", damping: 20, stiffness: 300 }}
               className="pointer-events-auto relative h-12 w-12"
               onClick={() => setMobileExpanded(true)}
-              title={`${notifications.length} conversations`}
+              title={localizeUi("ui.chat.chatnotificationbubbles.value1Conversations", { value1: notifications.length })}
             >
               {/* Stacked circles (max 3 visible) */}
               {notifications.slice(0, 3).map((notif, i) => (
@@ -211,6 +214,7 @@ function NotificationBubble({
   onDeclineCall: () => void;
   pendingCallAction: string | null;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const isCall = notif.kind === "call" && !!notif.callId;
   const accepting = isCall && pendingCallAction === `accept:${notif.callId}`;
   const declining = isCall && pendingCallAction === `decline:${notif.callId}`;
@@ -252,7 +256,7 @@ function NotificationBubble({
             : "bg-[var(--accent)]/20 shadow-lg ring-2 ring-[var(--accent)]/40",
           "transition-transform hover:scale-110 active:scale-95",
         )}
-        title={isCall ? `${notif.characterName} is calling` : `${notif.characterName} sent a message`}
+        title={isCall ?localizeUi("ui.chat.notificationbubble.value1IsCalling", { value1: notif.characterName }) :localizeUi("ui.chat.notificationbubble.value1SentAMessage", { value1: notif.characterName })}
       >
         {notif.avatarUrl ? (
           <img
@@ -282,7 +286,7 @@ function NotificationBubble({
               onDeclineCall();
             }}
             className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--destructive)] text-white shadow-sm transition-transform hover:scale-105 active:scale-95 disabled:opacity-60"
-            title="Decline call"
+            title={localizeUi("ui.chat.notificationbubble.declineCall")}
           >
             {declining ? <Loader2 size="0.8125rem" className="animate-spin" /> : <PhoneOff size="0.8125rem" />}
           </button>
@@ -294,7 +298,7 @@ function NotificationBubble({
               onAcceptCall();
             }}
             className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500 text-white shadow-sm transition-transform hover:scale-105 active:scale-95 disabled:opacity-60"
-            title="Answer call"
+            title={localizeUi("ui.chat.notificationbubble.answerCall")}
           >
             {accepting ? <Loader2 size="0.8125rem" className="animate-spin" /> : <Phone size="0.8125rem" />}
           </button>

@@ -40,6 +40,10 @@ export interface MacroContext {
   timeZone?: string;
   /** Agent data keyed by agent type (for {{agent::TYPE}}) */
   agentData?: Record<string, string>;
+  /** Referenced character names keyed by exact card ID (for {{CHARACTER_ID}}) */
+  characterReferences?: Record<string, string>;
+  /** Activated lorebook Outlet content keyed by its exact, case-sensitive name */
+  outlets?: Record<string, string>;
   /** Current character card fields used by macros like {{description}} */
   characterFields?: {
     phoneticName?: string;
@@ -63,7 +67,7 @@ export interface MacroContext {
   };
   /** Conversation-mode-only fields for {{convo_display}}/{{char_about}}/{{persona_about}}/{{convo_behavior}}.
    *  Populated ONLY by the conversation prompt branch, so these macros resolve to ""
-   *  in Roleplay/Visual-Novel/Game — even if placed in a shared surface those modes render. */
+   *  in Roleplay/Game — even if placed in a shared surface those modes render. */
   convoFields?: {
     charDisplayName?: string;
     charAbout?: string;
@@ -111,8 +115,10 @@ export interface SupportedMacroDefinition {
   description: string;
 }
 
+export const CHARACTER_REFERENCE_ID_PATTERN = /\{\{([A-Za-z0-9_-]{21})\}\}/g;
+
 const CHARACTER_MACRO_PATTERN =
-  /\{\{(?:char|charName|charNamePhonetic|charPhonetic|description|personality|backstory|appearance|scenario|example|charSysInfo|charPostHistory)\}\}|\{\{\s*#if\s+[^}]*\b(?:char|charName|charNamePhonetic|charPhonetic|character|speaker|description|personality|backstory|appearance|scenario|example|charSysInfo|charPostHistory)\b/i;
+  /\{\{(?:char|charName|charNamePhonetic|charPhonetic|description|personality|backstory|appearance|scenario|example|charSysInfo|charPostHistory|convo_display|char_about|convo_behavior)\}\}|\{\{\s*#if\s+[^}]*\b(?:char|charName|charNamePhonetic|charPhonetic|character|speaker|description|personality|backstory|appearance|scenario|example|charSysInfo|charPostHistory|convo_display|char_about|convo_behavior)\b/i;
 const MAX_CHARACTER_FIELD_RESOLUTION_DEPTH = 4;
 const MAX_DICE_COUNT = 1000;
 const MAX_DICE_SIDES = 1_000_000;
@@ -149,10 +155,16 @@ const DEFERRED_CHARACTER_MACRO_TOKENS = {
   example: `${DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX}EXAMPLE\x1f`,
   systemPrompt: `${DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX}SYSTEM_PROMPT\x1f`,
   postHistoryInstructions: `${DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX}POST_HISTORY\x1f`,
+  convoDisplay: `${DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX}CONVO_DISPLAY\x1f`,
+  charAbout: `${DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX}CHAR_ABOUT\x1f`,
+  convoBehavior: `${DEFERRED_CHARACTER_MACRO_TOKEN_PREFIX}CONVO_BEHAVIOR\x1f`,
 } as const;
 
 export type CharacterMacroProfile = NonNullable<MacroContext["characterProfiles"]>[number];
-type CharacterFieldMacroName = Exclude<keyof typeof DEFERRED_CHARACTER_MACRO_TOKENS, "char" | "charPhonetic" | "group">;
+type CharacterFieldMacroName = Exclude<
+  keyof typeof DEFERRED_CHARACTER_MACRO_TOKENS,
+  "char" | "charPhonetic" | "group" | "convoDisplay" | "charAbout" | "convoBehavior"
+>;
 type ConditionalBlockPayload = {
   condition: string;
   truthy: string;
@@ -307,6 +319,12 @@ export const SUPPORTED_MACROS: readonly SupportedMacroDefinition[] = [
   { category: "Identity", syntax: "{{charName}}", description: "Alias for {{char}}" },
   {
     category: "Identity",
+    syntax: "{{21-character-card-ID}}",
+    description:
+      "Name of another character, pulls the card into the context; referenced by its exact 21-character ID",
+  },
+  {
+    category: "Identity",
     syntax: "{{charNamePhonetic}}",
     description: "Current character phonetic name, or {{char}} when none is configured",
   },
@@ -376,6 +394,11 @@ export const SUPPORTED_MACROS: readonly SupportedMacroDefinition[] = [
   { category: "Context", syntax: "{{lastGenerationType}}", description: "Current generation type label" },
   { category: "Context", syntax: "{{idle_duration}}", description: "Time since the last chat activity" },
   { category: "Context", syntax: "{{agent::TYPE}}", description: "Cached output for an agent or tracker type" },
+  {
+    category: "Lorebooks",
+    syntax: "{{outlet::name}}",
+    description: "Activated lorebook entries assigned to the exact, case-sensitive Outlet name",
+  },
   {
     category: "Game",
     syntax: "{{gameStoryboardKeyframeCount}}",
@@ -481,6 +504,7 @@ function macroContextForCharacterProfile(profile: CharacterMacroProfile, base?: 
     timeZone: base?.timeZone,
     agentData: base?.agentData,
     personaFields: base?.personaFields,
+    convoFields: base?.convoFields,
     characterFields: {
       phoneticName: profile.phoneticName ?? "",
       description: profile.description ?? "",
@@ -554,6 +578,15 @@ export function resolveDeferredCharacterMacros(
   result = result
     .split(DEFERRED_CHARACTER_MACRO_TOKENS.postHistoryInstructions)
     .join(resolveCharacterFieldValue(profile, "postHistoryInstructions", 0, baseContext));
+  result = result
+    .split(DEFERRED_CHARACTER_MACRO_TOKENS.convoDisplay)
+    .join(scopedContext.convoFields?.charDisplayName ?? "");
+  result = result
+    .split(DEFERRED_CHARACTER_MACRO_TOKENS.charAbout)
+    .join(scopedContext.convoFields?.charAbout ?? "");
+  result = result
+    .split(DEFERRED_CHARACTER_MACRO_TOKENS.convoBehavior)
+    .join(scopedContext.convoFields?.convoBehavior ?? "");
   return result;
 }
 
@@ -831,7 +864,7 @@ function resolveConditionalOperand(raw: string, ctx: MacroContext, options: Reso
 
 function isCharacterConditionalOperand(raw: string): boolean {
   const normalized = normalizeConditionKey(raw);
-  return /^(char|charname|charphonetic|charnamephonetic|character|characterphonetic|speaker|speakerphonetic|group|description|personality|backstory|appearance|scenario|example|charsysinfo|charposthistory)$/.test(
+  return /^(char|charname|charphonetic|charnamephonetic|character|characterphonetic|speaker|speakerphonetic|group|description|personality|backstory|appearance|scenario|example|charsysinfo|charposthistory|convo_display|char_about|convo_behavior)$/.test(
     normalized,
   );
 }
@@ -1588,6 +1621,7 @@ function formatMacroDateTime(now: Date, requestedTimeZone?: string): MacroDateTi
  *  - {{user}} — user's display name
  *  - {{persona}} — active persona description, personality, backstory, appearance, and scenario joined by new lines
  *  - {{char}} — current character name
+ *  - {{CHARACTER_ID}} — name of another character card referenced by its exact ID
  *  - {{characters}} — comma-separated list of all character names
  *  - {{group}} — comma-separated list of other active chat characters
  *  - {{description}} / {{personality}} / {{backstory}} / {{appearance}} / {{scenario}} / {{example}} — current character card fields
@@ -1613,6 +1647,7 @@ function formatMacroDateTime(now: Date, requestedTimeZone?: string): MacroDateTi
  *  - {{chatId}} — current chat ID
  *  - {{lastGenerationType}} — current generation type label
  *  - {{idle_duration}} — time since the last chat activity
+ *  - {{outlet::name}} — activated lorebook entries assigned to a named Outlet
  *  - {{gameStoryboardKeyframeCount}} — current Game Mode Keyframes per Turn target
  *  - {{// comment}} — removed (author comments)
  *  - {{trim}} — remove surrounding whitespace
@@ -1662,8 +1697,12 @@ export function resolveMacros(template: string, ctx: MacroContext, options: Reso
     if (field === "char") return ctx.char;
     if (field === "charPhonetic") return ctx.charPhonetic || ctx.characterFields?.phoneticName || ctx.char;
     if (field === "group") return resolveGroupCharacters(ctx);
-    return resolveNestedFieldMacros(ctx.characterFields?.[field] ?? "");
+    return resolveNestedFieldMacros(ctx.characterFields?.[field as CharacterFieldMacroName] ?? "");
   };
+  const conversationCharacterReplacement = (
+    field: "convoDisplay" | "charAbout" | "convoBehavior",
+    value: string | undefined,
+  ): string => (deferCharacterMacros === "all" ? DEFERRED_CHARACTER_MACRO_TOKENS[field] : (value ?? ""));
 
   // ── Comments — strip first so they don't interfere ──
   result = stripMacroComments(result);
@@ -1739,15 +1778,28 @@ export function resolveMacros(template: string, ctx: MacroContext, options: Reso
   result = result.replace(/\{\{charPostHistory\}\}/gi, characterReplacement("postHistoryInstructions"));
   // Conversation-mode-only macros. `convoFields` is set only by the convo prompt
   // branch, so these are "" in every other mode.
-  result = result.replace(/\{\{convo_display\}\}/gi, () => ctx.convoFields?.charDisplayName ?? "");
-  result = result.replace(/\{\{char_about\}\}/gi, () => ctx.convoFields?.charAbout ?? "");
+  result = result.replace(/\{\{convo_display\}\}/gi, () =>
+    conversationCharacterReplacement("convoDisplay", ctx.convoFields?.charDisplayName),
+  );
+  result = result.replace(/\{\{char_about\}\}/gi, () =>
+    conversationCharacterReplacement("charAbout", ctx.convoFields?.charAbout),
+  );
   result = result.replace(/\{\{persona_about\}\}/gi, () => ctx.convoFields?.personaAbout ?? "");
-  result = result.replace(/\{\{convo_behavior\}\}/gi, () => ctx.convoFields?.convoBehavior ?? "");
+  result = result.replace(/\{\{convo_behavior\}\}/gi, () =>
+    conversationCharacterReplacement("convoBehavior", ctx.convoFields?.convoBehavior),
+  );
   result = result.replace(/\{\{input\}\}/gi, ctx.lastInput ?? "");
   result = result.replace(/\{\{model\}\}/gi, ctx.model ?? "");
   result = result.replace(/\{\{chatId\}\}/gi, ctx.chatId ?? "");
   result = result.replace(/\{\{lastGenerationType\}\}/gi, ctx.lastGenerationType ?? "");
   result = result.replace(/\{\{idle_duration\}\}/gi, ctx.idleDuration ?? "");
+  const unresolvedCharacterReferences = new Set<string>();
+  result = result.replace(CHARACTER_REFERENCE_ID_PATTERN, (match, characterId: string) => {
+    const reference = ctx.characterReferences?.[characterId];
+    if (reference !== undefined) return reference;
+    unresolvedCharacterReferences.add(characterId);
+    return match;
+  });
 
   // ── Date/time ──
   // #3164: formatting the date/time parts constructs Intl.DateTimeFormat — a
@@ -1833,6 +1885,7 @@ export function resolveMacros(template: string, ctx: MacroContext, options: Reso
   // ── Catch-all: resolve any remaining {{name}} from variables ──
   // This allows preset variables like {{POV}} to resolve directly
   result = result.replace(/\{\{(\w+)\}\}/g, (match, name) => {
+    if (unresolvedCharacterReferences.has(name)) return match;
     const val = ctx.variables[name];
     return val !== undefined ? val : match; // leave unknown macros as-is
   });
@@ -1843,6 +1896,18 @@ export function resolveMacros(template: string, ctx: MacroContext, options: Reso
   // dice rolls, variable writes, or other macros back into this resolution.
   result = result.replace(/\{\{agent::([\w-]+)\}\}/gi, (_, type) => {
     return ctx.agentData?.[type] ?? "";
+  });
+
+  // Outlet content has already passed through lorebook macro resolution before
+  // it is collected. Insert it after every executable macro pass so Outlet
+  // content cannot recursively invoke another Outlet or introduce side effects.
+  result = replaceBalancedMacros(result, (body) => {
+    const match = body.match(/^outlet::([\s\S]*)$/i);
+    if (!match) return undefined;
+    const name = (match[1] ?? "").trim();
+    return name && ctx.outlets && Object.prototype.hasOwnProperty.call(ctx.outlets, name)
+      ? ctx.outlets[name]!
+      : "";
   });
 
   if (options.trimResult !== false) {

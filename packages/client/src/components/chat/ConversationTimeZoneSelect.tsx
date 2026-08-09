@@ -10,6 +10,7 @@ import {
 } from "../../lib/conversation-time-zone";
 import { cn } from "../../lib/utils";
 import { useUIStore } from "../../stores/ui.store";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 type ConversationTimeZoneSelectProps = {
   className?: string;
@@ -17,6 +18,7 @@ type ConversationTimeZoneSelectProps = {
 };
 
 export function ConversationTimeZoneSelect({ className, compact = false }: ConversationTimeZoneSelectProps) {
+  const { t: localizeUi } = useUiTranslation();
   const selectId = useId();
   const queryClient = useQueryClient();
   const conversationTimeZone = useUIStore((state) => state.conversationTimeZone);
@@ -45,13 +47,13 @@ export function ConversationTimeZoneSelect({ className, compact = false }: Conve
       } catch (error) {
         if (requestId === requestIdRef.current) {
           setConversationTimeZone(previousTimeZone);
-          toast.error(error instanceof Error ? error.message : "Failed to save the Conversation timezone");
+          toast.error(error instanceof Error ? error.message :localizeUi("ui.chat.conversationtimezoneselect.failedToSaveTheConversationTimezone"));
         }
       } finally {
         if (requestId === requestIdRef.current) setIsSaving(false);
       }
     },
-    [queryClient, setConversationTimeZone],
+    [queryClient, setConversationTimeZone, localizeUi],
   );
 
   const selectTimeZone = (nextTimeZone: string) => {
@@ -65,12 +67,10 @@ export function ConversationTimeZoneSelect({ className, compact = false }: Conve
     <div className={cn("space-y-1.5", className)}>
       <div className="flex flex-wrap items-center justify-between gap-1.5">
         <label htmlFor={selectId} className="inline-flex items-center gap-1.5 text-xs font-medium">
-          <Clock3 size="0.75rem" className="text-[var(--muted-foreground)]" />
-          Schedule timezone
-        </label>
+          <Clock3 size="0.75rem" className="text-[var(--muted-foreground)]" />{localizeUi("ui.chat.conversationtimezoneselect.scheduleTimezone")}</label>
         <span className="inline-flex items-center gap-1 text-[0.59375rem] text-[var(--muted-foreground)]">
           {isSaving ? <Loader2 size="0.625rem" className="animate-spin" /> : <Check size="0.625rem" />}
-          {isSaving ? "Saving" : "All conversations"}
+          {isSaving ?localizeUi("ui.noodle.noodlehome.saving") :localizeUi("ui.chat.conversationtimezoneselect.allConversations")}
         </span>
       </div>
 
@@ -104,13 +104,11 @@ export function ConversationTimeZoneSelect({ className, compact = false }: Conve
             onClick={() => selectTimeZone(detectedTimeZone)}
             className="inline-flex min-h-10 items-center justify-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--background)] px-3 text-[0.6875rem] font-medium text-[var(--foreground)] transition-colors hover:bg-[var(--accent)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] disabled:cursor-wait disabled:opacity-60"
           >
-            <LocateFixed size="0.75rem" /> Use device
-          </button>
+            <LocateFixed size="0.75rem" /> {localizeUi("ui.chat.conversationtimezoneselect.useDevice")}</button>
         )}
       </div>
 
-      <p className="text-[0.59375rem] leading-4 text-[var(--muted-foreground)]/80">
-        Availability and autonomous messages follow this timezone. Your device currently reports {detectedTimeZone}.
+      <p className="text-[0.59375rem] leading-4 text-[var(--muted-foreground)]/80">{localizeUi("ui.chat.conversationtimezoneselect.availabilityAndAutonomousMessagesFollowThisTimezoneYourDevice")} {detectedTimeZone}.
       </p>
     </div>
   );

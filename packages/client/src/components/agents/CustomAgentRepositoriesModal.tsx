@@ -1,6 +1,12 @@
 import { useMemo, useState } from "react";
 import { Check, ExternalLink, GitFork, Loader2, Plus, RefreshCw, Trash2, TriangleAlert } from "lucide-react";
-import type { CustomAgentRepositoryChange, CustomAgentRepositoryPreview } from "@marinara-engine/shared";
+import {
+  CUSTOM_AGENT_PERMISSIONS_EXPLICIT_SETTING,
+  normalizeCustomAgentCapabilities,
+  type CustomAgentCapability,
+  type CustomAgentRepositoryChange,
+  type CustomAgentRepositoryPreview,
+} from "@marinara-engine/shared";
 import { toast } from "sonner";
 import {
   useAddCustomAgentRepository,
@@ -13,6 +19,8 @@ import { getPrivilegedActionErrorMessage } from "../../lib/api-client";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { cn } from "../../lib/utils";
 import { Modal } from "../ui/Modal";
+import { useTranslation as useUiTranslation } from "react-i18next";
+import { useAgentImportPolicy } from "../../hooks/use-agents";
 
 const TRUST_WARNING =
   "This repo and its agents are not affiliated with or vetted by PastaDevs. Custom agents can run tools, send prompts to your configured connections, and change behavior on every sync. Only add repos from people or sources you trust.";
@@ -37,8 +45,24 @@ function previewSettings(change: CustomAgentRepositoryChange) {
   return configuration;
 }
 
+function previewPermissions(change: CustomAgentRepositoryChange): CustomAgentCapability[] {
+  const definition = change.definition;
+  if (!definition) return [];
+  const settings = {
+    ...(definition.defaultSettings ?? {}),
+    ...(definition.defaultTools ? { enabledTools: definition.defaultTools } : {}),
+    ...(definition.resultType ? { resultType: definition.resultType } : {}),
+    [CUSTOM_AGENT_PERMISSIONS_EXPLICIT_SETTING]: false,
+  };
+  return Object.entries(normalizeCustomAgentCapabilities(settings))
+    .filter(([, enabled]) => enabled === true)
+    .map(([capability]) => capability as CustomAgentCapability);
+}
+
 export function CustomAgentRepositoriesModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const { t: localizeUi } = useUiTranslation();
   const repositories = useCustomAgentRepositories();
+  const { data: agentImportPolicy } = useAgentImportPolicy();
   const previewMutation = usePreviewCustomAgentRepository();
   const addMutation = useAddCustomAgentRepository();
   const syncMutation = useSyncCustomAgentRepository();
@@ -50,16 +74,21 @@ export function CustomAgentRepositoriesModal({ open, onClose }: { open: boolean;
     () => repositories.data?.repositories.find((entry) => entry.id === preview?.repository.id) ?? null,
     [preview?.repository.id, repositories.data?.repositories],
   );
+  const previewPermissionsByAgentId = useMemo(
+    () => new Map((preview?.changes ?? []).map((change) => [change.agentId, previewPermissions(change)])),
+    [preview],
+  );
   const contentChanges = preview?.changes.filter((change) => change.status !== "unchanged") ?? [];
   const pending =
     previewMutation.isPending || addMutation.isPending || syncMutation.isPending || removeMutation.isPending;
+  const agentImportsEnabled = agentImportPolicy?.enabled === true;
 
   const previewUrl = async () => {
     if (!url.trim()) return;
     try {
       setPreview(await previewMutation.mutateAsync({ url: url.trim() }));
     } catch (error) {
-      toast.error(getPrivilegedActionErrorMessage(error, "Repository preview failed."));
+      toast.error(getPrivilegedActionErrorMessage(error,localizeUi("ui.agents.customagentrepositoriesmodal.repositoryPreviewFailed")));
     }
   };
 
@@ -67,26 +96,33 @@ export function CustomAgentRepositoriesModal({ open, onClose }: { open: boolean;
     try {
       setPreview(await previewMutation.mutateAsync({ repositoryId }));
     } catch (error) {
-      toast.error(getPrivilegedActionErrorMessage(error, "Repository preview failed."));
+      toast.error(getPrivilegedActionErrorMessage(error,localizeUi("ui.agents.customagentrepositoriesmodal.repositoryPreviewFailed")));
     }
   };
 
   const applyPreview = async () => {
     if (!preview) return;
+    if (!agentImportsEnabled) {
+      toast.info(localizeUi("settings.agentImports.enableFirst"));
+      return;
+    }
     if (!configuredRepository) {
       const confirmed = await showConfirmDialog({
-        title: "Add this custom repository?",
-        message: `${TRUST_WARNING}\n\n${preview.changes.length} agent${preview.changes.length === 1 ? "" : "s"} will be imported.`,
-        confirmLabel: "Add Repo Anyway",
+        title:localizeUi("ui.agents.customagentrepositoriesmodal.addThisCustomRepository"),
+        message: localizeUi("ui.agents.customagentrepositoriesmodal.repositoryAgentsWillBeImported", {
+          warning: TRUST_WARNING,
+          count: preview.changes.length,
+        }),
+        confirmLabel:localizeUi("ui.agents.customagentrepositoriesmodal.addRepoAnyway"),
       });
       if (!confirmed) return;
       try {
         await addMutation.mutateAsync({ url: preview.repository.url, digest: preview.digest, confirmed });
-        toast.success("Custom repository added and its agents imported.");
+        toast.success(localizeUi("ui.agents.customagentrepositoriesmodal.customRepositoryAddedAndItsAgentsImported"));
         setUrl("");
         setPreview(null);
       } catch (error) {
-        toast.error(getPrivilegedActionErrorMessage(error, "Repository installation failed."));
+        toast.error(getPrivilegedActionErrorMessage(error,localizeUi("ui.agents.customagentrepositoriesmodal.repositoryInstallationFailed")));
       }
       return;
     }
@@ -97,9 +133,9 @@ export function CustomAgentRepositoriesModal({ open, onClose }: { open: boolean;
         .map((change) => `${change.name}: ${STATUS_LABELS[change.status].toLowerCase()}`)
         .join("\n");
       confirmed = await showConfirmDialog({
-        title: "Apply repository changes?",
-        message: `${TRUST_WARNING}\n\nRemote values replace the managed prompt, settings, and tools shown in this preview. Removed definitions are kept as local custom agents.\n\n${summary}`,
-        confirmLabel: "Apply Changes",
+        title:localizeUi("ui.agents.customagentrepositoriesmodal.applyRepositoryChanges"),
+        message:localizeUi("ui.agents.customagentrepositoriesmodal.value1RemoteValuesReplaceTheManagedPromptSettingsAnd", { value1: TRUST_WARNING, value2: summary }),
+        confirmLabel:localizeUi("ui.agents.customagentrepositoriesmodal.applyChanges"),
       });
       if (!confirmed) return;
     }
@@ -109,28 +145,27 @@ export function CustomAgentRepositoriesModal({ open, onClose }: { open: boolean;
         digest: preview.digest,
         confirmed,
       });
-      toast.success(contentChanges.length > 0 ? "Repository changes applied." : "Repository is already current.");
+      toast.success(contentChanges.length > 0 ?localizeUi("ui.agents.customagentrepositoriesmodal.repositoryChangesApplied") :localizeUi("ui.agents.customagentrepositoriesmodal.repositoryIsAlreadyCurrent"));
       setPreview(null);
     } catch (error) {
-      toast.error(getPrivilegedActionErrorMessage(error, "Repository sync failed."));
+      toast.error(getPrivilegedActionErrorMessage(error,localizeUi("ui.agents.customagentrepositoriesmodal.repositorySyncFailed")));
     }
   };
 
   const removeRepository = async (repositoryId: string, name: string) => {
     const confirmed = await showConfirmDialog({
-      title: `Remove ${name}?`,
-      message:
-        "This stops future synchronization. Imported agents, their runs, and their memory remain available as local custom agents.",
-      confirmLabel: "Remove Source",
+      title:localizeUi("ui.agents.customagentrepositoriesmodal.removeValue1", { value1: name }),
+      message:localizeUi("ui.agents.customagentrepositoriesmodal.thisStopsFutureSynchronizationImportedAgentsTheirRunsAnd"),
+      confirmLabel:localizeUi("ui.agents.customagentrepositoriesmodal.removeSource"),
       tone: "destructive",
     });
     if (!confirmed) return;
     try {
       await removeMutation.mutateAsync(repositoryId);
       if (preview?.repository.id === repositoryId) setPreview(null);
-      toast.success("Custom repository removed. Its agents were kept locally.");
+      toast.success(localizeUi("ui.agents.customagentrepositoriesmodal.customRepositoryRemovedItsAgentsWereKeptLocally"));
     } catch (error) {
-      toast.error(getPrivilegedActionErrorMessage(error, "Repository removal failed."));
+      toast.error(getPrivilegedActionErrorMessage(error,localizeUi("ui.agents.customagentrepositoriesmodal.repositoryRemovalFailed")));
     }
   };
 
@@ -138,7 +173,7 @@ export function CustomAgentRepositoriesModal({ open, onClose }: { open: boolean;
     <Modal
       open={open}
       onClose={onClose}
-      title="Custom Agent Repositories"
+      title={localizeUi("ui.agents.customagentrepositoriesmodal.customAgentRepositories")}
       width="max-w-3xl"
       mobileFullscreen
       closeDisabled={pending}
@@ -150,12 +185,8 @@ export function CustomAgentRepositoriesModal({ open, onClose }: { open: boolean;
         </div>
 
         <section aria-labelledby="custom-repository-add-heading">
-          <h3 id="custom-repository-add-heading" className="text-base font-semibold">
-            Preview a GitHub repository
-          </h3>
-          <p className="mt-1 text-sm text-[var(--muted-foreground)]">
-            Add the repository root URL. It must contain a top-level <code>agents.json</code> file.
-          </p>
+          <h3 id="custom-repository-add-heading" className="text-base font-semibold">{localizeUi("ui.agents.customagentrepositoriesmodal.previewAGithubRepository")}</h3>
+          <p className="mt-1 text-sm text-[var(--muted-foreground)]">{localizeUi("ui.agents.customagentrepositoriesmodal.addTheRepositoryRootUrlItMustContainA")} <code>{"agents.json"}</code> {localizeUi("ui.agents.customagentrepositoriesmodal.file")}</p>
           <form
             className="mt-3 flex flex-col gap-2 sm:flex-row"
             onSubmit={(event) => {
@@ -167,8 +198,8 @@ export function CustomAgentRepositoriesModal({ open, onClose }: { open: boolean;
               value={url}
               onChange={(event) => setUrl(event.target.value)}
               className="mari-chrome-field h-11 min-w-0 flex-1 px-3 text-sm"
-              placeholder="https://github.com/owner/agent-repository"
-              aria-label="GitHub agent repository URL"
+              placeholder={localizeUi("ui.agents.customagentrepositoriesmodal.httpsGithubComOwnerAgentRepository")}
+              aria-label={localizeUi("ui.agents.customagentrepositoriesmodal.githubAgentRepositoryUrl")}
               disabled={pending}
             />
             <button
@@ -176,25 +207,20 @@ export function CustomAgentRepositoriesModal({ open, onClose }: { open: boolean;
               className="mari-chrome-control mari-chrome-control--primary h-11 shrink-0 px-4 text-sm"
               disabled={pending || !url.trim()}
             >
-              {previewMutation.isPending ? <Loader2 className="animate-spin" size="0.9rem" /> : <Plus size="0.9rem" />}
-              Preview
-            </button>
+              {previewMutation.isPending ? <Loader2 className="animate-spin" size="0.9rem" /> : <Plus size="0.9rem" />}{localizeUi("settings.notifications.customSound.actions.preview")}</button>
           </form>
         </section>
 
         <section aria-labelledby="custom-repository-saved-heading">
           <div className="flex items-center justify-between gap-3">
-            <h3 id="custom-repository-saved-heading" className="text-base font-semibold">
-              Saved sources
-            </h3>
+            <h3 id="custom-repository-saved-heading" className="text-base font-semibold">{localizeUi("ui.agents.customagentrepositoriesmodal.savedSources")}</h3>
             <span className="text-xs tabular-nums text-[var(--muted-foreground)]">
               {repositories.data?.repositories.length ?? 0}
             </span>
           </div>
           {repositories.isLoading ? (
             <p className="mt-3 flex items-center gap-2 text-sm text-[var(--muted-foreground)]">
-              <Loader2 className="animate-spin" size="0.9rem" /> Loading sources…
-            </p>
+              <Loader2 className="animate-spin" size="0.9rem" /> {localizeUi("ui.agents.customagentrepositoriesmodal.loadingSources")}</p>
           ) : repositories.data?.repositories.length ? (
             <div className="mt-2 divide-y divide-[var(--border)] border-y border-[var(--border)]">
               {repositories.data.repositories.map((repository) => (
@@ -213,8 +239,8 @@ export function CustomAgentRepositoriesModal({ open, onClose }: { open: boolean;
                       <ExternalLink size="0.75rem" className="shrink-0" />
                     </a>
                     <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">
-                      {repository.agentCount} agent{repository.agentCount === 1 ? "" : "s"}
-                      {repository.lastSyncedAt ? ` • Synced ${new Date(repository.lastSyncedAt).toLocaleString()}` : ""}
+                      {repository.agentCount} {localizeUi("ui.agents.agentcatalogview.agent")}{repository.agentCount === 1 ? "" :localizeUi("ui.noodle.stageprofileview.s")}
+                      {repository.lastSyncedAt ?localizeUi("ui.agents.customagentrepositoriesmodal.syncedValue1", { value1: new Date(repository.lastSyncedAt).toLocaleString() }) : ""}
                     </p>
                   </div>
                   <button
@@ -222,17 +248,17 @@ export function CustomAgentRepositoriesModal({ open, onClose }: { open: boolean;
                     className="mari-chrome-control h-10 px-3 text-xs"
                     onClick={() => void previewExisting(repository.id)}
                     disabled={pending}
-                    aria-label={`Preview updates from ${repository.owner}/${repository.name}`}
+                    aria-label={localizeUi("ui.agents.customagentrepositoriesmodal.previewUpdatesFromValue1Value2", { value1: repository.owner, value2: repository.name })}
                   >
                     <RefreshCw size="0.85rem" className={cn(previewMutation.isPending && "animate-spin")} />
-                    <span className="max-sm:hidden">Check</span>
+                    <span className="max-sm:hidden">{localizeUi("ui.agents.customagentrepositoriesmodal.check")}</span>
                   </button>
                   <button
                     type="button"
                     className="mari-chrome-control h-10 w-10 p-0 text-[var(--destructive)]"
                     onClick={() => void removeRepository(repository.id, `${repository.owner}/${repository.name}`)}
                     disabled={pending}
-                    aria-label={`Remove ${repository.owner}/${repository.name}`}
+                    aria-label={localizeUi("ui.agents.customagentrepositoriesmodal.removeValue1Value2", { value1: repository.owner, value2: repository.name })}
                   >
                     <Trash2 size="0.9rem" />
                   </button>
@@ -240,9 +266,7 @@ export function CustomAgentRepositoriesModal({ open, onClose }: { open: boolean;
               ))}
             </div>
           ) : (
-            <p className="mt-3 text-sm text-[var(--muted-foreground)]">
-              No custom sources yet. Previewing never installs or changes an agent.
-            </p>
+            <p className="mt-3 text-sm text-[var(--muted-foreground)]">{localizeUi("ui.agents.customagentrepositoriesmodal.noCustomSourcesYetPreviewingNeverInstallsOrChanges")}</p>
           )}
         </section>
 
@@ -251,22 +275,23 @@ export function CustomAgentRepositoriesModal({ open, onClose }: { open: boolean;
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--muted-foreground)]">
-                  {configuredRepository ? "Sync preview" : "Import preview"}
+                  {configuredRepository ?localizeUi("ui.agents.customagentrepositoriesmodal.syncPreview") :localizeUi("ui.agents.customagentrepositoriesmodal.importPreview")}
                 </p>
                 <h3 id="custom-repository-preview-heading" className="mt-1 text-lg font-semibold">
                   {preview.repository.owner}/{preview.repository.name}
                 </h3>
                 <p className="mt-1 text-sm text-[var(--muted-foreground)]">
                   {contentChanges.length === 0
-                    ? "No managed agent content has changed."
-                    : `${contentChanges.length} content change${contentChanges.length === 1 ? "" : "s"} to review.`}
+                    ?localizeUi("ui.agents.customagentrepositoriesmodal.noManagedAgentContentHasChanged")
+                    :localizeUi("ui.agents.customagentrepositoriesmodal.value1ContentChangeValue2ToReview", { value1: contentChanges.length, value2: contentChanges.length === 1 ? "" :localizeUi("ui.noodle.stageprofileview.s") })}
                 </p>
               </div>
               <button
                 type="button"
                 className="mari-chrome-control mari-chrome-control--primary h-10 px-4 text-sm"
                 onClick={() => void applyPreview()}
-                disabled={pending}
+                disabled={pending || !agentImportsEnabled}
+                title={agentImportsEnabled ? undefined : localizeUi("settings.agentImports.enableFirst")}
               >
                 {addMutation.isPending || syncMutation.isPending ? (
                   <Loader2 size="0.9rem" className="animate-spin" />
@@ -275,9 +300,9 @@ export function CustomAgentRepositoriesModal({ open, onClose }: { open: boolean;
                 )}
                 {configuredRepository
                   ? contentChanges.length > 0
-                    ? "Apply Changes"
-                    : "Confirm Current"
-                  : "Add Repository"}
+                    ?localizeUi("ui.agents.customagentrepositoriesmodal.applyChanges")
+                    :localizeUi("ui.agents.customagentrepositoriesmodal.confirmCurrent")
+                  :localizeUi("ui.agents.customagentrepositoriesmodal.addRepository")}
               </button>
             </div>
 
@@ -289,29 +314,43 @@ export function CustomAgentRepositoriesModal({ open, onClose }: { open: boolean;
                       {STATUS_LABELS[change.status]}
                     </span>
                     <span className="min-w-0 flex-1 truncate text-sm font-semibold">{change.name}</span>
-                    <span className="text-xs text-[var(--muted-foreground)] group-open:hidden">Review</span>
+                    <span className="text-xs text-[var(--muted-foreground)] group-open:hidden">{localizeUi("ui.agents.customagentrepositoriesmodal.review")}</span>
                   </summary>
                   <div className="ml-0 mt-3 space-y-3 sm:ml-28">
                     {change.changedFields.length > 0 && (
-                      <p className="text-xs text-[var(--muted-foreground)]">
-                        Changes: {change.changedFields.join(", ")}
+                      <p className="text-xs text-[var(--muted-foreground)]">{localizeUi("ui.agents.customagentrepositoriesmodal.changes")} {change.changedFields.join(", ")}
                       </p>
                     )}
                     {change.status === "removed" ? (
-                      <p className="max-w-[70ch] text-sm text-[var(--muted-foreground)]">
-                        This definition is absent upstream. Sync keeps the current agent and removes its repository
-                        link.
-                      </p>
+                      <p className="max-w-[70ch] text-sm text-[var(--muted-foreground)]">{localizeUi("ui.agents.customagentrepositoriesmodal.thisDefinitionIsAbsentUpstreamSyncKeepsTheCurrent")}</p>
                     ) : (
                       <>
                         <div>
-                          <p className="text-xs font-semibold text-[var(--muted-foreground)]">Prompt</p>
+                          <p className="text-xs font-semibold text-[var(--muted-foreground)]">{localizeUi("ui.agents.customagentrepositoriesmodal.prompt")}</p>
                           <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded-lg bg-[var(--secondary)] p-3 text-xs leading-5 text-[var(--foreground)]">
                             {change.definition?.defaultPromptTemplate || "(empty prompt)"}
                           </pre>
                         </div>
                         <div>
-                          <p className="text-xs font-semibold text-[var(--muted-foreground)]">Settings and tools</p>
+                          <p className="text-xs font-semibold text-[var(--muted-foreground)]">
+                            {localizeUi("settings.agentImports.review.permissions")}
+                          </p>
+                          {(previewPermissionsByAgentId.get(change.agentId)?.length ?? 0) > 0 ? (
+                            <ul className="mt-1 list-disc space-y-1 pl-5 text-xs text-[var(--foreground)]">
+                              {(previewPermissionsByAgentId.get(change.agentId) ?? []).map((capability) => (
+                                <li key={capability}>
+                                  {localizeUi(`settings.agentImports.capabilities.${capability}.label`)}
+                                </li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <p className="mt-1 text-xs text-[var(--muted-foreground)]">
+                              {localizeUi("settings.agentImports.review.noPermissions")}
+                            </p>
+                          )}
+                        </div>
+                        <div>
+                          <p className="text-xs font-semibold text-[var(--muted-foreground)]">{localizeUi("ui.agents.customagentrepositoriesmodal.settingsAndTools")}</p>
                           <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap rounded-lg bg-[var(--secondary)] p-3 text-xs leading-5 text-[var(--foreground)]">
                             {JSON.stringify(previewSettings(change), null, 2)}
                           </pre>

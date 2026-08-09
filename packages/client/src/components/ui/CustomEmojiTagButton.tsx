@@ -15,6 +15,7 @@ import {
   type CustomKind,
   type CustomTagPatch,
 } from "../../lib/custom-emoji";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 export interface TaggableImage {
   id: string;
@@ -32,6 +33,7 @@ export function CustomEmojiTagButton({
   image: TaggableImage;
   onApply: (patch: CustomTagPatch) => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [flashing, setFlashing] = useState(false);
@@ -69,7 +71,7 @@ export function CustomEmojiTagButton({
       }
       const slug = slugifyCustomName(name);
       if (!slug) {
-        toast.error("Enter a name using letters or numbers.");
+        toast.error(localizeUi("ui.ui.customemojitagbutton.enterANameUsingLettersOrNumbers"));
         return;
       }
       onApply({ customKind: kind, customName: slug, width, height });
@@ -82,7 +84,7 @@ export function CustomEmojiTagButton({
 
   async function rename() {
     const input = await showPromptDialog({
-      title: "Rename",
+      title:localizeUi("ui.chat.chatbranchselector.rename"),
       message: NAME_PROMPT_MESSAGE,
       defaultValue: image.customName ?? "",
       placeholder: "e.g. kekw",
@@ -90,7 +92,7 @@ export function CustomEmojiTagButton({
     if (input === null) return;
     const slug = slugifyCustomName(input);
     if (!slug) {
-      toast.error("Enter a name using letters or numbers.");
+      toast.error(localizeUi("ui.ui.customemojitagbutton.enterANameUsingLettersOrNumbers"));
       return;
     }
     onApply({ customKind: image.customKind ?? "emoji", customName: slug });
@@ -135,7 +137,7 @@ export function CustomEmojiTagButton({
           const rect = e.currentTarget.getBoundingClientRect();
           setMenu({ x: rect.left, y: rect.bottom + 4 });
         }}
-        title={tagged ? `${image.customKind}: ${image.customName}` : "Tag as emoji or sticker"}
+        title={tagged ?localizeUi("ui.ui.customemojitagbutton.value1Value2", { value1: image.customKind, value2: image.customName }) :localizeUi("ui.ui.customemojitagbutton.tagAsEmojiOrSticker")}
         className={cn(
           "absolute left-1 top-1 z-10 flex max-w-[calc(100%-0.5rem)] items-center gap-1 rounded-lg px-1.5 py-1 text-white transition-opacity",
           tagged

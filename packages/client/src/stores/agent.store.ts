@@ -95,6 +95,15 @@ function logAgentDebugToBrowserConsole(entry: AgentDebugEntry) {
   console.groupEnd();
 }
 
+/**
+ * Stable empties for selectors that hide another chat's failures. A selector that returns a
+ * fresh `[]` is a new snapshot on every read, and zustand v5 has no built-in equality check —
+ * React then re-renders forever ("Maximum update depth exceeded", minified error #185) as soon
+ * as anything else updates the store often, e.g. a background chat streaming.
+ */
+export const EMPTY_AGENT_TYPES: string[] = [];
+export const EMPTY_AGENT_FAILURES: AgentFailure[] = [];
+
 interface AgentState {
   activeAgents: string[];
   lastResults: Map<string, AgentResult>;

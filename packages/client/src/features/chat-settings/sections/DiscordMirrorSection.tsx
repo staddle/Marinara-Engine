@@ -1,4 +1,5 @@
 import { useId } from "react";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface DiscordMirrorControlsProps {
   webhookUrl: string;
@@ -11,6 +12,7 @@ export function DiscordMirrorControls({
   onWebhookUrlChange,
   className = "space-y-2",
 }: DiscordMirrorControlsProps) {
+  const { t: localizeUi } = useUiTranslation();
   const webhookInputId = useId();
   const webhookErrorId = useId();
   const trimmedWebhookUrl = webhookUrl.trim();
@@ -22,7 +24,7 @@ export function DiscordMirrorControls({
       <input
         id={webhookInputId}
         type="url"
-        placeholder="https://discord.com/api/webhooks/..."
+        placeholder={localizeUi("ui.chatSettings.discordmirrorcontrols.httpsDiscordComApiWebhooks")}
         value={webhookUrl}
         onChange={(e) => onWebhookUrlChange(e.target.value.trim())}
         aria-invalid={hasInvalidWebhook}
@@ -30,9 +32,7 @@ export function DiscordMirrorControls({
         className="w-full rounded-lg bg-[var(--secondary)] px-3 py-2.5 text-[0.6875rem] text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]/50 ring-1 ring-transparent focus:ring-[var(--primary)]/40 focus:outline-none transition-all"
       />
       {hasInvalidWebhook && (
-        <p id={webhookErrorId} className="text-[0.625rem] text-red-400">
-          Invalid webhook URL format
-        </p>
+        <p id={webhookErrorId} className="text-[0.625rem] text-red-400">{localizeUi("ui.chatSettings.discordmirrorcontrols.invalidWebhookUrlFormat")}</p>
       )}
     </div>
   );

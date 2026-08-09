@@ -21,6 +21,26 @@ export const apiProviderSchema = z.enum([
   "video_generation",
 ]);
 
+export const connectionImageCaptioningDefaultsSchema = z.object({
+  imageCaptioningEnabled: z.boolean().optional(),
+  imageCaptioningConnectionId: z.string().trim().min(1).nullable().optional(),
+});
+
+export type ConnectionImageCaptioningDefaults = z.infer<typeof connectionImageCaptioningDefaultsSchema>;
+
+export function parseConnectionImageCaptioningDefaults(raw: unknown): ConnectionImageCaptioningDefaults {
+  let parsed = raw;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      return {};
+    }
+  }
+  const result = connectionImageCaptioningDefaultsSchema.safeParse(parsed);
+  return result.success ? result.data : {};
+}
+
 export const createConnectionSchema = z.object({
   name: z.string().min(1).max(200),
   provider: apiProviderSchema,

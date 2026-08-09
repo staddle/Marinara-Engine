@@ -1,6 +1,19 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type UIEvent } from "react";
-import { ArrowLeft, ArrowUpDown, Check, Download, Hash, Pencil, Plus, Search, Star, User } from "lucide-react";
-import { includesTextForMatch, normalizeTextForMatch, type CharacterData } from "@marinara-engine/shared";
+import {
+  ArrowLeft,
+  ArrowUpDown,
+  Check,
+  Download,
+  Hash,
+  MessageCircle,
+  Pencil,
+  Plus,
+  Search,
+  Star,
+  User,
+} from "lucide-react";
+import { type CharacterData } from "@marinara-engine/shared";
+import { useTranslation, useTranslation as useUiTranslation } from "react-i18next";
 import {
   flattenCharacterPages,
   flattenPersonaPages,
@@ -8,8 +21,17 @@ import {
   usePersonaPages,
 } from "../../hooks/use-characters";
 import { getCharacterTitle } from "../../lib/character-display";
+import {
+  formatCardLibraryMeta,
+  getCardLibrarySummary,
+  matchesCardLibrarySearch,
+  parseCardLibrarySearchQuery,
+} from "../../lib/card-library-search";
 import { estimateCharacterCardTokens, formatEstimatedTokens } from "../../lib/character-token-count";
-import { cn, getAvatarCropStyle, parseAvatarCropJson, type AvatarCropValue } from "../../lib/utils";
+import { applyInlineMarkdown, renderMarkdownBlocks } from "../../lib/markdown";
+import { normalizeAvatarCrop, type AvatarCrop } from "@marinara-engine/shared";
+import { cn, getAvatarCropStyle } from "../../lib/utils";
+import { useLocalizedUiText } from "../../localization/use-localized-ui-text";
 import {
   useUIStore,
   type CardLibraryKind,
@@ -49,7 +71,7 @@ type PersonaRow = {
   backstory?: string | null;
   appearance?: string | null;
   avatarPath: string | null;
-  avatarCrop?: string | AvatarCropValue | null;
+  avatarCrop?: string | AvatarCrop | null;
   isActive?: boolean | string;
   tags?: string | string[] | null;
   createdAt: string;
@@ -65,7 +87,7 @@ type LibraryCard = {
   meta: string | null;
   summary: string;
   avatarPath: string | null;
-  avatarCrop?: AvatarCropValue;
+  avatarCrop?: AvatarCrop;
   createdAt: string;
   updatedAt: string;
   tags: string[];
@@ -132,49 +154,12 @@ function getPersonaTags(persona: PersonaRow): string[] {
   }
 }
 
-function parseLibrarySearchQuery(value: string) {
-  const excludedTags: string[] = [];
-  const text = value
-    .replace(/(?:^|\s)(?:-|!)(?:tag:|#)?(?:"([^"]+)"|(\S+))/gi, (_match, quoted: string, bare: string) => {
-      const tag = (quoted ?? bare ?? "").trim();
-      if (tag) excludedTags.push(normalizeTextForMatch(tag));
-      return " ";
-    })
-    .replace(/\s+/gu, " ")
-    .trim();
-
-  return {
-    text: normalizeTextForMatch(text),
-    excludedTags,
-  };
-}
-
 function getCharacterSummary(char: ParsedCharacterRow) {
-  return (
-    getText(char.parsed.creator_notes) ||
-    getText(char.parsed.description) ||
-    getText(char.parsed.personality) ||
-    "No creator notes yet."
-  );
+  return getCardLibrarySummary([char.parsed.creator_notes, char.parsed.description, char.parsed.personality]);
 }
 
 function getPersonaSummary(persona: PersonaRow) {
-  return (
-    getText(persona.creatorNotes) ||
-    getText(persona.description) ||
-    getText(persona.personality) ||
-    getText(persona.backstory) ||
-    "No creator notes yet."
-  );
-}
-
-function getCardMeta(creator: unknown, version: unknown): string | null {
-  const parts: string[] = [];
-  const creatorText = getText(creator);
-  const versionText = getText(version);
-  if (creatorText) parts.push(creatorText);
-  if (versionText) parts.push(`v${versionText}`);
-  return parts.join(" · ") || null;
+  return getCardLibrarySummary([persona.creatorNotes, persona.description, persona.personality, persona.backstory]);
 }
 
 function truncateText(content: string, maxLength: number) {
@@ -209,22 +194,16 @@ function estimatePersonaTokens(persona: PersonaRow) {
   );
 }
 
-function parsePersonaAvatarCrop(value: PersonaRow["avatarCrop"]): AvatarCropValue | undefined {
-  if (!value) return undefined;
-  if (typeof value === "string") return parseAvatarCropJson(value) ?? undefined;
-  return value;
-}
-
 function toCharacterLibraryCard(char: ParsedCharacterRow): LibraryCard {
   const name = getText(char.parsed.name) || "Unnamed";
   return {
     id: char.id,
     name,
     title: getCharacterTitle({ name, comment: char.comment }),
-    meta: getCardMeta(char.parsed.creator, char.parsed.character_version),
+    meta: formatCardLibraryMeta(char.parsed.creator, char.parsed.character_version),
     summary: getCharacterSummary(char),
     avatarPath: char.avatarPath,
-    avatarCrop: char.parsed.extensions?.avatarCrop as AvatarCropValue | undefined,
+    avatarCrop: normalizeAvatarCrop(char.parsed.extensions?.avatarCrop) ?? undefined,
     createdAt: char.createdAt,
     updatedAt: char.updatedAt,
     tags: getCharacterTags(char),
@@ -241,10 +220,10 @@ function toPersonaLibraryCard(persona: PersonaRow): LibraryCard {
     id: persona.id,
     name: getText(persona.name) || "Unnamed",
     title: getText(persona.comment) || null,
-    meta: getCardMeta(persona.creator, persona.personaVersion),
+    meta: formatCardLibraryMeta(persona.creator, persona.personaVersion),
     summary: getPersonaSummary(persona),
     avatarPath: persona.avatarPath,
-    avatarCrop: parsePersonaAvatarCrop(persona.avatarCrop),
+    avatarCrop: normalizeAvatarCrop(persona.avatarCrop) ?? undefined,
     createdAt: persona.createdAt,
     updatedAt: persona.updatedAt,
     tags: getPersonaTags(persona),
@@ -260,11 +239,14 @@ function CardLibraryDetailCard({
   card,
   kind,
   onEdit,
+  onChat,
 }: {
   card: LibraryCard;
   kind: CardLibraryKind;
   onEdit: (id: string) => void;
+  onChat?: (card: LibraryCard) => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const copy = LIBRARY_COPY[kind];
   const placeholderClass =
     kind === "characters" ? "mari-avatar-placeholder--character" : "mari-avatar-placeholder--persona";
@@ -308,38 +290,58 @@ function CardLibraryDetailCard({
               <div className="flex shrink-0 flex-col items-end gap-1.5">
                 <span
                   className="mari-chrome-muted-badge gap-1 px-2.5 py-1 text-[0.6875rem]"
-                  title={`Estimated from ${copy.singular} card text fields; actual tokenizer counts vary by model.`}
+                  title={localizeUi(
+                    "ui.characters.cardlibrarydetailcard.estimatedFromValue1CardTextFieldsActualTokenizerCounts",
+                    { value1: copy.singular },
+                  )}
                 >
                   <Hash size="0.75rem" />
                   {formatEstimatedTokens(card.tokenEstimate)}
                 </span>
                 {card.favorite && (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2.5 py-1 text-[0.6875rem] font-medium text-amber-300">
-                    <Star size="0.75rem" className="fill-current" /> Favorite
+                  <span
+                    data-character-favorite-indicator="detail"
+                    className="mari-chrome-accent-surface mari-accent-animated inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[0.6875rem] font-medium"
+                  >
+                    <Star size="0.75rem" className="fill-current" />{" "}
+                    {localizeUi("ui.characters.cardlibrarydetailcard.favorite")}
                   </span>
                 )}
                 {card.active && (
                   <span className="mari-chrome-muted-badge mari-chrome-accent-surface gap-1 px-2.5 py-1 text-[0.6875rem]">
-                    <Check size="0.75rem" /> Active
+                    <Check size="0.75rem" /> {localizeUi("ui.characters.lorebooktab.active")}
                   </span>
                 )}
               </div>
             </div>
 
             {card.creatorNotes && (
-              <p className="mt-4 rounded-[1.5rem] border border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-highlight-bg)] px-4 py-3 text-sm leading-6 text-[var(--marinara-chat-chrome-panel-text)]">
-                {card.creatorNotes}
-              </p>
+              <div className="mari-message-content mt-4 whitespace-pre-wrap rounded-[1.5rem] border border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-highlight-bg)] px-4 py-3 text-sm leading-6 text-[var(--marinara-chat-chrome-panel-text)]">
+                {renderMarkdownBlocks(card.creatorNotes, applyInlineMarkdown, `creator-notes-${card.id}`)}
+              </div>
             )}
 
-            <div className="mt-4 flex flex-wrap gap-2">
+            <div className={cn("mt-4 gap-2", onChat ? "grid grid-cols-2" : "flex flex-wrap")}>
               <button
                 onClick={() => onEdit(card.id)}
-                className="mari-chrome-control mari-chrome-control--primary px-4 py-2.5 text-sm"
+                className="mari-chrome-control mari-chrome-control--regular-label min-h-10 px-3 py-2 text-xs sm:px-4 sm:text-sm"
               >
                 <Pencil size="0.875rem" />
-                Edit {copy.singular === "character" ? "Character" : "Persona"}
+                {localizeUi("ui.noodle.noodlepostcard.edit")}{" "}
+                {copy.singular === "character"
+                  ? localizeUi("ui.characters.cardlibrarydetailcard.character")
+                  : localizeUi("ui.characters.cardlibrarydetailcard.persona")}
               </button>
+              {onChat && (
+                <button
+                  type="button"
+                  onClick={() => onChat(card)}
+                  className="mari-chrome-control mari-chrome-control--regular-label min-h-10 px-3 py-2 text-xs sm:px-4 sm:text-sm"
+                >
+                  <MessageCircle size="0.875rem" />
+                  {localizeUi("ui.characters.characterlibraryview.chatNow")}
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -355,9 +357,13 @@ function CardLibraryDetailCard({
               <h3 className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--marinara-chat-chrome-panel-muted)]">
                 {section.title}
               </h3>
-              <p className="mt-3 whitespace-pre-wrap text-sm leading-6 text-[var(--marinara-chat-chrome-panel-text)]">
-                {truncateText(section.content, section.title === "Opening Message" ? 420 : 620)}
-              </p>
+              <div className="mari-message-content mt-3 whitespace-pre-wrap text-sm leading-6 text-[var(--marinara-chat-chrome-panel-text)]">
+                {renderMarkdownBlocks(
+                  truncateText(section.content, section.title === "Opening Message" ? 420 : 620),
+                  applyInlineMarkdown,
+                  `card-${card.id}-${section.title}`,
+                )}
+              </div>
             </section>
           ))}
         </div>
@@ -367,6 +373,9 @@ function CardLibraryDetailCard({
 }
 
 export function CharacterLibraryView() {
+  const { t: localizeUi } = useUiTranslation();
+  const { t } = useTranslation();
+  const localize = useLocalizedUiText();
   const kind = useUIStore((s) => s.cardLibraryKind);
   const copy = LIBRARY_COPY[kind];
   const isPersonaLibrary = kind === "personas";
@@ -388,7 +397,7 @@ export function CharacterLibraryView() {
   const selectedId = isPersonaLibrary ? personaSelectedId : characterSelectedId;
   const sort = isPersonaLibrary ? personaSort : characterSort;
   const [search, setSearch] = useState("");
-  const serverSearch = useMemo(() => parseLibrarySearchQuery(search).text, [search]);
+  const serverSearch = useMemo(() => parseCardLibrarySearchQuery(search).text, [search]);
   const characterPages = useCharacterPages({ enabled: !isPersonaLibrary, search: serverSearch, sort: characterSort });
   const personaPages = usePersonaPages({ enabled: isPersonaLibrary, search: serverSearch, sort: personaSort });
   const characters = useMemo(() => flattenCharacterPages(characterPages.data), [characterPages.data]);
@@ -407,22 +416,8 @@ export function CharacterLibraryView() {
   }, [characters, isPersonaLibrary, personas]);
 
   const filteredCards = useMemo(() => {
-    const query = parseLibrarySearchQuery(search);
-    return cards.filter((card) => {
-      const tagSet = new Set(card.tags.map((tag) => normalizeTextForMatch(tag)));
-      if (query.excludedTags.some((tag) => tagSet.has(tag))) return false;
-      if (!query.text) return true;
-      return [
-        card.name,
-        card.title,
-        card.meta,
-        card.summary,
-        ...card.tags,
-        ...card.sections.map((section) => section.content),
-      ]
-        .filter((value): value is string => typeof value === "string")
-        .some((value) => includesTextForMatch(value, query.text));
-    });
+    const query = parseCardLibrarySearchQuery(search);
+    return cards.filter((card) => matchesCardLibrarySearch(card, query));
   }, [cards, search]);
 
   const sortedCards = useMemo(() => {
@@ -534,6 +529,17 @@ export function CharacterLibraryView() {
     else openCharacterDetail(id, { preserveCharacterLibrary: true });
   };
 
+  const openCharacterChat = useCallback(
+    (card: LibraryCard) => {
+      if (isPersonaLibrary) return;
+      openModal("start-character-chat", {
+        characterId: card.id,
+        characterName: card.name,
+      });
+    },
+    [isPersonaLibrary, openModal],
+  );
+
   const handleSortChange = (value: string) => {
     if (isPersonaLibrary) setPersonaSort(value as ResourcePanelSort);
     else setCharacterSort(value as CharacterLibrarySort);
@@ -563,7 +569,7 @@ export function CharacterLibraryView() {
             <button
               onClick={closeLibrary}
               className="mari-chrome-control h-9 w-9 rounded-2xl p-0 md:h-10 md:w-10"
-              title="Close library"
+              title={localizeUi("ui.characters.characterlibraryview.closeLibrary")}
             >
               <ArrowLeft size="0.95rem" />
             </button>
@@ -575,7 +581,9 @@ export function CharacterLibraryView() {
                 {copy.heading}
               </h1>
               <p className="text-xs text-[var(--marinara-chat-chrome-panel-muted)] md:text-sm">
-                {filteredCards.length} out of {cards.length} card{cards.length === 1 ? "" : "s"}
+                {filteredCards.length} {localizeUi("ui.characters.characterlibraryview.outOf")} {cards.length}{" "}
+                {localizeUi("ui.characters.characterlibraryview.card")}
+                {cards.length === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s")}
               </p>
             </div>
           </div>
@@ -584,16 +592,16 @@ export function CharacterLibraryView() {
             <button
               onClick={() => openModal(isPersonaLibrary ? "create-persona" : "create-character")}
               className={newCardButtonClass}
-              title={`New ${copy.singular}`}
-              aria-label={`New ${copy.singular}`}
+              title={localizeUi("ui.characters.characterlibraryview.newValue1", { value1: copy.singular })}
+              aria-label={localizeUi("ui.characters.characterlibraryview.newValue1", { value1: copy.singular })}
             >
               <Plus size="0.75rem" />
             </button>
             <button
               onClick={() => openModal(isPersonaLibrary ? "import-persona" : "import-character")}
               className={libraryToolbarButtonClass}
-              title={`Import ${copy.singular}`}
-              aria-label={`Import ${copy.singular}`}
+              title={localizeUi("ui.characters.characterlibraryview.importValue1", { value1: copy.singular })}
+              aria-label={localizeUi("ui.characters.characterlibraryview.importValue1", { value1: copy.singular })}
             >
               <Download size="0.75rem" />
             </button>
@@ -606,7 +614,11 @@ export function CharacterLibraryView() {
               <input
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
-                placeholder={isPersonaLibrary ? "Search personas" : 'Search characters or -tag:"tag name"'}
+                placeholder={
+                  isPersonaLibrary
+                    ? localize("Search personas")
+                    : t("search.panels.charactersWithExcludedTag", { query: '-tag:"tag name"' })
+                }
                 className={cn(libraryToolbarFieldClass, "pl-7 pr-2.5")}
               />
             </div>
@@ -620,11 +632,13 @@ export function CharacterLibraryView() {
                   "mari-chrome-sort-field mari-accent-animated appearance-none pl-2.5 pr-7",
                 )}
               >
-                <option value="name-asc">Name A-Z</option>
-                <option value="name-desc">Name Z-A</option>
-                <option value="newest">Newest</option>
-                <option value="oldest">Oldest</option>
-                {!isPersonaLibrary && <option value="favorites">Favorites first</option>}
+                <option value="name-asc">{localizeUi("ui.characters.characterlibraryview.nameAZ")}</option>
+                <option value="name-desc">{localizeUi("ui.characters.characterlibraryview.nameZA")}</option>
+                <option value="newest">{localizeUi("ui.characters.characterlibraryview.newest")}</option>
+                <option value="oldest">{localizeUi("ui.characters.characterlibraryview.oldest")}</option>
+                {!isPersonaLibrary && (
+                  <option value="favorites">{localizeUi("ui.characters.characterlibraryview.favoritesFirst")}</option>
+                )}
               </select>
               <ArrowUpDown
                 size="0.6875rem"
@@ -661,10 +675,10 @@ export function CharacterLibraryView() {
               </div>
               <div>
                 <h2 className="text-lg font-semibold text-[var(--marinara-chat-chrome-panel-title)]">
-                  No matching {copy.plural}
+                  {localizeUi("ui.characters.characterlibraryview.noMatching")} {copy.plural}
                 </h2>
                 <p className="mt-1 max-w-md text-sm text-[var(--marinara-chat-chrome-panel-muted)]">
-                  Try a different search, adjust sorting, or import a new card into the library.
+                  {localizeUi("ui.characters.characterlibraryview.tryADifferentSearchAdjustSortingOrImportA")}
                 </p>
               </div>
             </div>
@@ -679,6 +693,7 @@ export function CharacterLibraryView() {
                   <Fragment key={card.id}>
                     <button
                       type="button"
+                      data-card-library-card={card.id}
                       onClick={() => setSelectedId(card.id)}
                       className={cn(
                         "group flex h-full items-stretch overflow-hidden rounded-[1.25rem] border bg-[var(--card)]/70 text-left shadow-[0_20px_50px_-32px_rgba(15,23,42,0.75)] transition-all hover:border-[var(--marinara-chat-chrome-button-border-hover)] hover:shadow-[0_24px_60px_-32px_color-mix(in_srgb,var(--marinara-chat-chrome-accent)_35%,transparent)] sm:flex-col sm:rounded-[1.75rem] sm:hover:-translate-y-0.5",
@@ -688,8 +703,9 @@ export function CharacterLibraryView() {
                       )}
                     >
                       <div
+                        data-card-library-avatar
                         className={cn(
-                          "mari-avatar-placeholder relative h-24 w-24 shrink-0 overflow-hidden sm:h-auto sm:w-full sm:aspect-square",
+                          "mari-avatar-placeholder relative min-h-24 w-24 shrink-0 self-stretch overflow-hidden sm:h-auto sm:min-h-0 sm:w-full sm:self-auto sm:aspect-square",
                           placeholderClass,
                         )}
                       >
@@ -707,13 +723,17 @@ export function CharacterLibraryView() {
                           </div>
                         )}
                         {card.favorite && (
-                          <div className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-full bg-black/55 px-2 py-1 text-[0.5625rem] font-medium text-amber-200 backdrop-blur-sm sm:right-3 sm:top-3 sm:text-[0.625rem]">
-                            <Star size="0.625rem" className="fill-current sm:h-[0.6875rem] sm:w-[0.6875rem]" /> Favorite
+                          <div
+                            data-character-favorite-indicator="card"
+                            className="mari-chrome-accent-surface mari-accent-animated absolute right-2 top-2 inline-flex items-center gap-1 rounded-full px-2 py-1 text-[0.5625rem] font-medium backdrop-blur-sm sm:right-3 sm:top-3 sm:text-[0.625rem]"
+                          >
+                            <Star size="0.625rem" className="fill-current sm:h-[0.6875rem] sm:w-[0.6875rem]" />{" "}
+                            {localizeUi("ui.characters.cardlibrarydetailcard.favorite")}
                           </div>
                         )}
                         {card.active && (
                           <div className="mari-chrome-accent-surface absolute right-2 top-2 inline-flex items-center gap-1 rounded-full px-2 py-1 text-[0.5625rem] font-medium backdrop-blur-sm sm:right-3 sm:top-3 sm:text-[0.625rem]">
-                            <Check size="0.625rem" /> Active
+                            <Check size="0.625rem" /> {localizeUi("ui.characters.lorebooktab.active")}
                           </div>
                         )}
                       </div>
@@ -740,7 +760,10 @@ export function CharacterLibraryView() {
                         <div className="mt-auto flex flex-wrap gap-1 sm:gap-1.5">
                           <span
                             className="mari-chrome-muted-badge gap-1 px-1.5 py-0.5 text-[0.5625rem] sm:px-2 sm:py-1 sm:text-[0.625rem]"
-                            title={`Estimated from ${copy.singular} card text fields; actual tokenizer counts vary by model.`}
+                            title={localizeUi(
+                              "ui.characters.cardlibrarydetailcard.estimatedFromValue1CardTextFieldsActualTokenizerCounts",
+                              { value1: copy.singular },
+                            )}
                           >
                             <Hash size="0.5625rem" /> {formatEstimatedTokens(card.tokenEstimate)}
                           </span>
@@ -763,7 +786,12 @@ export function CharacterLibraryView() {
 
                     {isSelected && (
                       <div className="col-span-full lg:hidden">
-                        <CardLibraryDetailCard card={card} kind={kind} onEdit={openDetailFromLibrary} />
+                        <CardLibraryDetailCard
+                          card={card}
+                          kind={kind}
+                          onEdit={openDetailFromLibrary}
+                          onChat={isPersonaLibrary ? undefined : openCharacterChat}
+                        />
                       </div>
                     )}
                   </Fragment>
@@ -780,7 +808,9 @@ export function CharacterLibraryView() {
                 disabled={isFetchingNextPage}
                 className="mari-chrome-control mari-chrome-control--primary px-5 py-2 text-sm"
               >
-                {isFetchingNextPage ? "Loading..." : `Load more (${cards.length} loaded)`}
+                {isFetchingNextPage
+                  ? localizeUi("ui.characters.characterlibraryview.loading")
+                  : localizeUi("ui.characters.characterlibraryview.loadMoreValue1Loaded", { value1: cards.length })}
               </button>
             </div>
           )}
@@ -789,7 +819,12 @@ export function CharacterLibraryView() {
         <aside className="hidden min-h-0 overflow-visible border-t border-[var(--marinara-chat-chrome-panel-divider)] bg-[var(--card)]/65 backdrop-blur-xl lg:block lg:overflow-y-auto lg:border-l lg:border-t-0">
           <div className="space-y-4 p-4 md:p-6">
             {selectedCard ? (
-              <CardLibraryDetailCard card={selectedCard} kind={kind} onEdit={openDetailFromLibrary} />
+              <CardLibraryDetailCard
+                card={selectedCard}
+                kind={kind}
+                onEdit={openDetailFromLibrary}
+                onChat={isPersonaLibrary ? undefined : openCharacterChat}
+              />
             ) : (
               <div className="flex min-h-[18rem] flex-col items-center justify-center gap-3 rounded-[2rem] border border-dashed border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--background)]/65 p-6 text-center">
                 <div
@@ -802,10 +837,11 @@ export function CharacterLibraryView() {
                 </div>
                 <div>
                   <h2 className="text-lg font-semibold text-[var(--marinara-chat-chrome-panel-title)]">
-                    Select a card
+                    {localizeUi("ui.characters.characterlibraryview.selectACard")}
                   </h2>
                   <p className="mt-1 text-sm text-[var(--marinara-chat-chrome-panel-muted)]">
-                    Pick a {copy.singular} from the grid to see a larger overview before editing.
+                    {localizeUi("ui.characters.characterlibraryview.pickA")} {copy.singular}{" "}
+                    {localizeUi("ui.characters.characterlibraryview.fromTheGridToSeeALargerOverviewBefore")}
                   </p>
                 </div>
               </div>

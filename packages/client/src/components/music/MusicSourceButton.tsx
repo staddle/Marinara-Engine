@@ -1,6 +1,7 @@
 import { useUIStore, type MusicPlayerSource } from "../../stores/ui.store";
 import { cn } from "../../lib/utils";
 import { Play } from "lucide-react";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 function SpotifyGlyph({ className }: { className?: string }) {
   return (
@@ -37,6 +38,7 @@ export function MusicSourceGlyph({ source, className }: { source: MusicPlayerSou
 }
 
 export function MusicSourceButton({ source, className }: { source: MusicPlayerSource; className?: string }) {
+  const { t: localizeUi } = useUiTranslation();
   const setMusicPlayerSource = useUIStore((s) => s.setMusicPlayerSource);
   const sourceOrder: MusicPlayerSource[] = ["spotify", "youtube", "custom"];
   const nextSource = sourceOrder[(sourceOrder.indexOf(source) + 1) % sourceOrder.length] ?? "spotify";
@@ -64,8 +66,8 @@ export function MusicSourceButton({ source, className }: { source: MusicPlayerSo
         sourceClasses,
         className,
       )}
-      title={`Switch to ${labels[nextSource]} player`}
-      aria-label={`Switch to ${labels[nextSource]} player`}
+      title={localizeUi("ui.music.musicsourcebutton.switchToValue1Player", { value1: labels[nextSource] })}
+      aria-label={localizeUi("ui.music.musicsourcebutton.switchToValue1Player", { value1: labels[nextSource] })}
     >
       <MusicSourceGlyph source={source} />
     </button>

@@ -13,105 +13,172 @@ export const capabilityPermissionSchema = z.enum([
   "ui",
 ]);
 
-const capabilityPackageManifestBaseSchema = z.object({
-  id: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(80),
-  name: z.string().min(1).max(120),
-  version: z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/),
-  description: z.string().max(2000).default(""),
-  engine: z.object({ min: z.string().min(1), maxExclusive: z.string().min(1) }).strict(),
-  kind: z.array(capabilityPackageKindSchema).min(1),
-  entrypoints: z
-    .object({
-      server: z.string().optional(),
-      client: z.string().optional(),
-      agents: z.string().optional(),
-      knowledge: z.string().optional(),
-    })
-    .strict(),
-  contributions: z
-    .object({
-      slots: z
-        .array(
-          z.enum([
-            "conversation-surface",
-            "conversation-toolbar",
-            "chat-settings",
-            "spatial-workspace",
-            "chat-runtime",
-            "game-world-map",
-          ]),
-        )
-        .optional(),
-      conversationGame: z
-        .object({
-          command: z.string().regex(/^\/[a-z0-9-]+$/),
-          aliases: z.array(z.string().min(1).max(40)).default([]),
-          playerLabel: z.string().min(1).max(80),
-        })
-        .strict()
-        .optional(),
-      agentDetail: z
-        .object({
-          agentIds: z.array(z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(80)).min(1).max(32),
-        })
-        .strict()
-        .optional(),
-    })
-    .strict()
-    .optional(),
-  files: z.array(z.object({
-    path: z.string().min(1).max(240),
-    sha256: z.string().regex(/^[a-f0-9]{64}$/),
-    bytes: z.number().int().nonnegative().max(100 * 1024 * 1024),
-  }).strict()).min(1),
-  permissions: z.array(capabilityPermissionSchema),
-  restartRequired: z.boolean().default(false),
-}).strict();
+const capabilityPackageManifestBaseSchema = z
+  .object({
+    id: z
+      .string()
+      .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
+      .max(80),
+    name: z.string().min(1).max(120),
+    version: z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/),
+    description: z.string().max(2000).default(""),
+    engine: z.object({ min: z.string().min(1), maxExclusive: z.string().min(1) }).strict(),
+    kind: z.array(capabilityPackageKindSchema).min(1),
+    entrypoints: z
+      .object({
+        server: z.string().optional(),
+        client: z.string().optional(),
+        agents: z.string().optional(),
+        knowledge: z.string().optional(),
+      })
+      .strict(),
+    contributions: z
+      .object({
+        slots: z
+          .array(
+            z.enum([
+              "conversation-surface",
+              "conversation-toolbar",
+              "chat-settings",
+              "spatial-workspace",
+              "chat-runtime",
+              "game-world-map",
+              // Mounts the package's own game UI over the narration.
+              "game-surface",
+            ]),
+          )
+          .optional(),
+        /** Options for the `game-surface` slot. */
+        gameSurface: z
+          .object({
+            /** Class the host puts on the game area while this surface is mounted, so the package can
+             *  restyle the shared chrome that renders outside its element. Declared rather than pushed at
+             *  runtime, so the theme applies on first paint. */
+            surfaceClass: z
+              .string()
+              .regex(/^[a-z][a-z0-9-]*$/)
+              .max(60)
+              .optional(),
+          })
+          .strict()
+          .optional(),
+        conversationGame: z
+          .object({
+            command: z.string().regex(/^\/[a-z0-9-]+$/),
+            aliases: z.array(z.string().min(1).max(40)).default([]),
+            playerLabel: z.string().min(1).max(80),
+          })
+          .strict()
+          .optional(),
+        agentDetail: z
+          .object({
+            agentIds: z
+              .array(
+                z
+                  .string()
+                  .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
+                  .max(80),
+              )
+              .min(1)
+              .max(32),
+          })
+          .strict()
+          .optional(),
+      })
+      .strict()
+      .optional(),
+    files: z
+      .array(
+        z
+          .object({
+            path: z.string().min(1).max(240),
+            sha256: z.string().regex(/^[a-f0-9]{64}$/),
+            bytes: z
+              .number()
+              .int()
+              .nonnegative()
+              .max(100 * 1024 * 1024),
+          })
+          .strict(),
+      )
+      .min(1),
+    permissions: z.array(capabilityPermissionSchema),
+    restartRequired: z.boolean().default(false),
+  })
+  .strict();
 
-export const supportedCapabilityApi = Object.freeze({ major: 1, minor: 3 } as const);
+export const supportedCapabilityApi = Object.freeze({ major: 1, minor: 8 } as const);
 
-const capabilityApiVersionSchema = z.object({
-  major: z.number().int().positive(),
-  minor: z.number().int().nonnegative(),
-}).strict();
+const capabilityApiVersionSchema = z
+  .object({
+    major: z.number().int().positive(),
+    minor: z.number().int().nonnegative(),
+  })
+  .strict();
 
-const capabilityPackageBuiltAgainstSchema = z.object({
-  engineVersion: z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/),
-  engineCommit: z.string().regex(/^[a-f0-9]{40}$/),
-}).strict();
+const capabilityPackageBuiltAgainstSchema = z
+  .object({
+    engineVersion: z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/),
+    engineCommit: z.string().regex(/^[a-f0-9]{40}$/),
+  })
+  .strict();
 
-export const capabilityPackageManifestV1Schema = capabilityPackageManifestBaseSchema.extend({
-  schemaVersion: z.literal(1),
-}).strict();
+export const capabilityPackageManifestV1Schema = capabilityPackageManifestBaseSchema
+  .extend({
+    schemaVersion: z.literal(1),
+  })
+  .strict();
 
-export const capabilityPackageManifestV2Schema = capabilityPackageManifestBaseSchema.extend({
-  schemaVersion: z.literal(2),
-  capabilityApi: capabilityApiVersionSchema,
-  builtAgainst: capabilityPackageBuiltAgainstSchema,
-}).strict();
+export const capabilityPackageManifestV2Schema = capabilityPackageManifestBaseSchema
+  .extend({
+    schemaVersion: z.literal(2),
+    capabilityApi: capabilityApiVersionSchema,
+    builtAgainst: capabilityPackageBuiltAgainstSchema,
+  })
+  .strict();
 
-export const capabilityPackageManifestSchema = z.discriminatedUnion("schemaVersion", [
-  capabilityPackageManifestV1Schema,
-  capabilityPackageManifestV2Schema,
-]);
+export const capabilityPackageManifestSchema = z
+  .discriminatedUnion("schemaVersion", [capabilityPackageManifestV1Schema, capabilityPackageManifestV2Schema])
+  .superRefine((manifest, ctx) => {
+    // A game-surface package draws the whole mode from its client bundle: without a client entrypoint the
+    // module loader skips it, so it would be offered in the setup wizard and then render nothing. Caught
+    // here so it fails at install with a clear reason rather than as an empty screen later.
+    if (manifest.contributions?.slots?.includes("game-surface") && !manifest.entrypoints.client?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["entrypoints", "client"],
+        message: 'A package declaring the "game-surface" slot must provide a client entrypoint to render it',
+      });
+    }
+  });
 
-export const capabilityCatalogPackageSchema = z.object({
-  manifest: capabilityPackageManifestSchema,
-  category: z.enum(["writer", "tracker", "misc"]).default("misc"),
-  artifact: z.object({
-    url: z.string().url(),
-    sha256: z.string().regex(/^[a-f0-9]{64}$/),
-    bytes: z.number().int().positive().max(100 * 1024 * 1024),
-  }).strict(),
-  iconUrl: z.string().url().optional(),
-  documentationUrl: z.string().url().optional(),
-}).strict();
+export const capabilityCatalogPackageSchema = z
+  .object({
+    manifest: capabilityPackageManifestSchema,
+    category: z.enum(["writer", "tracker", "misc"]).default("misc"),
+    artifact: z
+      .object({
+        url: z.string().url(),
+        sha256: z.string().regex(/^[a-f0-9]{64}$/),
+        bytes: z
+          .number()
+          .int()
+          .positive()
+          .max(100 * 1024 * 1024),
+      })
+      .strict(),
+    iconUrl: z.string().url().optional(),
+    documentationUrl: z.string().url().optional(),
+  })
+  .strict();
 
-export const capabilityCatalogSchema = z.object({
-  schemaVersion: z.literal(1),
-  generatedAt: z.string().datetime(),
-  packages: z.array(capabilityCatalogPackageSchema),
-}).strict();
+export const capabilityCatalogSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    generatedAt: z.string().datetime(),
+    packages: z.array(capabilityCatalogPackageSchema),
+  })
+  .strict();
 
 export const capabilityPackageReadinessSchema = z.enum(["pending", "registered", "ready", "error"]);
 
@@ -128,39 +195,60 @@ export const installedCapabilityPackageSchema = z.object({
   previousVersion: z.string().optional(),
 });
 
-export const installedCapabilityRegistrySchema = z.object({
-  schemaVersion: z.literal(1),
-  packages: z.array(installedCapabilityPackageSchema),
-}).strict();
+export const installedCapabilityRegistrySchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    packages: z.array(installedCapabilityPackageSchema),
+  })
+  .strict();
 
-const packagedAgentPromptTemplateSchema = z.object({
-  id: z.string().min(1).max(80),
-  name: z.string().min(1).max(120),
-  promptTemplate: z.string(),
-  description: z.string().optional(),
-}).strict();
+const packagedAgentPromptTemplateSchema = z
+  .object({
+    id: z.string().min(1).max(80),
+    name: z.string().min(1).max(120),
+    promptTemplate: z.string(),
+    description: z.string().optional(),
+  })
+  .strict();
 
-export const packagedAgentDefinitionSchema = z.object({
-  id: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(80),
-  name: z.string().min(1).max(120),
-  description: z.string().max(2000),
-  author: z.string().max(120).optional(),
-  phase: z.enum(["pre_generation", "parallel", "post_processing"]),
-  enabledByDefault: z.boolean(),
-  defaultInjectAsSection: z.boolean().optional(),
-  category: z.enum(["writer", "tracker", "misc"]),
-  libraryHidden: z.boolean().optional(),
-  runtimeDisabled: z.boolean().optional(),
-  /** @deprecated Legacy package compatibility; author resultType in defaultSettings instead. */
-  resultType: agentResultTypeSchema.optional(),
-  modeAllowlist: z.array(z.enum(["conversation", "roleplay", "visual_novel", "game"])).optional(),
-  defaultTools: z.array(z.string()).optional(),
-  defaultSettings: z.record(z.string(), z.unknown()).optional(),
-  promptTemplates: z.array(packagedAgentPromptTemplateSchema).optional(),
-  runInterval: z.number().int().positive().optional(),
-  defaultPromptTemplate: z.string(),
-  execution: z.enum(["pipeline", "feature"]).optional(),
-}).strict();
+export const packagedAgentDefinitionSchema = z
+  .object({
+    id: z
+      .string()
+      .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
+      .max(80),
+    name: z.string().min(1).max(120),
+    description: z.string().max(2000),
+    author: z.string().max(120).optional(),
+    phase: z.enum(["pre_generation", "parallel", "post_processing"]),
+    enabledByDefault: z.boolean(),
+    defaultInjectAsSection: z.boolean().optional(),
+    category: z.enum(["writer", "tracker", "misc"]),
+    libraryHidden: z.boolean().optional(),
+    runtimeDisabled: z.boolean().optional(),
+    /** @deprecated Legacy package compatibility; author resultType in defaultSettings instead. */
+    resultType: agentResultTypeSchema.optional(),
+    // Installed packages on disk may still list the retired "visual_novel" mode.
+    // Normalize it to "roleplay" (its behavioural successor) rather than failing the
+    // whole manifest parse, which crashed server bootstrap. Dropping it instead would
+    // turn a visual_novel-only allowlist into an empty one, which means "every mode".
+    modeAllowlist: z
+      .preprocess(
+        (value) =>
+          Array.isArray(value)
+            ? [...new Set(value.map((mode) => (mode === "visual_novel" ? "roleplay" : mode)))]
+            : value,
+        z.array(z.enum(["conversation", "roleplay", "game"])),
+      )
+      .optional(),
+    defaultTools: z.array(z.string()).optional(),
+    defaultSettings: z.record(z.string(), z.unknown()).optional(),
+    promptTemplates: z.array(packagedAgentPromptTemplateSchema).optional(),
+    runInterval: z.number().int().positive().optional(),
+    defaultPromptTemplate: z.string(),
+    execution: z.enum(["pipeline", "feature", "host"]).optional(),
+  })
+  .strict();
 
 export const packagedAgentDefinitionsSchema = z.array(packagedAgentDefinitionSchema);
 
@@ -169,6 +257,14 @@ export type CapabilityCatalogPackage = z.infer<typeof capabilityCatalogPackageSc
 export type CapabilityCatalog = z.infer<typeof capabilityCatalogSchema>;
 export type InstalledCapabilityPackage = z.infer<typeof installedCapabilityPackageSchema>;
 export type PackagedAgentDefinition = z.infer<typeof packagedAgentDefinitionSchema>;
+
+export interface CapabilityPackageUpdate {
+  id: string;
+  name: string;
+  installedVersion: string;
+  version: string;
+  restartRequired: boolean;
+}
 
 export interface CustomAgentRepository {
   id: string;

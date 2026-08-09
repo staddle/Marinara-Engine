@@ -13,11 +13,15 @@ const DEV_SERVER_OPEN = process.env.VITE_OPEN_BROWSER !== "false" && process.env
 function manualChunks(id: string) {
   if (!id.includes("node_modules")) return undefined;
 
+  // Keep dynamically selected Lucide glyphs in small alphabetical chunks
+  // instead of pulling the complete icon catalog into one eager vendor file.
+  const lucideIcon = id.match(/lucide-react\/dist\/esm\/icons\/([^/]+)\.js$/u);
+  if (lucideIcon) return `vendor-icons-${lucideIcon[1]?.[0] ?? "misc"}`;
+  if (id.includes("lucide-react")) return "vendor-icons";
   if (id.includes("react") || id.includes("scheduler")) return "vendor-react";
   if (id.includes("@tanstack")) return "vendor-tanstack";
   if (id.includes("framer-motion")) return "vendor-motion";
   if (id.includes("zustand")) return "vendor-state";
-  if (id.includes("lucide-react")) return "vendor-icons";
   if (id.includes("dompurify") || id.includes("sonner")) return "vendor-ui";
 
   return "vendor-misc";
@@ -93,7 +97,7 @@ export default defineConfig({
           manifest: false, // We use the static manifest.json in public/
           workbox: {
             // Intentionally exclude html so index.html is not precached and does not interfere with the PWA stale-version/update flow.
-            globPatterns: ["**/*.{js,css,png,svg,ico,woff2}"],
+            globPatterns: ["**/*.{js,css,json,png,svg,ico,woff2}"],
             navigateFallback: null,
             // Keep the offline shell lean. Large decorative sprites and splash art are fetched on demand.
             globIgnores: ["**/sprites/**", "logo.png", "logo-splash.gif"],

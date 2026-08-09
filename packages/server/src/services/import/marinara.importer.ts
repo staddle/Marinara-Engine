@@ -23,7 +23,7 @@ import { createLorebooksStorage } from "../storage/lorebooks.storage.js";
 import { createPromptsStorage } from "../storage/prompts.storage.js";
 import { normalizeTimestampOverrides, type TimestampOverrides } from "./import-timestamps.js";
 import { resolveLorebookEntryRole } from "./lorebook-role.js";
-import { mkdir, writeFile } from "fs/promises";
+import { access, mkdir, writeFile } from "fs/promises";
 import { join } from "path";
 import { DATA_DIR } from "../../utils/data-dir.js";
 import { assertInsideDir, extensionFromImageMime, isAllowedImageBuffer } from "../../utils/security.js";
@@ -36,9 +36,10 @@ function resolveNativePosition(value: unknown): number {
   if (typeof value === "string") {
     if (value === "after_char") return 1;
     if (value === "at_depth" || value === "depth") return 2;
+    if (value === "outlet") return 7;
     return 0;
   }
-  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 2 ? value : 0;
+  return typeof value === "number" && Number.isInteger(value) && [0, 1, 2, 7].includes(value) ? value : 0;
 }
 
 function normalizeDefaultChoices(value: unknown): Record<string, string | string[]> {
@@ -165,7 +166,45 @@ async function restoreCharacterGallery(
     const entry = item as Record<string, unknown>;
     const decoded = decodeImageDataUrl(entry.data);
     if (!decoded) continue;
-    const safeFilename = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${decoded.ext}`;
+    // Preserve the exported filename: portable card://self/gallery/<file>
+    // references in greetings/messages key on it, so a regenerated name breaks
+    // every reference after import. Sanitize the stem, always take the
+    // extension from the DECODED image (never the envelope), and resolve
+    // collisions (merging galleries can legitimately repeat a filename).
+    const randomFilename = () => `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${decoded.ext}`;
+    let safeFilename = randomFilename();
+    const originalName = typeof entry.filename === "string" ? entry.filename : "";
+    const originalBase = originalName.split(/[\\/]/).pop()!;
+    const originalStem = originalBase
+      .replace(/\.[^.]*$/, "")
+      .replace(/[^A-Za-z0-9._-]/g, "-")
+      .replace(/^\.+/, "")
+      // The serve and export paths reject any filename containing "..", so a
+      // stem with interior dot-runs — or a trailing dot (also possible after
+      // truncation), which recreates ".." once the extension is appended —
+      // would be written but never readable.
+      .replace(/\.{2,}/g, ".")
+      .slice(0, 80)
+      .replace(/\.+$/, "");
+    // The extension normally comes from the DECODED image (never the envelope),
+    // but uploads store ".jpeg" verbatim while extensionFromImageMime returns
+    // the canonical "jpg" — the one alias in ALLOWED_GALLERY_EXTS. Keep the
+    // original spelling in that case, or portable card://self refs written
+    // against the exported name break on the round trip this preserves.
+    const originalExt = (/\.([A-Za-z0-9]+)$/.exec(originalBase)?.[1] ?? "").toLowerCase();
+    const ext = originalExt === "jpeg" && decoded.ext === "jpg" ? "jpeg" : decoded.ext;
+    if (originalStem) {
+      for (let attempt = 0; attempt <= 50; attempt++) {
+        const candidate = attempt === 0 ? `${originalStem}.${ext}` : `${originalStem}-${attempt + 1}.${ext}`;
+        try {
+          await access(join(dir, candidate));
+          // exists — try the next suffix
+        } catch {
+          safeFilename = candidate;
+          break;
+        }
+      }
+    }
     try {
       const filepath = assertInsideDir(dir, join(dir, safeFilename));
       await writeFile(filepath, decoded.buffer);
@@ -578,6 +617,7 @@ async function importLorebookPayload(data: unknown, db: DB) {
           : [],
         additionalMatchingSources: readMatchingSources(e.additionalMatchingSources),
         position: resolveNativePosition(e.position),
+        outletName: String(e.outletName ?? ""),
         depth: Number(e.depth ?? 4),
         order: Number(e.order ?? 100),
         role: resolveLorebookEntryRole(e.role),

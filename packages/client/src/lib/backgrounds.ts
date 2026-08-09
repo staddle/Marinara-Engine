@@ -15,14 +15,20 @@ function safeDecode(value: string): string {
   }
 }
 
-export function chatBackgroundMetadataToUrl(value: unknown): string | null {
+/**
+ * `width` requests a downscaled copy for previews (sidebar rows, pickers). Only honoured for
+ * uploaded backgrounds — the server ignores unknown widths and animated sources and returns
+ * the original, so callers never need a fallback. Omit it wherever the image is shown large.
+ */
+export function chatBackgroundMetadataToUrl(value: unknown, width?: number): string | null {
   if (typeof value !== "string") return null;
   const background = value.trim();
   if (!background) return null;
 
-  if (background.startsWith(USER_BACKGROUND_URL_PREFIX) || background.startsWith(GAME_ASSET_FILE_URL_PREFIX)) {
-    return background;
-  }
+  const sized = (url: string) => (width ? `${url}?w=${width}` : url);
+
+  if (background.startsWith(USER_BACKGROUND_URL_PREFIX)) return sized(background);
+  if (background.startsWith(GAME_ASSET_FILE_URL_PREFIX)) return background;
   if (/^(https?:|data:|blob:)/i.test(background) || background.startsWith("/")) {
     return background;
   }
@@ -32,14 +38,15 @@ export function chatBackgroundMetadataToUrl(value: unknown): string | null {
     return gameAssetFileUrl(assetPath);
   }
 
-  return `${USER_BACKGROUND_URL_PREFIX}${encodeURIComponent(background)}`;
+  return sized(`${USER_BACKGROUND_URL_PREFIX}${encodeURIComponent(background)}`);
 }
 
 export function chatBackgroundUrlToMetadata(url: string | null): string | null {
   if (!url) return null;
 
   if (url.startsWith(USER_BACKGROUND_URL_PREFIX)) {
-    return safeDecode(url.slice(USER_BACKGROUND_URL_PREFIX.length));
+    // Drop any `?w=` preview sizing so a round-tripped URL stores the plain filename.
+    return safeDecode(url.slice(USER_BACKGROUND_URL_PREFIX.length).split("?")[0] ?? "");
   }
 
   if (url.startsWith(GAME_ASSET_FILE_URL_PREFIX)) {

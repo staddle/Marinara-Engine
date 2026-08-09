@@ -1,5 +1,6 @@
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { cn } from "../../lib/utils";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 type TranscriptWindowControlsProps = {
   hiddenBeforeCount: number;
@@ -22,6 +23,7 @@ export function TranscriptWindowControls({
   className,
   buttonClassName,
 }: TranscriptWindowControlsProps) {
+  const { t: localizeUi } = useUiTranslation();
   if (!onShowOlder && !onShowNewer && !onJumpToLatest) return null;
 
   return (
@@ -32,8 +34,7 @@ export function TranscriptWindowControls({
           onClick={onShowOlder}
           className={cn(TRANSCRIPT_WINDOW_BUTTON_CLASS, buttonClassName)}
         >
-          <ChevronUp size="0.75rem" />
-          Show older ({hiddenBeforeCount})
+          <ChevronUp size="0.75rem" />{localizeUi("ui.chat.transcriptwindowcontrols.showOlder")}{hiddenBeforeCount})
         </button>
       )}
       {onShowNewer && hiddenAfterCount > 0 && (
@@ -42,8 +43,7 @@ export function TranscriptWindowControls({
           onClick={onShowNewer}
           className={cn(TRANSCRIPT_WINDOW_BUTTON_CLASS, buttonClassName)}
         >
-          <ChevronDown size="0.75rem" />
-          Show newer ({hiddenAfterCount})
+          <ChevronDown size="0.75rem" />{localizeUi("ui.chat.transcriptwindowcontrols.showNewer")}{hiddenAfterCount})
         </button>
       )}
       {onJumpToLatest && hiddenAfterCount > 0 && (
@@ -51,9 +51,7 @@ export function TranscriptWindowControls({
           type="button"
           onClick={onJumpToLatest}
           className={cn(TRANSCRIPT_WINDOW_BUTTON_CLASS, buttonClassName)}
-        >
-          Latest
-        </button>
+        >{localizeUi("ui.chat.transcriptwindowcontrols.latest")}</button>
       )}
     </div>
   );

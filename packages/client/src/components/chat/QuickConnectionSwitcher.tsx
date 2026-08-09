@@ -10,8 +10,10 @@ import { useChatStore } from "../../stores/chat.store";
 import { useSidecarStore } from "../../stores/sidecar.store";
 import { appendLocalSidecarConnectionOption, isLocalSidecarConnectionOption } from "../../lib/connection-filters";
 import { cn } from "../../lib/utils";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 export function QuickConnectionSwitcher({ className }: { className?: string }) {
+  const { t: localizeUi } = useUiTranslation();
   const [open, setOpen] = useState(false);
   const btnRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -109,7 +111,7 @@ export function QuickConnectionSwitcher({ className }: { className?: string }) {
           <div
             ref={menuRef}
             role="menu"
-            aria-label="Connections"
+            aria-label={localizeUi("navigation.topbar.connections")}
             tabIndex={-1}
             onPointerDown={(event) => event.stopPropagation()}
             onKeyDown={(event) => {
@@ -123,11 +125,11 @@ export function QuickConnectionSwitcher({ className }: { className?: string }) {
             style={pos ? { left: pos.left, top: pos.top } : { visibility: "hidden" as const }}
           >
             <div className="flex items-center justify-between gap-2 border-b border-foreground/10 px-3 py-2">
-              <span className="text-[0.6875rem] font-semibold">Connections</span>
+              <span className="text-[0.6875rem] font-semibold">{localizeUi("navigation.topbar.connections")}</span>
               <button
                 type="button"
                 onClick={handleToggleRandom}
-                title={isRandom ? "Random pool active — click to disable" : "Use random connection from pool"}
+                title={isRandom ?localizeUi("ui.chat.quickconnectionswitcher.randomPoolActiveClickToDisable") :localizeUi("ui.chat.quickconnectionswitcher.useRandomConnectionFromPool")}
                 className={cn(
                   "flex h-6 w-6 items-center justify-center rounded-md transition-all active:scale-90",
                   isRandom
@@ -149,7 +151,7 @@ export function QuickConnectionSwitcher({ className }: { className?: string }) {
                       key={conn.id}
                       onClick={() => handleTogglePool(conn.id, inPool)}
                       className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs transition-colors hover:bg-foreground/10"
-                      title={inPool ? "In random pool — click to remove" : "Click to add to random pool"}
+                      title={inPool ?localizeUi("ui.chat.quickconnectionswitcher.inRandomPoolClickToRemove") :localizeUi("ui.chat.quickconnectionswitcher.clickToAddToRandomPool")}
                     >
                       <span className="flex-1 truncate">{conn.name || conn.id}</span>
                       <span
@@ -182,9 +184,7 @@ export function QuickConnectionSwitcher({ className }: { className?: string }) {
               })}
 
               {sorted.length === 0 && (
-                <div className="px-3 py-4 text-center text-[0.6875rem] italic text-foreground/45">
-                  No connections found.
-                </div>
+                <div className="px-3 py-4 text-center text-[0.6875rem] italic text-foreground/45">{localizeUi("ui.chat.quickconnectionswitcher.noConnectionsFound")}</div>
               )}
             </div>
           </div>,
@@ -198,7 +198,7 @@ export function QuickConnectionSwitcher({ className }: { className?: string }) {
         type="button"
         ref={btnRef}
         onClick={() => setOpen((v) => !v)}
-        title="Quick Connection Switcher"
+        title={localizeUi("ui.chat.quickconnectionswitcher.quickConnectionSwitcher")}
         className={cn(
           "flex h-8 w-8 items-center justify-center rounded-xl transition-all",
           open

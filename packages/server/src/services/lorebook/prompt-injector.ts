@@ -44,7 +44,8 @@ export function buildWorldInfoBlocks(activatedEntries: ActivatedEntry[]): {
     } else if (entry.position === 1) {
       afterParts.push(entry.content);
     }
-    // position >= 2 entries are handled by getDepthInjectedEntries
+    // Position 2 entries are handled by getDepthInjectedEntries.
+    // Position 7 entries are named Outlets and are never injected automatically.
   }
 
   return {
@@ -55,7 +56,7 @@ export function buildWorldInfoBlocks(activatedEntries: ActivatedEntry[]): {
 
 /**
  * Get entries that should be injected at specific depths in the message array.
- * Only entries with position >= 2 (depth injection mode) are included.
+ * Only entries with position 2 (depth injection mode) are included.
  * Position 0/1 entries always go to worldInfoBefore/After via buildWorldInfoBlocks.
  */
 export function getDepthInjectedEntries(activatedEntries: ActivatedEntry[]): Array<{
@@ -65,7 +66,7 @@ export function getDepthInjectedEntries(activatedEntries: ActivatedEntry[]): Arr
   order: number;
 }> {
   return activatedEntries
-    .filter((a) => a.entry.position >= 2 && a.entry.depth >= 0)
+    .filter((a) => a.entry.position === 2 && a.entry.depth >= 0)
     .map((a) => ({
       content: a.entry.content,
       role: a.entry.role,
@@ -167,6 +168,7 @@ export function processActivatedEntries(
   worldInfoBefore: string;
   worldInfoAfter: string;
   depthEntries: Array<{ content: string; role: LorebookRole; depth: number; order: number }>;
+  outlets: Record<string, string>;
   totalEntries: number;
   totalTokensEstimate: number;
 } {
@@ -179,6 +181,20 @@ export function processActivatedEntries(
   // Get depth entries
   const depthEntries = getDepthInjectedEntries(budgeted);
 
+  // Outlet names are deliberately exact and case-sensitive. Activated entries
+  // with the same name are joined in insertion order, but are not injected at
+  // any automatic lorebook position.
+  const outletParts = new Map<string, string[]>();
+  for (const { entry } of [...budgeted].sort((a, b) => a.entry.order - b.entry.order)) {
+    if (entry.position !== 7 || !entry.outletName) continue;
+    const parts = outletParts.get(entry.outletName) ?? [];
+    parts.push(entry.content);
+    outletParts.set(entry.outletName, parts);
+  }
+  const outlets = Object.fromEntries(
+    Array.from(outletParts, ([name, parts]) => [name, parts.join("\n")]),
+  );
+
   // Estimate tokens
   const totalChars = budgeted.reduce((sum, a) => sum + a.entry.content.length, 0);
 
@@ -186,6 +202,7 @@ export function processActivatedEntries(
     worldInfoBefore: before,
     worldInfoAfter: after,
     depthEntries,
+    outlets,
     totalEntries: budgeted.length,
     totalTokensEstimate: Math.ceil(totalChars / 4),
   };

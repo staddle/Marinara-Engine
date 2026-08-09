@@ -20,6 +20,7 @@ import {
   useCharacterGalleryClips,
   useUploadCharacterGalleryImage,
   useDeleteCharacterGalleryImage,
+  useSetCharacterGalleryImageAsAvatar,
   useDeleteCharacterGalleryClip,
   useUpdateCharacterGalleryClipTrim,
   useUploadCharacterGalleryClip,
@@ -36,6 +37,8 @@ import {
   useCharacterVersions,
   useRestoreCharacterVersion,
   useDeleteCharacterVersion,
+  useRenameCharacterVersion,
+  useResetCharacterVersions,
   spriteKeys,
   type CharacterCallVideoGenerationInput,
   type CharacterGalleryClip,
@@ -44,13 +47,16 @@ import {
 } from "../../hooks/use-characters";
 import { ConvoProfileFields } from "./ConvoProfileFields";
 import { useUIStore } from "../../stores/ui.store";
-import { lorebookKeys, useLorebook } from "../../hooks/use-lorebooks";
+import { lorebookKeys, useLorebook, useUpdateLorebook } from "../../hooks/use-lorebooks";
 import { useConnections } from "../../hooks/use-connections";
 import { useInstalledCapabilityPackages } from "../../hooks/use-capability-packages";
-import { showConfirmDialog } from "../../lib/app-dialogs";
+import { showConfirmDialog, showPromptDialog } from "../../lib/app-dialogs";
+import { formatCardVersionTimestamp, getCardVersionTitle } from "../../lib/card-version-history";
 import { SpriteGenerationModal } from "../ui/SpriteGenerationModal";
 import { AvatarGenerationModal } from "../ui/AvatarGenerationModal";
 import { AvatarCropWidget } from "../ui/AvatarCropWidget";
+import { AvatarReplaceActions } from "../ui/AvatarReplaceActions";
+import { EditorAvatarTileActions } from "../ui/EditorAvatarTileActions";
 import { CallClipGenerationModal } from "../ui/CallClipGenerationModal";
 import { ImageUploadDropzone } from "../ui/ImageUploadDropzone";
 import { CustomEmojiTagButton } from "../ui/CustomEmojiTagButton";
@@ -78,6 +84,7 @@ import {
   Palette,
   FolderOpen,
   Film,
+  Link2,
   Loader2,
   Swords,
   Crop,
@@ -90,20 +97,17 @@ import {
   RotateCcw,
   Scissors,
   MessageCircle,
+  Pencil,
 } from "lucide-react";
-import {
-  cn,
-  copyToClipboard,
-  generateClientId,
-  getAvatarCropStyle,
-  type AvatarCrop,
-  type LegacyAvatarCrop,
-} from "../../lib/utils";
+import { cn, copyToClipboard, generateClientId, getAvatarCropStyle } from "../../lib/utils";
+import { normalizeAvatarCrop } from "@marinara-engine/shared";
 import { extractColorsFromImage } from "../../lib/avatar-color-extraction";
+import { buildCardAssetMarkdown } from "../../lib/card-asset-links";
 import { HelpTooltip } from "../ui/HelpTooltip";
 import { api } from "../../lib/api-client";
 import { downloadSpriteFile } from "../../lib/sprite-download";
 import { ColorPicker } from "../ui/ColorPicker";
+import { StatIconPicker } from "../ui/StatIconPicker";
 import { MacroTextarea } from "../ui/MacroTextarea";
 import { Modal } from "../ui/Modal";
 import { SpriteFrameEditor } from "../ui/SpriteFrameEditor";
@@ -119,14 +123,22 @@ import {
   syncRpgHpFromPools,
   type CharacterCardVersion,
   type CharacterData,
+  type CharacterTrackerCustomFieldDefault,
   type ConversationCallCharacterVideoClipKind,
   type ConvoBehaviorConfig,
   type RPGStatPool,
   type RPGStatsConfig,
 } from "@marinara-engine/shared";
 import { parseTrackerCardColorConfig, serializeTrackerCardColorConfig } from "../../lib/tracker-card-colors";
+import {
+  getStatNameOccurrence,
+  remapStatIconAssignments,
+  resolveStatIconAssignment,
+  setStatIconAssignment,
+} from "../../lib/stat-icon-assignments";
 import { useQuoteFormatter } from "../../hooks/use-quote-formatter";
 import { LorebookAssignmentSection } from "../lorebooks/LorebookAssignmentSection";
+import { useTranslation, useTranslation as useUiTranslation } from "react-i18next";
 
 // ── Tabs ──
 const TABS = [
@@ -189,7 +201,7 @@ const CHARACTER_STATS_HELP =
   "HP is injected into the prompt so the AI knows the character's current health. Attributes are custom stats, like STR or DEX, that define the character's capabilities. The Character Tracker agent can adjust values based on combat, healing, and narrative events. Values set here serve as the initial/default state for new conversations.";
 
 const CHARACTER_COLORS_HELP =
-  "Name color is applied to the character's display name in chat. Gradients use CSS linear-gradient. Dialogue color applies to text inside dialogue quotation marks and can optionally be bolded from Settings. Box color sets the background color of the character's message bubble in roleplay mode. An empty dialogue color uses the default from Settings > Appearance when enabled; other empty fields use theme colors.";
+  "Name color is applied to the character's display name in chat. Gradients use CSS linear-gradient. Dialogue color applies to text inside dialogue quotation marks and can optionally be bolded from Settings. Box color sets the background color of the character's message bubble in roleplay mode. An empty dialogue color uses the default from Settings > Appearance; other empty fields use theme colors.";
 
 const CHARACTER_LOREBOOK_HELP =
   "Attach lorebook/world-info entries to this character. Entries trigger from keywords during conversation; embedded card lorebooks can be imported into Marinara as linked lorebooks for deeper editing.";
@@ -200,6 +212,16 @@ interface ParsedCharacter {
   comment: string;
   avatarPath: string | null;
   spriteFolderPath: string | null;
+}
+
+function getPersistedCharacterName(character: ParsedCharacter | undefined) {
+  if (!character) return null;
+  try {
+    const data = typeof character.data === "string" ? JSON.parse(character.data) : character.data;
+    return typeof data?.name === "string" && data.name.trim() ? data.name.trim() : null;
+  } catch {
+    return null;
+  }
 }
 
 function appendNewTags(existingTags: string[], rawInput: string) {
@@ -252,6 +274,7 @@ function formatCharacterExtensionValue(key: string, value: unknown, formatQuotes
 }
 
 export function CharacterEditor() {
+  const { t: localizeUi } = useUiTranslation();
   const characterId = useUIStore((s) => s.characterDetailId);
   const closeDetail = useUIStore((s) => s.closeCharacterDetail);
   const { data: rawCharacter, isLoading } = useCharacter(characterId);
@@ -398,7 +421,7 @@ export function CharacterEditor() {
   // linked standalone lorebook, if any, is left untouched.
   const handleLorebookUnembedded = useCallback(() => {
     if (lorebookEmbedInFlightRef.current) {
-      toast.error("Wait for the embedded lorebook update to finish before removing it from the card.");
+      toast.error(localizeUi("ui.characters.charactereditor.waitForTheEmbeddedLorebookUpdateToFinishBefore"));
       return;
     }
     if (!dirtyRef.current) return;
@@ -419,7 +442,7 @@ export function CharacterEditor() {
         extensions: extensions as CharacterData["extensions"],
       };
     });
-  }, []);
+  }, [localizeUi]);
 
   const updateExtension = useCallback(
     (key: string, value: unknown) => {
@@ -456,11 +479,11 @@ export function CharacterEditor() {
   const handleSave = async () => {
     if (!characterId || !formData) return false;
     if (avatarUploadInFlightRef.current) {
-      toast.error("Wait for the current avatar upload to finish before saving.");
+      toast.error(localizeUi("ui.characters.charactereditor.waitForTheCurrentAvatarUploadToFinishBefore"));
       return false;
     }
     if (lorebookEmbedInFlightRef.current) {
-      toast.error("Wait for the embedded lorebook update to finish before saving.");
+      toast.error(localizeUi("ui.characters.charactereditor.waitForTheEmbeddedLorebookUpdateToFinishBefore_5148080"));
       return false;
     }
     setSaving(true);
@@ -477,7 +500,9 @@ export function CharacterEditor() {
       return true;
     } catch (err: any) {
       console.error("[CharacterEditor] Save failed:", err);
-      toast.error(err?.message ?? "Failed to save character. Check the console for details.");
+      toast.error(
+        err?.message ?? localizeUi("ui.characters.charactereditor.failedToSaveCharacterCheckTheConsoleForDetails"),
+      );
       return false;
     } finally {
       setSaving(false);
@@ -489,12 +514,12 @@ export function CharacterEditor() {
     if (!file || !characterId) return;
     if (saving) {
       e.target.value = "";
-      toast.error("Wait for the current save to finish before uploading an avatar.");
+      toast.error(localizeUi("ui.characters.charactereditor.waitForTheCurrentSaveToFinishBeforeUploading"));
       return;
     }
     if (!beginAvatarUpload()) {
       e.target.value = "";
-      toast.error("Wait for the current avatar upload to finish.");
+      toast.error(localizeUi("ui.characters.charactereditor.waitForTheCurrentAvatarUploadToFinish"));
       return;
     }
 
@@ -538,14 +563,14 @@ export function CharacterEditor() {
     };
     reader.onerror = () => {
       if (!isCurrentAvatarUpload(uploadToken, uploadCharacterId)) return;
-      toast.error("Failed to read avatar image.");
+      toast.error(localizeUi("ui.characters.charactereditor.failedToReadAvatarImage"));
       finishAvatarUpload(uploadToken, uploadCharacterId);
     };
     e.target.value = "";
     try {
       reader.readAsDataURL(file);
     } catch {
-      toast.error("Failed to read avatar image.");
+      toast.error(localizeUi("ui.characters.charactereditor.failedToReadAvatarImage"));
       finishAvatarUpload(uploadToken, uploadCharacterId);
     }
   };
@@ -578,7 +603,7 @@ export function CharacterEditor() {
       try {
         await uploadAvatar.mutateAsync({ id: uploadCharacterId, avatar: avatarDataUrl });
         if (isCurrentAvatarUpload(uploadToken, uploadCharacterId)) {
-          toast.success("Character avatar generated.");
+          toast.success(localizeUi("ui.characters.charactereditor.characterAvatarGenerated"));
         }
       } catch (error) {
         if (isCurrentAvatarUpload(uploadToken, uploadCharacterId)) {
@@ -606,24 +631,27 @@ export function CharacterEditor() {
       setDirtyState,
       setExtensionValue,
       uploadAvatar,
+      localizeUi,
     ],
   );
 
   const handleAvatarRemove = useCallback(async () => {
     if (!characterId || !avatarPreview) return;
     if (saving) {
-      toast.error("Wait for the current save to finish before removing the avatar.");
+      toast.error(localizeUi("ui.characters.charactereditor.waitForTheCurrentSaveToFinishBeforeRemoving"));
       return;
     }
     if (avatarUploadInFlightRef.current) {
-      toast.error("Wait for the current avatar upload to finish before removing the avatar.");
+      toast.error(localizeUi("ui.characters.charactereditor.waitForTheCurrentAvatarUploadToFinishBefore_bee1ef8"));
       return;
     }
 
     const confirmed = await showConfirmDialog({
-      title: "Remove Avatar",
-      message: `Remove the avatar from ${formData?.name || "this character"}? This clears the character card's avatar without deleting the character.`,
-      confirmLabel: "Remove",
+      title: localizeUi("ui.characters.charactereditor.removeAvatar"),
+      message: localizeUi("ui.characters.charactereditor.removeTheAvatarFromValue1ThisClearsTheCharacter", {
+        value1: formData?.name || localizeUi("ui.characters.charactereditor.thisCharacter"),
+      }),
+      confirmLabel: localizeUi("settings.notifications.customSound.actions.remove"),
       tone: "destructive",
     });
     if (!confirmed) return;
@@ -632,19 +660,25 @@ export function CharacterEditor() {
       await removeAvatar.mutateAsync(characterId);
       setAvatarPreview(null);
       if (fileInputRef.current) fileInputRef.current.value = "";
-      toast.success("Avatar removed.");
+      toast.success(localizeUi("ui.characters.charactereditor.avatarRemoved"));
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to remove avatar.");
+      toast.error(
+        error instanceof Error ? error.message : localizeUi("ui.characters.charactereditor.failedToRemoveAvatar"),
+      );
     }
-  }, [avatarPreview, characterId, formData?.name, removeAvatar, saving]);
+  }, [avatarPreview, characterId, formData?.name, removeAvatar, saving, localizeUi]);
 
   const handleDelete = async () => {
     if (!characterId) return;
     if (
       !(await showConfirmDialog({
-        title: "Delete Character",
-        message: "Are you sure you want to delete this character?",
-        confirmLabel: "Delete",
+        title: localizeUi("ui.characters.charactereditor.deleteCharacter_07d0983"),
+        message: localizeUi("dialog.delete.namedPermanent", {
+          name:
+            getPersistedCharacterName(rawCharacter as ParsedCharacter | undefined) ||
+            localizeUi("ui.characters.charactereditor.thisCharacter"),
+        }),
+        confirmLabel: localizeUi("lorebook.editor.batch.delete"),
         tone: "destructive",
       }))
     ) {
@@ -682,7 +716,7 @@ export function CharacterEditor() {
 
     const personaName = formData.name.trim();
     if (!personaName) {
-      toast.error("Character needs a name before it can be imported as a persona.");
+      toast.error(localizeUi("ui.characters.charactereditor.characterNeedsANameBeforeItCanBeImported"));
       return;
     }
 
@@ -739,25 +773,29 @@ export function CharacterEditor() {
           });
         } catch (error) {
           console.warn("[CharacterEditor] Failed to copy avatar to imported persona:", error);
-          toast.error("Persona imported, but the avatar could not be copied.");
+          toast.error(localizeUi("ui.characters.charactereditor.personaImportedButTheAvatarCouldNotBeCopied"));
           return;
         }
       }
 
-      toast.success(`Imported "${personaName}" as a persona.`);
+      toast.success(localizeUi("ui.characters.charactereditor.importedValue1AsAPersona", { value1: personaName }));
     } catch (error) {
       console.error("[CharacterEditor] Failed to import character as persona:", error);
-      toast.error(error instanceof Error ? error.message : "Failed to import character as persona.");
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : localizeUi("ui.characters.charactereditor.failedToImportCharacterAsPersona"),
+      );
     }
-  }, [avatarPreview, createPersona, formData, getAvatarDataUrl, uploadPersonaAvatar]);
+  }, [avatarPreview, createPersona, formData, getAvatarDataUrl, uploadPersonaAvatar, localizeUi]);
 
   const handleClose = useCallback(() => {
     if (avatarUploading) {
-      toast.error("Wait for the current avatar upload to finish.");
+      toast.error(localizeUi("ui.characters.charactereditor.waitForTheCurrentAvatarUploadToFinish"));
       return;
     }
     if (lorebookEmbedding) {
-      toast.error("Wait for the embedded lorebook update to finish.");
+      toast.error(localizeUi("ui.characters.lorebooktab.waitForTheEmbeddedLorebookUpdateToFinish"));
       return;
     }
     if (dirty) {
@@ -765,21 +803,21 @@ export function CharacterEditor() {
       return;
     }
     closeDetail();
-  }, [avatarUploading, dirty, closeDetail, lorebookEmbedding]);
+  }, [avatarUploading, dirty, closeDetail, lorebookEmbedding, localizeUi]);
 
   const forceClose = useCallback(() => {
     if (avatarUploading) {
-      toast.error("Wait for the current avatar upload to finish.");
+      toast.error(localizeUi("ui.characters.charactereditor.waitForTheCurrentAvatarUploadToFinish"));
       return;
     }
     if (lorebookEmbedding) {
-      toast.error("Wait for the embedded lorebook update to finish.");
+      toast.error(localizeUi("ui.characters.lorebooktab.waitForTheEmbeddedLorebookUpdateToFinish"));
       return;
     }
     setShowUnsavedWarning(false);
     setDirtyState(false);
     closeDetail();
-  }, [avatarUploading, closeDetail, lorebookEmbedding, setDirtyState]);
+  }, [avatarUploading, closeDetail, lorebookEmbedding, setDirtyState, localizeUi]);
 
   const addTag = () => {
     if (!formData) return;
@@ -826,11 +864,14 @@ export function CharacterEditor() {
       <button
         type="button"
         onClick={() => updateExtension("fav", !formData.extensions.fav)}
-        className={cn(
-          "mari-editor-action inline-flex",
-          formData.extensions.fav ? "text-yellow-400" : "text-[var(--muted-foreground)] hover:text-yellow-400",
-        )}
-        title={formData.extensions.fav ? "Remove from favorites" : "Add to favorites"}
+        data-character-favorite-toggle
+        data-favorite={formData.extensions.fav ? "true" : "false"}
+        className="mari-editor-action mari-editor-action--favorite inline-flex"
+        title={
+          formData.extensions.fav
+            ? localizeUi("ui.characters.charactereditor.removeFromFavorites")
+            : localizeUi("ui.characters.charactereditor.addToFavorites")
+        }
       >
         {formData.extensions.fav ? <Star size="1rem" fill="currentColor" /> : <StarOff size="1rem" />}
       </button>
@@ -839,7 +880,7 @@ export function CharacterEditor() {
         type="button"
         onClick={() => setExportDialogOpen(true)}
         className={headerActionButtonClass}
-        title="Export character"
+        title={localizeUi("ui.characters.charactereditor.exportCharacter")}
       >
         <svg width="1rem" height="1rem" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
           <path
@@ -858,7 +899,7 @@ export function CharacterEditor() {
         onClick={handleImportAsPersona}
         disabled={createPersona.isPending || uploadPersonaAvatar.isPending}
         className="mari-editor-action inline-flex disabled:cursor-not-allowed disabled:opacity-50"
-        title="Import character as persona"
+        title={localizeUi("ui.characters.charactereditor.importCharacterAsPersona")}
       >
         {createPersona.isPending || uploadPersonaAvatar.isPending ? (
           <Loader2 size="1rem" className="animate-spin" />
@@ -873,12 +914,12 @@ export function CharacterEditor() {
           if (!characterId) return;
           duplicateCharacter.mutate(characterId, {
             onSuccess: () => {
-              toast.success("Character duplicated");
+              toast.success(localizeUi("ui.characters.charactereditor.characterDuplicated"));
             },
           });
         }}
         className="mari-editor-action inline-flex"
-        title="Duplicate character"
+        title={localizeUi("ui.characters.charactereditor.duplicateCharacter")}
       >
         <Copy size="1rem" />
       </button>
@@ -887,7 +928,7 @@ export function CharacterEditor() {
         type="button"
         onClick={handleDelete}
         className="mari-editor-action inline-flex"
-        title="Delete character"
+        title={localizeUi("ui.characters.charactereditor.deleteCharacter")}
       >
         <Trash2 size="1rem" />
       </button>
@@ -898,8 +939,10 @@ export function CharacterEditor() {
     <div className="mari-editor-shell mari-editor-legacy-bridge flex flex-1 flex-col overflow-hidden">
       <ExportFormatDialog
         open={exportDialogOpen}
-        title="Export Character"
-        description="Native keeps Marinara metadata, sprites, gallery images, and attached lorebooks. Compatible exports direct Chara Card V2 JSON for other platforms."
+        title={localizeUi("ui.characters.charactereditor.exportCharacter_cdcda78")}
+        description={localizeUi(
+          "ui.characters.charactereditor.nativeKeepsMarinaraMetadataSpritesGalleryImagesAndAttached",
+        )}
         compatibleDescription="Exports direct Chara Card V2 JSON without the Marinara wrapper."
         showPngOption
         onClose={() => setExportDialogOpen(false)}
@@ -915,7 +958,7 @@ export function CharacterEditor() {
       />
       <AvatarGenerationModal
         open={avatarGeneratorOpen}
-        title="Generate Character Avatar"
+        title={localizeUi("ui.characters.charactereditor.generateCharacterAvatar")}
         entityName={formData.name}
         defaultAppearance={
           ((formData.extensions.appearance as string | undefined) || formData.description || formData.personality) ?? ""
@@ -926,9 +969,14 @@ export function CharacterEditor() {
       />
 
       {/* ── Header ── */}
-      <div className="mari-editor-header items-start">
+      <div className="mari-editor-header">
         <div className="mari-editor-header-main max-md:min-w-full">
-          <button type="button" onClick={handleClose} className="mari-editor-action inline-flex" title="Back">
+          <button
+            type="button"
+            onClick={handleClose}
+            className="mari-editor-action inline-flex"
+            title={localizeUi("ui.noodle.noodlerframe.back")}
+          >
             <ArrowLeft size="1.125rem" />
           </button>
 
@@ -945,46 +993,60 @@ export function CharacterEditor() {
                 src={avatarPreview}
                 alt={formData.name}
                 className="pointer-events-none h-full w-full object-cover"
-                style={getAvatarCropStyle(formData.extensions.avatarCrop as AvatarCrop | LegacyAvatarCrop | undefined)}
+                style={getAvatarCropStyle(normalizeAvatarCrop(formData.extensions.avatarCrop))}
               />
             ) : (
               <User size="1.375rem" className="text-white" />
             )}
-            <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
-              <Camera size="1rem" className="text-white" />
-            </div>
-            {imageGenerationAvailable && (
-              <button
-                type="button"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setAvatarGeneratorOpen(true);
-                }}
-                className="absolute right-0.5 top-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-[var(--card)]/95 text-[var(--primary)] opacity-0 shadow-md ring-1 ring-[var(--border)] transition-opacity hover:bg-[var(--card)] group-hover:opacity-100 max-md:opacity-100"
-                title="Generate avatar"
-              >
-                <Wand2 size="0.75rem" />
-              </button>
-            )}
+            <EditorAvatarTileActions
+              generationAvailable={imageGenerationAvailable}
+              onGenerate={() => setAvatarGeneratorOpen(true)}
+            />
             <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleAvatarUpload} />
           </div>
 
           <div className="min-w-0 flex-1">
-            <input
-              value={formData.name}
-              onChange={(e) => updateField("name", e.target.value)}
-              className="mari-editor-title-input"
-              placeholder="Character name"
-            />
-            <input
-              value={characterComment}
-              onChange={(e) => updateCharacterComment(e.target.value)}
-              className="mari-editor-subtitle-input"
-              placeholder="Title / comment (e.g. 'Modern AU version')"
-            />
-            <p className="mari-editor-meta text-[0.625rem]">
-              {formData.creator ? `by ${formData.creator}` : "No creator"} · v{formData.character_version || "1.0"}
-            </p>
+            <div className="mari-editor-title-line">
+              <input
+                value={formData.name}
+                onChange={(e) => updateField("name", e.target.value)}
+                onBlur={() => {
+                  const trimmedName = formData.name.trim();
+                  if (trimmedName !== formData.name) updateField("name", trimmedName);
+                }}
+                className="mari-editor-title-input"
+                placeholder={localizeUi("ui.characters.charactereditor.characterName")}
+                size={Math.max(1, Math.min(formData.name.length || 14, 80))}
+              />
+              <p
+                className="mari-editor-meta mari-editor-byline"
+                title={localizeUi("ui.characters.charactereditor.value1VValue2", {
+                  value1: formData.creator
+                    ? localizeUi("ui.characters.charactereditor.byValue1", { value1: formData.creator })
+                    : localizeUi("ui.characters.charactereditor.noCreator"),
+                  value2: formData.character_version || "1.0",
+                })}
+              >
+                <span className="mari-editor-byline-creator">
+                  {formData.creator
+                    ? localizeUi("ui.characters.charactereditor.byValue1", { value1: formData.creator })
+                    : localizeUi("ui.characters.charactereditor.noCreator")}
+                </span>
+                <span aria-hidden="true">·</span>
+                <span className="mari-editor-byline-version">
+                  {localizeUi("ui.characters.charactereditor.v")}
+                  {formData.character_version || "1.0"}
+                </span>
+              </p>
+            </div>
+            <div className="mari-editor-secondary-line">
+              <input
+                value={characterComment}
+                onChange={(e) => updateCharacterComment(e.target.value)}
+                className="mari-editor-subtitle-input"
+                placeholder={localizeUi("ui.characters.charactereditor.titleCommentEGModernAuVersion")}
+              />
+            </div>
           </div>
         </div>
 
@@ -1001,13 +1063,15 @@ export function CharacterEditor() {
       {showUnsavedWarning && (
         <div className="flex items-center gap-3 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2.5">
           <AlertTriangle size="0.9375rem" className="shrink-0 text-amber-500" />
-          <p className="flex-1 text-xs font-medium text-amber-500">You have unsaved changes. Close without saving?</p>
+          <p className="flex-1 text-xs font-medium text-amber-500">
+            {localizeUi("ui.characters.charactereditor.youHaveUnsavedChangesCloseWithoutSaving")}
+          </p>
           <button
             type="button"
             onClick={() => setShowUnsavedWarning(false)}
             className="rounded-lg px-3 py-1 text-xs font-medium text-[var(--muted-foreground)] transition-all hover:bg-[var(--accent)]"
           >
-            Keep editing
+            {localizeUi("ui.characters.charactereditor.keepEditing")}
           </button>
           <button
             type="button"
@@ -1015,7 +1079,7 @@ export function CharacterEditor() {
             disabled={avatarUploading}
             className="rounded-lg bg-amber-500/15 px-3 py-1 text-xs font-medium text-amber-500 transition-all hover:bg-amber-500/25 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            Discard & close
+            {localizeUi("ui.characters.charactereditor.discardClose")}
           </button>
           <button
             type="button"
@@ -1027,7 +1091,7 @@ export function CharacterEditor() {
             disabled={saving || avatarUploading}
             className="mari-editor-action mari-editor-action--primary mari-editor-action--compact inline-flex rounded-lg px-3 py-1 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            Save & close
+            {localizeUi("ui.characters.charactereditor.saveClose")}
           </button>
         </div>
       )}
@@ -1054,9 +1118,12 @@ export function CharacterEditor() {
                 removeAllTags={removeAllTags}
                 avatarPreview={avatarPreview}
                 onSelectAvatar={() => fileInputRef.current?.click()}
+                onGenerateAvatar={() => setAvatarGeneratorOpen(true)}
+                imageGenerationAvailable={imageGenerationAvailable}
                 avatarUploading={avatarUploading}
                 onRemoveAvatar={handleAvatarRemove}
                 removingAvatar={removeAvatar.isPending}
+                hasUnsavedChanges={dirty}
               />
             )}
             {activeTab === "card" && (
@@ -1146,11 +1213,12 @@ function CharacterCardTab({
   updateField: <K extends keyof CharacterData>(key: K, value: CharacterData[K]) => void;
   updateExtension: (key: string, value: unknown) => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   return (
     <div>
       <SectionHeader
-        title="Card"
-        subtitle="Write the character's core card fields in one focused workspace."
+        title={localizeUi("editor.tabs.card")}
+        subtitle={localizeUi("ui.characters.charactercardtab.writeTheCharacterSCoreCardFieldsInOne")}
         helpText={CHARACTER_CARD_HELP}
       />
       <EditorSectionJumps items={CHARACTER_CARD_SECTIONS} />
@@ -1160,45 +1228,51 @@ function CharacterCardTab({
         </EditorSectionAnchor>
         <EditorSectionAnchor id="character-card-personality">
           <TextareaTab
-            title="Personality"
-            subtitle="A concise summary of the character's personality traits, temperament, and behavioral patterns."
+            title={localizeUi("chat.settings.inlineEditor.fields.personality")}
+            subtitle={localizeUi("ui.characters.charactercardtab.aConciseSummaryOfTheCharacterSPersonalityTraits")}
             helpText={CHARACTER_PERSONALITY_HELP}
             value={formData.personality}
             onChange={(v) => updateField("personality", v)}
-            placeholder="Energetic, curious, and fiercely loyal. Speaks in short bursts. Has a habit of…"
+            placeholder={localizeUi(
+              "ui.characters.charactercardtab.energeticCuriousAndFiercelyLoyalSpeaksInShortBursts",
+            )}
             rows={8}
           />
         </EditorSectionAnchor>
         <EditorSectionAnchor id="character-card-backstory">
           <TextareaTab
-            title="Backstory"
-            subtitle="The character's history, origin story, and formative life events."
+            title={localizeUi("chat.settings.inlineEditor.fields.backstory")}
+            subtitle={localizeUi("ui.characters.charactercardtab.theCharacterSHistoryOriginStoryAndFormativeLife")}
             helpText={CHARACTER_BACKSTORY_HELP}
             value={(formData.extensions.backstory as string) ?? ""}
             onChange={(v) => updateExtension("backstory", v)}
-            placeholder="Born in a small village on the outskirts of the empire…"
+            placeholder={localizeUi("ui.characters.charactercardtab.bornInASmallVillageOnTheOutskirtsOf")}
             rows={12}
           />
         </EditorSectionAnchor>
         <EditorSectionAnchor id="character-card-appearance">
           <TextareaTab
-            title="Appearance"
-            subtitle="Detailed physical description, height, build, hair, eyes, clothing, distinguishing features."
+            title={localizeUi("chat.settings.inlineEditor.fields.appearance")}
+            subtitle={localizeUi(
+              "ui.characters.charactercardtab.detailedPhysicalDescriptionHeightBuildHairEyesClothingDistinguishing",
+            )}
             helpText={CHARACTER_APPEARANCE_HELP}
             value={(formData.extensions.appearance as string) ?? ""}
             onChange={(v) => updateExtension("appearance", v)}
-            placeholder="Tall and willowy with silver-streaked dark hair. Wears a battered leather coat over…"
+            placeholder={localizeUi("ui.characters.charactercardtab.tallAndWillowyWithSilverStreakedDarkHairWears")}
             rows={8}
           />
         </EditorSectionAnchor>
         <EditorSectionAnchor id="character-card-scenario">
           <TextareaTab
-            title="Scenario"
-            subtitle="The default setting or situation where interactions take place."
+            title={localizeUi("chat.settings.inlineEditor.fields.scenario")}
+            subtitle={localizeUi(
+              "ui.characters.charactercardtab.theDefaultSettingOrSituationWhereInteractionsTakePlace",
+            )}
             helpText={CHARACTER_SCENARIO_HELP}
             value={formData.scenario}
             onChange={(v) => updateField("scenario", v)}
-            placeholder="A bustling port city during a trade festival. The streets are alive with merchants and performers…"
+            placeholder={localizeUi("ui.characters.charactercardtab.aBustlingPortCityDuringATradeFestivalThe")}
             rows={8}
           />
         </EditorSectionAnchor>
@@ -1217,23 +1291,27 @@ function CharacterDescriptionTab({
   formData: CharacterData;
   updateField: <K extends keyof CharacterData>(key: K, value: CharacterData[K]) => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
+  const selfCharacterId = useUIStore((s) => s.characterDetailId);
   return (
     <div className="mari-editor-panel space-y-3 p-3">
       <SectionHeader
-        title="Description"
-        subtitle="The character's general description. This is sent in every prompt as part of the character's identity."
+        title={localizeUi("chat.settings.inlineEditor.fields.description")}
+        subtitle={localizeUi("ui.characters.characterdescriptiontab.theCharacterSGeneralDescriptionThisIsSentIn")}
         helpText={CHARACTER_DESCRIPTION_HELP}
       />
       <MacroTextarea
         value={formData.description}
         onChange={(value) => updateField("description", value)}
-        placeholder="Describe who this character is, their role, and their key traits…"
+        placeholder={localizeUi("ui.characters.characterdescriptiontab.describeWhoThisCharacterIsTheirRoleAndTheir")}
         rows={12}
-        title="Description"
+        title={localizeUi("chat.settings.inlineEditor.fields.description")}
+        showMarkdownPreview
+        selfCharacterId={selfCharacterId}
         className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-4 text-sm leading-relaxed outline-none transition-colors placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
       />
       <p className="mt-1.5 text-right text-[0.625rem] text-[var(--muted-foreground)]">
-        {formData.description.length} characters
+        {formData.description.length} {localizeUi("ui.noodle.noodlehome.characters")}
       </p>
     </div>
   );
@@ -1256,6 +1334,8 @@ function TextareaTab({
   placeholder: string;
   rows?: number;
 }) {
+  const { t: localizeUi } = useUiTranslation();
+  const selfCharacterId = useUIStore((s) => s.characterDetailId);
   return (
     <div className="mari-editor-panel space-y-3 p-3">
       <SectionHeader title={title} subtitle={subtitle} helpText={helpText} />
@@ -1265,9 +1345,13 @@ function TextareaTab({
         placeholder={placeholder}
         rows={rows}
         title={title}
+        showMarkdownPreview
+        selfCharacterId={selfCharacterId}
         className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-4 text-sm leading-relaxed outline-none transition-colors placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
       />
-      <p className="mt-1.5 text-right text-[0.625rem] text-[var(--muted-foreground)]">{value.length} characters</p>
+      <p className="mt-1.5 text-right text-[0.625rem] text-[var(--muted-foreground)]">
+        {value.length} {localizeUi("ui.noodle.noodlehome.characters")}
+      </p>
     </div>
   );
 }
@@ -1300,6 +1384,12 @@ function ConvoTab({
       onAboutMeChange={(v) => updateExtension("aboutMe", v)}
       behavior={ext.convoBehavior as ConvoBehaviorConfig | undefined}
       onBehaviorChange={(b) => updateExtension("convoBehavior", b)}
+      imageInstructions={(ext.conversationImageInstructions as string) ?? ""}
+      onImageInstructionsChange={(value) => updateExtension("conversationImageInstructions", value)}
+      applyImageInstructionsToNoodle={ext.applyConversationImageInstructionsToNoodle === true}
+      onApplyImageInstructionsToNoodleChange={(value) =>
+        updateExtension("applyConversationImageInstructionsToNoodle", value)
+      }
     />
   );
 }
@@ -1318,9 +1408,12 @@ function MetadataTab({
   removeAllTags,
   avatarPreview,
   onSelectAvatar,
+  onGenerateAvatar,
+  imageGenerationAvailable,
   avatarUploading,
   onRemoveAvatar,
   removingAvatar,
+  hasUnsavedChanges,
 }: {
   characterId: string | null;
   formData: CharacterData;
@@ -1335,74 +1428,45 @@ function MetadataTab({
   removeAllTags: () => void;
   avatarPreview: string | null;
   onSelectAvatar: () => void;
+  onGenerateAvatar: () => void;
+  imageGenerationAvailable: boolean;
   avatarUploading: boolean;
   onRemoveAvatar: () => void;
   removingAvatar: boolean;
+  hasUnsavedChanges: boolean;
 }) {
+  const { t: localizeUi } = useUiTranslation();
+  const { t } = useTranslation();
   // Read existing crop in either current or legacy shape; the widget handles both
   // and writes back the current shape on first interaction.
-  const savedCrop = (formData.extensions.avatarCrop as AvatarCrop | LegacyAvatarCrop | undefined) ?? null;
+  const savedCrop = normalizeAvatarCrop(formData.extensions.avatarCrop);
 
   return (
     <div className="space-y-5">
       <SectionHeader
-        title="Metadata"
-        subtitle="Basic character info: avatar, name, title, creator, version, tags."
+        title={localizeUi("editor.tabs.metadata")}
+        subtitle={localizeUi("ui.characters.metadatatab.basicCharacterInfoAvatarNameTitleCreatorVersionTags")}
         helpText={CHARACTER_METADATA_HELP}
       />
 
       <div className="space-y-1.5">
         <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-          Avatar
-          <HelpTooltip text="The character image shown in the library and chats. You can replace it at any time without changing the character card." />
+          {t("editor.avatar.label")}
+          <HelpTooltip text={t("editor.avatar.character.help")} />
         </span>
-        <button
-          type="button"
-          onClick={onSelectAvatar}
-          disabled={avatarUploading}
-          aria-busy={avatarUploading}
-          className="group flex min-h-20 w-full items-center gap-3 rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-3 text-left transition-colors hover:border-[var(--primary)]/40 hover:bg-[var(--accent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--primary)]/30 disabled:cursor-wait disabled:opacity-60"
-        >
-          <span
-            className={cn(
-              "relative flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--background)]",
-              !avatarPreview && "mari-avatar-placeholder mari-avatar-placeholder--character",
-            )}
-          >
-            {avatarPreview ? (
-              <img
-                src={avatarPreview}
-                alt=""
-                className="pointer-events-none h-full w-full object-cover"
-                style={getAvatarCropStyle(savedCrop ?? undefined)}
-              />
-            ) : (
-              <User size="1.375rem" className="text-white" />
-            )}
-          </span>
-          <span className="min-w-0 flex-1">
-            <span className="block text-sm font-semibold text-[var(--foreground)]">
-              {avatarUploading ? "Uploading avatar…" : avatarPreview ? "Replace avatar" : "Upload avatar"}
-            </span>
-            <span className="mt-0.5 block text-xs leading-5 text-[var(--muted-foreground)]">
-              Choose an image from this device. You can adjust its crop after uploading.
-            </span>
-          </span>
-          {avatarUploading ? (
-            <Loader2 size="1rem" className="shrink-0 animate-spin text-[var(--primary)]" />
-          ) : (
-            <Upload
-              size="1rem"
-              className="shrink-0 text-[var(--muted-foreground)] transition-colors group-hover:text-[var(--primary)]"
-            />
-          )}
-        </button>
+        <AvatarReplaceActions
+          hasAvatar={Boolean(avatarPreview)}
+          uploading={avatarUploading}
+          generationAvailable={imageGenerationAvailable}
+          onUpload={onSelectAvatar}
+          onGenerate={onGenerateAvatar}
+        />
       </div>
 
       {characterId && (
         <div className="flex flex-wrap items-center gap-2 rounded-xl border border-[var(--border)] bg-[var(--secondary)]/70 px-3 py-2">
           <span className="text-[0.625rem] font-semibold uppercase tracking-wide text-[var(--muted-foreground)]">
-            Character ID
+            {localizeUi("ui.characters.metadatatab.characterId")}
           </span>
           <code className="min-w-0 flex-1 break-all rounded-lg bg-[var(--background)] px-2 py-1 text-[0.6875rem] text-[var(--foreground)]">
             {characterId}
@@ -1411,14 +1475,14 @@ function MetadataTab({
             type="button"
             onClick={async () => {
               const copied = await copyToClipboard(characterId);
-              if (copied) toast.success("Character ID copied");
-              else toast.error("Could not copy the character ID");
+              if (copied) toast.success(localizeUi("ui.characters.metadatatab.characterIdCopied"));
+              else toast.error(localizeUi("ui.characters.metadatatab.couldNotCopyTheCharacterId"));
             }}
             className="mari-editor-action inline-flex h-8 px-2 text-[0.6875rem]"
-            title="Copy character ID"
+            title={localizeUi("ui.characters.metadatatab.copyCharacterId")}
           >
             <Copy size="0.75rem" />
-            Copy
+            {localizeUi("lorebook.editor.batch.copy")}
           </button>
         </div>
       )}
@@ -1438,31 +1502,37 @@ function MetadataTab({
       <div className="grid gap-4 sm:grid-cols-2">
         <label className="space-y-1.5 sm:col-span-2">
           <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-            Name{" "}
-            <HelpTooltip text="The character's display name. This is what appears in chat and is used as {{char}} in prompts." />
+            {localizeUi("ui.characters.metadatatab.name")}{" "}
+            <HelpTooltip text={localizeUi("ui.characters.metadatatab.theCharacterSDisplayNameThisIsWhatAppears")} />
           </span>
           <input
             value={formData.name}
             onChange={(e) => updateField("name", e.target.value)}
+            onBlur={() => {
+              const trimmedName = formData.name.trim();
+              if (trimmedName !== formData.name) updateField("name", trimmedName);
+            }}
             className="w-full rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm outline-none focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
           />
         </label>
         <label className="space-y-1.5 sm:col-span-2">
           <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-            Title / comment{" "}
-            <HelpTooltip text="A short note shown under the character name in the library, useful for variants or alternate versions." />
+            {localizeUi("ui.characters.metadatatab.titleComment")}{" "}
+            <HelpTooltip text={localizeUi("ui.characters.metadatatab.aShortNoteShownUnderTheCharacterNameIn")} />
           </span>
           <input
             value={characterComment}
             onChange={(e) => updateCharacterComment(e.target.value)}
             className="w-full rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm outline-none focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
-            placeholder="Modern AU version"
+            placeholder={localizeUi("ui.characters.metadatatab.modernAuVersion")}
           />
         </label>
         <label className="space-y-1.5">
           <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-            Phonetic name{" "}
-            <HelpTooltip text="Optional pronunciation override used only when this character's name is sent to text-to-speech." />
+            {localizeUi("ui.characters.metadatatab.phoneticName")}{" "}
+            <HelpTooltip
+              text={localizeUi("ui.characters.metadatatab.optionalPronunciationOverrideUsedOnlyWhenThisCharacterS")}
+            />
           </span>
           <input
             value={typeof formData.extensions?.phoneticName === "string" ? formData.extensions.phoneticName : ""}
@@ -1473,19 +1543,22 @@ function MetadataTab({
         </label>
         <label className="space-y-1.5">
           <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-            Creator{" "}
-            <HelpTooltip text="The person who made this character. Useful for giving credit when sharing characters." />
+            {localizeUi("ui.characters.metadatatab.creator")}{" "}
+            <HelpTooltip text={localizeUi("ui.characters.metadatatab.thePersonWhoMadeThisCharacterUsefulForGiving")} />
           </span>
           <input
             value={formData.creator}
             onChange={(e) => updateField("creator", e.target.value)}
             className="w-full rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm outline-none focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
-            placeholder="Your name"
+            placeholder={localizeUi("ui.characters.metadatatab.yourName")}
           />
         </label>
         <div className="space-y-1.5">
           <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-            Version <HelpTooltip text="Version number for tracking changes to this character definition over time." />
+            {localizeUi("ui.characters.metadatatab.version")}{" "}
+            <HelpTooltip
+              text={localizeUi("ui.characters.metadatatab.versionNumberForTrackingChangesToThisCharacterDefinition")}
+            />
           </span>
           <input
             value={formData.character_version}
@@ -1498,12 +1571,13 @@ function MetadataTab({
             currentData={formData}
             currentComment={characterComment}
             currentAvatarPath={avatarPreview}
+            hasUnsavedChanges={hasUnsavedChanges}
           />
         </div>
         <label className="space-y-1.5">
           <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-            Talkativeness{" "}
-            <HelpTooltip text="How often this character speaks in group chats. 0% = rarely speaks unless addressed, 100% = responds to almost everything." />
+            {localizeUi("ui.characters.metadatatab.talkativeness")}{" "}
+            <HelpTooltip text={localizeUi("ui.characters.metadatatab.howOftenThisCharacterSpeaksInGroupChats0")} />
           </span>
           <input
             type="range"
@@ -1524,16 +1598,18 @@ function MetadataTab({
       <div className="space-y-2">
         <div className="flex items-center justify-between gap-2">
           <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-            Tags{" "}
-            <HelpTooltip text="Labels for organizing characters. Use tags like 'fantasy', 'sci-fi', 'OC' etc. to categorize and search." />
+            {localizeUi("ui.characters.metadatatab.tags")}{" "}
+            <HelpTooltip
+              text={localizeUi("ui.characters.metadatatab.labelsForOrganizingCharactersUseTagsLikeFantasySci")}
+            />
           </span>
           {formData.tags.length > 0 && (
             <button
               type="button"
               onClick={removeAllTags}
-              className="mari-chrome-control mari-chrome-control--compact mari-chrome-control--danger"
+              className="mari-chrome-accent-surface mari-accent-animated rounded-lg border px-2.5 py-1 text-[0.6875rem] font-medium transition-colors"
             >
-              Remove All
+              {localizeUi("ui.characters.metadatatab.removeAll")}
             </button>
           )}
         </div>
@@ -1545,8 +1621,8 @@ function MetadataTab({
               <button
                 type="button"
                 onClick={() => removeTag(tag)}
-                className="ml-0.5 rounded-full p-0.5 transition-colors hover:bg-[var(--destructive)]/20 hover:text-[var(--destructive)]"
-                title={`Remove tag "${tag}"`}
+                className="ml-0.5 rounded-full p-0.5 transition-colors hover:bg-[var(--primary)]/15 hover:text-[var(--primary)]"
+                title={localizeUi("ui.characters.metadatatab.removeTagValue1", { value1: tag })}
               >
                 <X size="0.625rem" />
               </button>
@@ -1563,7 +1639,7 @@ function MetadataTab({
                 addTag();
               }
             }}
-            placeholder="Add tag…"
+            placeholder={localizeUi("ui.characters.metadatatab.addTag")}
             className="flex-1 rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-1.5 text-xs outline-none focus:border-[var(--primary)]/40"
           />
           <button
@@ -1571,7 +1647,7 @@ function MetadataTab({
             onClick={addTag}
             className="mari-chrome-control mari-chrome-control--compact mari-chrome-control--selected px-3 py-1.5"
           >
-            Add
+            {localizeUi("ui.characters.metadatatab.add")}
           </button>
         </div>
       </div>
@@ -1579,16 +1655,18 @@ function MetadataTab({
       {/* Creator Notes */}
       <div className="block space-y-1.5">
         <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-          Creator Notes{" "}
-          <HelpTooltip text="Private notes about this character — tips for use, known quirks, recommended settings. Not sent to the AI." />
+          {localizeUi("ui.characters.metadatatab.creatorNotes")}{" "}
+          <HelpTooltip text={localizeUi("ui.characters.metadatatab.privateNotesAboutThisCharacterTipsForUseKnown")} />
         </span>
         <MacroTextarea
           value={formData.creator_notes}
           onChange={(value) => updateField("creator_notes", value)}
           rows={4}
-          title="Creator Notes"
+          title={localizeUi("ui.characters.metadatatab.creatorNotes")}
+          showMarkdownPreview
+          selfCharacterId={characterId}
           className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-3 text-sm outline-none placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
-          placeholder="Notes about this character, intended use, tips for best results…"
+          placeholder={localizeUi("ui.characters.metadatatab.notesAboutThisCharacterIntendedUseTipsForBest")}
         />
       </div>
     </div>
@@ -1620,70 +1698,126 @@ function getVersionFieldValue(data: CharacterData, key: string): string {
   return typeof value === "string" ? value : "";
 }
 
-function formatVersionTimestamp(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function getVersionTitle(version: CharacterCardVersion): string {
-  return version.version?.trim() ? `v${version.version}` : "Untitled version";
-}
-
 function CharacterVersionHistoryPanel({
   characterId,
   currentData,
   currentComment,
   currentAvatarPath,
+  hasUnsavedChanges,
 }: {
   characterId: string | null;
   currentData: CharacterData;
   currentComment: string;
   currentAvatarPath: string | null;
+  hasUnsavedChanges: boolean;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const { data: versions = [], isLoading } = useCharacterVersions(characterId);
   const restoreVersion = useRestoreCharacterVersion();
   const deleteVersion = useDeleteCharacterVersion();
+  const renameVersion = useRenameCharacterVersion();
+  const resetVersions = useResetCharacterVersions();
   const [selectedVersion, setSelectedVersion] = useState<CharacterCardVersion | null>(null);
+  const savedVersionCount = versions.filter((version) => !version.isCurrent).length;
+  const getVersionTitle = (version: CharacterCardVersion) => getCardVersionTitle(version, localizeUi);
+  const versionMutationPending =
+    restoreVersion.isPending || deleteVersion.isPending || renameVersion.isPending || resetVersions.isPending;
 
   if (!characterId) return null;
 
   const handleRestore = async (version: CharacterCardVersion) => {
     const confirmed = await showConfirmDialog({
-      title: "Restore Character Version",
-      message: `Restore ${currentData.name || "this character"} to ${getVersionTitle(version)}? The current card will become exactly that saved version without creating another history entry.`,
-      confirmLabel: "Restore",
+      title: localizeUi("ui.characters.characterversionhistorypanel.restoreCharacterVersion"),
+      message: localizeUi("ui.characters.characterversionhistorypanel.restoreValue1ToValue2TheCurrentCardWillBecome", {
+        value1: currentData.name || localizeUi("ui.characters.charactereditor.thisCharacter"),
+        value2: getVersionTitle(version),
+      }),
+      confirmLabel: localizeUi("ui.chat.databaseworkspaceapprovalcard.restore"),
     });
     if (!confirmed) return;
     try {
       await restoreVersion.mutateAsync({ id: characterId, versionId: version.id });
-      toast.success(`Restored ${getVersionTitle(version)}.`);
+      toast.success(
+        localizeUi("ui.characters.characterversionhistorypanel.restoredValue1", { value1: getVersionTitle(version) }),
+      );
       setSelectedVersion(null);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to restore character version.");
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : localizeUi("ui.characters.characterversionhistorypanel.failedToRestoreCharacterVersion"),
+      );
     }
   };
 
   const handleDeleteVersion = async (version: CharacterCardVersion) => {
     const confirmed = await showConfirmDialog({
-      title: "Delete Saved Version",
-      message: `Delete ${getVersionTitle(version)} from version history? This does not change the current character card.`,
-      confirmLabel: "Delete",
+      title: localizeUi("ui.characters.characterversionhistorypanel.deleteSavedVersion"),
+      message: localizeUi(
+        "ui.characters.characterversionhistorypanel.deleteValue1FromVersionHistoryThisDoesNotChange",
+        { value1: getVersionTitle(version) },
+      ),
+      confirmLabel: localizeUi("lorebook.editor.batch.delete"),
       tone: "destructive",
     });
     if (!confirmed) return;
     try {
       await deleteVersion.mutateAsync({ id: characterId, versionId: version.id });
-      toast.success(`Deleted ${getVersionTitle(version)}.`);
+      toast.success(
+        localizeUi("ui.characters.characterversionhistorypanel.deletedValue1", { value1: getVersionTitle(version) }),
+      );
       setSelectedVersion((current) => (current?.id === version.id ? null : current));
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to delete character version.");
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : localizeUi("ui.characters.characterversionhistorypanel.failedToDeleteCharacterVersion"),
+      );
+    }
+  };
+
+  const handleRenameVersion = async (version: CharacterCardVersion) => {
+    const nextVersion = await showPromptDialog({
+      title: localizeUi("ui.cardversionhistory.renameVersion"),
+      message: localizeUi("ui.cardversionhistory.renameVersionMessage", {
+        value1: getVersionTitle(version),
+      }),
+      defaultValue: version.version,
+      placeholder: localizeUi("ui.cardversionhistory.versionPlaceholder"),
+      confirmLabel: localizeUi("ui.cardversionhistory.save"),
+      tone: "accent",
+    });
+    const trimmedVersion = nextVersion?.trim();
+    if (!trimmedVersion || trimmedVersion === version.version) return;
+    try {
+      await renameVersion.mutateAsync({ id: characterId, versionId: version.id, version: trimmedVersion });
+      toast.success(
+        localizeUi("ui.cardversionhistory.renamedVersion", {
+          value1: getVersionTitle(version),
+          value2: trimmedVersion,
+        }),
+      );
+      setSelectedVersion(null);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : localizeUi("ui.cardversionhistory.failedToRenameVersion"));
+    }
+  };
+
+  const handleResetVersions = async () => {
+    const characterName = currentData.name || localizeUi("ui.characters.charactereditor.thisCharacter");
+    const confirmed = await showConfirmDialog({
+      title: localizeUi("ui.cardversionhistory.resetVersioningForValue1", { value1: characterName }),
+      message: localizeUi("ui.cardversionhistory.resetVersioningMessage", { value1: characterName }),
+      confirmLabel: localizeUi("ui.cardversionhistory.reset"),
+      tone: "destructive",
+    });
+    if (!confirmed) return;
+    try {
+      await resetVersions.mutateAsync(characterId);
+      toast.success(localizeUi("ui.cardversionhistory.resetVersioningSuccess", { value1: characterName }));
+      setSelectedVersion(null);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : localizeUi("ui.cardversionhistory.failedToResetVersioning"));
     }
   };
 
@@ -1692,16 +1826,38 @@ function CharacterVersionHistoryPanel({
       <div className="flex items-center justify-between gap-2">
         <span className="inline-flex items-center gap-1.5 text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
           <History size="0.75rem" />
-          Version history
+          {localizeUi("ui.characters.characterversionhistorypanel.versionHistory")}
         </span>
-        <span className="rounded-full bg-[var(--accent)] px-2 py-0.5 text-[0.625rem] text-[var(--muted-foreground)]">
-          {isLoading ? "Loading" : `${versions.length} saved`}
-        </span>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={handleResetVersions}
+            disabled={isLoading || versionMutationPending || hasUnsavedChanges}
+            className="mari-editor-action mari-editor-action--compact inline-flex h-7 px-2 text-[0.625rem]"
+            title={localizeUi(
+              hasUnsavedChanges
+                ? "ui.cardversionhistory.saveOrDiscardEditsBeforeResettingVersioning"
+                : "ui.cardversionhistory.resetVersioning",
+            )}
+          >
+            {resetVersions.isPending ? (
+              <Loader2 size="0.75rem" className="animate-spin" />
+            ) : (
+              <RotateCcw size="0.75rem" />
+            )}
+            {localizeUi("ui.cardversionhistory.reset")}
+          </button>
+          <span className="mari-editor-chip mari-editor-chip--accent px-2 py-0.5 text-[0.625rem]">
+            {isLoading
+              ? localizeUi("ui.characters.characterversionhistorypanel.loading")
+              : localizeUi("ui.characters.characterversionhistorypanel.value1Saved", { value1: savedVersionCount })}
+          </span>
+        </div>
       </div>
 
       {versions.length === 0 ? (
         <p className="mt-2 text-[0.6875rem] leading-relaxed text-[var(--muted-foreground)]">
-          Previous card states will appear here after the next edit.
+          {localizeUi("ui.characters.characterversionhistorypanel.previousCardStatesWillAppearHereAfterTheNext")}
         </p>
       ) : (
         <div className="mt-2 flex max-h-36 flex-col gap-1.5 overflow-y-auto pr-1">
@@ -1712,44 +1868,70 @@ function CharacterVersionHistoryPanel({
             >
               <button
                 type="button"
-                onClick={() => setSelectedVersion(version)}
-                className="min-w-0 flex-1 text-left"
-                title="Compare with current card"
+                onClick={() => {
+                  if (!version.isCurrent) setSelectedVersion(version);
+                }}
+                disabled={version.isCurrent}
+                className="min-w-0 flex-1 text-left disabled:cursor-default"
+                title={
+                  version.isCurrent
+                    ? undefined
+                    : localizeUi("ui.characters.characterversionhistorypanel.compareWithCurrentCard")
+                }
               >
                 <span className="block truncate text-[0.6875rem] font-medium text-[var(--foreground)]">
                   {getVersionTitle(version)}
                 </span>
                 <span className="block truncate text-[0.625rem] text-[var(--muted-foreground)]">
-                  {formatVersionTimestamp(version.createdAt)}
-                  {version.source ? ` · ${version.source}` : ""}
+                  {formatCardVersionTimestamp(version.createdAt)}
+                  {!version.isCurrent && version.source
+                    ? localizeUi("ui.characters.characterversionhistorypanel.value1", { value1: version.source })
+                    : ""}
                 </span>
               </button>
-              <button
-                type="button"
-                onClick={() => handleRestore(version)}
-                disabled={restoreVersion.isPending || deleteVersion.isPending}
-                className="rounded-lg p-1.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-50"
-                title="Restore this version"
-              >
-                {restoreVersion.isPending ? (
-                  <Loader2 size="0.75rem" className="animate-spin" />
-                ) : (
-                  <RotateCcw size="0.75rem" />
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={() => handleDeleteVersion(version)}
-                disabled={restoreVersion.isPending || deleteVersion.isPending}
-                className="rounded-lg p-1.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-50"
-                title="Delete this saved version"
-              >
-                {deleteVersion.isPending && deleteVersion.variables?.versionId === version.id ? (
-                  <Loader2 size="0.75rem" className="animate-spin" />
-                ) : (
-                  <Trash2 size="0.75rem" />
-                )}
-              </button>
+              {!version.isCurrent && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => handleRenameVersion(version)}
+                    disabled={versionMutationPending}
+                    className="mari-editor-action mari-editor-action--compact inline-flex h-7 w-7 rounded-lg p-0"
+                    title={localizeUi("ui.cardversionhistory.renameThisSavedVersion")}
+                  >
+                    {renameVersion.isPending && renameVersion.variables?.versionId === version.id ? (
+                      <Loader2 size="0.75rem" className="animate-spin" />
+                    ) : (
+                      <Pencil size="0.75rem" />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleRestore(version)}
+                    disabled={versionMutationPending}
+                    className="mari-editor-action mari-editor-action--compact inline-flex h-7 w-7 rounded-lg p-0"
+                    title={localizeUi("ui.characters.characterversionhistorypanel.restoreThisVersion")}
+                  >
+                    {restoreVersion.isPending ? (
+                      <Loader2 size="0.75rem" className="animate-spin" />
+                    ) : (
+                      <RotateCcw size="0.75rem" />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteVersion(version)}
+                    disabled={versionMutationPending}
+                    className="mari-editor-action mari-editor-action--compact mari-editor-action--danger inline-flex h-7 w-7 rounded-lg p-0"
+                    title={localizeUi("ui.characters.characterversionhistorypanel.deleteThisSavedVersion")}
+                  >
+                    {deleteVersion.isPending && deleteVersion.variables?.versionId === version.id ? (
+                      <Loader2 size="0.75rem" className="animate-spin" />
+                    ) : (
+                      <Trash2 size="0.75rem" />
+                    )}
+                  </button>
+                </>
+              )}
             </div>
           ))}
         </div>
@@ -1758,26 +1940,41 @@ function CharacterVersionHistoryPanel({
       <Modal
         open={!!selectedVersion}
         onClose={() => setSelectedVersion(null)}
-        title={selectedVersion ? `Compare ${getVersionTitle(selectedVersion)}` : "Compare Version"}
+        title={
+          selectedVersion
+            ? localizeUi("ui.characters.characterversionhistorypanel.compareValue1", {
+                value1: getVersionTitle(selectedVersion),
+              })
+            : localizeUi("ui.characters.characterversionhistorypanel.compareVersion")
+        }
         width="max-w-5xl"
       >
         {selectedVersion && (
           <div className="flex max-h-[75vh] flex-col gap-4 overflow-y-auto">
             <div className="grid gap-3 rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-3 text-xs md:grid-cols-2">
               <div>
-                <p className="font-semibold text-[var(--foreground)]">Current card</p>
+                <p className="font-semibold text-[var(--foreground)]">
+                  {localizeUi("ui.characters.characterversionhistorypanel.currentCard")}
+                </p>
                 <p className="mt-1 text-[var(--muted-foreground)]">
-                  v{currentData.character_version || "1.0"}
-                  {currentComment ? ` · ${currentComment}` : ""}
-                  {currentAvatarPath ? " · has avatar" : ""}
+                  {localizeUi("ui.characters.charactereditor.v")}
+                  {currentData.character_version || "1.0"}
+                  {currentComment
+                    ? localizeUi("ui.characters.characterversionhistorypanel.value1", { value1: currentComment })
+                    : ""}
+                  {currentAvatarPath ? localizeUi("ui.characters.characterversionhistorypanel.hasAvatar") : ""}
                 </p>
               </div>
               <div>
                 <p className="font-semibold text-[var(--foreground)]">{getVersionTitle(selectedVersion)}</p>
                 <p className="mt-1 text-[var(--muted-foreground)]">
-                  {formatVersionTimestamp(selectedVersion.createdAt)}
-                  {selectedVersion.reason ? ` · ${selectedVersion.reason}` : ""}
-                  {selectedVersion.avatarPath ? " · has avatar" : ""}
+                  {formatCardVersionTimestamp(selectedVersion.createdAt)}
+                  {selectedVersion.reason
+                    ? localizeUi("ui.characters.characterversionhistorypanel.value1", {
+                        value1: selectedVersion.reason,
+                      })
+                    : ""}
+                  {selectedVersion.avatarPath ? localizeUi("ui.characters.characterversionhistorypanel.hasAvatar") : ""}
                 </p>
               </div>
             </div>
@@ -1794,16 +1991,24 @@ function CharacterVersionHistoryPanel({
                       <span className="text-xs font-semibold text-[var(--foreground)]">{field.label}</span>
                       {changed && (
                         <span className="rounded-full bg-[var(--primary)]/10 px-2 py-0.5 text-[0.625rem] font-medium text-[var(--primary)]">
-                          changed
+                          {localizeUi("ui.characters.characterversionhistorypanel.changed")}
                         </span>
                       )}
                     </div>
                     <div className="grid gap-2 md:grid-cols-2">
-                      <div className="min-h-20 whitespace-pre-wrap rounded-lg bg-[var(--secondary)] p-2 text-xs leading-relaxed text-[var(--foreground)]">
-                        {currentValue || <span className="text-[var(--muted-foreground)]">Empty</span>}
+                      <div className="min-h-20 min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere] rounded-lg bg-[var(--secondary)] p-2 text-xs leading-relaxed text-[var(--foreground)]">
+                        {currentValue || (
+                          <span className="text-[var(--muted-foreground)]">
+                            {localizeUi("ui.characters.characterversionhistorypanel.empty")}
+                          </span>
+                        )}
                       </div>
-                      <div className="min-h-20 whitespace-pre-wrap rounded-lg bg-[var(--secondary)] p-2 text-xs leading-relaxed text-[var(--foreground)]">
-                        {savedValue || <span className="text-[var(--muted-foreground)]">Empty</span>}
+                      <div className="min-h-20 min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere] rounded-lg bg-[var(--secondary)] p-2 text-xs leading-relaxed text-[var(--foreground)]">
+                        {savedValue || (
+                          <span className="text-[var(--muted-foreground)]">
+                            {localizeUi("ui.characters.characterversionhistorypanel.empty")}
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -1823,7 +2028,7 @@ function CharacterVersionHistoryPanel({
                 ) : (
                   <RotateCcw size="0.75rem" />
                 )}
-                Restore this version
+                {localizeUi("ui.characters.characterversionhistorypanel.restoreThisVersion")}
               </button>
             </div>
           </div>
@@ -1840,6 +2045,8 @@ function DialogueTab({
   formData: CharacterData;
   updateField: <K extends keyof CharacterData>(key: K, value: CharacterData[K]) => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
+  const selfCharacterId = useUIStore((s) => s.characterDetailId);
   const greetingKeysRef = useRef<string[]>([]);
 
   while (greetingKeysRef.current.length < formData.alternate_greetings.length) {
@@ -1885,29 +2092,31 @@ function DialogueTab({
   };
 
   const greetingActionButtonClassName =
-    "inline-flex h-8 w-8 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--secondary)] text-[var(--muted-foreground)] transition-all hover:border-[var(--primary)]/40 hover:text-[var(--foreground)] active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-[var(--border)] disabled:hover:text-[var(--muted-foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]";
+    "mari-editor-action mari-editor-action--compact inline-flex h-8 w-8 rounded-lg p-0 disabled:cursor-not-allowed disabled:opacity-40";
 
   return (
     <div className="space-y-6">
       <SectionHeader
-        title="Dialogue & Greetings"
-        subtitle="First message, example dialogue, and alternate greetings."
+        title={localizeUi("ui.characters.dialoguetab.dialogueGreetings")}
+        subtitle={localizeUi("ui.characters.dialoguetab.firstMessageExampleDialogueAndAlternateGreetings")}
         helpText={CHARACTER_DIALOGUE_HELP}
       />
 
       {/* First Message */}
       <div className="block space-y-1.5">
         <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-          First Message{" "}
-          <HelpTooltip text="The character's opening message when a new chat starts. Good first messages set the scene and establish the character's voice." />
+          {localizeUi("ui.characters.dialoguetab.firstMessage")}{" "}
+          <HelpTooltip text={localizeUi("ui.characters.dialoguetab.theCharacterSOpeningMessageWhenANewChat")} />
         </span>
         <MacroTextarea
           value={formData.first_mes}
           onChange={(value) => updateField("first_mes", value)}
           rows={6}
-          title="First Message"
+          title={localizeUi("ui.characters.dialoguetab.firstMessage")}
+          showMarkdownPreview
+          selfCharacterId={selfCharacterId}
           className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-4 text-sm leading-relaxed outline-none placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
-          placeholder="What is the character's first message when a new chat starts?"
+          placeholder={localizeUi("ui.characters.dialoguetab.whatIsTheCharacterSFirstMessageWhenA")}
         />
       </div>
 
@@ -1915,15 +2124,18 @@ function DialogueTab({
       <div className="space-y-3">
         <div className="flex items-center justify-between">
           <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-            Alternate Greetings ({formData.alternate_greetings.length})
-            <HelpTooltip text="Alternative first messages for variety. When starting a new chat, you can pick which greeting to use." />
+            {localizeUi("ui.characters.dialoguetab.alternateGreetings")}
+            {formData.alternate_greetings.length})
+            <HelpTooltip
+              text={localizeUi("ui.characters.dialoguetab.alternativeFirstMessagesForVarietyWhenStartingANew")}
+            />
           </span>
           <button
             type="button"
             onClick={addGreeting}
-            className="rounded-xl bg-[var(--primary)]/15 px-3 py-1 text-xs font-medium text-[var(--primary)] transition-all hover:bg-[var(--primary)]/25"
+            className="mari-editor-action mari-editor-action--accent mari-editor-action--compact inline-flex rounded-lg px-3 py-1 text-xs"
           >
-            + Add
+            {localizeUi("ui.characters.dialoguetab.add")}
           </button>
         </div>
         {formData.alternate_greetings.map((g, i) => (
@@ -1932,15 +2144,18 @@ function DialogueTab({
             className="space-y-2 rounded-xl border border-[var(--border)]/70 bg-[var(--background)]/35 p-2.5"
           >
             <div className="flex items-center justify-between gap-2">
-              <span className="text-xs font-medium text-[var(--muted-foreground)]">Greeting #{i + 1}</span>
+              <span className="text-xs font-medium text-[var(--muted-foreground)]">
+                {localizeUi("ui.characters.dialoguetab.greeting")}
+                {i + 1}
+              </span>
               <div className="flex shrink-0 items-center gap-1">
                 <button
                   type="button"
                   onClick={() => moveGreeting(i, -1)}
                   disabled={i === 0}
                   className={greetingActionButtonClassName}
-                  aria-label={`Move alternate greeting ${i + 1} up`}
-                  title="Move up"
+                  aria-label={localizeUi("ui.characters.dialoguetab.moveAlternateGreetingValue1Up", { value1: i + 1 })}
+                  title={localizeUi("ui.characters.dialoguetab.moveUp")}
                 >
                   <ArrowUp size="0.75rem" />
                 </button>
@@ -1949,20 +2164,19 @@ function DialogueTab({
                   onClick={() => moveGreeting(i, 1)}
                   disabled={i === formData.alternate_greetings.length - 1}
                   className={greetingActionButtonClassName}
-                  aria-label={`Move alternate greeting ${i + 1} down`}
-                  title="Move down"
+                  aria-label={localizeUi("ui.characters.dialoguetab.moveAlternateGreetingValue1Down", {
+                    value1: i + 1,
+                  })}
+                  title={localizeUi("ui.characters.dialoguetab.moveDown")}
                 >
                   <ArrowDown size="0.75rem" />
                 </button>
                 <button
                   type="button"
                   onClick={() => removeGreeting(i)}
-                  className={cn(
-                    greetingActionButtonClassName,
-	                    "hover:border-[var(--border)] hover:text-[var(--foreground)]",
-                  )}
-                  aria-label={`Remove alternate greeting ${i + 1}`}
-                  title="Remove greeting"
+                  className={cn(greetingActionButtonClassName, "mari-editor-action--danger")}
+                  aria-label={localizeUi("ui.characters.dialoguetab.removeAlternateGreetingValue1", { value1: i + 1 })}
+                  title={localizeUi("ui.characters.dialoguetab.removeGreeting")}
                 >
                   <Trash2 size="0.75rem" />
                 </button>
@@ -1972,9 +2186,11 @@ function DialogueTab({
               value={g}
               onChange={(value) => updateGreeting(i, value)}
               rows={3}
-              title={`Alternate Greeting #${i + 1}`}
+              title={localizeUi("ui.characters.dialoguetab.alternateGreetingValue1", { value1: i + 1 })}
+              showMarkdownPreview
+              selfCharacterId={selfCharacterId}
               className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-3 text-sm outline-none placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40"
-              placeholder={`Greeting #${i + 1}...`}
+              placeholder={localizeUi("ui.characters.dialoguetab.greetingValue1", { value1: i + 1 })}
             />
           </div>
         ))}
@@ -1983,19 +2199,23 @@ function DialogueTab({
       {/* Example Messages */}
       <div className="block space-y-1.5">
         <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-          Example Dialogue{" "}
-          <HelpTooltip text="Sample conversations showing how the character talks. Helps the AI learn the character's speaking style, vocabulary, and mannerisms." />
+          {localizeUi("chat.settings.inlineEditor.fields.exampleDialogue")}{" "}
+          <HelpTooltip
+            text={localizeUi("ui.characters.dialoguetab.sampleConversationsShowingHowTheCharacterTalksHelpsThe")}
+          />
         </span>
         <p className="text-[0.625rem] text-[var(--muted-foreground)]/70">
-          {"Use <START> to separate exchanges. Use {{user}} and {{char}} as placeholders."}
+          {localizeUi("ui.characters.dialoguetab.useStartToSeparateExchangesUseUserAndChar")}
         </p>
         <MacroTextarea
           value={formData.mes_example}
           onChange={(value) => updateField("mes_example", value)}
           rows={10}
-          title="Example Dialogue"
+          title={localizeUi("chat.settings.inlineEditor.fields.exampleDialogue")}
+          showMarkdownPreview
+          selfCharacterId={selfCharacterId}
           className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-4 font-mono text-xs leading-relaxed outline-none placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
-          placeholder={"<START>\n{{user}}: Hello!\n{{char}}: *Waves excitedly.* Hey there!"}
+          placeholder={localizeUi("ui.characters.dialoguetab.startUserHelloCharWavesExcitedlyHeyThere")}
         />
       </div>
     </div>
@@ -2013,63 +2233,74 @@ function AdvancedTab({
   updateExtension: (key: string, value: unknown) => void;
   characterId: string | null;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const depthPrompt = formData.extensions.depth_prompt ?? { prompt: "", depth: 4, role: "system" as const };
 
   return (
     <div className="space-y-6">
       <SectionHeader
-        title="Advanced"
-        subtitle="System prompt, post-history instructions, and depth prompt injection."
+        title={localizeUi("settings.tabs.advanced.label")}
+        subtitle={localizeUi("ui.characters.advancedtab.systemPromptPostHistoryInstructionsAndDepthPromptInjection")}
         helpText={CHARACTER_ADVANCED_HELP}
       />
 
       <div className="block space-y-1.5">
         <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-          System Prompt{" "}
-          <HelpTooltip text="Character-specific instructions inserted by the prompt preset's character block or wherever the preset uses {{charSysInfo}}. This does not replace the chat's main system prompt." />
+          {localizeUi("ui.characters.advancedtab.systemPrompt")}{" "}
+          <HelpTooltip
+            text={localizeUi("ui.characters.advancedtab.characterSpecificInstructionsInsertedByThePromptPresetS")}
+          />
         </span>
         <MacroTextarea
           value={formData.system_prompt}
           onChange={(value) => updateField("system_prompt", value)}
           rows={6}
-          title="System Prompt"
+          title={localizeUi("ui.characters.advancedtab.systemPrompt")}
+          showMarkdownPreview
+          selfCharacterId={characterId}
           className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-4 text-sm outline-none placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
-          placeholder="Character-specific instructions inserted through {{charSysInfo}} or the character prompt block…"
+          placeholder={localizeUi(
+            "ui.characters.advancedtab.characterSpecificInstructionsInsertedThroughCharsysinfoOrTheCharacter",
+          )}
         />
       </div>
 
       <div className="block space-y-1.5">
         <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-          Post-History Instructions{" "}
-          <HelpTooltip text="Text inserted after the chat history, right before the AI generates. Great for reminders like 'stay in character' or 'respond in 2 paragraphs'." />
+          {localizeUi("ui.characters.advancedtab.postHistoryInstructions")}{" "}
+          <HelpTooltip text={localizeUi("ui.characters.advancedtab.textInsertedAfterTheChatHistoryRightBeforeThe")} />
         </span>
         <MacroTextarea
           value={formData.post_history_instructions}
           onChange={(value) => updateField("post_history_instructions", value)}
           rows={4}
-          title="Post-History Instructions"
+          title={localizeUi("ui.characters.advancedtab.postHistoryInstructions")}
+          showMarkdownPreview
+          selfCharacterId={characterId}
           className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-4 text-sm outline-none placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
-          placeholder="Text inserted after the chat history but before generation…"
+          placeholder={localizeUi("ui.characters.advancedtab.textInsertedAfterTheChatHistoryButBeforeGeneration")}
         />
       </div>
 
       {/* Depth Prompt */}
       <div className="space-y-3 rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
         <span className="inline-flex items-center gap-1 text-xs font-semibold">
-          Depth Prompt{" "}
-          <HelpTooltip text="Injects text at a specific position in the chat history. Depth 0 = after the latest message, depth 4 = 4 messages back. Useful for persistent reminders." />
+          {localizeUi("ui.characters.advancedtab.depthPrompt")}{" "}
+          <HelpTooltip text={localizeUi("ui.characters.advancedtab.injectsTextAtASpecificPositionInTheChat")} />
         </span>
         <MacroTextarea
           value={depthPrompt.prompt}
           onChange={(value) => updateExtension("depth_prompt", { ...depthPrompt, prompt: value })}
           rows={4}
-          title="Depth Prompt"
+          title={localizeUi("ui.characters.advancedtab.depthPrompt")}
+          showMarkdownPreview
+          selfCharacterId={characterId}
           className="w-full resize-y rounded-xl border border-[var(--border)] bg-[var(--secondary)] p-3 text-sm outline-none focus:border-[var(--primary)]/40"
-          placeholder="Prompt injected at a specific depth in the chat history…"
+          placeholder={localizeUi("ui.characters.advancedtab.promptInjectedAtASpecificDepthInTheChat")}
         />
         <div className="flex gap-4">
           <label className="flex items-center gap-2 text-xs">
-            <span className="text-[var(--muted-foreground)]">Depth</span>
+            <span className="text-[var(--muted-foreground)]">{localizeUi("ui.characters.advancedtab.depth")}</span>
             <input
               type="number"
               min={0}
@@ -2082,15 +2313,15 @@ function AdvancedTab({
             />
           </label>
           <label className="flex items-center gap-2 text-xs">
-            <span className="text-[var(--muted-foreground)]">Role</span>
+            <span className="text-[var(--muted-foreground)]">{localizeUi("ui.characters.advancedtab.role")}</span>
             <select
               value={depthPrompt.role}
               onChange={(e) => updateExtension("depth_prompt", { ...depthPrompt, role: e.target.value })}
               className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2 py-1 text-xs outline-none"
             >
-              <option value="system">System</option>
-              <option value="user">User</option>
-              <option value="assistant">Assistant</option>
+              <option value="system">{localizeUi("ui.characters.advancedtab.system")}</option>
+              <option value="user">{localizeUi("ui.characters.advancedtab.user")}</option>
+              <option value="assistant">{localizeUi("ui.characters.advancedtab.assistant")}</option>
             </select>
           </label>
         </div>
@@ -2211,10 +2442,12 @@ function characterClipTrimLabel(clip: CharacterGalleryClip) {
 }
 
 function CharacterGalleryTab({ characterId, characterName }: { characterId: string; characterName?: string }) {
+  const { t: localizeUi } = useUiTranslation();
   const [mediaTab, setMediaTab] = useState<CharacterGalleryMediaTab>("images");
   const { data: images, isLoading } = useCharacterGalleryImages(characterId);
   const upload = useUploadCharacterGalleryImage(characterId);
   const remove = useDeleteCharacterGalleryImage(characterId);
+  const setAvatar = useSetCharacterGalleryImageAsAvatar(characterId);
   const tag = useTagCharacterGalleryImage(characterId);
   const [lightbox, setLightbox] = useState<CharacterGalleryImage | null>(null);
 
@@ -2230,9 +2463,9 @@ function CharacterGalleryTab({ characterId, characterName }: { characterId: stri
     async (image: CharacterGalleryImage) => {
       if (
         !(await showConfirmDialog({
-          title: "Delete Character Image",
-          message: "Delete this character gallery image?",
-          confirmLabel: "Delete",
+          title: localizeUi("ui.characters.charactergallerytab.deleteCharacterImage"),
+          message: localizeUi("ui.characters.charactergallerytab.deleteThisCharacterGalleryImage"),
+          confirmLabel: localizeUi("lorebook.editor.batch.delete"),
           tone: "destructive",
         }))
       ) {
@@ -2241,14 +2474,47 @@ function CharacterGalleryTab({ characterId, characterName }: { characterId: stri
       remove.mutate(image.id);
       if (lightbox?.id === image.id) setLightbox(null);
     },
-    [lightbox?.id, remove],
+    [lightbox?.id, remove, localizeUi],
+  );
+
+  const handleSetAvatar = useCallback(
+    async (image: CharacterGalleryImage) => {
+      try {
+        await setAvatar.mutateAsync(image.id);
+        toast.success(localizeUi("ui.characters.charactergallerytab.characterAvatarUpdated"));
+      } catch (error) {
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : localizeUi("ui.characters.charactergallerytab.failedToUpdateCharacterAvatar"),
+        );
+      }
+    },
+    [setAvatar, localizeUi],
+  );
+
+  // Copies the PORTABLE image reference (card://self/gallery/<file>) — resolves
+  // to whichever character speaks the message, so it survives export/import
+  // where character ids are regenerated. Filenames round-trip in native exports.
+  const handleCopyReference = useCallback(
+    async (image: CharacterGalleryImage) => {
+      const filename = image.filePath.split("/").pop() ?? "";
+      if (!filename) return;
+      const label = image.prompt.trim() || filename.replace(/\.[^.]+$/, "");
+      const ok = await copyToClipboard(
+        buildCardAssetMarkdown(label, `card://self/gallery/${encodeURIComponent(filename)}`),
+      );
+      if (ok) toast.success(localizeUi("ui.characters.charactergallerytab.referenceCopied"));
+      else toast.error(localizeUi("ui.characters.charactergallerytab.failedToCopyReference"));
+    },
+    [localizeUi],
   );
 
   return (
     <div className="space-y-6">
       <SectionHeader
-        title="Character Gallery"
-        subtitle="Keep character images and generated videos attached to this character even if chats get deleted."
+        title={localizeUi("ui.characters.charactergallerytab.characterGallery")}
+        subtitle={localizeUi("ui.characters.charactergallerytab.keepCharacterImagesAndGeneratedVideosAttachedToThis")}
         helpText={CHARACTER_GALLERY_HELP}
       />
 
@@ -2282,7 +2548,7 @@ function CharacterGalleryTab({ characterId, characterName }: { characterId: stri
       {mediaTab === "images" ? (
         <>
           <ImageUploadDropzone
-            label="Upload Character Images"
+            label={localizeUi("ui.characters.charactergallerytab.uploadCharacterImages")}
             pending={upload.isPending}
             pendingLabel="Uploading…"
             dragLabel="Drop character images to upload"
@@ -2321,11 +2587,32 @@ function CharacterGalleryTab({ characterId, characterName }: { characterId: stri
                       {new Date(image.createdAt).toLocaleDateString()}
                     </span>
                     <div className="flex gap-1">
+                      <button
+                        type="button"
+                        onClick={() => void handleCopyReference(image)}
+                        className="rounded-lg bg-white/15 p-1.5 text-white transition-colors hover:bg-white/25"
+                        title={localizeUi("ui.characters.charactergallerytab.copyImageReference")}
+                      >
+                        <Link2 size="0.75rem" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleSetAvatar(image)}
+                        disabled={setAvatar.isPending}
+                        className="rounded-lg bg-white/15 p-1.5 text-white transition-colors hover:bg-white/25 disabled:opacity-50"
+                        title={localizeUi("ui.characters.charactergallerytab.setAsAvatar")}
+                      >
+                        {setAvatar.isPending ? (
+                          <Loader2 size="0.75rem" className="animate-spin" />
+                        ) : (
+                          <User size="0.75rem" />
+                        )}
+                      </button>
                       <a
                         href={image.url}
                         download
                         className="rounded-lg bg-white/15 p-1.5 text-white transition-colors hover:bg-white/25"
-                        title="Download"
+                        title={localizeUi("ui.characters.charactergallerytab.download")}
                         onClick={(e) => e.stopPropagation()}
                       >
                         <Download size="0.75rem" />
@@ -2334,7 +2621,7 @@ function CharacterGalleryTab({ characterId, characterName }: { characterId: stri
                         type="button"
                         onClick={() => void handleDelete(image)}
                         className="rounded-lg bg-white/15 p-1.5 text-white transition-colors hover:bg-white/25"
-                        title="Delete"
+                        title={localizeUi("lorebook.editor.batch.delete")}
                       >
                         <Trash2 size="0.75rem" />
                       </button>
@@ -2347,10 +2634,13 @@ function CharacterGalleryTab({ characterId, characterName }: { characterId: stri
             <div className="flex flex-col items-center gap-3 rounded-xl border-2 border-dashed border-[var(--border)] py-12 text-center">
               <Camera size="1.75rem" className="text-[var(--muted-foreground)]/40" />
               <div>
-                <p className="text-sm font-medium text-[var(--muted-foreground)]">No character images yet</p>
+                <p className="text-sm font-medium text-[var(--muted-foreground)]">
+                  {localizeUi("ui.characters.charactergallerytab.noCharacterImagesYet")}
+                </p>
                 <p className="mt-0.5 text-xs text-[var(--muted-foreground)]/60">
-                  Upload images here to keep them tied to {characterName || "this character"} instead of a specific
-                  chat.
+                  {localizeUi("ui.characters.charactergallerytab.uploadImagesHereToKeepThemTiedTo")}{" "}
+                  {characterName || "this character"}{" "}
+                  {localizeUi("ui.characters.charactergallerytab.insteadOfASpecificChat")}
                 </p>
               </div>
             </div>
@@ -2372,6 +2662,15 @@ function CharacterGalleryTab({ characterId, characterName }: { characterId: stri
               className="max-h-[85vh] w-full rounded-lg object-contain shadow-2xl"
             />
             <div className="absolute right-2 top-2 flex gap-2">
+              <button
+                type="button"
+                onClick={() => void handleSetAvatar(lightbox)}
+                disabled={setAvatar.isPending}
+                className="rounded-lg bg-black/60 p-2 text-white transition-colors hover:bg-black/80 disabled:opacity-50"
+                title={localizeUi("ui.characters.charactergallerytab.setAsAvatar")}
+              >
+                {setAvatar.isPending ? <Loader2 size="0.875rem" className="animate-spin" /> : <User size="0.875rem" />}
+              </button>
               <a
                 href={lightbox.url}
                 download
@@ -2395,6 +2694,7 @@ function CharacterGalleryTab({ characterId, characterName }: { characterId: stri
 }
 
 function CharacterVideosGallery({ characterId, characterName }: { characterId: string; characterName?: string }) {
+  const { t: localizeUi } = useUiTranslation();
   const { data, isLoading } = useCharacterGalleryClips(characterId);
   const deleteClip = useDeleteCharacterGalleryClip(characterId);
   const uploadVideo = useUploadCharacterGalleryVideo(characterId);
@@ -2408,12 +2708,20 @@ function CharacterVideosGallery({ characterId, characterName }: { characterId: s
         for (const file of files) {
           await uploadVideo.mutateAsync({ file });
         }
-        toast.success(files.length === 1 ? "Video uploaded." : "Videos uploaded.");
+        toast.success(
+          files.length === 1
+            ? localizeUi("ui.characters.charactervideosgallery.videoUploaded")
+            : localizeUi("ui.characters.charactervideosgallery.videosUploaded"),
+        );
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Could not upload video.");
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : localizeUi("ui.characters.charactervideosgallery.couldNotUploadVideo"),
+        );
       }
     },
-    [uploadVideo],
+    [uploadVideo, localizeUi],
   );
 
   const handleDeleteClip = useCallback(
@@ -2421,9 +2729,9 @@ function CharacterVideosGallery({ characterId, characterName }: { characterId: s
       if (!canDeleteCharacterGalleryClip(clip)) return;
       if (
         !(await showConfirmDialog({
-          title: "Delete Clip",
+          title: localizeUi("ui.characters.charactervideosgallery.deleteClip"),
           message: characterGalleryClipDeleteMessage(clip),
-          confirmLabel: "Delete",
+          confirmLabel: localizeUi("lorebook.editor.batch.delete"),
           tone: "destructive",
         }))
       ) {
@@ -2433,14 +2741,18 @@ function CharacterVideosGallery({ characterId, characterName }: { characterId: s
       setDeletingClipId(clip.id);
       try {
         await deleteClip.mutateAsync(clip.id);
-        toast.success("Video deleted.");
+        toast.success(localizeUi("ui.characters.charactervideosgallery.videoDeleted"));
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Could not delete video.");
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : localizeUi("ui.characters.charactervideosgallery.couldNotDeleteVideo"),
+        );
       } finally {
         setDeletingClipId(null);
       }
     },
-    [deleteClip],
+    [deleteClip, localizeUi],
   );
 
   if (isLoading) {
@@ -2456,7 +2768,7 @@ function CharacterVideosGallery({ characterId, characterName }: { characterId: s
   return (
     <div className="space-y-6">
       <ImageUploadDropzone
-        label="Upload Character Videos"
+        label={localizeUi("ui.characters.charactervideosgallery.uploadCharacterVideos")}
         pending={uploadVideo.isPending}
         pendingLabel="Uploading…"
         dragLabel="Drop character videos to upload"
@@ -2490,9 +2802,12 @@ function CharacterVideosGallery({ characterId, characterName }: { characterId: s
         <div className="flex flex-col items-center gap-3 rounded-xl border-2 border-dashed border-[var(--border)] py-12 text-center">
           <Film size="1.75rem" className="text-[var(--muted-foreground)]/40" />
           <div>
-            <p className="text-sm font-medium text-[var(--muted-foreground)]">No character videos yet</p>
+            <p className="text-sm font-medium text-[var(--muted-foreground)]">
+              {localizeUi("ui.characters.charactervideosgallery.noCharacterVideosYet")}
+            </p>
             <p className="mt-0.5 text-xs text-[var(--muted-foreground)]/60">
-              Upload videos or generate scene videos with {characterName || "this character"}.
+              {localizeUi("ui.characters.charactervideosgallery.uploadVideosOrGenerateSceneVideosWith")}{" "}
+              {characterName || "this character"}.
             </p>
           </div>
         </div>
@@ -2502,6 +2817,7 @@ function CharacterVideosGallery({ characterId, characterName }: { characterId: s
 }
 
 function CharacterCallClipsGallery({ characterId, characterName }: { characterId: string; characterName?: string }) {
+  const { t: localizeUi } = useUiTranslation();
   const { data, isLoading } = useCharacterGalleryClips(characterId);
   const generateCallClips = useGenerateCharacterCallVideoClips(characterId);
   const generateCustomCallClip = useGenerateCharacterCustomCallVideoClip(characterId);
@@ -2563,21 +2879,25 @@ function CharacterCallClipsGallery({ characterId, characterName }: { characterId
         }
         toast.success(
           customClip && standardKinds.length === 0
-            ? "Custom call clip generation started."
+            ? localizeUi("ui.characters.charactercallclipsgallery.customCallClipGenerationStarted")
             : singleKind
-              ? "Call clip generation started."
+              ? localizeUi("ui.characters.charactercallclipsgallery.callClipGenerationStarted")
               : customClip
-                ? "Call clip and custom clip generation started."
-                : "Call clip generation batch started.",
+                ? localizeUi("ui.characters.charactercallclipsgallery.callClipAndCustomClipGenerationStarted")
+                : localizeUi("ui.characters.charactercallclipsgallery.callClipGenerationBatchStarted"),
         );
         setGenerationDialogOpen(false);
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Could not start call clip generation.");
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : localizeUi("ui.characters.charactercallclipsgallery.couldNotStartCallClipGeneration"),
+        );
       } finally {
         setGeneratingClipId(null);
       }
     },
-    [generateCallClips, generateCustomCallClip],
+    [generateCallClips, generateCustomCallClip, localizeUi],
   );
 
   const handleUploadClipFile = useCallback(
@@ -2594,15 +2914,25 @@ function CharacterCallClipsGallery({ characterId, characterName }: { characterId
           label: pending.label,
           kind: pending.kind,
         });
-        toast.success(pending.kind ? `${pending.label || "Call clip"} uploaded.` : "Clip uploaded.");
+        toast.success(
+          pending.kind
+            ? localizeUi("ui.characters.charactercallclipsgallery.value1Uploaded", {
+                value1: pending.label || localizeUi("ui.characters.charactercallclipsgallery.callClip"),
+              })
+            : localizeUi("ui.characters.charactercallclipsgallery.clipUploaded"),
+        );
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Could not upload clip.");
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : localizeUi("ui.characters.charactercallclipsgallery.couldNotUploadClip"),
+        );
       } finally {
         pendingClipUploadRef.current = null;
         setUploadingClipId(null);
       }
     },
-    [uploadClip],
+    [uploadClip, localizeUi],
   );
 
   const handleUploadCallClip = useCallback(
@@ -2625,9 +2955,9 @@ function CharacterCallClipsGallery({ characterId, characterName }: { characterId
       if (!canDeleteCharacterGalleryClip(clip)) return;
       if (
         !(await showConfirmDialog({
-          title: "Delete Clip",
+          title: localizeUi("ui.characters.charactervideosgallery.deleteClip"),
           message: characterGalleryClipDeleteMessage(clip),
-          confirmLabel: "Delete",
+          confirmLabel: localizeUi("lorebook.editor.batch.delete"),
           tone: "destructive",
         }))
       ) {
@@ -2637,14 +2967,22 @@ function CharacterCallClipsGallery({ characterId, characterName }: { characterId
       setDeletingClipId(clip.id);
       try {
         await deleteClip.mutateAsync(clip.id);
-        toast.success(clip.source === "conversation-call" ? "Call clip reset." : "Clip deleted.");
+        toast.success(
+          clip.source === "conversation-call"
+            ? localizeUi("ui.characters.charactercallclipsgallery.callClipReset")
+            : localizeUi("ui.characters.charactercallclipsgallery.clipDeleted"),
+        );
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Could not delete clip.");
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : localizeUi("ui.characters.charactercallclipsgallery.couldNotDeleteClip"),
+        );
       } finally {
         setDeletingClipId(null);
       }
     },
-    [deleteClip],
+    [deleteClip, localizeUi],
   );
 
   const handleSaveTrim = useCallback(
@@ -2654,13 +2992,17 @@ function CharacterCallClipsGallery({ characterId, characterName }: { characterId
           clipId: clip.id,
           ...trim,
         });
-        toast.success("Clip trim saved.");
+        toast.success(localizeUi("ui.characters.charactercallclipsgallery.clipTrimSaved"));
         setTrimClip(null);
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Could not save clip trim.");
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : localizeUi("ui.characters.charactercallclipsgallery.couldNotSaveClipTrim"),
+        );
       }
     },
-    [updateClipTrim],
+    [updateClipTrim, localizeUi],
   );
 
   if (isLoading) {
@@ -2684,9 +3026,13 @@ function CharacterCallClipsGallery({ characterId, characterName }: { characterId
       />
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--border)] bg-[var(--card)] p-3">
         <div className="min-w-0">
-          <p className="text-sm font-semibold text-[var(--foreground)]">Video call clips</p>
+          <p className="text-sm font-semibold text-[var(--foreground)]">
+            {localizeUi("ui.characters.charactercallclipsgallery.videoCallClips")}
+          </p>
           <p className="mt-0.5 text-xs text-[var(--muted-foreground)]">
-            {readyCallClipCount}/{standardCallClips.length || 6} standard ready · {customCallClipCount} custom
+            {readyCallClipCount}/{standardCallClips.length || 6}{" "}
+            {localizeUi("ui.characters.charactercallclipsgallery.standardReady")} {customCallClipCount}{" "}
+            {localizeUi("ui.characters.charactercallclipsgallery.custom")}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -2701,7 +3047,7 @@ function CharacterCallClipsGallery({ characterId, characterName }: { characterId
             ) : (
               <Upload size="0.85rem" />
             )}
-            Upload extra
+            {localizeUi("ui.characters.charactercallclipsgallery.uploadExtra")}
           </button>
           <button
             type="button"
@@ -2710,7 +3056,9 @@ function CharacterCallClipsGallery({ characterId, characterName }: { characterId
             className="inline-flex items-center gap-2 rounded-lg bg-[var(--primary)] px-3 py-2 text-xs font-semibold text-[var(--primary-foreground)] transition-all hover:shadow-md disabled:cursor-not-allowed disabled:opacity-60"
           >
             {batchGenerationPending ? <Loader2 size="0.85rem" className="animate-spin" /> : <Wand2 size="0.85rem" />}
-            {batchGenerationPending ? "Generating" : "Generate Clips"}
+            {batchGenerationPending
+              ? localizeUi("ui.characters.charactercallclipsgallery.generating")
+              : localizeUi("ui.characters.charactercallclipsgallery.generateClips")}
           </button>
         </div>
       </div>
@@ -2738,9 +3086,12 @@ function CharacterCallClipsGallery({ characterId, characterName }: { characterId
         <div className="flex flex-col items-center gap-3 rounded-xl border-2 border-dashed border-[var(--border)] py-12 text-center">
           <Film size="1.75rem" className="text-[var(--muted-foreground)]/40" />
           <div>
-            <p className="text-sm font-medium text-[var(--muted-foreground)]">No call clips yet</p>
+            <p className="text-sm font-medium text-[var(--muted-foreground)]">
+              {localizeUi("ui.characters.charactercallclipsgallery.noCallClipsYet")}
+            </p>
             <p className="mt-0.5 text-xs text-[var(--muted-foreground)]/60">
-              Generate or upload video-call loops for {characterName || "this character"}.
+              {localizeUi("ui.characters.charactercallclipsgallery.generateOrUploadVideoCallLoopsFor")}{" "}
+              {characterName || "this character"}.
             </p>
           </div>
         </div>
@@ -2800,6 +3151,7 @@ function CharacterClipTrimModal({
     trim: { trimStartSeconds: number | null; trimEndSeconds: number | null },
   ) => void | Promise<void>;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [duration, setDuration] = useState<number | null>(null);
   const [start, setStart] = useState(0);
@@ -2871,7 +3223,14 @@ function CharacterClipTrimModal({
   };
 
   return (
-    <Modal open={Boolean(clip)} onClose={onClose} title={`Trim ${clip.label || "clip"}`} width="max-w-2xl">
+    <Modal
+      open={Boolean(clip)}
+      onClose={onClose}
+      title={localizeUi("ui.characters.charactercliptrimmodal.trimValue1", {
+        value1: clip.label || localizeUi("ui.panels.ttsconfigcard.clip"),
+      })}
+      width="max-w-2xl"
+    >
       <div className="space-y-4">
         <div className="overflow-hidden rounded-xl border border-[var(--border)] bg-black">
           <video
@@ -2897,12 +3256,17 @@ function CharacterClipTrimModal({
 
         <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-3">
           <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[var(--muted-foreground)]">
-            <span>Start {formatTrimSecond(safeStart)}</span>
-            <span>End {endIsNatural ? "natural end" : formatTrimSecond(safeEnd)}</span>
+            <span>
+              {localizeUi("ui.characters.charactercliptrimmodal.start")} {formatTrimSecond(safeStart)}
+            </span>
+            <span>
+              {localizeUi("ui.characters.charactercliptrimmodal.end")}{" "}
+              {endIsNatural ? localizeUi("ui.characters.charactercliptrimmodal.naturalEnd") : formatTrimSecond(safeEnd)}
+            </span>
           </div>
           <div className="mt-3 grid gap-3">
             <label className="grid gap-1 text-xs font-medium text-[var(--foreground)]">
-              Start
+              {localizeUi("ui.characters.charactercliptrimmodal.start")}
               <input
                 type="range"
                 min={0}
@@ -2914,7 +3278,7 @@ function CharacterClipTrimModal({
               />
             </label>
             <label className="grid gap-1 text-xs font-medium text-[var(--foreground)]">
-              End
+              {localizeUi("ui.characters.charactercliptrimmodal.end")}
               <input
                 type="range"
                 min={Math.min(resolvedDuration, safeStart + minGap)}
@@ -2935,7 +3299,7 @@ function CharacterClipTrimModal({
             className="inline-flex items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-xs font-semibold text-[var(--foreground)] transition-colors hover:border-[var(--primary)]/50"
           >
             <RotateCcw size="0.85rem" />
-            Reset
+            {localizeUi("ui.characters.charactercliptrimmodal.reset")}
           </button>
           <div className="flex items-center gap-2">
             <button
@@ -2943,7 +3307,7 @@ function CharacterClipTrimModal({
               onClick={onClose}
               className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-xs font-semibold text-[var(--foreground)] transition-colors hover:border-[var(--primary)]/50"
             >
-              Cancel
+              {localizeUi("chat.delete.dialog.cancel")}
             </button>
             <button
               type="button"
@@ -2952,7 +3316,7 @@ function CharacterClipTrimModal({
               className="inline-flex items-center gap-2 rounded-lg bg-[var(--primary)] px-3 py-2 text-xs font-semibold text-[var(--primary-foreground)] transition-all hover:shadow-md disabled:cursor-not-allowed disabled:opacity-60"
             >
               {saving ? <Loader2 size="0.85rem" className="animate-spin" /> : <Scissors size="0.85rem" />}
-              Save Trim
+              {localizeUi("ui.characters.charactercliptrimmodal.saveTrim")}
             </button>
           </div>
         </div>
@@ -2986,6 +3350,7 @@ function CharacterClipCard({
   onDelete: (clip: CharacterGalleryClip) => void | Promise<void>;
   onEditTrim: (clip: CharacterGalleryClip) => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const sourceLabel = clip.origin === "uploaded" ? "Uploaded" : characterGalleryClipSourceLabel(clip.source);
   const dateLabel = formatClipDate(clip.updatedAt ?? clip.createdAt);
   const isReady = clip.status === "ready" && Boolean(clip.url);
@@ -3017,7 +3382,9 @@ function CharacterClipCard({
               ) : (
                 <Film size="1.25rem" className="opacity-50" />
               )}
-              <span>{clip.status === "missing" ? "Not generated" : clip.status}</span>
+              <span>
+                {clip.status === "missing" ? localizeUi("ui.characters.characterclipcard.notGenerated") : clip.status}
+              </span>
             </div>
             {canGenerate || canUploadSlot ? (
               <div className="absolute inset-x-2 bottom-2 flex flex-wrap items-center justify-center gap-1.5">
@@ -3027,10 +3394,12 @@ function CharacterClipCard({
                     onClick={() => void onGenerate(clip)}
                     disabled={generationDisabled || generating}
                     className="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--card)] px-2.5 py-1 text-[0.7rem] font-semibold text-[var(--foreground)] opacity-0 shadow-sm transition-all hover:border-[var(--primary)]/50 hover:text-[var(--primary)] focus-visible:opacity-100 disabled:cursor-not-allowed disabled:text-[var(--muted-foreground)] group-hover:opacity-100 max-md:opacity-100"
-                    title={`Generate ${clip.label || "call clip"}`}
+                    title={localizeUi("ui.characters.characterclipcard.generateValue1", {
+                      value1: clip.label || localizeUi("ui.characters.characterclipcard.callClip"),
+                    })}
                   >
                     {generating ? <Loader2 size="0.75rem" className="animate-spin" /> : <Wand2 size="0.75rem" />}
-                    <span>Generate</span>
+                    <span>{localizeUi("ui.characters.characterclipcard.generate")}</span>
                   </button>
                 ) : null}
                 {canUploadSlot ? (
@@ -3039,10 +3408,12 @@ function CharacterClipCard({
                     onClick={() => onUpload(clip)}
                     disabled={uploading || uploadDisabled || generationDisabled}
                     className="inline-flex min-h-8 items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--card)] px-2.5 py-1 text-[0.7rem] font-semibold text-[var(--foreground)] opacity-0 shadow-sm transition-all hover:border-[var(--primary)]/50 hover:text-[var(--primary)] focus-visible:opacity-100 disabled:cursor-not-allowed disabled:text-[var(--muted-foreground)] group-hover:opacity-100 max-md:opacity-100"
-                    title={`Upload ${clip.label || "call clip"}`}
+                    title={localizeUi("ui.characters.characterclipcard.uploadValue1", {
+                      value1: clip.label || localizeUi("ui.characters.characterclipcard.callClip"),
+                    })}
                   >
                     {uploading ? <Loader2 size="0.75rem" className="animate-spin" /> : <Upload size="0.75rem" />}
-                    <span>Upload</span>
+                    <span>{localizeUi("ui.characters.characterclipcard.upload")}</span>
                   </button>
                 ) : null}
               </div>
@@ -3065,7 +3436,12 @@ function CharacterClipCard({
               {clip.label || characterName || "Clip"}
             </p>
             <p className="mt-0.5 truncate text-[0.6875rem] text-[var(--muted-foreground)]">
-              {clip.chatName ? `${clip.chatName} · ${dateLabel}` : dateLabel}
+              {clip.chatName
+                ? localizeUi("ui.characters.characterclipcard.value1Value2", {
+                    value1: clip.chatName,
+                    value2: dateLabel,
+                  })
+                : dateLabel}
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-1">
@@ -3074,8 +3450,10 @@ function CharacterClipCard({
                 type="button"
                 onClick={() => onEditTrim(clip)}
                 className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] p-1.5 text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)]"
-                title="Trim loop"
-                aria-label={`Trim ${clip.label || "clip"}`}
+                title={localizeUi("ui.characters.characterclipcard.trimLoop")}
+                aria-label={localizeUi("ui.characters.charactercliptrimmodal.trimValue1", {
+                  value1: clip.label || localizeUi("ui.panels.ttsconfigcard.clip"),
+                })}
               >
                 <Scissors size="0.75rem" />
               </button>
@@ -3086,8 +3464,10 @@ function CharacterClipCard({
                 onClick={() => onUpload(clip)}
                 disabled={uploading || uploadDisabled || generationDisabled}
                 className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] p-1.5 text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-60"
-                title="Upload replacement"
-                aria-label={`Upload replacement for ${clip.label || "clip"}`}
+                title={localizeUi("ui.characters.characterclipcard.uploadReplacement")}
+                aria-label={localizeUi("ui.characters.characterclipcard.uploadReplacementForValue1", {
+                  value1: clip.label || localizeUi("ui.panels.ttsconfigcard.clip"),
+                })}
               >
                 {uploading ? <Loader2 size="0.75rem" className="animate-spin" /> : <Upload size="0.75rem" />}
               </button>
@@ -3097,7 +3477,7 @@ function CharacterClipCard({
                 href={clip.url}
                 download
                 className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] p-1.5 text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)]"
-                title="Download"
+                title={localizeUi("ui.characters.charactergallerytab.download")}
               >
                 <Download size="0.75rem" />
               </a>
@@ -3108,8 +3488,10 @@ function CharacterClipCard({
                 onClick={() => void onDelete(clip)}
                 disabled={deleting}
                 className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] p-1.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-60"
-                title="Delete"
-                aria-label={`Delete ${clip.label || "clip"}`}
+                title={localizeUi("lorebook.editor.batch.delete")}
+                aria-label={localizeUi("ui.characters.characterclipcard.deleteValue1", {
+                  value1: clip.label || localizeUi("ui.panels.ttsconfigcard.clip"),
+                })}
               >
                 {deleting ? <Loader2 size="0.75rem" className="animate-spin" /> : <Trash2 size="0.75rem" />}
               </button>
@@ -3167,6 +3549,7 @@ function SpritesTab({
   defaultAppearance?: string;
   defaultAvatarUrl?: string | null;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   type SpriteCategory = "expressions" | "full-body" | "clips";
 
   const { data: sprites, isLoading } = useCharacterSprites(characterId);
@@ -3203,9 +3586,7 @@ function SpritesTab({
   const pendingExpressionRef = useRef("");
 
   const allSprites = (sprites as SpriteInfo[] | undefined) ?? [];
-  const portraitExpressionNames = allSprites
-    .filter((s) => !s.expression.toLowerCase().startsWith("full_"))
-    .map((s) => s.expression);
+  const portraitExpressionSprites = allSprites.filter((s) => !s.expression.toLowerCase().startsWith("full_"));
   const visibleSprites = allSprites.filter((s) =>
     category === "clips"
       ? false
@@ -3365,16 +3746,30 @@ function SpritesTab({
         });
         toast.success(
           modeLabel === "all"
-            ? `Exported ${spritesToExport.length} sprite${spritesToExport.length === 1 ? "" : "s"} as a folder.`
-            : `Exported ${spritesToExport.length} ${category === "full-body" ? "full-body" : "expression"} sprite${spritesToExport.length === 1 ? "" : "s"} as a folder.`,
+            ? localizeUi("ui.characters.spritestab.exportedValue1SpriteValue2AsAFolder", {
+                value1: spritesToExport.length,
+                value2: spritesToExport.length === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s"),
+              })
+            : localizeUi("ui.characters.spritestab.exportedValue1Value2SpriteValue3AsAFolder", {
+                value1: spritesToExport.length,
+                value2:
+                  category === "full-body"
+                    ? localizeUi("ui.characters.spritestab.fullBody_0fbbc4a")
+                    : localizeUi("ui.characters.spritestab.expression"),
+                value3: spritesToExport.length === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s"),
+              }),
         );
       } catch (error) {
-        toast.error(error instanceof Error ? error.message : "No sprites were exported. Please try again.");
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : localizeUi("ui.characters.spritestab.noSpritesWereExportedPleaseTryAgain"),
+        );
       } finally {
         setExporting(false);
       }
     },
-    [category, characterId, characterName, exportSprites],
+    [category, characterId, characterName, exportSprites, localizeUi],
   );
 
   const handleCleanVisibleSprites = useCallback(async () => {
@@ -3383,9 +3778,14 @@ function SpritesTab({
     const modeLabel = category === "full-body" ? "full-body" : "expression";
     if (
       !(await showConfirmDialog({
-        title: "Clean Sprite Backgrounds",
-        message: `Clean backgrounds on ${visibleSprites.length} saved ${modeLabel} sprite${visibleSprites.length === 1 ? "" : "s"} at strength ${savedCleanupStrength}? Marinara will keep a restore point in case the cleanup looks wrong.`,
-        confirmLabel: "Clean",
+        title: localizeUi("ui.characters.spritestab.cleanSpriteBackgrounds"),
+        message: localizeUi("ui.characters.spritestab.cleanBackgroundsOnValue1SavedValue2SpriteValue3At", {
+          value1: visibleSprites.length,
+          value2: modeLabel,
+          value3: visibleSprites.length === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s"),
+          value4: savedCleanupStrength,
+        }),
+        confirmLabel: localizeUi("ui.characters.spritestab.clean"),
       }))
     ) {
       return;
@@ -3408,17 +3808,28 @@ function SpritesTab({
             : result.backgroundRemoverProcessed
               ? ` with AI fallback`
               : ` with automatic matte cleanup`;
-        toast.success(`Cleaned ${result.processed} saved sprite${result.processed === 1 ? "" : "s"}${engineDetails}.`);
+        toast.success(
+          localizeUi("ui.characters.spritestab.cleanedValue1SavedSpriteValue2Value3", {
+            value1: result.processed,
+            value2: result.processed === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s"),
+            value3: engineDetails,
+          }),
+        );
       }
       if (result.failed.length > 0) {
-        toast.warning(`${result.failed.length} sprite${result.failed.length === 1 ? "" : "s"} could not be cleaned.`);
+        toast.warning(
+          localizeUi("ui.characters.spritestab.value1SpriteValue2CouldNotBeCleaned", {
+            value1: result.failed.length,
+            value2: result.failed.length === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s"),
+          }),
+        );
       }
     } catch (err: any) {
-      toast.error(err?.message || "Failed to clean saved sprites.");
+      toast.error(err?.message || localizeUi("ui.characters.spritestab.failedToCleanSavedSprites"));
     } finally {
       setCleaningSprites(false);
     }
-  }, [category, characterId, cleanupSavedSprites, savedCleanupStrength, visibleSprites]);
+  }, [category, characterId, cleanupSavedSprites, savedCleanupStrength, visibleSprites, localizeUi]);
 
   const handleRestoreLastCleanup = useCallback(async () => {
     if (!lastCleanupBackupId) return;
@@ -3429,19 +3840,29 @@ function SpritesTab({
         backupId: lastCleanupBackupId,
       });
       if (result.restored > 0) {
-        toast.success(`Restored ${result.restored} sprite${result.restored === 1 ? "" : "s"} from the cleanup backup.`);
+        toast.success(
+          localizeUi("ui.characters.spritestab.restoredValue1SpriteValue2FromTheCleanupBackup", {
+            value1: result.restored,
+            value2: result.restored === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s"),
+          }),
+        );
       }
       if (result.failed.length > 0) {
-        toast.warning(`${result.failed.length} sprite${result.failed.length === 1 ? "" : "s"} could not be restored.`);
+        toast.warning(
+          localizeUi("ui.characters.spritestab.value1SpriteValue2CouldNotBeRestored", {
+            value1: result.failed.length,
+            value2: result.failed.length === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s"),
+          }),
+        );
       } else {
         setLastCleanupBackupId(null);
       }
     } catch (err: any) {
-      toast.error(err?.message || "Failed to restore sprite cleanup backup.");
+      toast.error(err?.message || localizeUi("ui.characters.spritestab.failedToRestoreSpriteCleanupBackup"));
     } finally {
       setRestoringCleanup(false);
     }
-  }, [characterId, lastCleanupBackupId, restoreSpriteCleanupBackup]);
+  }, [characterId, lastCleanupBackupId, restoreSpriteCleanupBackup, localizeUi]);
 
   const handleApplySpriteFrame = useCallback(
     async (croppedDataUrl: string) => {
@@ -3454,13 +3875,17 @@ function SpritesTab({
           expression: framingSprite.expression,
           image: croppedDataUrl,
         });
-        toast.success(`Framed ${displayExpression(framingSprite.expression)} sprite.`);
+        toast.success(
+          localizeUi("ui.characters.spritestab.framedValue1Sprite", {
+            value1: displayExpression(framingSprite.expression),
+          }),
+        );
         setFramingSprite(null);
       } finally {
         setSavingFrame(false);
       }
     },
-    [characterId, displayExpression, framingSprite, uploadSprite],
+    [characterId, displayExpression, framingSprite, uploadSprite, localizeUi],
   );
 
   const handleApplyWandCleanup = useCallback(
@@ -3474,21 +3899,25 @@ function SpritesTab({
           expression: wandCleanupSprite.expression,
           image: cleanedDataUrl,
         });
-        toast.success(`Cleaned ${displayExpression(wandCleanupSprite.expression)} sprite.`);
+        toast.success(
+          localizeUi("ui.characters.spritestab.cleanedValue1Sprite", {
+            value1: displayExpression(wandCleanupSprite.expression),
+          }),
+        );
         setWandCleanupSprite(null);
       } finally {
         setSavingWandCleanup(false);
       }
     },
-    [characterId, displayExpression, uploadSprite, wandCleanupSprite],
+    [characterId, displayExpression, uploadSprite, wandCleanupSprite, localizeUi],
   );
 
   if (category === "clips") {
     return (
       <div className="space-y-6">
         <SectionHeader
-          title="Character Sprites"
-          subtitle="Upload VN-style sprites and video-call clips for this character."
+          title={localizeUi("ui.characters.spritestab.characterSprites")}
+          subtitle={localizeUi("ui.characters.spritestab.uploadVnStyleSpritesAndVideoCallClipsFor")}
           helpText={CHARACTER_SPRITES_HELP}
         />
 
@@ -3502,8 +3931,8 @@ function SpritesTab({
   return (
     <div className="space-y-6">
       <SectionHeader
-        title="Character Sprites"
-        subtitle="Upload VN-style sprites for different expressions. The Expression Engine agent will select the appropriate sprite during roleplay."
+        title={localizeUi("ui.characters.spritestab.characterSprites")}
+        subtitle={localizeUi("ui.characters.spritestab.uploadVnStyleSpritesForDifferentExpressionsTheExpression")}
         helpText={CHARACTER_SPRITES_HELP}
       />
 
@@ -3526,7 +3955,7 @@ function SpritesTab({
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <h4 className="text-xs font-semibold flex items-center gap-1.5">
             <Upload size="0.8125rem" className="text-[var(--primary)]" />
-            Add Sprite
+            {localizeUi("ui.characters.spritestab.addSprite")}
           </h4>
           <div className="flex flex-wrap items-center gap-2 md:justify-end">
             <button
@@ -3535,21 +3964,23 @@ function SpritesTab({
               disabled={spriteGenerationUnavailable}
               className="mari-chrome-accent-surface mari-accent-animated flex min-w-0 items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-center text-[0.6875rem] font-medium leading-tight transition-all disabled:cursor-not-allowed disabled:opacity-40 max-md:flex-1 max-md:basis-[calc(50%-0.25rem)] max-md:px-2.5"
               title={
-                spriteGenerationUnavailable ? spriteGenerationReason : "Generate sprites using AI image generation"
+                spriteGenerationUnavailable
+                  ? spriteGenerationReason
+                  : localizeUi("ui.characters.spritestab.generateSpritesUsingAiImageGeneration")
               }
             >
               <Wand2 size="0.8125rem" />
-              Generate Sprite
+              {localizeUi("ui.characters.spritestab.generateSprite")}
             </button>
             <button
               type="button"
               onClick={() => folderInputRef.current?.click()}
               disabled={!!folderProgress}
               className="flex min-w-0 items-center justify-center gap-1.5 rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-center text-[0.6875rem] font-medium leading-tight text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-40 max-md:flex-1 max-md:basis-[calc(50%-0.25rem)] max-md:px-2.5"
-              title="Select a folder of PNGs — each filename becomes the expression name"
+              title={localizeUi("ui.characters.spritestab.selectAFolderOfPngsEachFilenameBecomesThe")}
             >
               <FolderOpen size="0.8125rem" />
-              Upload Folder
+              {localizeUi("ui.characters.spritestab.uploadFolder")}
             </button>
             <button
               type="button"
@@ -3559,11 +3990,13 @@ function SpritesTab({
               title={
                 backgroundCleanupUnavailable
                   ? backgroundCleanupReason
-                  : "Clean backgrounds on the currently visible saved sprites"
+                  : localizeUi("ui.characters.spritestab.cleanBackgroundsOnTheCurrentlyVisibleSavedSprites")
               }
             >
               {cleaningSprites ? <Loader2 size="0.8125rem" className="animate-spin" /> : <Eraser size="0.8125rem" />}
-              {cleaningSprites ? "Cleaning..." : "Clean Backgrounds"}
+              {cleaningSprites
+                ? localizeUi("ui.characters.spritestab.cleaning")
+                : localizeUi("ui.characters.spritestab.cleanBackgrounds")}
             </button>
             <div className="relative max-md:flex-1 max-md:basis-[calc(50%-0.25rem)]">
               <button
@@ -3571,10 +4004,12 @@ function SpritesTab({
                 onClick={() => setExportMenuOpen((open) => !open)}
                 disabled={exporting || allSprites.length === 0}
                 className="flex w-full min-w-0 items-center justify-center gap-1.5 rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-center text-[0.6875rem] font-medium leading-tight text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-40 max-md:px-2.5"
-                title="Choose which saved sprites to export"
+                title={localizeUi("ui.characters.spritestab.chooseWhichSavedSpritesToExport")}
               >
                 <ImageDown size="0.8125rem" />
-                {exporting ? "Exporting..." : "Export"}
+                {exporting
+                  ? localizeUi("ui.characters.spritestab.exporting")
+                  : localizeUi("ui.characters.spritestab.export")}
               </button>
               {exportMenuOpen && !exporting && (
                 <div className="absolute right-0 top-[calc(100%+0.35rem)] z-30 min-w-44 rounded-lg border border-[var(--border)] bg-[var(--card)] p-1 text-xs shadow-xl">
@@ -3588,7 +4023,9 @@ function SpritesTab({
                     className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[var(--foreground)] transition-colors hover:bg-[var(--secondary)] disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     <ImageDown size="0.75rem" />
-                    {category === "full-body" ? "Full-body only" : "Expressions only"}
+                    {category === "full-body"
+                      ? localizeUi("ui.characters.spritestab.fullBodyOnly")
+                      : localizeUi("ui.characters.spritestab.expressionsOnly")}
                   </button>
                   <button
                     type="button"
@@ -3600,7 +4037,7 @@ function SpritesTab({
                     className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-[var(--foreground)] transition-colors hover:bg-[var(--secondary)] disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     <ImageDown size="0.75rem" />
-                    All sprites
+                    {localizeUi("ui.characters.spritestab.allSprites")}
                   </button>
                 </div>
               )}
@@ -3609,8 +4046,12 @@ function SpritesTab({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 rounded-lg bg-[var(--secondary)]/60 px-3 py-2">
-          <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">Cleanup strength</span>
-          <span className="text-[0.625rem] text-[var(--muted-foreground)]">Soft</span>
+          <span className="text-[0.6875rem] font-medium text-[var(--foreground)]">
+            {localizeUi("ui.characters.spritestab.cleanupStrength")}
+          </span>
+          <span className="text-[0.625rem] text-[var(--muted-foreground)]">
+            {localizeUi("ui.characters.spritestab.soft")}
+          </span>
           <input
             type="range"
             min={0}
@@ -3621,7 +4062,9 @@ function SpritesTab({
             disabled={cleaningSprites}
             className="min-w-40 flex-1 accent-[var(--primary)] disabled:opacity-50"
           />
-          <span className="text-[0.625rem] text-[var(--muted-foreground)]">Aggressive</span>
+          <span className="text-[0.625rem] text-[var(--muted-foreground)]">
+            {localizeUi("ui.characters.spritestab.aggressive")}
+          </span>
           <span className="w-8 text-right text-[0.6875rem] tabular-nums text-[var(--muted-foreground)]">
             {savedCleanupStrength}
           </span>
@@ -3631,18 +4074,19 @@ function SpritesTab({
         {folderProgress && (
           <div className="flex items-center gap-2 rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--muted-foreground)]">
             <Loader2 size="0.75rem" className="animate-spin text-[var(--primary)]" />
-            Uploading {folderProgress.done}/{folderProgress.total} sprites…
+            {localizeUi("ui.noodle.noodleprofilesurface.uploading_de27240")} {folderProgress.done}/
+            {folderProgress.total} {localizeUi("ui.characters.spritestab.sprites")}
           </div>
         )}
         {cleaningSprites && (
           <div className="flex items-center gap-2 rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--muted-foreground)]">
             <Loader2 size="0.75rem" className="animate-spin text-[var(--primary)]" />
-            Applying automatic matte cleanup to saved sprites…
+            {localizeUi("ui.characters.spritestab.applyingAutomaticMatteCleanupToSavedSprites")}
           </div>
         )}
         {lastCleanupBackupId && (
           <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--muted-foreground)]">
-            <span>Last cleanup has a restore point.</span>
+            <span>{localizeUi("ui.characters.spritestab.lastCleanupHasARestorePoint")}</span>
             <button
               type="button"
               onClick={() => void handleRestoreLastCleanup()}
@@ -3650,7 +4094,7 @@ function SpritesTab({
               className="flex items-center gap-1.5 rounded-md bg-[var(--card)] px-2.5 py-1 text-[0.6875rem] font-medium text-[var(--foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] disabled:opacity-40"
             >
               {restoringCleanup ? <Loader2 size="0.75rem" className="animate-spin" /> : <RotateCcw size="0.75rem" />}
-              Undo Cleanup
+              {localizeUi("ui.characters.spritestab.undoCleanup")}
             </button>
           </div>
         )}
@@ -3670,8 +4114,8 @@ function SpritesTab({
             onChange={(e) => setNewExpression(e.target.value)}
             placeholder={
               category === "full-body"
-                ? "Pose name (e.g. idle, walk, battle_stance)…"
-                : "Expression name (e.g. happy, sad, angry)…"
+                ? localizeUi("ui.characters.spritestab.poseNameEGIdleWalkBattleStance")
+                : localizeUi("ui.characters.spritestab.expressionNameEGHappySadAngry")
             }
             className="min-w-0 flex-1 rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm outline-none focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
             onKeyDown={(e) => {
@@ -3687,14 +4131,16 @@ function SpritesTab({
             className="flex w-full items-center justify-center gap-1.5 rounded-xl bg-[var(--primary)] px-4 py-2 text-xs font-medium text-[var(--primary-foreground)] shadow-sm transition-all hover:shadow-md disabled:opacity-40 sm:w-auto"
           >
             <Plus size="0.8125rem" />
-            Upload
+            {localizeUi("ui.characters.characterclipcard.upload")}
           </button>
         </div>
 
         {/* Quick expression buttons */}
         {category === "expressions" && suggestedExpressions.length > 0 && (
           <div>
-            <p className="text-[0.625rem] text-[var(--muted-foreground)] mb-1.5">Quick add:</p>
+            <p className="text-[0.625rem] text-[var(--muted-foreground)] mb-1.5">
+              {localizeUi("ui.characters.spritestab.quickAdd")}
+            </p>
             <div className="flex flex-wrap gap-1">
               {suggestedExpressions.slice(0, 12).map((expr) => (
                 <button
@@ -3749,7 +4195,7 @@ function SpritesTab({
                 type="button"
                 onClick={() => setWandCleanupSprite(sprite)}
                 className="group/preview relative block aspect-[3/4] w-full bg-[var(--secondary)]"
-                title="Open wand cleanup"
+                title={localizeUi("ui.characters.spritestab.openWandCleanup")}
               >
                 <img src={sprite.url} alt={sprite.expression} loading="lazy" className="h-full w-full object-contain" />
                 <span className="pointer-events-none absolute right-2 top-2 inline-flex h-7 w-7 items-center justify-center rounded-full bg-[var(--card)]/90 text-[var(--primary)] opacity-0 shadow-lg ring-1 ring-[var(--border)] transition-opacity group-hover/preview:opacity-100 max-md:opacity-100">
@@ -3768,7 +4214,7 @@ function SpritesTab({
                     type="button"
                     onClick={() => setFramingSprite(sprite)}
                     className="rounded-lg p-1 text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-                    title="Frame"
+                    title={localizeUi("ui.characters.spritestab.frame")}
                   >
                     <Crop size="0.6875rem" />
                   </button>
@@ -3776,7 +4222,7 @@ function SpritesTab({
                     type="button"
                     onClick={() => void downloadSpriteFile(sprite)}
                     className="rounded-lg p-1 text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-                    title="Download"
+                    title={localizeUi("ui.characters.charactergallerytab.download")}
                   >
                     <ImageDown size="0.6875rem" />
                   </button>
@@ -3784,7 +4230,7 @@ function SpritesTab({
                     type="button"
                     onClick={() => startUpload(sprite.expression)}
                     className="rounded-lg p-1 text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-                    title="Replace"
+                    title={localizeUi("settings.notifications.customSound.actions.replace")}
                   >
                     <Upload size="0.6875rem" />
                   </button>
@@ -3792,7 +4238,7 @@ function SpritesTab({
                     type="button"
                     onClick={() => setDeleteSpriteRequest(sprite)}
                     className="rounded-lg p-1 text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-                    title="Delete"
+                    title={localizeUi("lorebook.editor.batch.delete")}
                   >
                     <Trash2 size="0.6875rem" />
                   </button>
@@ -3805,11 +4251,13 @@ function SpritesTab({
         <div className="flex flex-col items-center gap-3 rounded-xl border-2 border-dashed border-[var(--border)] py-12 text-center">
           <Image size="1.75rem" className="text-[var(--muted-foreground)]/40" />
           <div>
-            <p className="text-sm font-medium text-[var(--muted-foreground)]">No sprites yet</p>
+            <p className="text-sm font-medium text-[var(--muted-foreground)]">
+              {localizeUi("ui.characters.spritestab.noSpritesYet")}
+            </p>
             <p className="mt-0.5 text-xs text-[var(--muted-foreground)]/60">
               {category === "full-body"
-                ? "Upload full-body sprites above. Use transparent PNGs for best results."
-                : "Upload expression sprites above. Use transparent PNGs for best results."}
+                ? localizeUi("ui.characters.spritestab.uploadFullBodySpritesAboveUseTransparentPngsFor")
+                : localizeUi("ui.characters.spritestab.uploadExpressionSpritesAboveUseTransparentPngsForBest")}
             </p>
           </div>
         </div>
@@ -3821,12 +4269,13 @@ function SpritesTab({
           onClose={() => {
             if (!deletingSprites) setDeleteSpriteRequest(null);
           }}
-          title="Delete Sprite"
+          title={localizeUi("ui.characters.spritestab.deleteSprite")}
           width="max-w-sm"
         >
           <div className="space-y-4">
             <p className="text-sm leading-relaxed text-[var(--foreground)]">
-              Delete sprite for "{displayExpression(deleteSpriteRequest.expression)}"?
+              {localizeUi("ui.characters.spritestab.deleteSpriteFor")}
+              {displayExpression(deleteSpriteRequest.expression)}"?
             </p>
             <div className="flex flex-wrap items-center gap-2">
               {visibleSprites.length > 1 ? (
@@ -3834,14 +4283,17 @@ function SpritesTab({
                   type="button"
                   onClick={() => void handleDeleteVisibleSprites()}
                   disabled={!!deletingSprites}
-	                  className="mr-auto inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 py-2 text-xs font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-50 sm:px-3 sm:text-sm"
+                  className="mr-auto inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-2.5 py-2 text-xs font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-50 sm:px-3 sm:text-sm"
                 >
                   {deletingSprites === "all" ? (
                     <Loader2 size="0.875rem" className="animate-spin" />
                   ) : (
                     <Trash2 size="0.875rem" />
                   )}
-                  Delete All {category === "full-body" ? "Full-Body" : "Expressions"}
+                  {localizeUi("ui.characters.spritestab.deleteAll")}{" "}
+                  {category === "full-body"
+                    ? localizeUi("ui.characters.spritestab.fullBody")
+                    : localizeUi("ui.characters.spritestab.expressions")}
                 </button>
               ) : null}
               <div className="ml-auto flex shrink-0 items-center gap-2">
@@ -3851,16 +4303,16 @@ function SpritesTab({
                   disabled={!!deletingSprites}
                   className="rounded-lg px-2.5 py-2 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:opacity-50 sm:px-3 sm:text-sm"
                 >
-                  Cancel
+                  {localizeUi("chat.delete.dialog.cancel")}
                 </button>
                 <button
                   type="button"
                   onClick={() => void handleDeleteSingleSprite()}
                   disabled={!!deletingSprites}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--destructive)] px-2.5 py-2 text-xs font-medium text-white transition-colors hover:bg-[var(--destructive)]/85 disabled:opacity-50 sm:px-3 sm:text-sm"
+                  className="mari-chrome-accent-surface mari-accent-animated inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-2 text-xs font-medium transition-colors disabled:opacity-50 sm:px-3 sm:text-sm"
                 >
                   {deletingSprites === "single" && <Loader2 size="0.875rem" className="animate-spin" />}
-                  Delete
+                  {localizeUi("lorebook.editor.batch.delete")}
                 </button>
               </div>
             </div>
@@ -3874,7 +4326,7 @@ function SpritesTab({
         onClose={() => setSpriteGenOpen(false)}
         entityId={characterId}
         initialSpriteType={category === "full-body" ? "full-body" : "expressions"}
-        existingExpressionNames={portraitExpressionNames}
+        existingExpressionSprites={portraitExpressionSprites}
         defaultAppearance={defaultAppearance}
         defaultAvatarUrl={defaultAvatarUrl}
         onSpritesGenerated={() => {
@@ -3918,8 +4370,17 @@ function StatsTab({
   formData: CharacterData;
   updateExtension: (key: string, value: unknown) => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const stats: RPGStatsConfig = (formData.extensions.rpgStats as RPGStatsConfig) ?? DEFAULT_RPG_STATS;
   const pools = normalizeRpgStatPools(stats);
+  const trackerCustomFieldDefaults = Array.isArray(formData.extensions.trackerCustomFieldDefaults)
+    ? (formData.extensions.trackerCustomFieldDefaults as CharacterTrackerCustomFieldDefault[])
+    : [];
+  const trackerCardAppearance = parseTrackerCardColorConfig(formData.extensions.trackerCardColors);
+
+  const updateStatIcons = (statIcons: NonNullable<typeof trackerCardAppearance.statIcons>) => {
+    updateExtension("trackerCardColors", serializeTrackerCardColorConfig({ ...trackerCardAppearance, statIcons }));
+  };
 
   const update = (patch: Partial<RPGStatsConfig>) => {
     updateExtension("rpgStats", { ...stats, ...patch });
@@ -3934,6 +4395,21 @@ function StatsTab({
 
   const updatePool = (index: number, patch: Partial<RPGStatPool>) => {
     const nextPools = pools.map((pool, poolIndex) => (poolIndex === index ? { ...pool, ...patch } : pool));
+    if (typeof patch.name === "string" && patch.name !== pools[index]?.name) {
+      updateStatIcons(
+        remapStatIconAssignments(trackerCardAppearance.statIcons ?? [], pools, nextPools, (nextIndex) => nextIndex),
+      );
+    }
+    updatePools(nextPools);
+  };
+
+  const removePool = (index: number) => {
+    const nextPools = pools.filter((_, poolIndex) => poolIndex !== index);
+    updateStatIcons(
+      remapStatIconAssignments(trackerCardAppearance.statIcons ?? [], pools, nextPools, (nextIndex) =>
+        nextIndex < index ? nextIndex : nextIndex + 1,
+      ),
+    );
     updatePools(nextPools);
   };
 
@@ -3951,17 +4427,24 @@ function StatsTab({
     update({ attributes: stats.attributes.filter((_, i) => i !== index) });
   };
 
+  const updateTrackerCustomFieldDefault = (index: number, patch: Partial<CharacterTrackerCustomFieldDefault>) => {
+    updateExtension(
+      "trackerCustomFieldDefaults",
+      trackerCustomFieldDefaults.map((field, fieldIndex) => (fieldIndex === index ? { ...field, ...patch } : field)),
+    );
+  };
+
   return (
     <div className="space-y-6">
       <SectionHeader
-        title="RPG Stats"
-        subtitle="Toggle stat tracking for this character. When enabled, the character's stats are included in the prompt and tracked by agents."
+        title={localizeUi("ui.characters.statstab.rpgStats")}
+        subtitle={localizeUi("ui.characters.statstab.toggleStatTrackingForThisCharacterWhenEnabledThe")}
         helpText={CHARACTER_STATS_HELP}
       />
 
       <SettingsSwitch
-        label={<span className="font-medium">Enable RPG Stats</span>}
-        description="Stats will be injected into the prompt and tracked by the Character Tracker agent."
+        label={<span className="font-medium">{localizeUi("ui.characters.statstab.enableRpgStats")}</span>}
+        description={localizeUi("ui.characters.statstab.statsWillBeInjectedIntoThePromptAndTracked")}
         checked={stats.enabled}
         onChange={(checked) => update({ enabled: checked })}
         labelPosition="start"
@@ -3974,34 +4457,54 @@ function StatsTab({
           {/* Pools */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold">Pools</h3>
+              <h3 className="text-sm font-semibold">{localizeUi("ui.characters.statstab.pools")}</h3>
               <button
                 type="button"
                 onClick={() => updatePools([...pools, createNewRpgPool(pools)])}
                 className="mari-chrome-accent-surface mari-accent-animated flex items-center gap-1 rounded-lg px-2.5 py-1 text-[0.6875rem] font-medium transition-colors"
               >
                 <Plus size="0.75rem" />
-                Add
+                {localizeUi("ui.characters.metadatatab.add")}
               </button>
             </div>
             <div className="space-y-2">
               {pools.map((pool, i) => (
                 <div
                   key={i}
-                  className="grid gap-2 rounded-xl border border-[var(--border)] bg-[var(--card)] px-3 py-2 sm:grid-cols-[2rem_minmax(0,1fr)_5rem_5rem_auto] sm:items-center"
+                  className="grid gap-2 rounded-xl border border-[var(--border)] bg-[var(--card)] px-3 py-2 sm:grid-cols-[2rem_2rem_minmax(0,1fr)_5rem_5rem_auto] sm:items-center"
                 >
                   <input
                     type="color"
                     value={pool.color}
                     onChange={(e) => updatePool(i, { color: e.target.value })}
                     className="h-8 w-8 rounded border border-[var(--border)] bg-transparent p-0.5"
-                    aria-label={`${pool.name || "Pool"} color`}
+                    aria-label={localizeUi("ui.characters.statstab.value1Color", {
+                      value1: pool.name || localizeUi("ui.characters.statstab.pool"),
+                    })}
+                  />
+                  <StatIconPicker
+                    value={resolveStatIconAssignment(
+                      trackerCardAppearance.statIcons ?? [],
+                      pool.name,
+                      getStatNameOccurrence(pools, i),
+                    )}
+                    statName={pool.name}
+                    onSelect={(icon) =>
+                      updateStatIcons(
+                        setStatIconAssignment(
+                          trackerCardAppearance.statIcons ?? [],
+                          pool.name,
+                          getStatNameOccurrence(pools, i),
+                          icon ?? undefined,
+                        ),
+                      )
+                    }
                   />
                   <input
                     value={pool.name}
                     onChange={(e) => updatePool(i, { name: e.target.value })}
                     className="min-w-0 rounded-lg border border-[var(--border)] bg-[var(--input)] px-2 py-1 text-xs font-medium"
-                    placeholder="Name"
+                    placeholder={localizeUi("ui.characters.metadatatab.name")}
                   />
                   <input
                     type="number"
@@ -4009,7 +4512,9 @@ function StatsTab({
                     onChange={(e) => updatePool(i, { value: Math.max(0, parseInt(e.target.value) || 0) })}
                     className="w-full rounded-lg border border-[var(--border)] bg-[var(--input)] px-2 py-1 text-center text-xs"
                     min={0}
-                    aria-label={`${pool.name || "Pool"} value`}
+                    aria-label={localizeUi("ui.characters.statstab.value1Value", {
+                      value1: pool.name || localizeUi("ui.characters.statstab.pool"),
+                    })}
                   />
                   <input
                     type="number"
@@ -4017,13 +4522,17 @@ function StatsTab({
                     onChange={(e) => updatePool(i, { max: Math.max(1, parseInt(e.target.value) || 1) })}
                     className="w-full rounded-lg border border-[var(--border)] bg-[var(--input)] px-2 py-1 text-center text-xs"
                     min={1}
-                    aria-label={`${pool.name || "Pool"} max`}
+                    aria-label={localizeUi("ui.characters.statstab.value1Max", {
+                      value1: pool.name || localizeUi("ui.characters.statstab.pool"),
+                    })}
                   />
                   <button
                     type="button"
-                    onClick={() => updatePools(pools.filter((_, poolIndex) => poolIndex !== i))}
-                    className="rounded-lg p-1 text-[var(--muted-foreground)] transition-colors hover:bg-red-500/15 hover:text-red-400"
-                    aria-label={`Remove ${pool.name || "pool"}`}
+                    onClick={() => removePool(i)}
+                    className="rounded-lg p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--primary)]/15 hover:text-[var(--primary)]"
+                    aria-label={localizeUi("ui.characters.statstab.removeValue1", {
+                      value1: pool.name || localizeUi("ui.characters.statstab.pool_51a4b13"),
+                    })}
                   >
                     <X size="0.75rem" />
                   </button>
@@ -4035,14 +4544,14 @@ function StatsTab({
           {/* Attributes */}
           <div className="space-y-3">
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold">Attributes</h3>
+              <h3 className="text-sm font-semibold">{localizeUi("ui.characters.statstab.attributes")}</h3>
               <button
                 type="button"
                 onClick={addAttribute}
                 className="mari-chrome-accent-surface mari-accent-animated flex items-center gap-1 rounded-lg px-2.5 py-1 text-[0.6875rem] font-medium transition-colors"
               >
                 <Plus size="0.75rem" />
-                Add
+                {localizeUi("ui.characters.metadatatab.add")}
               </button>
             </div>
 
@@ -4056,7 +4565,7 @@ function StatsTab({
                     value={attr.name}
                     onChange={(e) => updateAttribute(i, "name", e.target.value)}
                     className="w-20 rounded-lg border border-[var(--border)] bg-[var(--input)] px-2 py-1 text-xs font-medium"
-                    placeholder="Name"
+                    placeholder={localizeUi("ui.characters.metadatatab.name")}
                   />
                   <input
                     type="number"
@@ -4067,7 +4576,7 @@ function StatsTab({
                   <button
                     type="button"
                     onClick={() => removeAttribute(i)}
-                    className="rounded-lg p-1 text-[var(--muted-foreground)] transition-colors hover:bg-red-500/15 hover:text-red-400"
+                    className="rounded-lg p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--primary)]/15 hover:text-[var(--primary)]"
                   >
                     <X size="0.75rem" />
                   </button>
@@ -4077,6 +4586,71 @@ function StatsTab({
           </div>
         </>
       )}
+
+      <div className="space-y-3 border-t border-[var(--border)] pt-5">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h3 className="text-sm font-semibold">{localizeUi("ui.characters.statstab.trackerCustomFields")}</h3>
+            <p className="mt-0.5 text-[0.6875rem] leading-relaxed text-[var(--muted-foreground)]">
+              {localizeUi("ui.characters.statstab.trackerCustomFieldsDescription")}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() =>
+              updateExtension("trackerCustomFieldDefaults", [...trackerCustomFieldDefaults, { name: "", value: "" }])
+            }
+            className="mari-chrome-accent-surface mari-accent-animated flex shrink-0 items-center gap-1 rounded-lg px-2.5 py-1 text-[0.6875rem] font-medium transition-colors"
+          >
+            <Plus size="0.75rem" />
+            {localizeUi("ui.characters.metadatatab.add")}
+          </button>
+        </div>
+
+        {trackerCustomFieldDefaults.length === 0 ? (
+          <p className="rounded-xl border border-dashed border-[var(--border)] px-3 py-4 text-center text-xs text-[var(--muted-foreground)]">
+            {localizeUi("ui.characters.statstab.noTrackerCustomFields")}
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {trackerCustomFieldDefaults.map((field, index) => (
+              <div
+                key={index}
+                className="grid gap-2 rounded-xl border border-[var(--border)] bg-[var(--card)] px-3 py-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)_auto] sm:items-center"
+              >
+                <input
+                  value={field.name}
+                  onChange={(event) => updateTrackerCustomFieldDefault(index, { name: event.target.value })}
+                  className="min-w-0 rounded-lg border border-[var(--border)] bg-[var(--input)] px-2 py-1 text-xs font-medium"
+                  placeholder={localizeUi("ui.characters.statstab.trackerFieldName")}
+                  aria-label={localizeUi("ui.characters.statstab.trackerFieldName")}
+                />
+                <input
+                  value={field.value}
+                  onChange={(event) => updateTrackerCustomFieldDefault(index, { value: event.target.value })}
+                  className="min-w-0 rounded-lg border border-[var(--border)] bg-[var(--input)] px-2 py-1 text-xs"
+                  placeholder={localizeUi("ui.characters.statstab.initialValue")}
+                  aria-label={localizeUi("ui.characters.statstab.initialValue")}
+                />
+                <button
+                  type="button"
+                  onClick={() =>
+                    updateExtension(
+                      "trackerCustomFieldDefaults",
+                      trackerCustomFieldDefaults.filter((_, fieldIndex) => fieldIndex !== index),
+                    )
+                  }
+                  className="rounded-lg p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--primary)]/15 hover:text-[var(--primary)]"
+                  title={localizeUi("ui.characters.statstab.removeTrackerField")}
+                  aria-label={localizeUi("ui.characters.statstab.removeTrackerField")}
+                >
+                  <X size="0.75rem" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -4092,6 +4666,7 @@ function ColorsTab({
   updateExtension: (key: string, value: unknown) => void;
   avatarUrl: string | null;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const nameColor = (formData.extensions.nameColor as string) ?? "";
   const dialogueColor = (formData.extensions.dialogueColor as string) ?? "";
   const boxColor = (formData.extensions.boxColor as string) ?? "";
@@ -4115,8 +4690,8 @@ function ColorsTab({
   return (
     <div className="space-y-6">
       <SectionHeader
-        title="Character Colors"
-        subtitle="Customize how this character appears in chats. Colors are applied to the name, dialogue, and message bubble."
+        title={localizeUi("ui.characters.colorstab.characterColors")}
+        subtitle={localizeUi("ui.characters.colorstab.customizeHowThisCharacterAppearsInChatsColorsAre")}
         helpText={CHARACTER_COLORS_HELP}
       />
 
@@ -4125,28 +4700,31 @@ function ColorsTab({
         type="button"
         disabled={!avatarUrl || extracting}
         onClick={handleExtract}
-        className={cn(
-          "flex w-full items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-xs font-medium transition-all",
-          avatarUrl
-            ? "mari-chrome-accent-surface mari-accent-animated active:scale-[0.98]"
-            : "cursor-not-allowed bg-white/5 text-[var(--muted-foreground)]/50",
-        )}
+        className="mari-editor-action mari-editor-action--accent mari-editor-action--primary flex w-full rounded-xl px-4 py-2.5 text-xs"
       >
         {extracting ? <Loader2 size="0.875rem" className="animate-spin" /> : <Palette size="0.875rem" />}
-        {extracting ? "Extracting..." : avatarUrl ? "Extract Colors from Avatar" : "Upload an avatar first"}
+        {extracting
+          ? localizeUi("ui.characters.colorstab.extracting")
+          : avatarUrl
+            ? localizeUi("ui.characters.colorstab.extractColorsFromAvatar")
+            : localizeUi("ui.characters.colorstab.uploadAnAvatarFirst")}
       </button>
 
       {/* Preview card */}
       <div className="space-y-3 overflow-hidden rounded-xl border border-[var(--border)] bg-black/30 p-4">
-        <p className="text-[0.625rem] font-medium uppercase tracking-widest text-[var(--muted-foreground)]">Preview</p>
+        <p className="text-[0.625rem] font-medium uppercase tracking-widest text-[var(--muted-foreground)]">
+          {localizeUi("settings.notifications.customSound.actions.preview")}
+        </p>
         <div className="flex gap-3">
           <div className="mari-chrome-accent-tile mari-accent-animated relative flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full ring-2 ring-[var(--marinara-chat-chrome-button-border-active)]">
             {avatarUrl ? (
               <img
                 src={avatarUrl}
-                alt={`${formData.name || "Character"} avatar preview`}
+                alt={localizeUi("ui.characters.colorstab.value1AvatarPreview", {
+                  value1: formData.name || localizeUi("ui.characters.cardlibrarydetailcard.character"),
+                })}
                 className="h-full w-full object-cover"
-                style={getAvatarCropStyle(formData.extensions.avatarCrop as AvatarCrop | LegacyAvatarCrop | undefined)}
+                style={getAvatarCropStyle(normalizeAvatarCrop(formData.extensions.avatarCrop))}
               />
             ) : (
               <User size="1rem" className="text-white" />
@@ -4178,9 +4756,11 @@ function ColorsTab({
               className="rounded-2xl rounded-tl-sm px-4 py-3 text-[0.8125rem] leading-[1.8] backdrop-blur-md ring-1 ring-white/8"
               style={boxColor ? { backgroundColor: boxColor } : { backgroundColor: "rgba(255,255,255,0.08)" }}
             >
-              <span className="text-white/90">They jump down, landing behind you, and straighten up. </span>
+              <span className="text-white/90">
+                {localizeUi("ui.characters.colorstab.theyJumpDownLandingBehindYouAndStraightenUp")}{" "}
+              </span>
               <strong style={dialogueColor ? { color: dialogueColor } : { color: "rgb(255, 255, 255)" }}>
-                &ldquo;Hello there.&rdquo;
+                {localizeUi("ui.characters.colorstab.ldquoHelloThereRdquo")}
               </strong>
             </div>
           </div>
@@ -4192,7 +4772,7 @@ function ColorsTab({
         value={nameColor}
         onChange={(v) => updateExtension("nameColor", v)}
         gradient
-        label="Name Display Color"
+        label={localizeUi("ui.characters.colorstab.nameDisplayColor")}
         helpText="The color (or gradient) used for the character's name in chat messages and sidebar tabs. Supports gradients!"
       />
 
@@ -4200,7 +4780,7 @@ function ColorsTab({
       <ColorPicker
         value={dialogueColor}
         onChange={(v) => updateExtension("dialogueColor", v)}
-        label="Dialogue Highlight Color"
+        label={localizeUi("ui.characters.colorstab.dialogueHighlightColor")}
         helpText={
           'Text inside dialogue quotation marks ("", “”, «», 「」, 『』) will be automatically colored with this, and can also be bolded from Settings.'
         }
@@ -4210,7 +4790,7 @@ function ColorsTab({
       <ColorPicker
         value={boxColor}
         onChange={(v) => updateExtension("boxColor", v)}
-        label="Message Box Color"
+        label={localizeUi("ui.characters.colorstab.messageBoxColor")}
         helpText="Background color for this character's chat message bubbles. Use a semi-transparent color for best results (e.g. rgba)."
       />
     </div>
@@ -4234,6 +4814,7 @@ function LorebookTab({
   onEmbeddingChange?: (embedding: boolean) => void;
   onUnembed?: () => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
   const book = formData.character_book;
   const entries = book?.entries ?? [];
   const qc = useQueryClient();
@@ -4258,13 +4839,14 @@ function LorebookTab({
   // (its loading state is `isLoading || !lorebook`, and a 404'd query
   // satisfies the second clause forever), so verify before showing it.
   const linkedLorebookQuery = useLorebook(rawLinkedLorebookId);
+  const updateLorebook = useUpdateLorebook();
   const linkedLorebookId =
     rawLinkedLorebookId && (linkedLorebookQuery.isLoading || linkedLorebookQuery.data) ? rawLinkedLorebookId : null;
   const hasEmbeddedLorebook = entries.length > 0 || embeddedLorebookMetadata.hasEmbeddedLorebook === true;
 
   const isRemoveBlockedByEmbedding = () => {
     if (embedding || isEmbeddingInFlight?.()) {
-      toast.error("Wait for the embedded lorebook update to finish before removing it from the card.");
+      toast.error(localizeUi("ui.characters.charactereditor.waitForTheEmbeddedLorebookUpdateToFinishBefore"));
       return true;
     }
     return false;
@@ -4273,7 +4855,7 @@ function LorebookTab({
   const handleImportEmbeddedLorebook = async () => {
     if (!characterId) return;
     if (removing) {
-      toast.error("Wait for the embedded lorebook removal to finish before importing.");
+      toast.error(localizeUi("ui.characters.lorebooktab.waitForTheEmbeddedLorebookRemovalToFinishBefore"));
       return;
     }
     setImporting(true);
@@ -4290,11 +4872,17 @@ function LorebookTab({
       }
       toast.success(
         result.reimported
-          ? `Reimported ${result.entriesImported} embedded lorebook entr${result.entriesImported === 1 ? "y" : "ies"}`
-          : `Imported ${result.entriesImported} embedded lorebook entr${result.entriesImported === 1 ? "y" : "ies"}`,
+          ? localizeUi("ui.characters.lorebooktab.reimportedEmbeddedLorebookEntries", {
+              count: result.entriesImported,
+            })
+          : localizeUi("ui.characters.lorebooktab.importedEmbeddedLorebookEntries", {
+              count: result.entriesImported,
+            }),
       );
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to import embedded lorebook");
+      toast.error(
+        error instanceof Error ? error.message : localizeUi("ui.characters.lorebooktab.failedToImportEmbeddedLorebook"),
+      );
     } finally {
       setImporting(false);
     }
@@ -4303,16 +4891,15 @@ function LorebookTab({
   const handleRemoveFromCard = async () => {
     if (!characterId || removing) return;
     if (importing) {
-      toast.error("Wait for the embedded lorebook import to finish before removing it from the card.");
+      toast.error(localizeUi("ui.characters.lorebooktab.waitForTheEmbeddedLorebookImportToFinishBefore"));
       return;
     }
     if (isRemoveBlockedByEmbedding()) return;
     if (
       !(await showConfirmDialog({
-        title: "Remove Embedded Lorebook",
-        message:
-          "Remove the embedded lorebook from this character's card? Its entries will no longer be baked into the card. Any linked standalone lorebook is kept.",
-        confirmLabel: "Remove from card",
+        title: localizeUi("ui.characters.lorebooktab.removeEmbeddedLorebook"),
+        message: localizeUi("ui.characters.lorebooktab.removeTheEmbeddedLorebookFromThisCharacterSCard"),
+        confirmLabel: localizeUi("ui.characters.lorebooktab.removeFromCard"),
         tone: "destructive",
       }))
     )
@@ -4326,9 +4913,11 @@ function LorebookTab({
       onUnembed?.();
       qc.invalidateQueries({ queryKey: ["characters", "detail", characterId] });
       qc.invalidateQueries({ queryKey: lorebookKeys.all });
-      toast.success("Removed the embedded lorebook from the card.");
+      toast.success(localizeUi("ui.characters.lorebooktab.removedTheEmbeddedLorebookFromTheCard"));
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to remove embedded lorebook.");
+      toast.error(
+        error instanceof Error ? error.message : localizeUi("ui.characters.lorebooktab.failedToRemoveEmbeddedLorebook"),
+      );
     } finally {
       setRemoving(false);
     }
@@ -4337,8 +4926,8 @@ function LorebookTab({
   return (
     <div className="space-y-4">
       <SectionHeader
-        title="Character Lorebook"
-        subtitle="World-building entries embedded in this character. Triggered by keywords in conversation."
+        title={localizeUi("ui.characters.lorebooktab.characterLorebook")}
+        subtitle={localizeUi("ui.characters.lorebooktab.worldBuildingEntriesEmbeddedInThisCharacterTriggeredBy")}
         helpText={CHARACTER_LOREBOOK_HELP}
       />
 
@@ -4366,7 +4955,9 @@ function LorebookTab({
             )}
           >
             {importing ? <Loader2 size="0.75rem" className="animate-spin" /> : <Library size="0.75rem" />}
-            {linkedLorebookId ? "Reimport Embedded Lorebook" : "Import Embedded Lorebook"}
+            {linkedLorebookId
+              ? localizeUi("ui.characters.lorebooktab.reimportEmbeddedLorebook")
+              : localizeUi("ui.characters.lorebooktab.importEmbeddedLorebook")}
           </button>
           {linkedLorebookId && (
             <button
@@ -4375,8 +4966,32 @@ function LorebookTab({
               className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--primary)]/15 px-3 py-1.5 text-xs font-medium text-[var(--primary)] transition-all hover:bg-[var(--primary)]/25"
             >
               <Library size="0.75rem" />
-              Edit Embedded Lorebook
+              {localizeUi("ui.characters.lorebooktab.editEmbeddedLorebook")}
             </button>
+          )}
+          {linkedLorebookId && linkedLorebookQuery.data && (
+            <SettingsSwitch
+              label={localizeUi("ui.characters.lorebooktab.showInLorebookLibrary")}
+              description={localizeUi("ui.characters.lorebooktab.hiddenLorebooksRemainEmbeddedAndEditable")}
+              checked={!linkedLorebookQuery.data.hiddenFromLibrary}
+              disabled={updateLorebook.isPending}
+              onChange={(visible) => {
+                updateLorebook.mutate(
+                  { id: linkedLorebookId, hiddenFromLibrary: !visible },
+                  {
+                    onError: (error) =>
+                      toast.error(
+                        error instanceof Error
+                          ? error.message
+                          : localizeUi("ui.characters.lorebooktab.failedToUpdateLorebookVisibility"),
+                      ),
+                  },
+                );
+              }}
+              labelPosition="start"
+              className="w-full justify-between rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 py-2 sm:w-auto sm:min-w-72"
+              labelClassName="text-xs"
+            />
           )}
           <button
             type="button"
@@ -4385,17 +5000,17 @@ function LorebookTab({
             className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-xs font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-all hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-50"
             title={
               embedding
-                ? "Wait for the embedded lorebook update to finish."
-                : "Remove the embedded lorebook (data.character_book) from the card"
+                ? localizeUi("ui.characters.lorebooktab.waitForTheEmbeddedLorebookUpdateToFinish")
+                : localizeUi("ui.characters.lorebooktab.removeTheEmbeddedLorebookDataCharacterBookFromThe")
             }
           >
             {removing || embedding ? <Loader2 size="0.75rem" className="animate-spin" /> : <Trash2 size="0.75rem" />}
-            Remove from card
+            {localizeUi("ui.characters.lorebooktab.removeFromCard")}
           </button>
           <span className="text-[0.6875rem] text-[var(--muted-foreground)]">
             {linkedLorebookId
-              ? "Edit opens the lorebook editor; changes sync back into the card's embedded copy."
-              : "Import bakes this embedded lorebook into Marinara as an editable linked lorebook."}
+              ? localizeUi("ui.characters.lorebooktab.editOpensTheLorebookEditorChangesSyncBackInto")
+              : localizeUi("ui.characters.lorebooktab.importBakesThisEmbeddedLorebookIntoMarinaraAsAn")}
           </span>
         </div>
       )}
@@ -4408,7 +5023,7 @@ function LorebookTab({
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-medium">{entry.name || `Entry #${i + 1}`}</p>
                   <p className="mt-0.5 text-[0.625rem] text-[var(--muted-foreground)]">
-                    Keys: {entry.keys.join(", ")}{" "}
+                    {localizeUi("ui.characters.lorebooktab.keys")} {entry.keys.join(", ")}{" "}
                     {entry.secondary_keys.length > 0 && `· Secondary: ${entry.secondary_keys.join(", ")}`}
                   </p>
                 </div>
@@ -4420,7 +5035,9 @@ function LorebookTab({
                       : "bg-[var(--muted-foreground)]/15 text-[var(--muted-foreground)]",
                   )}
                 >
-                  {entry.enabled ? "Active" : "Disabled"}
+                  {entry.enabled
+                    ? localizeUi("ui.characters.lorebooktab.active")
+                    : localizeUi("ui.characters.lorebooktab.disabled")}
                 </span>
               </div>
               <p className="mt-2 text-xs text-[var(--muted-foreground)] line-clamp-3">{entry.content}</p>

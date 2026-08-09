@@ -7,6 +7,7 @@ import { api } from "../../lib/api-client";
 import { cn } from "../../lib/utils";
 import { Modal } from "./Modal";
 import { ImagePromptReviewModal, type ImagePromptOverride, type ImagePromptReviewItem } from "./ImagePromptReviewModal";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 type AvatarGenerationModalProps = {
   open: boolean;
@@ -60,6 +61,7 @@ export function AvatarGenerationModal({
   onClose,
   onUseAvatar,
 }: AvatarGenerationModalProps) {
+  const { t: localizeUi } = useUiTranslation();
   const { data: connectionsList } = useConnections();
   const reviewImagePromptsBeforeSend = useUIStore((s) => s.reviewImagePromptsBeforeSend);
   const imagePortraitWidth = useUIStore((s) => s.imagePortraitWidth);
@@ -159,7 +161,7 @@ export function AvatarGenerationModal({
       setGeneratedAvatar(result.image);
       setGeneratedPrompt(result.prompt);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Avatar generation failed.");
+      toast.error(error instanceof Error ? error.message :localizeUi("ui.ui.avatargenerationmodal.avatarGenerationFailed"));
     } finally {
       setReviewSubmitting(false);
       setGenerating(false);
@@ -173,7 +175,7 @@ export function AvatarGenerationModal({
       await onUseAvatar(generatedAvatar);
       onClose();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Failed to save generated avatar.");
+      toast.error(error instanceof Error ? error.message :localizeUi("ui.ui.avatargenerationmodal.failedToSaveGeneratedAvatar"));
     } finally {
       setSaving(false);
     }
@@ -186,11 +188,9 @@ export function AvatarGenerationModal({
           <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_13rem]">
             <div className="space-y-4">
               <label className="space-y-1.5">
-                <span className="block text-xs font-medium text-[var(--foreground)]">Image Generation Connection</span>
+                <span className="block text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.agents.agenteditor.imageGenerationConnection")}</span>
                 {imageConnections.length === 0 ? (
-                  <p className="rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--destructive)]">
-                    No image generation connections found.
-                  </p>
+                  <p className="rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--destructive)]">{localizeUi("ui.ui.avatargenerationmodal.noImageGenerationConnectionsFound")}</p>
                 ) : (
                   <select
                     value={effectiveConnectionId ?? ""}
@@ -200,8 +200,8 @@ export function AvatarGenerationModal({
                     {imageConnections.map((connection) => (
                       <option key={connection.id} value={connection.id}>
                         {connection.name}
-                        {connection.model ? ` - ${connection.model}` : ""}
-                        {isDefaultImageConnection(connection) ? " (Default)" : ""}
+                        {connection.model ?localizeUi("ui.ui.avatargenerationmodal.value1", { value1: connection.model }) : ""}
+                        {isDefaultImageConnection(connection) ?localizeUi("ui.ui.avatargenerationmodal.default") : ""}
                       </option>
                     ))}
                   </select>
@@ -209,13 +209,13 @@ export function AvatarGenerationModal({
               </label>
 
               <label className="space-y-1.5">
-                <span className="block text-xs font-medium text-[var(--foreground)]">Avatar Prompt</span>
+                <span className="block text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.ui.avatargenerationmodal.avatarPrompt")}</span>
                 <textarea
                   value={appearance}
                   onChange={(event) => setAppearance(event.target.value)}
                   rows={7}
                   className="w-full resize-y rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs leading-relaxed text-[var(--foreground)] outline-none ring-1 ring-transparent transition-all placeholder:text-[var(--muted-foreground)] focus:ring-[var(--primary)]/40"
-                  placeholder="Describe the character's face, hair, build, outfit, mood, and visual style..."
+                  placeholder={localizeUi("ui.ui.avatargenerationmodal.describeTheCharacterSFaceHairBuildOutfitMood")}
                 />
               </label>
 
@@ -229,10 +229,10 @@ export function AvatarGenerationModal({
                   />
                   <img
                     src={defaultAvatarUrl}
-                    alt="Current avatar reference"
+                    alt={localizeUi("ui.ui.avatargenerationmodal.currentAvatarReference")}
                     className="h-10 w-10 rounded-lg object-cover ring-1 ring-[var(--border)]"
                   />
-                  <span className="min-w-0 flex-1">Use current avatar as a reference</span>
+                  <span className="min-w-0 flex-1">{localizeUi("ui.ui.avatargenerationmodal.useCurrentAvatarAsAReference")}</span>
                 </label>
               )}
             </div>
@@ -240,13 +240,13 @@ export function AvatarGenerationModal({
             <div className="flex flex-col gap-3">
               <div className="relative aspect-square overflow-hidden rounded-xl bg-[var(--secondary)] ring-1 ring-[var(--border)]">
                 {generatedAvatar ? (
-                  <img src={generatedAvatar} alt="Generated avatar" className="h-full w-full object-cover" />
+                  <img src={generatedAvatar} alt={localizeUi("ui.ui.avatargenerationmodal.generatedAvatar")} className="h-full w-full object-cover" />
                 ) : defaultAvatarUrl ? (
-                  <img src={defaultAvatarUrl} alt="Current avatar" className="h-full w-full object-cover opacity-80" />
+                  <img src={defaultAvatarUrl} alt={localizeUi("ui.ui.avatargenerationmodal.currentAvatar")} className="h-full w-full object-cover opacity-80" />
                 ) : (
                   <div className="flex h-full w-full flex-col items-center justify-center gap-2 text-[var(--muted-foreground)]">
                     <ImagePlus size="1.75rem" />
-                    <span className="text-xs">No preview yet</span>
+                    <span className="text-xs">{localizeUi("ui.ui.avatargenerationmodal.noPreviewYet")}</span>
                   </div>
                 )}
               </div>
@@ -260,8 +260,7 @@ export function AvatarGenerationModal({
 
           <div className="flex flex-col gap-2 border-t border-[var(--border)]/50 pt-3 sm:flex-row sm:items-center sm:justify-between">
             <span className="text-[0.625rem] text-[var(--muted-foreground)]">
-              {imagePortraitWidth}x{imagePortraitHeight} portrait canvas
-            </span>
+              {imagePortraitWidth}{localizeUi("ui.panels.imagedimensionrow.x")}{imagePortraitHeight} {localizeUi("ui.ui.avatargenerationmodal.portraitCanvas")}</span>
             <div className="flex justify-end gap-2">
               <button
                 type="button"
@@ -269,9 +268,7 @@ export function AvatarGenerationModal({
                 disabled={generating || saving}
                 className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <X size="0.875rem" />
-                Cancel
-              </button>
+                <X size="0.875rem" />{localizeUi("chat.delete.dialog.cancel")}</button>
               <button
                 type="button"
                 onClick={handleGenerate}
@@ -284,7 +281,7 @@ export function AvatarGenerationModal({
                 )}
               >
                 {generating ? <Loader2 size="0.875rem" className="animate-spin" /> : <Wand2 size="0.875rem" />}
-                {generatedAvatar ? "Regenerate" : "Generate"}
+                {generatedAvatar ?localizeUi("ui.agents.secretplotpanel.regenerate") :localizeUi("ui.characters.characterclipcard.generate")}
               </button>
               <button
                 type="button"
@@ -297,9 +294,7 @@ export function AvatarGenerationModal({
                     : "bg-[var(--primary)]/15 text-[var(--primary)] ring-[var(--primary)]/30 hover:bg-[var(--primary)]/20",
                 )}
               >
-                {saving ? <Loader2 size="0.875rem" className="animate-spin" /> : <Camera size="0.875rem" />}
-                Use Avatar
-              </button>
+                {saving ? <Loader2 size="0.875rem" className="animate-spin" /> : <Camera size="0.875rem" />}{localizeUi("ui.ui.avatargenerationmodal.useAvatar")}</button>
             </div>
           </div>
         </div>

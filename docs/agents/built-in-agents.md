@@ -1,6 +1,6 @@
 # Downloadable Agents Reference
 
-This guide lists all 29 official first-party packages available through **Agents → Download Agents**, grouped by category. Agents do not ship inside a fresh Marinara Engine installation. Their package sources, manifests, artifacts, and machine-readable catalog are published in [Pasta-Devs/Marinara-Agents](https://github.com/Pasta-Devs/Marinara-Agents). For each one, this guide explains what the agent does, when it runs or integrates, which chat modes allow it, and the main settings. For installation and activation, read the [Agents overview](agents-overview.md) first.
+This guide lists all 30 official first-party packages available through **Agents → Download Agents**, grouped by category. Agents do not ship inside a fresh Marinara Engine installation. Their package sources, manifests, artifacts, and machine-readable catalog are published in [Pasta-Devs/Marinara-Agents](https://github.com/Pasta-Devs/Marinara-Agents). For each one, this guide explains what the agent does, when it runs or integrates, which chat modes allow it, and the main settings. For installation and activation, read the [Agents overview](agents-overview.md) first.
 
 ## How to read this reference
 
@@ -14,7 +14,7 @@ Each agent below shows three quick facts.
 
 Marinara groups its agents into three categories in the **Agents** panel: **Writer Agents**, **Tracker Agents**, and **Misc Agents**. This reference uses the same grouping.
 
-A run interval means the agent runs once every few assistant messages instead of after every message. You can change a run interval in the agent's setup, up to 100.
+A run interval means the agent runs once every few user and assistant messages instead of after every message. You can change a run interval in the agent's setup, up to 100.
 
 ## Writer agents
 
@@ -42,7 +42,7 @@ Watches how a character changes during play and suggests edits to that character
 
 - **Phase**: Post-Processing.
 - **Where it works**: Roleplay.
-- **Key settings**: it runs once every 8 assistant messages by default. See [Agent approvals and the Agent Suite](approvals-and-agent-suite.md).
+- **Key settings**: it runs once every 8 user and assistant messages by default. See [Agent approvals and the Agent Suite](approvals-and-agent-suite.md).
 
 ### Narrative Director
 
@@ -130,14 +130,14 @@ Tracks fields you define yourself, such as currencies, counters, or flags. Use i
 - **Where it works**: Roleplay.
 - **Key settings**: **Add as Prompt Section** (on by default).
 
-### Hierarchical Maps
+### World Maps
 
 Adds persistent nested locations and spatial relationships to a story. You can author regions, areas, rooms, and connections, move between locations, and let the current position contribute spatial context to generation. Game Mode also gains the package's world-map view.
 
 - **Integration**: Feature package; it contributes map UI and chat runtime context instead of running as a normal generation-phase agent.
 - **Where it works**: Roleplay and Game.
 - **Key settings**: enable it for the Roleplay chat from **Chat Settings → Agents**, or select it during Game creation and manage it later from that game's settings. Installing or removing it requires a Marinara restart.
-- **Full guide**: [Hierarchical Maps: Setup, Authoring, and Travel](hierarchical-maps.md).
+- **Full guide**: [World Maps: Setup, Authoring, and Travel](hierarchical-maps.md).
 
 ## Misc agents
 
@@ -151,13 +151,23 @@ Simulates a live audience reacting to your scene, shown as a floating **Echo** w
 - **Where it works**: Roleplay.
 - **Key settings**: you pick a style from its named options, such as **AO3 / Wattpad**, **Twitter / Reddit**, **4chan**, **Constructive**, **Hype Squad**, and **Harbingers**. Controls in the widget include **Re-run Echo Chamber** and **Clear messages**.
 
+### Long-Term Memory
+
+Extracts durable memories from chat summaries, character records, and lorebooks into a package-owned vault, then recalls relevant context before the main reply. It supports scoped vault browsing, source imports, pending-draft review, and preset-marker placement for recalled context.
+
+- **Integration**: Feature package; it contributes pre-generation context and memory management UI instead of running as a normal post-processing tracker.
+- **Where it works**: Conversation, Roleplay, and Game.
+- **Key settings**: enablement, recall token budget (128-16,384), maximum recalled chunks (1-100), score threshold, recent-message context (1-20), recall style and semantic, lexical, graph, and keyword weights, resolved-memory inclusion, recall preamble, extraction reasoning and verbosity, generation limits, source limits, prompt templates, AI keyword extraction, and Game-mode extraction.
+- **Data lifecycle**: use the Memory Settings backup controls to export or replace the vault, drafts, and settings. Delete all data permanently removes memories, drafts, activity, and derived indexes while retaining settings. Uninstalling the package preserves the Long-Term Memory vault for a later reinstall. Installing, updating, or removing it requires a Marinara restart.
+- **Compatibility**: Engine `2.3.5` through before `4.0.0`. The package uses `agent-runtime`, `chat-read`, `chat-write`, `routes`, `storage`, and `ui` permissions.
+
 ### Illustrator
 
 Responsible for image and video generations. It writes visual prompts for important moments, then sends them to the configured media provider.
 
 - **Phase**: Post-Processing.
 - **Where it works**: Roleplay.
-- **Key settings**: it runs once every 5 assistant messages by default. Settings include **Prompt Model**, **Image Style**, **Attach Card Appearance**, and **Send Avatar References**. For the full setup, see [Illustrator agent](../media/illustrator-agent.md).
+- **Key settings**: it runs once every 5 user and assistant messages by default. Settings include **Prompt Model**, **Image Style**, **Attach Card Appearance**, and **Send Avatar References**. For the full setup, see [Illustrator agent](../media/illustrator-agent.md).
 
 ### Lorebook Keeper
 
@@ -165,7 +175,7 @@ Creates and updates lorebook entries from important facts in your chat, so your 
 
 - **Phase**: Post-Processing.
 - **Where it works**: Roleplay. In Game Mode, a session-end variant called **Game Session Keeper** does the same job at the end of a session.
-- **Key settings**: it runs once every 8 assistant messages by default. A **Target Lorebook** picker chooses where entries go, with an auto-select option.
+- **Key settings**: it runs once every 8 user and assistant messages by default. A **Target Lorebook** picker chooses where entries go, with an auto-select option.
 
 ### Combat
 
@@ -206,6 +216,16 @@ Adds clickable "What will you do?" choice buttons after each reply, for a choose
 - **Phase**: Post-Processing.
 - **Where it works**: Roleplay.
 - **Key settings**: **Edit** to rewrite the choices and **Re-roll** to generate new ones.
+
+### Storyboard
+
+Plans still or animated visual storyboards from completed Roleplay exchanges and Game narration. Separate planning and provider-aware formatting preserve source chronology, character identity, and the selected visual style across generated keyframes and videos.
+
+- **Integration**: Agent package; Game and Roleplay use the installed package's prompt templates and settings through the Engine's Storyboard host integration.
+- **Where it works**: Roleplay and Game.
+- **Key settings**: choose still or animation planners, image and video connections, keyframe count, duration, display mode, character-reference handling, Roleplay episode and style templates, and Game illustration/video templates.
+- **Compatibility**: Engine `2.3.5` through before `3.0.0`. The package uses `agent-runtime`, `chat-read`, `prompt-context`, `storage`, and `ui` permissions and does not require a restart.
+- **Full guide**: [Storyboard Agent: Roleplay and Game Mode](../game/storyboard.md).
 
 ### Calls
 

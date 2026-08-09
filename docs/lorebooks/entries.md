@@ -86,9 +86,13 @@ For example, take a **Selective** entry with primary key `king` and secondary ke
 
 These controls decide where an activated entry lands in the prompt. They sit on the compact row on a wide screen. On a narrow screen, tap the row's quick-controls button to reach them.
 
-- **Position**: choose **Before chat**, **After chat**, or **@ Depth**. Before chat and After chat place the entry around the chat history. **@ Depth** injects the entry inside the chat history. On a wide screen, the row shows these as the short labels **↑Char**, **↓Char**, and **@Depth**.
+- **Position**: choose **Before chat**, **After chat**, **@ Depth**, or **Outlet**. Before chat and After chat place the entry around the chat history. **@ Depth** injects the entry inside the chat history. **Outlet** does not inject the entry automatically; it makes activated content available to a named `{{outlet::name}}` macro. On a wide screen, the row shows the first three positions as the short labels **↑Char**, **↓Char**, and **@Depth**.
 - **Depth**: appears only when **Position** is **@ Depth**. It sets how many messages back from the latest message the entry is inserted. The default is 4.
 - **Order**: the insertion order when several entries activate at once. A lower number comes earlier in the prompt. The default is 100.
+
+When you choose **Outlet**, an **Outlet name** field appears. Enter an exact, case-sensitive name such as `character_rules`, then put `{{outlet::character_rules}}` in a prompt section. Every entry assigned to that Outlet still follows its normal keyword, constant, probability, filter, timing, entry-limit, and token-budget rules. Only entries activated for the current generation are collected. Entries that share the same Outlet name are joined in Order, separated by new lines.
+
+An Outlet macro with no active matching entries resolves to nothing. Outlet content cannot call another Outlet macro, which prevents recursive Outlet loops. Outlet macros work in prompt sections in Conversation, Roleplay, and Game modes.
 
 ## Trigger probability
 

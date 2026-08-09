@@ -3,6 +3,7 @@
 // ──────────────────────────────────────────────
 import { useEffect, useRef, useState } from "react";
 import { Search, X } from "lucide-react";
+import { useTranslation } from "react-i18next";
 import { cn } from "../../lib/utils";
 
 /**
@@ -14,6 +15,7 @@ import { cn } from "../../lib/utils";
  * @param onSearch - Callback when query changes
  */
 export function SearchInput({ search, onSearch }: { search: string; onSearch: (v: string) => void }) {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -30,7 +32,7 @@ export function SearchInput({ search, onSearch }: { search: string; onSearch: (v
         <button
           onClick={() => setExpanded(true)}
           className="flex h-10 w-10 items-center justify-center rounded-lg border border-(--border) bg-(--background) text-(--muted-foreground) transition-colors hover:bg-(--accent) hover:text-(--foreground) sm:hidden"
-          title="Search in folder"
+          title={t("search.folder.title")}
         >
           <Search size="0.875rem" />
         </button>
@@ -53,7 +55,7 @@ export function SearchInput({ search, onSearch }: { search: string; onSearch: (v
               onSearch("");
             }
           }}
-          placeholder="Search in folder..."
+          placeholder={t("search.folder.placeholder")}
           className="h-10 w-48 rounded-lg border border-(--border) bg-(--background) pl-7 pr-7 text-sm text-(--foreground) outline-none transition-colors focus:border-(--foreground)/40 focus:ring-1 focus:ring-(--foreground)/15 max-sm:absolute max-sm:right-0 max-sm:top-1/2 max-sm:w-48 max-sm:-translate-y-1/2 sm:h-8"
         />
         {expanded && (

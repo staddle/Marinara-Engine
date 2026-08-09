@@ -4,7 +4,11 @@
 // Supports V2 and V3 character card specs
 // ──────────────────────────────────────────────
 
+import { MAX_FILE_SIZES } from "@marinara-engine/shared";
+
 const CHARA_KEYWORDS = new Set(["ccv3", "chara"]);
+// zTXt card metadata may be raw JSON or base64 (up to 4/3 the JSON size).
+const MAX_CHARACTER_CARD_CHUNK_SIZE = Math.ceil(MAX_FILE_SIZES.CHARACTER_JSON / 3) * 4;
 
 /** Find the first null byte in a Uint8Array starting from `from`. */
 function findNull(data: Uint8Array, from: number): number {
@@ -12,6 +16,53 @@ function findNull(data: Uint8Array, from: number): number {
     if (data[i] === 0) return i;
   }
   return -1;
+}
+
+/** Parse chunk text that may be raw JSON or base64-encoded JSON. */
+function parseCharaChunkText(text: string): Record<string, unknown> {
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    // Decode base64 → bytes → UTF-8 (atob alone produces Latin-1, breaking multi-byte chars)
+    const raw = atob(text);
+    const utf8Bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) utf8Bytes[i] = raw.charCodeAt(i);
+    return JSON.parse(new TextDecoder().decode(utf8Bytes)) as Record<string, unknown>;
+  }
+}
+
+/** Inflate a zlib (RFC 1950) stream — the encoding zTXt chunks use. */
+async function inflateZlib(data: Uint8Array): Promise<Uint8Array> {
+  const reader = new Blob([data as BlobPart])
+    .stream()
+    .pipeThrough(new DecompressionStream("deflate"))
+    .getReader();
+  const chunks: Uint8Array[] = [];
+  let totalLength = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      totalLength += value.byteLength;
+      if (totalLength > MAX_CHARACTER_CARD_CHUNK_SIZE) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error("Compressed character metadata exceeds the allowed size");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const inflated = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    inflated.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return inflated;
 }
 
 /**
@@ -70,6 +121,21 @@ export async function parsePngCharacterCard(
           found.set(keyword, JSON.parse(jsonStr) as Record<string, unknown>);
         }
       }
+    } else if (type === "zTXt") {
+      // zTXt chunk: keyword\0 compressionMethod(1 byte, 0 = zlib deflate) compressedText.
+      // Character Tavern cards store their chara/ccv3 payloads this way.
+      const nullIdx = findNull(chunkData, 0);
+      if (nullIdx > 0) {
+        const keyword = new TextDecoder().decode(chunkData.slice(0, nullIdx));
+        if (CHARA_KEYWORDS.has(keyword) && !found.has(keyword) && chunkData[nullIdx + 1] === 0) {
+          try {
+            const inflated = await inflateZlib(chunkData.slice(nullIdx + 2));
+            found.set(keyword, parseCharaChunkText(new TextDecoder().decode(inflated)));
+          } catch {
+            // Skip malformed compressed chunks; other chunks may still carry the card.
+          }
+        }
+      }
     } else if (type === "iTXt") {
       // iTXt chunk: keyword\0 compressionFlag compressionMethod languageTag\0 translatedKeyword\0 text
       const nullIdx = findNull(chunkData, 0);
@@ -119,15 +185,15 @@ export async function parsePngCharacterCard(
     throw new Error("No character data found in PNG — this doesn't appear to be a SillyTavern character card");
   }
 
-  const imageDataUrl = await fileToDataUrl(file);
-  return { json, imageDataUrl };
+  return { json, imageDataUrl: bytesToDataUrl(bytes, file.type || "image/png") };
 }
 
-function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
+/** Build a data URL from bytes already in memory (no FileReader — also runs under Node regressions). */
+function bytesToDataUrl(bytes: Uint8Array, mimeType: string): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return `data:${mimeType};base64,${btoa(binary)}`;
 }

@@ -68,6 +68,12 @@ maintainer explicitly asks for end-to-end autonomous implementation.
 
 For UI work, define the primary path, mobile expectations, theme expectations,
 empty/error states, and the browser proof needed before calling the UI done.
+Treat localization as part of the implementation and proof boundary: route all
+new or changed user-facing copy through semantic keys and update canonical
+English in the same change. Community locale files may remain partial and fall
+back to English; update only translations the contributor can responsibly
+supply, and never edit every locale merely for key parity. Run
+`pnpm localization:check`. Prompts and user-authored content are not UI copy.
 
 ## Issue Filing Lane
 
@@ -93,6 +99,7 @@ Use this for code reviews, PR preparation, PR iteration, and ready-for-review ga
 - Never push directly to protected branches without explicit maintainer direction.
 - Do not auto-check PR validation boxes. Treat them as human verification tasks.
 - After pushing, inspect CI and review feedback when asked to ship or ready a PR.
+- Required checks and CodeRabbit must complete before every merge. PRs from active Pasta-Devs organization members and owners do not require separate human approval; organization members with repository merge permission may merge internal PRs to `staging` after those gates. Outside and first-time contributors also require an approving review from `SpicyMarinara`. Only `SpicyMarinara` may promote `staging` to `main`.
 
 Maintainer-equivalent self-review questions:
 

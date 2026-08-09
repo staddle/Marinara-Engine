@@ -1,5 +1,6 @@
-<!-- Target branch: `staging`. The default base in this UI is `main` (release branch). -->
-<!-- Change the base to `staging` before submitting unless this is a maintainer-approved mainline change. -->
+> [!IMPORTANT]
+> Contributions target `staging`. Only `SpicyMarinara` may promote this repository's `staging` branch or a same-repository `hotfix/*` branch to `main`.
+> Outside and first-time contributors also require an approving review from `SpicyMarinara`.
 <!-- See CONTRIBUTING.md § Branches. -->
 
 ## Linked issue
@@ -45,6 +46,7 @@ Closes #
 
 - [ ] No docs changes needed
 - [ ] Updated docs (README / CONTRIBUTING / android/README / CHANGELOG) as needed
+- [ ] Translated docs on the `docs-i18n` branch updated to match, or a `[docs-i18n]` follow-up issue opened (see CONTRIBUTING.md § Translated documentation)
 - [ ] Version/release files updated (only if this PR includes a version bump)
 
 ## UI evidence (if applicable)

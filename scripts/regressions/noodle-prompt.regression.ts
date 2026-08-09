@@ -44,6 +44,7 @@ import {
 } from "../../packages/server/src/services/noodle/noodle-context.js";
 import { canCreateGeneratedNoodleInteraction } from "../../packages/server/src/services/noodle/noodle-interaction-policy.js";
 import { parseNoodleGeneratedProfiles } from "../../packages/server/src/services/noodle/noodle-generated-profiles.js";
+import { resolveIllustratorCharacterReferences } from "../../packages/server/src/services/image/illustrator-references.js";
 import {
   parseNoodleGeneratedRefresh,
   parseNoodleGeneratedRefreshResponse,
@@ -59,10 +60,12 @@ import {
 } from "../../packages/server/src/services/noodle/noodle-public-prompt.service.js";
 import { formatNoodleMessagesForLog } from "../../packages/server/src/services/noodle/noodle-generation-log.js";
 import {
-  buildPrivatePostMessages,
-  protectPrivateGeneratedIdentity,
+  buildNoodlerPublicIdentity,
+  buildNoodlerPostMessages,
+  protectNoodlerGeneratedIdentity,
   stageProfileContainsPublicIdentity,
-} from "../../packages/server/src/services/noodle/noodle-private-generation.service.js";
+} from "../../packages/server/src/services/noodle/noodle-noodler-generation.service.js";
+import { noodlerSourceText } from "../../packages/server/src/services/noodle/noodle-stage-profile-draft.service.js";
 import {
   canViewNoodlerPost,
   isNoodlerHiddenFromViewer,
@@ -88,11 +91,12 @@ const makeAccount = (id: string): NoodleAccount => ({
   settings: {
     profile: {},
     social: {},
-    scheduler: {},
-    privacy: { access: { hiddenFromAccountIds: [], subscriptionIncludesPpv: false } },
+    scheduler: { autoPosting: { enabled: false, imagesEnabled: false } },
+    privacy: { access: { hiddenFromAccountIds: [] } },
+    wallet: { coins: 999999 },
   },
-  visibility: "public",
-  publicAccountId: null,
+  platform: "noodle",
+  noodleAccountId: null,
   createdAt: "2026-07-10T10:00:00.000Z",
   updatedAt: "2026-07-10T10:00:00.000Z",
 });
@@ -283,7 +287,6 @@ const repeatPost: NoodlePost = {
   quotePostId: null,
   source: "generated",
   access: "public",
-  ppvPrice: null,
   metadata: {},
   authorSnapshot: null,
   createdAt: "2026-07-10T10:00:00.000Z",
@@ -357,69 +360,97 @@ assert.equal(noodleGenerationRequestSchema.safeParse({ mode: "public", personaId
 assert.equal(noodleGenerationRequestSchema.safeParse({ mode: "public", timeZone: "Europe/Warsaw" }).success, true);
 assert.equal(
   noodleGenerationRequestSchema.safeParse({
-    mode: "private",
+    mode: "noodler",
     targetAccountId: "private-1",
-    privatePostGuide: "Write about tonight.",
-    privateProjectWork: "Advance the current beat.",
+    noodlerPostGuide: "Write about tonight.",
+    noodlerProjectWork: "Advance the current beat.",
   }).success,
   true,
 );
 assert.equal(noodleGenerationRequestSchema.safeParse({}).success, false);
-assert.equal(noodleGenerationRequestSchema.safeParse({ mode: "private" }).success, false);
+assert.equal(noodleGenerationRequestSchema.safeParse({ mode: "noodler" }).success, false);
 assert.equal(noodleGenerationRequestSchema.safeParse({ mode: "public", targetAccountId: "private-1" }).success, false);
 assert.equal(
   noodleGenerationRequestSchema.safeParse({
     mode: "public",
-    privatePostGuide: "Write about tonight.",
+    noodlerPostGuide: "Write about tonight.",
   }).success,
   false,
 );
 assert.equal(
   noodleGenerationRequestSchema.safeParse({
     mode: "public",
-    privateProjectWork: "Advance the current beat.",
+    noodlerProjectWork: "Advance the current beat.",
   }).success,
   false,
 );
 assert.equal(
   noodleGenerationRequestSchema.safeParse({
-    mode: "private",
+    mode: "noodler",
     targetAccountId: "private-1",
     personaId: "persona-1",
   }).success,
   false,
 );
+// Slice 8b: the manual Guide path may request image-prompt review on NoodleR generation.
 assert.equal(
   noodleGenerationRequestSchema.safeParse({
-    mode: "private",
+    mode: "noodler",
     targetAccountId: "private-1",
     reviewImagePromptsBeforeSend: true,
   }).success,
-  false,
+  true,
 );
-const privatePostMessages = buildPrivatePostMessages({
+const noodlerPostMessages = buildNoodlerPostMessages({
   account: { displayName: "Private Name", handle: "private_handle", bio: "Private bio" },
   stagePersonality: "Reserved and direct.",
   disclosureMode: "secret",
   publicIdentity: { displayName: "Known Public Name", handle: "known_public" },
   recentPosts: [],
   request: {
-    privatePostGuide: "Write about tonight.",
-    privateProjectWork: "Advance the current beat.",
+    noodlerPostGuide: "Write about tonight.",
+    noodlerProjectWork: "Advance the current beat.",
   },
+  allowImagePrompt: false,
+  generationGuidance: "Adults only; NSFW allowed when it fits.",
 });
-assert.match(privatePostMessages[0]?.content ?? "", /exactly one post for one private NoodleR creator page/u);
-assert.match(privatePostMessages[0]?.content ?? "", /Disclosure is secret/u);
-assert.match(privatePostMessages[1]?.content ?? "", /Private Name/u);
-assert.match(privatePostMessages[1]?.content ?? "", /Reserved and direct/u);
-assert.match(privatePostMessages[1]?.content ?? "", /Write about tonight\./u);
-assert.match(privatePostMessages[1]?.content ?? "", /Advance the current beat\./u);
+assert.match(noodlerPostMessages[0]?.content ?? "", /exactly one post for one NoodleR creator page/u);
+assert.match(noodlerPostMessages[0]?.content ?? "", /Disclosure is secret/u);
+// Editable generation guidance is injected into the system prompt.
+assert.match(noodlerPostMessages[0]?.content ?? "", /NSFW allowed when it fits/u);
+// With images disabled the model is told not to emit an image prompt.
+assert.match(noodlerPostMessages[0]?.content ?? "", /Do not create a poll or image prompt/u);
+// With images enabled it may return an optional imagePrompt.
+assert.match(
+  buildNoodlerPostMessages({
+    account: { displayName: "Private Name", handle: "private_handle", bio: "Private bio" },
+    stagePersonality: "",
+    disclosureMode: "secret",
+    publicIdentity: null,
+    recentPosts: [],
+    request: {},
+    allowImagePrompt: true,
+    generationGuidance: "",
+  })[0]?.content ?? "",
+  /optional imagePrompt/u,
+);
+assert.match(noodlerPostMessages[1]?.content ?? "", /Private Name/u);
+assert.match(noodlerPostMessages[1]?.content ?? "", /Reserved and direct/u);
+assert.match(noodlerPostMessages[1]?.content ?? "", /Write about tonight\./u);
+assert.match(noodlerPostMessages[1]?.content ?? "", /Advance the current beat\./u);
 assert.doesNotMatch(
-  privatePostMessages.map((message) => message.content).join("\n"),
+  noodlerPostMessages.map((message) => message.content).join("\n"),
   /Known Public Name|known_public/u,
 );
 
 const knownPublicIdentity = { displayName: "Known Public Name", handle: "known_public" };
+const renamedPublicIdentity = buildNoodlerPublicIdentity(knownPublicIdentity, {
+  data: JSON.stringify({ name: "Renamed Public Name" }),
+});
+assert.match(
+  noodlerSourceText(JSON.stringify({ name: "Renamed Public Name", personality: "Reserved and direct." })),
+  /Name: Renamed Public Name[\s\S]*Personality: Reserved and direct\./u,
+);
 const protectedStageProfile = {
   displayName: "After Hours",
   handle: "after_hours",
@@ -428,6 +459,13 @@ const protectedStageProfile = {
   disclosureMode: "secret" as const,
 };
 assert.equal(stageProfileContainsPublicIdentity(protectedStageProfile, knownPublicIdentity), true);
+assert.equal(
+  stageProfileContainsPublicIdentity(
+    { ...protectedStageProfile, bio: "Renamed Public Name after dark." },
+    renamedPublicIdentity,
+  ),
+  true,
+);
 assert.equal(
   stageProfileContainsPublicIdentity({ ...protectedStageProfile, bio: "Anonymous after dark." }, knownPublicIdentity),
   false,
@@ -438,7 +476,7 @@ assert.equal(
 );
 assert.equal(
   noodleStageProfileDraftRequestSchema.safeParse({
-    publicAccountId: "public-1",
+    noodleAccountId: "public-1",
     disclosureMode: "hinted",
     guidance: "Make it warmer.",
   }).success,
@@ -452,17 +490,30 @@ assert.equal(
   false,
 );
 const identitySample = "Known Public Name (@known_public) shares a late-night portrait.";
-assert.equal(protectPrivateGeneratedIdentity(identitySample, "open", knownPublicIdentity), identitySample);
+assert.equal(protectNoodlerGeneratedIdentity(identitySample, "open", knownPublicIdentity), identitySample);
 assert.equal(
-  protectPrivateGeneratedIdentity(identitySample, "hinted", knownPublicIdentity),
+  protectNoodlerGeneratedIdentity(identitySample, "hinted", knownPublicIdentity),
   "a public persona shares a late-night portrait.",
 );
 assert.equal(
-  protectPrivateGeneratedIdentity(identitySample, "secret", knownPublicIdentity),
+  protectNoodlerGeneratedIdentity(identitySample, "secret", knownPublicIdentity),
   "someone shares a late-night portrait.",
 );
+const renamedIdentitySample = "Renamed Public Name shares a late-night portrait.";
+assert.equal(
+  protectNoodlerGeneratedIdentity(renamedIdentitySample, "hinted", renamedPublicIdentity),
+  "a public persona shares a late-night portrait.",
+);
+assert.equal(
+  protectNoodlerGeneratedIdentity(renamedIdentitySample, "secret", renamedPublicIdentity),
+  "someone shares a late-night portrait.",
+);
+assert.equal(
+  protectNoodlerGeneratedIdentity(renamedIdentitySample, "open", renamedPublicIdentity),
+  renamedIdentitySample,
+);
 for (const mode of ["hinted", "secret"] as const) {
-  const imagePrompt = protectPrivateGeneratedIdentity(
+  const imagePrompt = protectNoodlerGeneratedIdentity(
     "Editorial portrait of Known Public Name, known online as @known_public.",
     mode,
     knownPublicIdentity,
@@ -471,90 +522,79 @@ for (const mode of ["hinted", "secret"] as const) {
 }
 const accessCreator = {
   ...makeAccount("creator-private"),
-  visibility: "private" as const,
+  platform: "noodler" as const,
   settings: {
     ...makeAccount("creator-private").settings,
     privacy: {
-      access: { hiddenFromAccountIds: ["blocked-viewer"], subscriptionIncludesPpv: false },
+      access: { hiddenFromAccountIds: ["blocked-viewer"] },
     },
   },
 };
 assert.equal(isNoodlerHiddenFromViewer(accessCreator, "blocked-viewer"), true);
 assert.equal(isNoodlerHiddenFromViewer(accessCreator, "allowed-viewer"), false);
-const subscriberPost = { id: "subscriber-post", access: "subscriber" as const };
-const ppvPost = { id: "ppv-post", access: "ppv" as const };
+const lockedPost = { id: "locked-post", access: "locked" as const };
 assert.equal(
   canViewNoodlerPost({
-    post: subscriberPost,
+    post: { id: "public-post", access: "public" },
     subscribed: false,
     unlockedPostIds: new Set(),
-    subscriptionIncludesPpv: false,
-  }),
-  false,
-);
-assert.equal(
-  canViewNoodlerPost({
-    post: subscriberPost,
-    subscribed: true,
-    unlockedPostIds: new Set(),
-    subscriptionIncludesPpv: false,
   }),
   true,
 );
 assert.equal(
   canViewNoodlerPost({
-    post: ppvPost,
+    post: lockedPost,
     subscribed: false,
-    unlockedPostIds: new Set([ppvPost.id]),
-    subscriptionIncludesPpv: false,
-  }),
-  true,
-);
-assert.equal(
-  canViewNoodlerPost({
-    post: ppvPost,
-    subscribed: true,
     unlockedPostIds: new Set(),
-    subscriptionIncludesPpv: false,
   }),
   false,
 );
 assert.equal(
   canViewNoodlerPost({
-    post: ppvPost,
+    post: lockedPost,
     subscribed: true,
     unlockedPostIds: new Set(),
-    subscriptionIncludesPpv: true,
+  }),
+  true,
+);
+assert.equal(
+  canViewNoodlerPost({
+    post: lockedPost,
+    subscribed: false,
+    unlockedPostIds: new Set([lockedPost.id]),
   }),
   true,
 );
 assert.equal(
   noodleGenerationRequestSchema.safeParse({
-    mode: "private",
+    mode: "noodler",
     targetAccountId: "creator-private",
-    access: "subscriber",
-    ppvPrice: 5,
+    access: "locked",
   }).success,
-  false,
+  true,
 );
-const openMessages = buildPrivatePostMessages({
+const openMessages = buildNoodlerPostMessages({
   account: { displayName: "Private Name", handle: "private_handle", bio: "Private bio" },
   stagePersonality: "Open about the public connection.",
   disclosureMode: "open",
   publicIdentity: knownPublicIdentity,
   recentPosts: [],
-  request: { privatePostGuide: "Mention Known Public Name and @known_public." },
+  request: { noodlerPostGuide: "Mention Known Public Name and @known_public." },
+  allowImagePrompt: false,
+  generationGuidance: "",
 });
 assert.match(openMessages.map((message) => message.content).join("\n"), /Known Public Name/u);
 assert.match(openMessages.map((message) => message.content).join("\n"), /known_public/u);
 for (const mode of ["hinted", "secret"] as const) {
-  const protectedMessages = buildPrivatePostMessages({
+  const protectedMessages = buildNoodlerPostMessages({
     account: { displayName: "Private Name", handle: "private_handle", bio: "Private bio" },
     stagePersonality: "Never identify Known Public Name or @known_public.",
     disclosureMode: mode,
     publicIdentity: knownPublicIdentity,
     recentPosts: [],
-    request: { privatePostGuide: "Write about Known Public Name (@known_public)." },
+    request: { noodlerPostGuide: "Write about Known Public Name (@known_public)." },
+    allowImagePrompt: false,
+    generationGuidance: "",
   });
   assert.doesNotMatch(
     protectedMessages.map((message) => message.content).join("\n"),
@@ -711,11 +751,13 @@ const instructions = (input: {
   allowRandomUsers?: boolean;
   enableImagePrompts?: boolean;
   allowGalleryImageAttachments?: boolean;
+  imageGenerationPrompt?: string;
 }) =>
   noodleTimelineFeatureInstructions({
     allowRandomUsers: input.allowRandomUsers ?? false,
     enableImagePrompts: input.enableImagePrompts ?? false,
     allowGalleryImageAttachments: input.allowGalleryImageAttachments ?? false,
+    imageGenerationPrompt: input.imageGenerationPrompt ?? "",
   });
 
 assert.deepEqual(instructions({}), []);
@@ -808,17 +850,58 @@ assert.equal(
   "moonlit laboratory portrait",
 );
 assert.equal(normalizeNoodleImagePrompt('{"content":"do not send this JSON to an image model"}'), null);
+// Source the appearance block from the real resolver rather than a hand-written string, so the
+// shared block's framing is covered by this test and not only the Noodle-side template.
+const noodleImageReferences = await resolveIllustratorCharacterReferences({
+  charactersStore: { list: async () => [] },
+  chatCharacters: [
+    { id: "dottore", name: "Dottore", avatarPath: null, appearance: "blue hair and a white mask" },
+  ],
+  persona: null,
+  requestedNames: ["Dottore"],
+  promptText: "Dottore",
+  includeReferenceImages: false,
+});
+assert.equal(noodleImageReferences.appearanceBlock, "Dottore's Appearance: blue hair and a white mask");
+
 const defaultNoodleImagePrompt = NOODLE_IMAGE_POST.defaultBuilder({
   authorName: "Dottore",
   postContent: "This entire post must not be sent to ComfyUI.",
   draftPrompt: "cel-shaded laboratory selfie",
-  userInstructions: "dramatic blue lighting",
-  characterDescription: "Dottore has blue hair and a white mask.",
+  userInstructions: "Create a social-media-ready character image. Mention build, clothing, pose, lighting.",
+  characterDescription: noodleImageReferences.appearanceBlock ?? "",
+  characterPersonality: "precise, arrogant, impatient",
+  characterImageInstructions: "stark lab photography with cold lighting",
 });
 assert.match(defaultNoodleImagePrompt, /^cel-shaded laboratory selfie/u);
-assert.match(defaultNoodleImagePrompt, /Dottore has blue hair/u);
+assert.match(defaultNoodleImagePrompt, /Dottore's Appearance: blue hair and a white mask/u);
+assert.doesNotMatch(defaultNoodleImagePrompt, /Character appearance notes:/u);
 assert.doesNotMatch(defaultNoodleImagePrompt, /This entire post/u);
 assert.doesNotMatch(defaultNoodleImagePrompt, /Output only|Draft image idea|Post text/u);
+
+// The image model must never receive text written for a language model. Settings instructions go
+// to the timeline model instead, and the surviving blocks carry no labels or framing sentences.
+assert.doesNotMatch(defaultNoodleImagePrompt, /social-media-ready character image|Mention build/u);
+assert.doesNotMatch(
+  defaultNoodleImagePrompt,
+  /Character personality and traits:|Character-specific image instructions:|Let these traits naturally influence/u,
+);
+assert.match(defaultNoodleImagePrompt, /precise, arrogant, impatient/u);
+assert.match(defaultNoodleImagePrompt, /stark lab photography/u);
+
+// ...and the timeline model must receive those instructions, marked as direction rather than text
+// to copy into imagePrompt.
+const imageDirectionInstructions = instructions({
+  enableImagePrompts: true,
+  imageGenerationPrompt: "Mention build, clothing, pose, lighting.",
+});
+assert.equal(imageDirectionInstructions.length, 2);
+assert.match(imageDirectionInstructions[1] ?? "", /Mention build, clothing, pose, lighting\./u);
+assert.match(imageDirectionInstructions[1] ?? "", /instructions to you, not text to copy/u);
+assert.deepEqual(instructions({ enableImagePrompts: true, imageGenerationPrompt: "   " }), [
+  imageGenerationInstruction,
+]);
+assert.deepEqual(instructions({ imageGenerationPrompt: "ignored while image prompts are off" }), []);
 
 assert.equal(
   characterAppearanceFromRow({

@@ -1,6 +1,6 @@
 # Marinara Engine - Android APK
 
-The Android app is a Termux bootstrap + WebView shell for Marinara Engine. It is not a native Android server build, but it can help launch the Termux setup flow and then opens the local Marinara server in a fullscreen WebView.
+The Android app is a Termux bootstrap + WebView shell for Marinara Engine. It is not a native Android server build, but it can help launch the Termux setup flow and then opens the local Marinara server in a fullscreen WebView by default.
 
 > **Android permission reality:** Android does not allow an ordinary APK to silently install another app or run commands inside Termux without user approval. First launch may still ask the user to install Termux, grant **Run commands in Termux environment** permission, and enable Termux external commands.
 
@@ -23,6 +23,7 @@ The Android app is a Termux bootstrap + WebView shell for Marinara Engine. It is
 
 - Native app icon on the home screen
 - Full-screen app-like experience without browser chrome
+- Optional Android status bar for the time, battery level, and notification icons, controlled from **Settings > General > App Behavior**
 - First-run bootstrap actions for Termux install/start handoff
 - Automatic retry while the local server is still starting
 - File upload support for character cards, images, and similar assets
@@ -118,6 +119,8 @@ To skip automatic Engine updates on every launch, add `AUTO_UPDATE_ENABLED=false
 Then open the **Marinara Engine** app from your home screen. The app shows "Connecting..." until the local server is ready, then loads automatically.
 
 Because the APK points at `http://127.0.0.1:<PORT>`, it only works while the Marinara Engine server is running on the same Android device and using the same port value.
+
+Marinara hides the Android status bar by default for a distraction-free view. Enable **Show Android status bar** under **Settings > General > App Behavior** to keep the time, battery level, and notification icons visible. The Android app remembers this choice across restarts.
 
 On Android 13 and newer, enabling **Mobile app** under **Background Notifications** opens Android's notification permission prompt. Browser notifications remain a separate setting. Notifications conceal reply content and ask the user to open Marinara to read the message.
 

@@ -23,7 +23,7 @@ Pick one fix:
 2. Install pnpm yourself. Run this command, then run the launcher again:
 
 ```bash
-npm install -g pnpm
+npm install -g pnpm@10.34.5
 ```
 
 3. Update corepack in an administrator terminal, then run the launcher again:
@@ -39,7 +39,17 @@ Marinara v2.3.0 could start pnpm through Corepack successfully and then fail dur
 If the checkout itself cannot update, run `git pull` in the Marinara folder and start it again. As a temporary v2.3.0 workaround, install the pinned package manager globally, rerun the launcher, and then update normally:
 
 ```bash
-npm install -g pnpm@10.33.2
+npm install -g pnpm@10.34.5
+```
+
+### Launcher update to pnpm 10.34.5
+
+Marinara v2.4.1 moves its pinned package manager to pnpm 10.34.5. An existing 10.33.2 launcher can finish that one-time handoff in the same run; the refreshed launcher then selects 10.34.5 for future starts. Corepack verifies the release against the SHA-512 digest pinned in `package.json`, and the npm fallback also requests exactly 10.34.5 rather than an unpinned latest version.
+
+If an earlier v2.4.1 staging build already stopped with `Expected version: >=10.34.5` and `Got: 10.33.2`, run the launcher once more; that build downloaded the refreshed launcher before stopping. If the launcher still cannot obtain the pinned release automatically, install the exact version and rerun it:
+
+```bash
+npm install -g pnpm@10.34.5
 ```
 
 ### Linux: ERR_PNPM_ENAMETOOLONG during install
@@ -71,7 +81,7 @@ Sometimes the server is running but the browser shows a blank page, or the app l
 
 ## Downloadable agent problems
 
-If **Agents → Download Agents** says the catalog is unavailable, the machine running the Marinara server—not only the browser—must be able to reach the official [Pasta-Devs/Marinara-Agents](https://github.com/Pasta-Devs/Marinara-Agents) catalog over GitHub HTTPS. Installed agents continue to work offline at their current version. Restore the server connection and restart Marinara to retry automatic package updates, or click **Refresh** or **Try again** to browse the catalog immediately.
+If **Agents → Download Agents** says the catalog is unavailable, the machine running the Marinara server—not only the browser—must be able to reach the official [Pasta-Devs/Marinara-Agents](https://github.com/Pasta-Devs/Marinara-Agents) catalog over GitHub HTTPS. Installed agents continue to work offline at their current version. Restore the server connection, then click **Refresh** or **Try again** to browse the catalog and check for updates.
 
 If an installed map or call does not appear, close Marinara Engine completely and start it again. Those route-bearing packages remain in **Restart required** state until the next process start. Conversation games are different: current Engine builds hot-activate them immediately. Refresh the catalog if installation failed, then confirm the game shows as ready; adding it under a chat's **Commands** settings is only necessary when you want characters to initiate it themselves, not for the game's manual slash command.
 
@@ -79,7 +89,7 @@ If an older installation cannot complete its first package migration, do not del
 
 Package downloads are rejected when their checksum, declared file list, Engine version range, or archive paths do not match the official catalog. Update Marinara Engine first, refresh the catalog, and retry. Do not manually extract an artifact into the data directory.
 
-Automatic updates never install packages the user did not choose. They only replace an already-installed official package with a newer compatible, verified catalog build. A failed update leaves the installed version registered; if a newly updated server runtime fails its startup self-check, Marinara rolls it back to the previous version.
+Agent updates are never applied at startup. When a newer compatible version is available, Marinara asks whether to apply it. Choose **No** to keep the installed version; the **Update** button remains available in **Agents → Download Agents**. A failed update also leaves the installed version registered, and a newly updated server runtime that fails its startup self-check rolls back to the previous version.
 
 ## Accessing Marinara from another device
 
@@ -88,8 +98,9 @@ If you cannot access Marinara from a phone, tablet, or another computer on your 
 - Bind the server to a reachable address. The server listens on `127.0.0.1` (loopback, your own machine only) by default. The shell launchers set `HOST=0.0.0.0` for you. If you started with `pnpm start` by hand, set `HOST=0.0.0.0` in your `.env` file first.
 - Confirm both devices are on the same Wi-Fi network.
 - Confirm no firewall blocks the port. The default port is `7860`, or whatever you set as `PORT`.
-- Set up access control. For ordinary network or public clients, set `BASIC_AUTH_USER` and `BASIC_AUTH_PASS` in `.env`. Loopback stays passwordless. Traffic over Tailscale and the same-host Docker bridge or detected container gateway is trusted by default.
+- Set up access control. For ordinary network or public clients, set `BASIC_AUTH_USER` and `BASIC_AUTH_PASS` in `.env`. Loopback stays passwordless. Direct traffic over Tailscale and the same-host Docker bridge or detected container gateway is trusted by default; proxy-forwarded Docker traffic requires normal authorization unless you explicitly set `REQUIRE_AUTH_FOR_DOCKER_PROXY=false`.
 - For privileged actions from that device (backups, data clearing, updates), set `ADMIN_SECRET` in the server `.env`. Then paste the same value into **Settings** > **Advanced** > **Admin Access** on that device and click **Save**.
+- If you use a public or reverse-proxy domain and see **Untrusted request host**, add its exact hostname to `TRUSTED_HOSTS` in `.env`. Direct IP addresses used by phones, LAN computers, and Tailscale peers remain accepted automatically.
 
 For the full walkthrough, see [Remote Access](REMOTE_ACCESS.md) and the [Frequently Asked Questions](FAQ.md).
 
@@ -127,6 +138,17 @@ The **Local Model** is an AI model that runs on your own machine with no API key
 
 - If installing a runtime fails with **Sidecar runtime install is disabled**, the server has that action turned off for safety. On your own machine, set `SIDECAR_RUNTIME_INSTALL_ENABLED=true` in `.env`. From another device, paste your admin secret into **Settings** > **Advanced** > **Admin Access** first.
 - If the model download or setup fails from another device (a network address or Docker), it may also need the admin secret. On your own machine, no admin secret is needed. See the point above for where to paste the secret.
+- If a bundled llama.cpp, MLX, uv, or MLX dependency-lock check reports a file-size or SHA-256 mismatch, Marinara has discarded or refused it before extraction or installation. Update or reinstall Marinara and retry; do not manually run, unpack, edit, or bypass the rejected artifact.
+
+### Maintainers: updating pinned local runtimes
+
+GitHub-generated source archives are not guaranteed to remain byte-for-byte stable, even when their commit contents do not change. Never “fix” a user mismatch by accepting the bytes seen on their machine or weakening verification. Re-pin runtime inputs only in a reviewed Engine change:
+
+1. Select an immutable upstream revision or release asset and review the upstream changes.
+2. Download the artifact into a temporary directory, record its exact byte count, and calculate its SHA-256 digest independently.
+3. Update `runtime-integrity-manifest.ts` with the revision, URL, size, and digest. For MLX, regenerate `packages/server/src/assets/mlx-runtime-requirements.lock` from its `.in` file with the pinned uv version on Apple Silicon/Python 3.12, review every dependency change, and update `requirementsLockSha256`.
+4. Run `pnpm regression:runtime-integrity`, `pnpm check`, and a real clean runtime installation on the affected platform.
+5. Ship the reviewed Engine update before asking users to retry. Do not provide a manual checksum override.
 
 For full setup, see [Local Model Setup](connections/local-model.md).
 
@@ -175,17 +197,19 @@ Then restart Marinara and click **Reapply Cleanup** in the sprite generation win
 - Rebuild the tool with `pnpm backgroundremover:reinstall`.
 - To force automatic matte cleanup without the AI fallback while you troubleshoot, set `SPRITE_BACKGROUND_REMOVAL_ENGINE=builtin` in `.env`.
 
-### Game Mode storyboards or scene videos do not appear
+### Game Mode or Roleplay storyboards do not appear
 
-Storyboards are a Game Mode feature. They turn a completed narration turn into keyframe images and optional clips.
+Game Mode Storyboards turn a completed GM narration into keyframe images and optional clips. Roleplay Storyboards combine completed exchanges and display the result inline after the assistant response.
 
+- Confirm **Storyboard** is installed from **Agents** > **Download Agents**, then turn on **Enable Agents** and **Enable Storyboards** for the chat.
 - For a manual scene video, generate or upload a **Gallery** image first, then use its **Video** or **Animate** action. The **Gallery** splits **Images** and **Videos** into tabs, so check the **Videos** tab.
-- For automatic storyboards, open **Chat Settings** > **Agents** > **Storyboards** and confirm **Automatic Storyboard Illustrations** is on. Turn on **Automatic Storyboard Animations** too if you also want clips.
-- Keyframe images need a Game image connection. Clips also need a video connection.
+- For automatic Game Mode Storyboards, open **Chat Settings** > **Agents** > **Storyboards** and confirm **Automatic Storyboard Illustrations** is on. Turn on **Automatic Storyboard Animations** too if you also want clips.
+- In Roleplay, add the **Storyboard** Agent to the chat. Choose **Still images** or **Animations**, set **Messages per episode**, and select the Storyboard image connection. **Manual only** runs from **Create storyboard** in the Gallery instead.
+- Keyframe images need an image connection. Clips also need a video connection.
 - If a custom prompt works better with all characters combined, turn off **Use NovelAI Character Prompts**.
 - Slow providers can hit a timeout. Raise `IMAGE_GEN_TIMEOUT_MS` or `VIDEO_GEN_TIMEOUT_MS` in `.env`, then restart Marinara. The server only reads these values at startup.
 
-See [Game Mode: Getting Started](game/getting-started.md) for the full setup.
+See the [Storyboard Agent Guide](game/storyboard.md) for both workflows and [Game Mode: Getting Started](game/getting-started.md) for Game setup.
 
 ### Game Mode world generation shows a JSON error
 
@@ -267,6 +291,18 @@ pnpm store prune
 
 Do not delete `data`, `storage`, or `marinara-engine.db`; those locations may contain your chats and settings. If the command still stops, capture the lines beginning at `Installing dependencies` and include the phone's free-space and memory figures in the report.
 
+### In-app update fails when switching between Stable and Staging on Android
+
+Switching channels (Stable ↔ Staging) forces a near-full dependency reinstall, which on Termux's slower storage can take much longer than an ordinary update. The in-app updater now allows extra time for each step on Android, so a channel switch that used to stop with a bare `Update failed: Command failed: corepack pnpm ... install` should complete.
+
+If an update still fails, the error now names the step that failed and includes the tail of its output. Read that message: a genuine dependency or lockfile error is reported there. You can also run the update by hand from Termux with the manual command shown in the error's hint, or reclaim space first:
+
+```bash
+cd Marinara-Engine
+pnpm store prune
+./start-termux.sh
+```
+
 ### Noodle shows `Etc/Unknown` or schedules use the wrong timezone
 
 For Conversation schedules, open Conversation Chat Settings or a character schedule editor and choose **Schedule timezone**. This global selection applies to every Conversation chat, including background autonomous messages, and can be reset with **Use device**.
@@ -286,6 +322,46 @@ If a Docker or Podman container fails with permission errors on the data volume:
 If the lite container restarts whenever it sends an AI request on a Raspberry Pi 4 or similar ARM device, check the exit code. Exit 132 or SIGILL points to a known upstream problem in the lite image's Node build on some ARM chips. SIGILL means the program hit an instruction the CPU cannot run.
 
 The regular (non-lite) image is not affected. Until the upstream fix ships, use the regular image on that device. Known affected lite images include `1.5.7-lite` and `1.5.8-lite`. Last checked against Marinara Engine 2.2.0.
+
+### External Extensions is missing from Addons
+
+The section is intentionally hidden until both safety gates are open:
+
+1. Set `ENABLE_EXTERNAL_EXTENSIONS=true` in the host's `.env`.
+2. Wait about two seconds for the configuration watcher, then open **Settings → Advanced → Danger Zone**, scroll below the data-deletion controls, and enable **Allow third-party extension imports**.
+
+If the Danger Zone switch is disabled, the host flag is still false or the app has not observed the change. Confirm that you edited the active `.env` path described in [Server Configuration](CONFIGURATION.md). On Docker, that is normally `/app/data/.env`.
+
+When either gate is closed, external, legacy, profile-imported, manually stored, and unknown-source extension records do not appear and cannot run. Reopening the gates does not automatically re-enable them.
+
+### An imported browser extension appears but does not work
+
+Open the extension in **Settings → Addons → External Extensions** and inspect **Requested access**. Older packages that use the `marinara.extension` v1 format without a capabilities declaration should show **Full page access**. Approve only the exact hash you inspected and trust.
+
+If an older package was exported again with an explicit empty capabilities list, Marinara treats it as a safe sandbox extension; DOM-dependent code will not work there. Add `full_page_access` to its manifest only if you understand that the code will gain access to the whole Marinara page, browser storage, network APIs, and same-origin session.
+
+After disabling a full page extension, reload Marinara if a toolbar item, overlay, listener, or visual change remains. Cleanup is best effort because page code can create side effects outside Marinara's tracked compatibility API.
+
+### A Server Extension says no supported sandbox is available
+
+Server Extensions and Professor Mari's raw shell commands run only with macOS Seatbelt or Linux Bubblewrap. Install `bwrap` on a native Linux host, then restart Marinara. The official Docker image already includes Bubblewrap, but the default container remains least-privileged and cannot create Bubblewrap's nested namespaces and mounts. Marinara detects that state and keeps OS-sandbox features disabled instead of attempting broken commands.
+
+If you accept the broader container privileges and need these features in Docker, save this as `docker-compose.override.yml` next to `docker-compose.yml`:
+
+```yaml
+services:
+  marinara:
+    environment:
+      MARINARA_DOCKER_USER: root
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor=unconfined
+```
+
+Recreate the container after adding the override. Keeping the server process as root is necessary here so the added capability is not discarded when Marinara's entrypoint normally drops to the `node` user. Running the server as root with `SYS_ADMIN` is a broad privilege escalation, and disabling the container's AppArmor profile further weakens its outer security boundary; do not enable this merely to silence the unavailable-sandbox message. Docker's default seccomp profile adapts to added capabilities, so a blanket `seccomp=unconfined` setting should not be necessary on current Docker releases.
+
+Windows, Android, and other unsupported hosts deliberately refuse Server Extension execution instead of falling back to the main server process. Browser Extensions can still use their opaque-origin Worker sandbox.
 
 ## Getting more help
 

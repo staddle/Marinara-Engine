@@ -20,17 +20,25 @@ import { createCharactersStorage } from "../storage/characters.storage.js";
 import { createNoodleStorage } from "../storage/noodle.storage.js";
 import { noodleResponseFormat } from "./noodle-response-format.js";
 import {
-  protectPrivateGeneratedIdentity,
+  buildNoodlerPublicIdentity,
+  protectNoodlerGeneratedIdentity,
   stageProfileContainsPublicIdentity,
-} from "./noodle-private-generation.service.js";
+} from "./noodle-noodler-generation.service.js";
 
 type GenerationConnection = NonNullable<Awaited<ReturnType<ReturnType<typeof createConnectionsStorage>["getWithKey"]>>>;
 
 function record(value: unknown): Record<string, unknown> {
+  if (typeof value === "string") {
+    try {
+      return record(JSON.parse(value));
+    } catch {
+      return {};
+    }
+  }
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
-function sourceText(data: unknown): string {
+export function noodlerSourceText(data: unknown): string {
   const source = record(data);
   const extensions = record(source.extensions);
   return [
@@ -50,7 +58,7 @@ function disclosureRules(mode: NoodleIdentityDisclosure, publicIdentity: { displ
     return `The public identity ${publicIdentity.displayName} (@${publicIdentity.handle}) may inspire and appear in the draft.`;
   if (mode === "hinted")
     return "Create an inspired alter ego. Broad personality, interests, and themes may carry over, but never use the exact public name or handle, or copy canonical biography sentences.";
-  return "Create a separate persona. Treat the source only as private authoring inspiration. Do not use the public name, handle, canonical occupation, relationships, locations, signature phrases, or distinctive identifying details.";
+  return "Create a separate persona. Treat the source only as confidential authoring inspiration. Do not use the public name, handle, canonical occupation, relationships, locations, signature phrases, or distinctive identifying details.";
 }
 
 function defaultDraft(
@@ -71,30 +79,30 @@ export async function generateNoodlerStageProfileDraft(
   input: { request: NoodleStageProfileDraftRequest; connection: GenerationConnection },
 ): Promise<NoodleStageProfileInput> {
   const noodle = createNoodleStorage(db);
-  const privateAccount = input.request.privateAccountId
-    ? await noodle.getPrivateAccountById(input.request.privateAccountId)
+  const noodlerAccount = input.request.noodlerAccountId
+    ? await noodle.getNoodlerAccountById(input.request.noodlerAccountId)
     : null;
-  const publicAccount = privateAccount?.publicAccountId
-    ? await noodle.getAccountById(privateAccount.publicAccountId)
-    : input.request.publicAccountId
-      ? await noodle.getAccountById(input.request.publicAccountId)
+  const publicAccount = noodlerAccount?.noodleAccountId
+    ? await noodle.getAccountById(noodlerAccount.noodleAccountId)
+    : input.request.noodleAccountId
+      ? await noodle.getAccountById(input.request.noodleAccountId)
       : null;
   if (!publicAccount) throw new Error("Noodle source account not found.");
   const characters = createCharactersStorage(db);
   const source = publicAccount.kind === "character" ? await characters.getById(publicAccount.entityId) : null;
-  const identity = { displayName: publicAccount.displayName, handle: publicAccount.handle };
+  const identity = buildNoodlerPublicIdentity(publicAccount, source);
   const seed = defaultDraft(publicAccount, input.request.disclosureMode);
   const currentDraft = input.request.currentDraft ? { ...seed, ...input.request.currentDraft } : seed;
   const protectedDraft = Object.fromEntries(
     Object.entries(currentDraft).map(([key, value]) => [
       key,
       typeof value === "string"
-        ? (protectPrivateGeneratedIdentity(value, input.request.disclosureMode, identity) ?? "")
+        ? (protectNoodlerGeneratedIdentity(value, input.request.disclosureMode, identity) ?? "")
         : value,
     ]),
   );
   const sourceDetails = source
-    ? sourceText(source.data)
+    ? noodlerSourceText(source.data)
     : "General temperament and creative interests from the source profile.";
   const rawSourceContext =
     input.request.disclosureMode === "secret"
@@ -116,7 +124,7 @@ export async function generateNoodlerStageProfileDraft(
       ? rawSourceContext
       : rawSourceContext
           .split("\n")
-          .map((line) => protectPrivateGeneratedIdentity(line, input.request.disclosureMode, identity) ?? "")
+          .map((line) => protectNoodlerGeneratedIdentity(line, input.request.disclosureMode, identity) ?? "")
           .join("\n");
   const messages: ChatMessage[] = [
     {
@@ -124,7 +132,7 @@ export async function generateNoodlerStageProfileDraft(
       content: [
         "Create one editable NoodleR stage profile draft.",
         "Return JSON only with displayName, handle, bio, stagePersonality, and disclosureMode.",
-        "Make the stage identity distinct, concise, and usable for future private post generation.",
+        "Make the stage identity distinct, concise, and usable for future NoodleR post generation.",
         disclosureRules(input.request.disclosureMode, identity),
       ].join("\n"),
     },
@@ -183,7 +191,7 @@ export async function generateNoodlerStageProfileDraft(
     ),
     stream: false,
     debugMode,
-    responseFormat: noodleResponseFormat(input.connection.model, "private_profile"),
+    responseFormat: noodleResponseFormat(input.connection.model, "noodler_profile"),
   });
   const parsed = noodleStageProfileDraftResponseSchema.parse(parseGameJsonish(response.content ?? ""));
   const draft = { ...parsed, disclosureMode: input.request.disclosureMode };

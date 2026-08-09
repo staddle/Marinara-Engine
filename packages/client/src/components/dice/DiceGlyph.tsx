@@ -3,6 +3,7 @@ import { cn } from "../../lib/utils";
 import "./dice.css";
 import { getDiceShape, getFaceLabel } from "./dice-shapes";
 import { getDiceVisualProfile } from "./dice-visual-profiles";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 export type DiceGlyphPhase = "idle" | "cast" | "tumble" | "impact" | "settled";
 export type DiceGlyphSize = "hero" | "standard" | "compact";
@@ -34,6 +35,7 @@ function renderD6Pips(value: number) {
 }
 
 export function DiceGlyph({ sides, value, phase, size = "standard", index = 0, emphasized = true, hero = false, className }: DiceGlyphProps) {
+  const { t: localizeUi } = useUiTranslation();
   const uid = useId();
   const shape = getDiceShape(sides);
   const profile = getDiceVisualProfile(sides, hero);
@@ -65,7 +67,7 @@ export function DiceGlyph({ sides, value, phase, size = "standard", index = 0, e
       } as CSSProperties}
     >
       <span className="dice-glyph-shadow" />
-      <svg className="dice-glyph-svg" viewBox="0 0 100 100" role="img" aria-label={`d${sides} showing ${face}`}>
+      <svg className="dice-glyph-svg" viewBox="0 0 100 100" role="img" aria-label={localizeUi("ui.dice.diceglyph.dValue1ShowingValue2", { value1: sides, value2: face })}>
         <defs>
           <radialGradient id={`die-shine-${uid}`} cx="36%" cy="26%" r="70%">
             <stop offset="0%" stopColor="white" stopOpacity="0.28" />
@@ -85,7 +87,7 @@ export function DiceGlyph({ sides, value, phase, size = "standard", index = 0, e
         ) : (
           <>
             <text className="dice-glyph-label" x="50" y={shape.labelY} textAnchor="middle">
-              {shape.kind === "coin" ? "d2" : `d${sides}`}
+              {shape.kind === "coin" ?localizeUi("ui.dice.diceglyph.d2") :localizeUi("ui.dice.diceglyph.dValue1", { value1: sides })}
             </text>
             <text className={cn("dice-glyph-value", shape.renderMode === "coin" && "dice-glyph-value--coin")} x="50" y={shape.valueY} textAnchor="middle" style={{ fontSize: shape.valueSize }}>
               {face}

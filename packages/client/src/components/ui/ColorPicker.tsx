@@ -5,6 +5,7 @@ import { useState, useRef, useCallback, useEffect, type ReactNode } from "react"
 import { Pipette, Sparkles, X, Plus, Trash2 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { isCssGradient, RAINBOW_GRADIENT_PRESET } from "../../lib/css-colors";
+import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface ColorPickerProps {
   value: string;
@@ -101,6 +102,7 @@ export function ColorPicker({
   headerAction,
   disabled = false,
 }: ColorPickerProps) {
+  const { t: localizeUi } = useUiTranslation();
   const isGradient = isCssGradient(value);
   const [mode, setMode] = useState<"solid" | "gradient">(isGradient ? "gradient" : "solid");
   const [gradientStops, setGradientStops] = useState<string[]>(
@@ -311,9 +313,7 @@ export function ColorPicker({
                     : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
                 )}
               >
-                <Pipette size="0.6875rem" className="mr-1 inline" />
-                Solid
-              </button>
+                <Pipette size="0.6875rem" className="mr-1 inline" />{localizeUi("ui.ui.colorpicker.solid")}</button>
               <button
                 type="button"
                 onClick={() => {
@@ -327,9 +327,7 @@ export function ColorPicker({
                     : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
                 )}
               >
-                <Sparkles size="0.6875rem" className="mr-1 inline" />
-                Gradient
-              </button>
+                <Sparkles size="0.6875rem" className="mr-1 inline" />{localizeUi("ui.ui.colorpicker.gradient")}</button>
             </div>
           )}
 
@@ -345,12 +343,12 @@ export function ColorPicker({
                       backgroundColor: previewValue && !isCssGradient(previewValue) ? previewValue : "#6c5ce7",
                     }}
                   />
-                  <span className="min-w-0 text-xs font-medium text-[var(--foreground)]">Pick color</span>
+                  <span className="min-w-0 text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.ui.colorpicker.pickColor")}</span>
                   <Pipette size="0.75rem" className="ml-auto shrink-0 text-[var(--muted-foreground)]" />
                   <input
                     ref={nativeRef}
                     type="color"
-                    aria-label={`Pick ${label} color`}
+                    aria-label={localizeUi("ui.ui.colorpicker.pickValue1Color", { value1: label })}
                     value={!isCssGradient(previewValue) ? getNativeColorValue(previewValue) : "#6c5ce7"}
                     onInput={(e) => handleSolidChange(e.currentTarget.value, true)}
                     onChange={(e) => handleSolidChange(e.currentTarget.value, true)}
@@ -360,12 +358,12 @@ export function ColorPicker({
                 </label>
 
                 <label className="min-w-0 space-y-1">
-                  <span className="block text-[0.625rem] font-medium text-[var(--muted-foreground)]">Hex / CSS</span>
+                  <span className="block text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.ui.colorpicker.hexCss")}</span>
                   <input
-                    aria-label={`${label} hex or CSS color`}
+                    aria-label={localizeUi("ui.ui.colorpicker.value1HexOrCssColor", { value1: label })}
                     value={value && !isCssGradient(value) ? value : ""}
                     onChange={(e) => handleSolidChange(e.target.value)}
-                    placeholder="#hex or color name"
+                    placeholder={localizeUi("ui.ui.colorpicker.hexOrColorName")}
                     className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-1.5 font-mono text-xs outline-none transition-colors focus:border-[var(--primary)]/50"
                   />
                 </label>
@@ -373,7 +371,7 @@ export function ColorPicker({
 
               {/* Preset palette */}
               <div>
-                <p className="mb-1.5 text-[0.625rem] text-[var(--muted-foreground)]">Presets</p>
+                <p className="mb-1.5 text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("navigation.topbar.presets")}</p>
                 <div className="flex flex-wrap gap-1.5">
                   {PRESETS.map((color) => (
                     <button
@@ -405,14 +403,13 @@ export function ColorPicker({
               {/* Stops */}
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <p className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">Color Stops</p>
+                  <p className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">{localizeUi("ui.ui.colorpicker.colorStops")}</p>
                   <button
                     type="button"
                     onClick={addStop}
                     className="flex items-center gap-0.5 rounded-md bg-[var(--secondary)] px-2 py-0.5 text-[0.625rem] text-[var(--muted-foreground)] transition-all hover:text-[var(--foreground)]"
                   >
-                    <Plus size="0.625rem" /> Add
-                  </button>
+                    <Plus size="0.625rem" /> {localizeUi("ui.characters.metadatatab.add")}</button>
                 </div>
                 {gradientStops.map((stop, i) => (
                   <div key={i} className="flex items-center gap-2">
@@ -451,13 +448,13 @@ export function ColorPicker({
               {/* Angle */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-[0.625rem] text-[var(--muted-foreground)]">Angle</span>
+                  <span className="text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("ui.ui.colorpicker.angle")}</span>
                   <span className="min-w-[2.75rem] text-right font-mono text-[0.625rem] tabular-nums text-[var(--muted-foreground)]">
                     {gradientAngle}°
                   </span>
                 </div>
                 <input
-                  aria-label="Gradient angle"
+                  aria-label={localizeUi("ui.ui.colorpicker.gradientAngle")}
                   type="range"
                   min={0}
                   max={360}
@@ -472,7 +469,7 @@ export function ColorPicker({
 
               {/* Gradient presets */}
               <div>
-                <p className="mb-1.5 text-[0.625rem] text-[var(--muted-foreground)]">Presets</p>
+                <p className="mb-1.5 text-[0.625rem] text-[var(--muted-foreground)]">{localizeUi("navigation.topbar.presets")}</p>
                 <div className="flex flex-wrap gap-1.5">
                   {GRADIENT_PRESETS.map((g) => (
                     <button
@@ -489,7 +486,7 @@ export function ColorPicker({
                         value === g && "ring-2 ring-[var(--primary)] scale-110",
                       )}
                       style={{ background: g }}
-                      title={g === RAINBOW_GRADIENT_PRESET ? "Gay RGB rainbow" : g}
+                      title={g === RAINBOW_GRADIENT_PRESET ?localizeUi("ui.ui.colorpicker.gayRgbRainbow") : g}
                     />
                   ))}
                 </div>

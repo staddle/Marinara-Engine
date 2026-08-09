@@ -199,7 +199,9 @@ function parseShareConfig(value: unknown): GameSetupConfig {
   }
 
   const optionalBooleans = [
+    "enableAgents",
     "enableSpriteGeneration",
+    "gameStoryboardsEnabled",
     "gameStoryboardAutoIllustrationsEnabled",
     "gameStoryboardAutoGenerationEnabled",
     "useCampaignArtStyle",
@@ -215,6 +217,13 @@ function parseShareConfig(value: unknown): GameSetupConfig {
 
   if (value.combatStyle !== undefined && value.combatStyle !== "classic" && value.combatStyle !== "tactical") {
     throw new Error("This file has an invalid combat style.");
+  }
+  if (
+    value.gameWorldMapMode !== undefined &&
+    value.gameWorldMapMode !== "standard" &&
+    value.gameWorldMapMode !== "hierarchical"
+  ) {
+    throw new Error("This file has an invalid world map mode.");
   }
   if (
     value.spotifySourceType !== undefined &&
@@ -662,6 +671,7 @@ export function buildGameSetupSummarySections(source: GameSetupShareSource): Gam
       title: "Visuals and storyboards",
       rows: [
         { label: "Visual generation", value: config.enableSpriteGeneration ? "On" : "Off" },
+        { label: "Storyboards", value: config.gameStoryboardsEnabled === false ? "Off" : "On" },
         {
           label: "Image connection",
           value: formatConnection(connections?.image, config.imageConnectionId, labels?.connectionNames, "None"),
@@ -699,7 +709,7 @@ export function buildGameSetupSummarySections(source: GameSetupShareSource): Gam
       title: "World tools",
       rows: [
         { label: "Active lorebooks", value: lorebooks },
-        { label: "Hierarchical map creation prompt", value: config.spatialMapInstructions?.trim() || "None" },
+        { label: "World map creation prompt", value: config.spatialMapInstructions?.trim() || "None" },
         { label: "HUD widgets", value: formatWidgets(config) },
         { label: "Music DJ", value: formatMusicSource(config) },
         { label: "Lorebook Keeper", value: config.enableLorebookKeeper ? "On" : "Off" },

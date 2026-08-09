@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   generateImageCaptionsForDataUrls,
   redactImageCaptionMessagesForLog,
+  resolveImageCaptioningRuntime,
   resolvePromptAttachmentInputs,
   type ImageCaptionConnection,
   type ImageCaptioningRuntime,
@@ -26,6 +27,69 @@ const connection: ImageCaptionConnection = {
   model: "caption-model",
   baseUrl: null,
 };
+
+const mainConnection: ImageCaptionConnection = {
+  ...connection,
+  id: "main-connection",
+  model: "main-model",
+  baseUrl: "http://localhost:1234/v1",
+  defaultParameters: JSON.stringify({
+    imageCaptioningEnabled: true,
+    imageCaptioningConnectionId: "vision-connection",
+  }),
+};
+const visionConnection: ImageCaptionConnection = {
+  ...connection,
+  id: "vision-connection",
+  model: "vision-model",
+  baseUrl: "http://localhost:5678/v1",
+};
+const runtimeConnections = {
+  listRandomPool: async () => [],
+  getWithKey: async (connectionId: string) =>
+    connectionId === mainConnection.id
+      ? mainConnection
+      : connectionId === visionConnection.id
+        ? visionConnection
+        : null,
+  getFallbackForAgents: async () => null,
+};
+const inheritedRuntime = await resolveImageCaptioningRuntime({
+  chatMeta: {},
+  fallbackConnectionId: mainConnection.id,
+  connections: runtimeConnections,
+});
+assert.equal(inheritedRuntime.enabled, true);
+assert.equal(inheritedRuntime.connectionId, visionConnection.id);
+assert.equal(inheritedRuntime.connection?.model, visionConnection.model);
+
+const disabledOverrideRuntime = await resolveImageCaptioningRuntime({
+  chatMeta: { imageCaptioningEnabled: false },
+  fallbackConnectionId: mainConnection.id,
+  connections: runtimeConnections,
+});
+assert.equal(disabledOverrideRuntime.enabled, false);
+
+const inheritedConnectionRuntime = await resolveImageCaptioningRuntime({
+  chatMeta: { imageCaptioningEnabled: true },
+  fallbackConnectionId: mainConnection.id,
+  connections: runtimeConnections,
+});
+assert.equal(inheritedConnectionRuntime.connectionId, visionConnection.id);
+
+const currentConnectionRuntime = await resolveImageCaptioningRuntime({
+  chatMeta: { imageCaptioningEnabled: true, imageCaptioningConnectionId: null },
+  fallbackConnectionId: mainConnection.id,
+  connections: runtimeConnections,
+});
+assert.equal(currentConnectionRuntime.connectionId, mainConnection.id);
+
+const disabledByDefaultRuntime = await resolveImageCaptioningRuntime({
+  chatMeta: {},
+  fallbackConnectionId: visionConnection.id,
+  connections: runtimeConnections,
+});
+assert.equal(disabledByDefaultRuntime.enabled, false);
 
 const providerMessages: ChatMessage[] = [
   { role: "system", content: "exact system prompt" },

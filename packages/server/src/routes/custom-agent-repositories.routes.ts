@@ -3,6 +3,7 @@ import { z } from "zod";
 import { isCustomAgentRepositoriesEnabled } from "../config/runtime-config.js";
 import { logger } from "../lib/logger.js";
 import { requirePrivilegedAccess } from "../middleware/privileged-gate.js";
+import { getCustomAgentImportPolicy } from "../services/agents/custom-agent-import-policy.service.js";
 import { createCustomAgentRepositoriesService } from "../services/agents/custom-agent-repositories.service.js";
 
 const repositoryUrlSchema = z.object({ url: z.string().trim().min(1).max(2048) }).strict();
@@ -30,6 +31,15 @@ function errorMessage(error: unknown): string {
   return error instanceof Error && error.message.trim() ? error.message : "Custom agent repository operation failed";
 }
 
+async function requireImportPolicy(app: FastifyInstance, reply: FastifyReply): Promise<boolean> {
+  if ((await getCustomAgentImportPolicy(app.db)).enabled) return true;
+  void reply.status(403).send({
+    error: "Custom Agent imports are disabled",
+    message: "Enable Agent imports in Advanced Settings → Danger Zone first.",
+  });
+  return false;
+}
+
 export async function customAgentRepositoriesRoutes(app: FastifyInstance) {
   const service = createCustomAgentRepositoriesService(app.db);
 
@@ -53,6 +63,7 @@ export async function customAgentRepositoriesRoutes(app: FastifyInstance) {
   app.post("/", async (request, reply) => {
     if (!requireFeature(reply)) return;
     if (!requirePrivilegedAccess(request, reply, { feature: "Custom agent repository installation" })) return;
+    if (!(await requireImportPolicy(app, reply))) return;
     try {
       const { url, digest, confirmed } = applyRepositorySchema.parse(request.body);
       return await service.add(url, digest, confirmed);
@@ -79,6 +90,7 @@ export async function customAgentRepositoriesRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string } }>("/:id/sync", async (request, reply) => {
     if (!requireFeature(reply)) return;
     if (!requirePrivilegedAccess(request, reply, { feature: "Custom agent repository synchronization" })) return;
+    if (!(await requireImportPolicy(app, reply))) return;
     try {
       const { id } = repositoryParamsSchema.parse(request.params);
       const { digest, confirmed } = syncRepositorySchema.parse(request.body);

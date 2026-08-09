@@ -38,6 +38,7 @@ These macros pull in the names and card fields of the person speaking and the ch
 | `{{user}}` / `{{userName}}` | Your current display name (or persona name). Defaults to `User` when no persona is set. |
 | `{{userNamePhonetic}}` | Your persona's Phonetic name, or `{{user}}` when it is empty. |
 | `{{char}}` / `{{charName}}` | The current character's name. Defaults to `Character`. |
+| `{{21-character-card-ID}}` | Name of another character. Replace the placeholder text with that card's exact 21-character ID to pull the card into context. |
 | `{{charNamePhonetic}}` | The character's Phonetic name, or `{{char}}` when it is empty. |
 | `{{characters}}` | Every character in the chat, joined by commas. |
 | `{{group}}` | Every other active character in the group chat, excluding the current responder. The persona is not part of this character roster. |
@@ -66,6 +67,8 @@ In a chat with one character, these resolve against that character. In a group c
 `{{group}}` follows the character currently responding, including during individual group generations. For example, if Pantalone is responding in a Roleplay group containing Powers That Be, Maukie, and Pantalone, `{{group}}` resolves to `Powers That Be, Maukie`. A character card remains in this roster even if its name happens to match `{{user}}`.
 
 The Phonetic name field has two jobs. It sets how the name is pronounced by text-to-speech. It also feeds `{{charNamePhonetic}}` and `{{userNamePhonetic}}`. You will find it in both the **Character Editor** and the **Persona Editor**.
+
+To reference a character who is not part of the current chat, copy that card's ID and place it directly inside double braces, such as `{{V1StGXR8_Z5jdHi6B-myT}}`. Do not include literal `<` or `>` characters. Marinara replaces the macro with the character's name and adds the referenced card's Description, Personality, Appearance, Backstory, Scenario, and Example Dialogue to the system prompt. This works in chat messages, prompt fields, and activated lorebook entries. The referenced card's initial greetings are excluded. Enabled lorebooks attached to that card remain subject to their normal keyword, constant, filter, probability, and token-budget rules.
 
 ## Conversation mode macros
 
@@ -114,6 +117,14 @@ The value of `{{lastGenerationType}}` is a plain label. Example values seen in t
 `{{gameStoryboardKeyframeCount}}` is supplied to Game Mode GM prompts, including the built-in **Storyboard Game Prompt**. It is a narrative target, not a demand for exactly that many paragraphs. The storyboard planner still returns fewer shots when a turn does not contain enough distinct visual moments.
 
 The `{{agent::TYPE}}` macro inserts the saved output of an agent (a background helper that fills in things like a scene tracker). The easiest way to add it is inside the **Preset Editor**: click **Add Section**, open the **Agent Sections** group, and pick an agent. Marinara creates a section that already contains the right `{{agent::TYPE}}` tag. This macro is resolved last, so agent text cannot inject more macros into your prompt.
+
+## Lorebook Outlet macros
+
+`{{outlet::name}}` inserts content from lorebook entries whose **Position** is **Outlet** and whose **Outlet name** exactly matches `name`. Outlet names are case-sensitive. For example, `{{outlet::character_rules}}` does not match an Outlet named `Character_Rules`.
+
+Outlet entries still use normal lorebook activation. Keywords, Constant mode, probability, filters, timing, entry limits, and token budgets decide whether an entry is active for the current generation. Active entries with the same Outlet name are joined in their **Order**, separated by new lines. They are inserted only at the macro; they are not also added at a normal lorebook position.
+
+Use Outlet macros in prompt sections in Conversation, Roleplay, or Game mode. The macro works even when it appears before the preset's lorebook marker, and a preset does not need a lorebook marker when it uses only Outlet entries. An unknown or inactive Outlet resolves to nothing. An Outlet entry cannot expand another Outlet macro, so nested Outlets do not recurse.
 
 ## Time macros
 

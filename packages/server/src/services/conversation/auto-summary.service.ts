@@ -16,16 +16,17 @@ export interface ConversationSummaryMessage {
   createdAt?: string | null;
 }
 
-export function countUserMessagesAfterSummaryAnchor(
+export function countConversationMessagesAfterSummaryAnchor(
   messages: Array<{ id?: string | null; role: string }>,
   anchorMessageId: string | null | undefined,
 ): number {
-  const countAllUserMessages = () => messages.filter((message) => message.role === "user").length;
+  const isConversationMessage = (message: { role: string }) => message.role === "user" || message.role === "assistant";
+  const countAllConversationMessages = () => messages.filter(isConversationMessage).length;
   const anchor = typeof anchorMessageId === "string" && anchorMessageId.trim() ? anchorMessageId.trim() : null;
-  if (!anchor) return countAllUserMessages();
+  if (!anchor) return countAllConversationMessages();
   const anchorIndex = messages.findIndex((message) => message.id === anchor);
-  if (anchorIndex < 0) return countAllUserMessages();
-  return messages.slice(anchorIndex + 1).filter((message) => message.role === "user").length;
+  if (anchorIndex < 0) return countAllConversationMessages();
+  return messages.slice(anchorIndex + 1).filter(isConversationMessage).length;
 }
 
 export interface ConversationSummaryRunResult {
@@ -71,6 +72,7 @@ interface GenerateMissingConversationSummariesOptions {
   rolloverHour?: number;
   timeZone?: string;
   timeoutMs?: number;
+  maxTokens?: number;
   maxMissingDays?: number;
 }
 
@@ -324,6 +326,7 @@ async function summarizeDayBucket(
   model: string,
   bucket: ConversationSummaryDayBucket,
   timeoutMs: number,
+  maxTokens: number,
 ): Promise<DaySummaryEntry> {
   const transcriptLines = bucket.msgs.map((message) => `${message.author}: ${message.content}`);
   const chunks = chunkTranscriptLines(transcriptLines, DAILY_TRANSCRIPT_CHUNK_CHARS);
@@ -335,6 +338,7 @@ async function summarizeDayBucket(
       dailySummarySystemPrompt(bucket.date, "a full day's"),
       chunks[0] ?? "",
       timeoutMs,
+      maxTokens,
     );
   }
 
@@ -346,7 +350,7 @@ async function summarizeDayBucket(
       dailySummarySystemPrompt(bucket.date, `part ${i + 1} of ${chunks.length} of a long day's`),
       chunks[i]!,
       timeoutMs,
-      2048,
+      maxTokens,
     );
     if (partial.summary || partial.keyDetails.length > 0) partials.push(partial);
   }
@@ -369,6 +373,7 @@ async function summarizeDayBucket(
     ].join("\n"),
     combinedInput,
     timeoutMs,
+    maxTokens,
   );
 }
 
@@ -449,6 +454,7 @@ export async function generateMissingConversationSummaries(
 ): Promise<ConversationSummaryRunResult> {
   const rolloverHour = Math.max(0, Math.min(11, Math.floor(options.rolloverHour ?? 4)));
   const timeoutMs = options.timeoutMs ?? DEFAULT_SUMMARY_TIMEOUT_MS;
+  const maxTokens = options.maxTokens ?? 4096;
   const now = options.now ?? new Date();
   const todayDateKey = logicalDateKey(now, rolloverHour, options.timeZone);
   const daySummaries = normalizeDaySummaries(options.metadata.daySummaries);
@@ -482,7 +488,7 @@ export async function generateMissingConversationSummaries(
 
   for (const bucket of bucketsToProcess) {
     try {
-      const entry = await summarizeDayBucket(options.provider, options.model, bucket, timeoutMs);
+      const entry = await summarizeDayBucket(options.provider, options.model, bucket, timeoutMs, maxTokens);
       if (entry.summary || entry.keyDetails.length > 0) {
         daySummaries[bucket.date] = entry;
         newlyGeneratedDays[bucket.date] = entry;
@@ -546,6 +552,7 @@ export async function generateMissingConversationSummaries(
         weekSummarySystemPrompt(rangeLabel),
         dayBlocks.join("\n\n"),
         timeoutMs,
+        maxTokens,
       );
       if (entry.summary || entry.keyDetails.length > 0) {
         weekSummaries[weekKey] = entry;
