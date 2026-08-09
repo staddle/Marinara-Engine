@@ -5,6 +5,7 @@ import { cn } from "../../lib/utils";
 import { useMicRecorder } from "../../hooks/use-mic-recorder";
 import { useTranscribeAudio } from "../../hooks/use-stt";
 import { useTranslation as useUiTranslation } from "react-i18next";
+import { classifyMicAccessError } from "../../lib/mic-access-error";
 
 interface PushToTalkButtonProps {
   disabled?: boolean;
@@ -46,10 +47,20 @@ export function PushToTalkButton({ disabled, onTranscribed, className, iconSize 
 
     try {
       await start();
-    } catch {
-      toast.error(localizeUi("ui.ui.pushtotalkbutton.couldNotAccessTheMicrophone"));
+    } catch (error) {
+      console.error("[push-to-talk] getUserMedia failed:", error);
+      const kind = classifyMicAccessError(error);
+      const message =
+        kind === "insecure-context"
+          ? localizeUi("ui.hooks.usecallvoicesession.microphoneAccessRequiresHttpsOrLocalhostThisPage")
+          : kind === "permission-denied"
+            ? localizeUi("ui.hooks.usecallvoicesession.microphonePermissionWasDeniedCheckYourBrowsers")
+            : kind === "not-found"
+              ? localizeUi("ui.hooks.usecallvoicesession.noMicrophoneWasFoundOnThisDevice")
+              : localizeUi("ui.ui.pushtotalkbutton.couldNotAccessTheMicrophone");
+      toast.error(message);
     }
-  }, [busy, disabled, onTranscribed, recording, start, stop, transcribeAudio]);
+  }, [busy, disabled, localizeUi, onTranscribed, recording, start, stop, transcribeAudio]);
 
   return (
     <button

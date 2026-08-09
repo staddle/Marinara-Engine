@@ -2,6 +2,8 @@
 // Hook: Continuous voice-activity-detected mic session for Call Mode
 // ──────────────────────────────────────────────
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useTranslation as useUiTranslation } from "react-i18next";
+import { classifyMicAccessError } from "../lib/mic-access-error";
 
 export type CallVoiceState = "idle" | "listening" | "speech-detected" | "paused";
 
@@ -32,6 +34,7 @@ interface UseCallVoiceSessionOptions {
 
 /** Continuous mic session that opens the microphone once and segments speech into per-utterance clips via simple volume-based voice activity detection. */
 export function useCallVoiceSession({ onUtterance, onError, paused }: UseCallVoiceSessionOptions) {
+  const { t: localizeUi } = useUiTranslation();
   const [state, setState] = useState<CallVoiceState>("idle");
   const streamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -160,11 +163,21 @@ export function useCallVoiceSession({ onUtterance, onError, paused }: UseCallVoi
       bufferRef.current = new Uint8Array(analyser.fftSize);
       pollTimerRef.current = setInterval(poll, POLL_INTERVAL_MS);
       setState(pausedRef.current ? "paused" : "listening");
-    } catch {
-      onErrorRef.current?.("Could not access the microphone.");
+    } catch (error) {
+      console.error("[call-voice-session] getUserMedia failed:", error);
+      const kind = classifyMicAccessError(error);
+      const message =
+        kind === "insecure-context"
+          ? localizeUi("ui.hooks.usecallvoicesession.microphoneAccessRequiresHttpsOrLocalhostThisPage")
+          : kind === "permission-denied"
+            ? localizeUi("ui.hooks.usecallvoicesession.microphonePermissionWasDeniedCheckYourBrowsers")
+            : kind === "not-found"
+              ? localizeUi("ui.hooks.usecallvoicesession.noMicrophoneWasFoundOnThisDevice")
+              : localizeUi("ui.ui.pushtotalkbutton.couldNotAccessTheMicrophone");
+      onErrorRef.current?.(message);
       stop();
     }
-  }, [poll, stop]);
+  }, [localizeUi, poll, stop]);
 
   useEffect(() => stop, [stop]);
 
