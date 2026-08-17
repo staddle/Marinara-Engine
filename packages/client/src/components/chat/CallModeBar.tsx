@@ -1,4 +1,5 @@
-import { Mic, MicOff, PhoneOff } from "lucide-react";
+import type { RefObject } from "react";
+import { Mic, MicOff, PhoneOff, Video, VideoOff } from "lucide-react";
 import { cn } from "../../lib/utils";
 import type { CallVoiceState } from "../../hooks/use-call-voice-session";
 import { useTranslation as useUiTranslation } from "react-i18next";
@@ -11,6 +12,9 @@ interface CallModeBarProps {
   muted: boolean;
   onToggleMute: () => void;
   onEndCall: () => void;
+  cameraEnabled: boolean;
+  onToggleCamera: () => void;
+  cameraVideoRef: RefObject<HTMLVideoElement | null>;
 }
 
 function callStatusLabel(phase: CallModePhase, voiceState: CallVoiceState, muted: boolean): string {
@@ -21,7 +25,16 @@ function callStatusLabel(phase: CallModePhase, voiceState: CallVoiceState, muted
   return "Listening…";
 }
 
-export function CallModeBar({ phase, voiceState, muted, onToggleMute, onEndCall }: CallModeBarProps) {
+export function CallModeBar({
+  phase,
+  voiceState,
+  muted,
+  onToggleMute,
+  onEndCall,
+  cameraEnabled,
+  onToggleCamera,
+  cameraVideoRef,
+}: CallModeBarProps) {
   const { t: localizeUi } = useUiTranslation();
   const pulsing = !muted && phase === "listening" && voiceState === "speech-detected";
   const thinking = phase === "thinking";
@@ -46,6 +59,16 @@ export function CallModeBar({ phase, voiceState, muted, onToggleMute, onEndCall 
         {muted ? <MicOff size="1.125rem" /> : <Mic size="1.125rem" className={cn(pulsing && "animate-pulse")} />}
       </span>
 
+      {cameraEnabled && (
+        <video
+          ref={cameraVideoRef}
+          muted
+          playsInline
+          autoPlay
+          className="hidden h-10 w-10 shrink-0 rounded-full object-cover sm:block"
+        />
+      )}
+
       <div className="min-w-0 flex-1">
         <div className="text-sm font-medium text-foreground/90">{callStatusLabel(phase, voiceState, muted)}</div>
         <div className="text-[0.6875rem] text-foreground/50">
@@ -68,6 +91,25 @@ export function CallModeBar({ phase, voiceState, muted, onToggleMute, onEndCall 
         aria-pressed={muted}
       >
         {muted ? <MicOff size="1rem" /> : <Mic size="1rem" />}
+      </button>
+
+      <button
+        type="button"
+        onClick={onToggleCamera}
+        className={cn(
+          "flex h-10 w-10 shrink-0 items-center justify-center rounded-full transition-colors",
+          cameraEnabled
+            ? "bg-foreground/15 text-foreground/70 hover:bg-foreground/20"
+            : "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70",
+        )}
+        title={
+          cameraEnabled
+            ? localizeUi("ui.chat.callmodebar.turnCameraOff")
+            : localizeUi("ui.chat.callmodebar.turnCameraOn")
+        }
+        aria-pressed={cameraEnabled}
+      >
+        {cameraEnabled ? <Video size="1rem" /> : <VideoOff size="1rem" />}
       </button>
 
       <button

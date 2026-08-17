@@ -27,6 +27,7 @@ import { useUIStore } from "../../stores/ui.store";
 import { useGenerate } from "../../hooks/use-generate";
 import { useSTTConfig, useTranscribeAudio } from "../../hooks/use-stt";
 import { useCallVoiceSession } from "../../hooks/use-call-voice-session";
+import { useCallCameraSession } from "../../hooks/use-call-camera-session";
 import { ttsService } from "../../lib/tts-service";
 import { useCommitSpatialOwnerTurn } from "../../hooks/use-spatial-context";
 import { useApplyRegex } from "../../hooks/use-apply-regex";
@@ -353,11 +354,16 @@ export const ChatInput = memo(function ChatInput({
   const customQuickReplies = useUIStore((s) => s.customQuickReplies);
   const speechToTextEnabled = useUIStore((s) => s.speechToTextEnabled);
   const { data: sttConfig } = useSTTConfig();
-  const pushToTalkEnabled = mode === "roleplay" && sttConfig?.enabled === true;
+  const pushToTalkEnabled = sttConfig?.enabled === true;
   const transcribeAudio = useTranscribeAudio();
   const [callActive, setCallActive] = useState(false);
   const [callPhase, setCallPhase] = useState<CallModePhase>("listening");
   const [callMuted, setCallMuted] = useState(false);
+  const [cameraEnabled, setCameraEnabled] = useState(false);
+  const cameraEnabledRef = useRef(false);
+  useEffect(() => {
+    cameraEnabledRef.current = cameraEnabled;
+  }, [cameraEnabled]);
   const quoteFormat = useUIStore((s) => s.quoteFormat);
   const createMessage = useCreateMessage(activeChatId);
   const commitSpatialOwnerTurn = useCommitSpatialOwnerTurn();
@@ -1823,21 +1829,43 @@ export const ChatInput = memo(function ChatInput({
     [activeChatId, generateWithNarrativeDirector, isInputBusy],
   );
 
+  const handleCallCameraError = useCallback((message: string) => {
+    toast.error(message);
+    setCameraEnabled(false);
+  }, []);
+
+  const cameraSession = useCallCameraSession({ onError: handleCallCameraError });
+  const { start: startCallCameraSession, stop: stopCallCameraSession, captureFrame: captureCallCameraFrame } =
+    cameraSession;
+
   const handleCallUtterance = useCallback(
     (blob: Blob) => {
       if (!activeChatId) return;
       setCallPhase("thinking");
+      const framePromise = cameraEnabledRef.current ? captureCallCameraFrame() : Promise.resolve(null);
       void (async () => {
         try {
-          const { text } = await transcribeAudio.mutateAsync(blob);
+          const [{ text }, frame] = await Promise.all([transcribeAudio.mutateAsync(blob), framePromise]);
           const trimmed = text.trim();
           if (trimmed) {
             setCallPhase("speaking");
+            let callAttachments: Array<{ type: string; data: string; filename: string; name: string }> | undefined;
+            if (frame) {
+              try {
+                const prepared = await prepareImageAttachment(frame, "camera.jpg");
+                callAttachments = [
+                  { type: prepared.type, data: prepared.data, filename: prepared.name, name: prepared.name },
+                ];
+              } catch {
+                // Skip the frame rather than fail the whole turn over an image encode error.
+              }
+            }
             try {
               await generateWithNarrativeDirector({
                 chatId: activeChatId,
                 connectionId: null,
                 userMessage: trimmed,
+                ...(callAttachments ? { attachments: callAttachments } : {}),
               });
             } catch (error) {
               toast.error(
@@ -1853,7 +1881,7 @@ export const ChatInput = memo(function ChatInput({
         }
       })();
     },
-    [activeChatId, generateWithNarrativeDirector, localizeUi, transcribeAudio],
+    [activeChatId, captureCallCameraFrame, generateWithNarrativeDirector, localizeUi, transcribeAudio],
   );
 
   const handleCallVoiceError = useCallback((message: string) => {
@@ -1875,6 +1903,15 @@ export const ChatInput = memo(function ChatInput({
   }, [callActive, startCallVoiceSession, stopCallVoiceSession]);
 
   useEffect(() => {
+    if (!callActive || !cameraEnabled) {
+      stopCallCameraSession();
+      return;
+    }
+    void startCallCameraSession();
+    return () => stopCallCameraSession();
+  }, [callActive, cameraEnabled, startCallCameraSession, stopCallCameraSession]);
+
+  useEffect(() => {
     // End the call automatically if the user switches chats mid-call.
     return () => setCallActive(false);
   }, [activeChatId]);
@@ -1882,10 +1919,15 @@ export const ChatInput = memo(function ChatInput({
   const handleStartCall = useCallback(() => {
     setCallPhase("listening");
     setCallMuted(false);
+    setCameraEnabled(false);
     setCallActive(true);
   }, []);
-  const handleEndCall = useCallback(() => setCallActive(false), []);
+  const handleEndCall = useCallback(() => {
+    setCallActive(false);
+    setCameraEnabled(false);
+  }, []);
   const handleToggleCallMute = useCallback(() => setCallMuted((m) => !m), []);
+  const handleToggleCallCamera = useCallback(() => setCameraEnabled((v) => !v), []);
 
   const ensureInputVisible = useCallback(() => {
     if (typeof window === "undefined" || !window.matchMedia("(max-width: 767px)").matches) return;
@@ -1945,6 +1987,9 @@ export const ChatInput = memo(function ChatInput({
           muted={callMuted}
           onToggleMute={handleToggleCallMute}
           onEndCall={handleEndCall}
+          cameraEnabled={cameraEnabled}
+          onToggleCamera={handleToggleCallCamera}
+          cameraVideoRef={cameraSession.videoRef}
         />
       ) : (
         <>

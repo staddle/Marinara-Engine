@@ -16,6 +16,7 @@ import {
   RefreshCw,
   Sparkles,
   WandSparkles,
+  Phone,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useQueryClient, type InfiniteData } from "@tanstack/react-query";
@@ -25,6 +26,10 @@ import { useUIStore } from "../../stores/ui.store";
 import { useConversationGamesStore } from "../../stores/conversation-games.store";
 import { useGenerate } from "../../hooks/use-generate";
 import { useApplyRegex } from "../../hooks/use-apply-regex";
+import { useSTTConfig, useTranscribeAudio } from "../../hooks/use-stt";
+import { useCallVoiceSession } from "../../hooks/use-call-voice-session";
+import { useCallCameraSession } from "../../hooks/use-call-camera-session";
+import { ttsService } from "../../lib/tts-service";
 import { useCreateMessage, useDeleteMessage, useUpdateMessageExtra, useChat, chatKeys } from "../../hooks/use-chats";
 import { characterKeys } from "../../hooks/use-characters";
 import {
@@ -53,6 +58,8 @@ import { QuickSwitcherMobile } from "./QuickSwitcherMobile";
 import { showChoiceDialog } from "../../lib/app-dialogs";
 import { useConversationCustomEmojis, type ConversationCustomEmoji } from "../../hooks/use-conversation-custom-emojis";
 import { SpeechToTextButton } from "../ui/SpeechToTextButton";
+import { PushToTalkButton } from "../ui/PushToTalkButton";
+import { CallModeBar, type CallModePhase } from "./CallModeBar";
 import { SlashCommandFeedback } from "./SlashCommandFeedback";
 import { QuickReplyMenu, type QuickReplyAction } from "./QuickReplyMenu";
 import { getChatInputShellClass } from "./chat-input-styles";
@@ -81,6 +88,21 @@ interface Attachment {
   type: string;
   data: string;
   name: string;
+}
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Call Mode shouldn't reopen the mic while the character's reply is still being spoken (mic
+ * pickup of the device's own TTS playback). Autoplay kicks in asynchronously after streaming
+ * ends, so wait a grace period for it to start, then wait for it to finish (a no-op if autoplay
+ * is off, since ttsService never leaves "idle" in that case).
+ */
+async function waitForTTSSettle(): Promise<void> {
+  await sleep(400);
+  while (ttsService.getState() === "loading" || ttsService.getState() === "playing") {
+    await sleep(150);
+  }
 }
 
 type EmojiCompletion =
@@ -432,6 +454,17 @@ export function ConversationInput({
   const showQuickReplyGuide = useUIStore((s) => s.showQuickReplyGuide);
   const customQuickReplies = useUIStore((s) => s.customQuickReplies);
   const speechToTextEnabled = useUIStore((s) => s.speechToTextEnabled);
+  const { data: sttConfig } = useSTTConfig();
+  const pushToTalkEnabled = sttConfig?.enabled === true;
+  const transcribeAudio = useTranscribeAudio();
+  const [callActive, setCallActive] = useState(false);
+  const [callPhase, setCallPhase] = useState<CallModePhase>("listening");
+  const [callMuted, setCallMuted] = useState(false);
+  const [cameraEnabled, setCameraEnabled] = useState(false);
+  const cameraEnabledRef = useRef(false);
+  useEffect(() => {
+    cameraEnabledRef.current = cameraEnabled;
+  }, [cameraEnabled]);
   const quoteFormat = useUIStore((s) => s.quoteFormat);
   const createMessage = useCreateMessage(activeChatId);
   const deleteMessage = useDeleteMessage(activeChatId);
@@ -1205,6 +1238,120 @@ export function ConversationInput({
     localizeUi,
   ]);
 
+  const handleVoiceMessage = useCallback(
+    (transcript: string) => {
+      if (!activeChatId || isSendBlocked) return;
+      void (async () => {
+        try {
+          await generate({ chatId: activeChatId, connectionId: null, userMessage: transcript });
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : "Generation failed";
+          toast.error(msg);
+        }
+      })();
+    },
+    [activeChatId, generate, isSendBlocked],
+  );
+
+  const handleCallCameraError = useCallback((message: string) => {
+    toast.error(message);
+    setCameraEnabled(false);
+  }, []);
+
+  const cameraSession = useCallCameraSession({ onError: handleCallCameraError });
+  const { start: startCallCameraSession, stop: stopCallCameraSession, captureFrame: captureCallCameraFrame } =
+    cameraSession;
+
+  const handleCallUtterance = useCallback(
+    (blob: Blob) => {
+      if (!activeChatId) return;
+      setCallPhase("thinking");
+      const framePromise = cameraEnabledRef.current ? captureCallCameraFrame() : Promise.resolve(null);
+      void (async () => {
+        try {
+          const [{ text }, frame] = await Promise.all([transcribeAudio.mutateAsync(blob), framePromise]);
+          const trimmed = text.trim();
+          if (trimmed) {
+            setCallPhase("speaking");
+            let callAttachments: Array<{ type: string; data: string; filename: string; name: string }> | undefined;
+            if (frame) {
+              try {
+                const prepared = await prepareImageAttachment(frame, "camera.jpg");
+                callAttachments = [
+                  { type: prepared.type, data: prepared.data, filename: prepared.name, name: prepared.name },
+                ];
+              } catch {
+                // Skip the frame rather than fail the whole turn over an image encode error.
+              }
+            }
+            try {
+              await generate({
+                chatId: activeChatId,
+                connectionId: null,
+                userMessage: trimmed,
+                ...(callAttachments ? { attachments: callAttachments } : {}),
+              });
+            } catch (error) {
+              const msg = error instanceof Error ? error.message : "Generation failed";
+              toast.error(msg);
+            }
+            await waitForTTSSettle();
+          }
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : localizeUi("ui.chat.chatinput.transcriptionFailed"));
+        } finally {
+          setCallPhase("listening");
+        }
+      })();
+    },
+    [activeChatId, captureCallCameraFrame, generate, localizeUi, transcribeAudio],
+  );
+
+  const handleCallVoiceError = useCallback((message: string) => {
+    toast.error(message);
+    setCallActive(false);
+  }, []);
+
+  const callVoiceSession = useCallVoiceSession({
+    onUtterance: handleCallUtterance,
+    onError: handleCallVoiceError,
+    paused: callPhase !== "listening" || callMuted,
+  });
+  const { start: startCallVoiceSession, stop: stopCallVoiceSession } = callVoiceSession;
+
+  useEffect(() => {
+    if (!callActive) return;
+    void startCallVoiceSession();
+    return () => stopCallVoiceSession();
+  }, [callActive, startCallVoiceSession, stopCallVoiceSession]);
+
+  useEffect(() => {
+    if (!callActive || !cameraEnabled) {
+      stopCallCameraSession();
+      return;
+    }
+    void startCallCameraSession();
+    return () => stopCallCameraSession();
+  }, [callActive, cameraEnabled, startCallCameraSession, stopCallCameraSession]);
+
+  useEffect(() => {
+    // End the call automatically if the user switches chats mid-call.
+    return () => setCallActive(false);
+  }, [activeChatId]);
+
+  const handleStartCall = useCallback(() => {
+    setCallPhase("listening");
+    setCallMuted(false);
+    setCameraEnabled(false);
+    setCallActive(true);
+  }, []);
+  const handleEndCall = useCallback(() => {
+    setCallActive(false);
+    setCameraEnabled(false);
+  }, []);
+  const handleToggleCallMute = useCallback(() => setCallMuted((m) => !m), []);
+  const handleToggleCallCamera = useCallback(() => setCameraEnabled((v) => !v), []);
+
   const runQuickSlashCommand = useCallback(
     async (commandLine: string, fallbackError: string) => {
       if (!activeChatId) return;
@@ -1953,6 +2100,45 @@ export function ConversationInput({
             </div>
           )}
 
+          {pushToTalkEnabled && (
+            <div className="flex min-h-11 items-center justify-between gap-2 rounded-lg px-3 py-2">
+              <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground/80">
+                {localizeUi("ui.chat.conversationinput.voiceInput")}
+              </span>
+              <PushToTalkButton
+                disabled={!activeChatId || isSendBlocked}
+                onTranscribed={(transcript) => {
+                  setMobilePickerOpen(false);
+                  handleVoiceMessage(transcript);
+                }}
+                className="h-10 w-10 rounded-lg"
+                iconSize={16}
+              />
+            </div>
+          )}
+
+          {pushToTalkEnabled && (
+            <button
+              type="button"
+              onClick={() => {
+                setMobilePickerOpen(false);
+                handleStartCall();
+              }}
+              disabled={!activeChatId || isSendBlocked}
+              className={cn(
+                "flex min-h-11 w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-colors",
+                activeChatId && !isSendBlocked
+                  ? "text-foreground/80 hover:bg-foreground/10"
+                  : "cursor-not-allowed text-foreground/25",
+              )}
+            >
+              <Phone size="1rem" className="shrink-0" />
+              <span className="min-w-0 flex-1 truncate text-sm font-medium">
+                {localizeUi("ui.chat.chatinput.startVoiceCall")}
+              </span>
+            </button>
+          )}
+
           {showQuickRepliesMenu &&
             quickReplyActions.map((action) => (
               <button
@@ -2008,6 +2194,19 @@ export function ConversationInput({
 
   return (
     <div className="mari-chat-input chat-input-container relative px-2 sm:px-3 pb-3">
+      {callActive ? (
+        <CallModeBar
+          phase={callPhase}
+          voiceState={callVoiceSession.state}
+          muted={callMuted}
+          onToggleMute={handleToggleCallMute}
+          onEndCall={handleEndCall}
+          cameraEnabled={cameraEnabled}
+          onToggleCamera={handleToggleCallCamera}
+          cameraVideoRef={cameraSession.videoRef}
+        />
+      ) : (
+        <>
       {/* Slash command autocomplete */}
       {completions.length > 0 && (
         <div className="absolute bottom-full left-3 right-3 z-40 mb-1 max-h-[min(18rem,45dvh)] overflow-y-auto rounded-lg border border-foreground/10 bg-[var(--card)] shadow-lg [-webkit-overflow-scrolling:touch]">
@@ -2336,6 +2535,31 @@ export function ConversationInput({
             />
           )}
 
+          {pushToTalkEnabled && (
+            <PushToTalkButton
+              disabled={!activeChatId || isSendBlocked}
+              onTranscribed={handleVoiceMessage}
+              className="hidden rounded-full sm:flex"
+              iconSize={16}
+            />
+          )}
+
+          {pushToTalkEnabled && (
+            <button
+              type="button"
+              onClick={handleStartCall}
+              disabled={!activeChatId || isSendBlocked}
+              className={cn(
+                "hidden h-11 w-11 shrink-0 items-center justify-center rounded-xl transition-all duration-200 active:scale-90 sm:flex sm:h-8 sm:w-8",
+                "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70",
+                (!activeChatId || isSendBlocked) && "cursor-not-allowed opacity-50",
+              )}
+              title={localizeUi("ui.chat.chatinput.startVoiceCall")}
+            >
+              <Phone size={16} />
+            </button>
+          )}
+
           {showQuickRepliesMenu && quickReplyActions.length > 0 && (
             <div className="hidden sm:block">
               <QuickReplyMenu actions={quickReplyActions} disabled={!activeChatId || isReadingAttachments} />
@@ -2370,6 +2594,8 @@ export function ConversationInput({
           </button>
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 }

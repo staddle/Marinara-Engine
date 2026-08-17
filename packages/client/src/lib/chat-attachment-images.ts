@@ -125,7 +125,7 @@ function fitWithinEdge(width: number, height: number, edge: number): { width: nu
   };
 }
 
-function createCanvasSurface(width: number, height: number): OffscreenCanvas | HTMLCanvasElement {
+export function createCanvasSurface(width: number, height: number): OffscreenCanvas | HTMLCanvasElement {
   if (typeof OffscreenCanvas !== "undefined") {
     return new OffscreenCanvas(width, height);
   }
@@ -136,7 +136,11 @@ function createCanvasSurface(width: number, height: number): OffscreenCanvas | H
   return canvas;
 }
 
-async function canvasToBlob(canvas: OffscreenCanvas | HTMLCanvasElement, type: string, quality: number): Promise<Blob> {
+export async function canvasToBlob(
+  canvas: OffscreenCanvas | HTMLCanvasElement,
+  type: string,
+  quality: number,
+): Promise<Blob> {
   if ("convertToBlob" in canvas) {
     return canvas.convertToBlob({ type, quality });
   }
@@ -159,7 +163,7 @@ async function canvasToBlob(canvas: OffscreenCanvas | HTMLCanvasElement, type: s
 async function renderBitmapAsJpeg(bitmap: ImageBitmap, edge: number, quality: number): Promise<Blob> {
   const size = fitWithinEdge(bitmap.width, bitmap.height, edge);
   const canvas = createCanvasSurface(size.width, size.height);
-  const ctx = canvas.getContext("2d");
+  const ctx = canvas.getContext("2d") as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
   if (!ctx) {
     throw new Error("Failed to prepare image attachment");
   }
