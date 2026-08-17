@@ -1,4 +1,5 @@
 import { LOCAL_SIDECAR_CONNECTION_ID, PROVIDERS, localAuthProviderBaseUrl } from "@marinara-engine/shared";
+import { createHash } from "node:crypto";
 import type { DB } from "../db/connection.js";
 import { logger } from "../lib/logger.js";
 import { isLocalEmbedderAvailable } from "./local-embedder.js";
@@ -59,6 +60,13 @@ function nonEmptyString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+function embeddingSpaceId(kind: string, ...parts: Array<string | null | undefined>): string {
+  const digest = createHash("sha256")
+    .update(JSON.stringify(parts.map((part) => part?.trim() ?? "")))
+    .digest("hex");
+  return `${kind}:${digest}`;
+}
+
 function buildVectorizerCacheKey(options: {
   chatMetadata?: unknown;
   connectionId?: string | null;
@@ -99,6 +107,23 @@ export async function resolveMemoryRecallEmbeddingSource(
   },
 ): Promise<MemoryRecallEmbeddingSource | null> {
   const connections = createConnectionsStorage(db);
+  if (options.connectionId === "random") {
+    // A random chat stores a sentinel rather than a persisted connection id.
+    // Use one stable, embedding-capable member of its pool so rebuilding and
+    // later recall queries stay in the same vector space.
+    const pool = (await connections.listRandomPool()).sort((left, right) => left.id.localeCompare(right.id));
+    for (const connection of pool) {
+      const source = await resolveMemoryRecallEmbeddingSource(db, {
+        chatMetadata: options.chatMetadata,
+        connectionId: connection.id,
+        activeConnection: connection,
+        activeBaseUrl: resolveBaseUrl(connection),
+      });
+      if (source) return source;
+    }
+    return null;
+  }
+
   let activeConnection =
     options.activeConnection ?? (options.connectionId ? await connections.getWithKey(options.connectionId) : null);
   if (!activeConnection && !options.connectionId) {
@@ -122,6 +147,11 @@ export async function resolveMemoryRecallEmbeddingSource(
     const provider = getLocalSidecarProvider();
     const label = "Local Model sidecar";
     return {
+      spaceId: embeddingSpaceId(
+        "sidecar",
+        sidecarModelService.getResolvedBackend(),
+        sidecarModelService.getConfiguredModelRef(),
+      ),
       label,
       async embed(texts: string[], signal?: AbortSignal) {
         try {
@@ -169,6 +199,7 @@ export async function resolveMemoryRecallEmbeddingSource(
   const label = `${embeddingConnection.name || embeddingConnection.provider} (${embeddingModel})`;
 
   return {
+    spaceId: embeddingSpaceId("remote", embeddingConnection.provider, embeddingBaseUrl, embeddingModel),
     label,
     async embed(texts: string[], signal?: AbortSignal) {
       try {

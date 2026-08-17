@@ -1,6 +1,6 @@
 import dotenv from "dotenv";
 import { logger as sharedLogger } from "../lib/logger.js";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -107,12 +107,31 @@ const EMPTY_ENV_HEADER = `# Marinara Engine - runtime configuration.
  * the same as today.
  */
 function ensureEnvFileExists(envPath: string) {
-  if (existsSync(envPath)) return;
+  if (existsSync(envPath)) {
+    if (process.platform !== "win32") {
+      try {
+        if ((statSync(envPath).mode & 0o077) !== 0) chmodSync(envPath, 0o600);
+      } catch (error) {
+        // Read-only mounts may reject chmod even when the mounted file is
+        // already private. Only fail when the resulting mode is unsafe.
+        try {
+          if ((statSync(envPath).mode & 0o077) === 0) return;
+        } catch {
+          // The original chmod failure remains the useful startup error.
+        }
+        throw new Error(`Cannot enforce private permissions on ${envPath}`, { cause: error });
+      }
+      if ((statSync(envPath).mode & 0o077) !== 0) {
+        throw new Error(`Cannot enforce private permissions on ${envPath}`);
+      }
+    }
+    return;
+  }
   try {
     mkdirSync(dirname(envPath), { recursive: true });
     // 'wx' = exclusive create. Race-safe across concurrent startups: a second
     // process that loses the race gets EEXIST, which we ignore.
-    writeFileSync(envPath, EMPTY_ENV_HEADER, { flag: "wx" });
+    writeFileSync(envPath, EMPTY_ENV_HEADER, { flag: "wx", mode: 0o600 });
   } catch (err) {
     const code = (err as NodeJS.ErrnoException | null)?.code;
     if (code === "EEXIST") return;
@@ -387,41 +406,29 @@ export function getTrustedPrivateNetworksOverride() {
 }
 
 /**
- * Trust traffic from the Tailscale CGNAT range (100.64.0.0/10) unconditionally.
- * When enabled, those clients skip both the IP allowlist and Basic Auth, the
- * same way loopback does.
+ * Choose how direct Tailscale traffic may skip the IP allowlist and Basic Auth.
  *
- * Default: ON. Joining a tailnet already requires authentication via the
- * operator's Tailscale account, which is a stronger trust signal than "any
- * LAN." Set BYPASS_AUTH_TAILSCALE=false to require Basic Auth from your
- * Tailnet too.
- *
- * Caveat: if your server's public connection is itself behind a CGNAT'd ISP
- * that uses 100.64.0.0/10, an internet client can appear with a source IP in
- * this range. Bind HOST to your tailscale0 IP (or use a host firewall) for
- * hard isolation when that risk applies, or set the flag to false.
+ * Default: automatic. A Tailscale-shaped client is trusted only when its
+ * connection also arrived on a local 100.64.0.0/10 address. Set the flag to
+ * true for the legacy broad range bypass, or false to disable it.
  */
-export function isTailscaleBypassEnabled() {
-  // Default-on: only an explicit disable flag turns it off.
-  return !isDisabledFlag(process.env.BYPASS_AUTH_TAILSCALE);
+export function getTailscaleBypassMode(): "auto" | "enabled" | "disabled" {
+  const raw = normalizeEnvValue(process.env.BYPASS_AUTH_TAILSCALE);
+  if (raw === null) return "auto";
+  return isEnabledFlag(raw) ? "enabled" : "disabled";
 }
 
 /**
- * Trust traffic from the Docker bridge range (172.16.0.0/12) and, while
- * running in Docker, the container's exact detected default gateway.
- * When enabled, those clients skip both the IP allowlist and Basic Auth.
+ * Choose how direct Docker traffic may skip the IP allowlist and Basic Auth.
  *
- * Default: ON. Docker bridge and container-gateway IPs represent same-host
- * Docker traffic. Detecting the exact gateway also covers Docker Desktop and
- * custom address pools outside 172.16.0.0/12. Set BYPASS_AUTH_DOCKER=false to
- * require auth from these clients as well.
- *
- * Caveat: 172.16.0.0/12 also covers some private LAN deployments. If your
- * non-Docker LAN uses 172.16.x.x or 172.20.x.x addresses, set the flag to
- * false.
+ * Default: automatic. Docker clients are trusted only when they match this
+ * container's actual interface networks or exact default gateway. Set the
+ * flag to true for the legacy broad range bypass, or false to disable it.
  */
-export function isDockerBypassEnabled() {
-  return !isDisabledFlag(process.env.BYPASS_AUTH_DOCKER);
+export function getDockerBypassMode(): "auto" | "enabled" | "disabled" {
+  const raw = normalizeEnvValue(process.env.BYPASS_AUTH_DOCKER);
+  if (raw === null) return "auto";
+  return isEnabledFlag(raw) ? "enabled" : "disabled";
 }
 
 /**

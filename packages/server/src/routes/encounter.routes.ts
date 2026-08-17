@@ -11,7 +11,8 @@ import { mapSheetAttributesToRPG } from "../services/game/skill-check.service.js
 import { createLLMProvider } from "../services/llm/provider-registry.js";
 import type { ChatMessage } from "../services/llm/base-provider.js";
 import { logger, logDebugOverride } from "../lib/logger.js";
-import { localAuthProviderBaseUrl, normalizeRpgStatPools, stripMacroComments } from "@marinara-engine/shared";
+import { cardPromptText } from "../services/prompt/card-text.js";
+import { localAuthProviderBaseUrl, normalizeRpgStatPools } from "@marinara-engine/shared";
 import type {
   EncounterInitRequest,
   EncounterActionRequest,
@@ -31,10 +32,6 @@ import { resolveActivePersonaCandidate } from "./generate/generate-route-utils.j
 // ──────────────────────────────────────────────
 
 const COMBAT_BLUEPRINT_OUTPUT_TOKENS = 12000;
-
-function cardPromptText(value: unknown): string {
-  return typeof value === "string" ? stripMacroComments(value).trim() : "";
-}
 
 function configuredHpMax(rpgStats: RPGStatsConfig | undefined): number | null {
   if (!rpgStats?.enabled) return null;

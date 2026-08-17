@@ -1,7 +1,7 @@
 import { useCallback, useRef } from "react";
 import { useTranslation as useUiTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { useUpdatePersona } from "../../../hooks/use-characters";
+import { useUpdatePersonaTrackerCard } from "../../../hooks/use-characters";
 
 const PERSONA_PORTRAIT_SAVE_MAX_ATTEMPTS = 3;
 const PERSONA_PORTRAIT_SAVE_RETRY_DELAY_MS = 400;
@@ -21,7 +21,7 @@ interface PendingPersonaPortraitSave {
 
 export function usePersonaPortraitSaveCoordinator() {
   const { t: localizeUi } = useUiTranslation();
-  const { mutateAsync } = useUpdatePersona();
+  const { mutateAsync } = useUpdatePersonaTrackerCard();
   const pendingSaveByPersonaIdRef = useRef(new Map<string, PendingPersonaPortraitSave>());
   const latestSaveVersionByPersonaIdRef = useRef(new Map<string, number>());
   const nextSaveVersionRef = useRef(0);

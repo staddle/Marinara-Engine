@@ -19,7 +19,7 @@ import { DEFAULT_GENERATION_PARAMS, generationParametersSchema, resolveMacros } 
 import { wrapContent, wrapGroup } from "./format-engine.js";
 import { sanitizePromptLeaf } from "./prompt-escaping.js";
 import { ensureLorebookScan, expandMarker, type MarkerContext } from "./marker-expander.js";
-import { mergeAdjacentMessages, squashLeadingSystemMessages } from "./merger.js";
+import { hasSamePromptAudience, mergeAdjacentMessages, squashLeadingSystemMessages } from "./merger.js";
 import { injectAtDepth } from "../lorebook/prompt-injector.js";
 import type { LorebookScanResult } from "../lorebook/index.js";
 import {
@@ -87,10 +87,15 @@ export function resolveChoiceVariableValue(input: {
   // Pick selection is necessarily multi-valued even if its companion flag was
   // normalized incorrectly during an older migration.
   const isMulti = readChoiceFlag(input.multiSelect) || (isRandom && Array.isArray(input.selected));
+
+  // An explicit empty selection is the user's OFF value. Only a missing value
+  // should fall back to the first option for legacy presets.
+  if (input.selected === "" || (Array.isArray(input.selected) && input.selected.length === 0)) return "";
+
   const selected = sanitizeChoiceSelection(input.selected, input.options, isMulti);
 
   if (isMulti && Array.isArray(selected)) {
-    if (selected.length === 0) return input.options[0]?.value ?? "";
+    if (selected.length === 0) return "";
     if (isRandom) {
       const random = input.random ?? Math.random;
       const roll = random();
@@ -983,15 +988,6 @@ function appendFallbackChatSummaryToSystemPrompt(
 function enforceStrictRoles(messages: ChatMLMessage[]): ChatMLMessage[] {
   if (messages.length === 0) return messages;
 
-  const hasSameAudience = (first: ChatMLMessage | undefined, second: ChatMLMessage) => {
-    const firstAudience = first?.hiddenFromAICharacterIds ?? [];
-    const secondAudience = second.hiddenFromAICharacterIds ?? [];
-    return (
-      firstAudience.length === secondAudience.length &&
-      firstAudience.every((characterId) => secondAudience.includes(characterId))
-    );
-  };
-
   const mergeInto = (target: ChatMLMessage, source: ChatMLMessage) => {
     target.content += "\n\n" + source.content;
     if (target.contextKind !== source.contextKind) {
@@ -1014,7 +1010,7 @@ function enforceStrictRoles(messages: ChatMLMessage[]): ChatMLMessage[] {
   while (idx < messages.length && messages[idx]!.role === "system") {
     const msg = messages[idx]!;
     const leadingSystem = result[result.length - 1];
-    if (leadingSystem?.role === "system" && hasSameAudience(leadingSystem, msg)) {
+    if (leadingSystem?.role === "system" && hasSamePromptAudience(leadingSystem, msg)) {
       mergeInto(leadingSystem, msg);
     } else {
       result.push({ ...msg });
@@ -1027,14 +1023,14 @@ function enforceStrictRoles(messages: ChatMLMessage[]): ChatMLMessage[] {
 
     if (msg.role === "system") {
       const prev = result[result.length - 1];
-      if (prev?.role === "system" && hasSameAudience(prev, msg)) mergeInto(prev, msg);
+      if (prev?.role === "system" && hasSamePromptAudience(prev, msg)) mergeInto(prev, msg);
       else result.push({ ...msg });
       continue;
     }
 
     const prev = result[result.length - 1];
     const sameCharacter = (prev?.characterId ?? null) === (msg.characterId ?? null);
-    if (prev && prev.role === msg.role && sameCharacter && hasSameAudience(prev, msg)) {
+    if (prev && prev.role === msg.role && sameCharacter && hasSamePromptAudience(prev, msg)) {
       mergeInto(prev, msg);
     } else {
       result.push({ ...msg });

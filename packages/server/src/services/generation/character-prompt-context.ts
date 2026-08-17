@@ -9,7 +9,7 @@ import {
 } from "@marinara-engine/shared";
 import { wrapContent } from "../prompt/format-engine.js";
 import { sanitizeExampleDialoguePromptLeaf, sanitizePromptLeaf } from "../prompt/prompt-escaping.js";
-import { cardPromptText } from "./generation-text-utils.js";
+import { cardPromptText } from "../prompt/card-text.js";
 
 export type CharacterPromptInfo = {
   id: string;

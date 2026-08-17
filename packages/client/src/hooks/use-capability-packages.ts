@@ -34,7 +34,7 @@ export function useCapabilityCatalog(enabled = true) {
   });
 }
 
-export function useCapabilityAgentRegistry() {
+export function useCapabilityAgentRegistry(enabled = true) {
   const query = useQuery({
     queryKey: capabilityPackageKeys.agents(),
     queryFn: async () => {
@@ -45,8 +45,16 @@ export function useCapabilityAgentRegistry() {
       replaceBuiltInAgentDefinitions(agents);
       return agents;
     },
+    enabled,
   });
   return query;
+}
+
+/** Select visible tracker manifests from the React Query registry result. */
+export function selectVisibleTrackerCapabilityAgents(
+  agents: BuiltInAgentManifest[] | undefined,
+): BuiltInAgentManifest[] {
+  return (agents ?? []).filter((agent) => agent.category === "tracker" && !agent.libraryHidden);
 }
 
 /**
@@ -66,6 +74,24 @@ export function selectGameExperiencePackages(
       isInstalledCapabilityReady(pkg) &&
       pkg.manifest.contributions?.slots?.includes("game-surface") &&
       Boolean(pkg.manifest.entrypoints.client?.trim()),
+  );
+}
+
+/** A restart-required update can keep using the version already loaded by this browser session. */
+export function isCapabilityPackageAvailableUntilRestart(installed: InstalledCapabilityPackage): boolean {
+  return installed.status === "restart-required" && Boolean(installed.previousVersion);
+}
+
+/** Installed destinations that Home can safely expose as browser tabs. */
+export function selectHomeBrowserPackages(
+  installed: InstalledCapabilityPackage[] | undefined,
+): InstalledCapabilityPackage[] {
+  return (installed ?? []).filter(
+    (pkg) =>
+      (isInstalledCapabilityReady(pkg) || isCapabilityPackageAvailableUntilRestart(pkg)) &&
+      pkg.manifest.contributions?.slots?.includes("home-browser-tab") &&
+      Boolean(pkg.manifest.entrypoints.client?.trim()) &&
+      Boolean(pkg.manifest.contributions.homeBrowserTab),
   );
 }
 
@@ -187,7 +213,15 @@ export function useCapabilityClientModules() {
   useEffect(() => {
     const eligiblePackageIds = new Set<string>();
     for (const item of installed.data ?? []) {
-      if (!isInstalledCapabilityReady(item) || !item.manifest.entrypoints.client) continue;
+      if (!item.manifest.entrypoints.client) continue;
+      if (isCapabilityPackageAvailableUntilRestart(item)) {
+        // The old client module is still loaded and paired with the old server
+        // runtime until Marinara restarts. Keep its state mounted while the new
+        // package version waits on disk.
+        eligiblePackageIds.add(item.id);
+        continue;
+      }
+      if (!isInstalledCapabilityReady(item)) continue;
       eligiblePackageIds.add(item.id);
       const current = getCapabilityClientModuleState(item.id);
       const attempt = current.version === item.version ? current.attempt : 0;
@@ -370,13 +404,12 @@ async function runCapabilityPackageQueue(
 export function useInstallCapabilityPackage() {
   const invalidate = useInvalidateCapabilityState();
   return useMutation({
-    mutationFn: (variables: string | { id: string; expectedVersion: string }) => {
-      const { id, expectedVersion } =
-        typeof variables === "string" ? { id: variables, expectedVersion: undefined } : variables;
-      return api.post<InstalledCapabilityPackage>(
-        `/capability-packages/${encodeURIComponent(id)}/install`,
-        expectedVersion ? { expectedVersion } : undefined,
-      );
+    mutationFn: (variables: { id: string; expectedVersion: string; expectedArtifactSha256: string }) => {
+      const { id, expectedVersion, expectedArtifactSha256 } = variables;
+      return api.post<InstalledCapabilityPackage>(`/capability-packages/${encodeURIComponent(id)}/install`, {
+        expectedVersion,
+        expectedArtifactSha256,
+      });
     },
     onSettled: invalidate,
   });
@@ -404,12 +437,20 @@ export function useUninstallCapabilityPackage() {
 export function useInstallAllCapabilityPackages() {
   const invalidate = useInvalidateCapabilityState();
   return useMutation({
-    mutationFn: ({ ids, onProgress }: BulkCapabilityPackageVariables) =>
+    mutationFn: ({
+      packages,
+      onProgress,
+    }: Omit<BulkCapabilityPackageVariables, "ids"> & { packages: CapabilityCatalog["packages"] }) =>
       runCapabilityPackageQueue(
-        ids,
+        packages.map((entry) => entry.manifest.id),
         async (id) => {
+          const entry = packages.find((candidate) => candidate.manifest.id === id)!;
           const result = await api.post<InstalledCapabilityPackage>(
             `/capability-packages/${encodeURIComponent(id)}/install`,
+            {
+              expectedVersion: entry.manifest.version,
+              expectedArtifactSha256: entry.artifact.sha256,
+            },
           );
           return { restartRequired: result.status === "restart-required" };
         },

@@ -29,3 +29,32 @@ export async function settleAgentJobsWithConcurrencyLimit<T, R>(
 
   return results;
 }
+
+export function createAgentConcurrencyLimiter(limit: number) {
+  const normalizedLimit = Number.isFinite(limit) ? Math.max(1, Math.trunc(limit)) : 1;
+  let activeJobs = 0;
+  const waiting: Array<() => void> = [];
+
+  const acquire = () =>
+    new Promise<void>((resolve) => {
+      if (activeJobs < normalizedLimit) {
+        activeJobs += 1;
+        resolve();
+        return;
+      }
+      waiting.push(() => {
+        activeJobs += 1;
+        resolve();
+      });
+    });
+
+  return async function runWithAgentConcurrencyLimit<R>(job: () => Promise<R>): Promise<R> {
+    await acquire();
+    try {
+      return await job();
+    } finally {
+      activeJobs -= 1;
+      waiting.shift()?.();
+    }
+  };
+}

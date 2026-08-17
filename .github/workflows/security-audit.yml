@@ -1,0 +1,33 @@
+name: Dependency security audit
+
+on:
+  pull_request:
+    branches: [staging]
+    paths:
+      - .npmrc
+      - package.json
+      - packages/*/package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@8912a9102ac27614460f54aedde9e1e7f9aec20d # v6.0.5
+
+      - name: Audit dependencies
+        run: pnpm audit --audit-level low

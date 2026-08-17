@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Camera, ImagePlus, Loader2, Wand2, X } from "lucide-react";
+import { Camera, IdCard, ImagePlus, Loader2, Wand2, X } from "lucide-react";
 import { toast } from "sonner";
 import { useConnections } from "../../hooks/use-connections";
 import { useUIStore } from "../../stores/ui.store";
@@ -12,6 +12,7 @@ import { useTranslation as useUiTranslation } from "react-i18next";
 type AvatarGenerationModalProps = {
   open: boolean;
   title: string;
+  mode?: "avatar" | "character-sheet";
   entityName: string;
   defaultAppearance?: string;
   defaultAvatarUrl?: string | null;
@@ -55,6 +56,7 @@ async function imageUrlToDataUrl(src: string): Promise<string> {
 export function AvatarGenerationModal({
   open,
   title,
+  mode = "avatar",
   entityName,
   defaultAppearance,
   defaultAvatarUrl,
@@ -66,6 +68,9 @@ export function AvatarGenerationModal({
   const reviewImagePromptsBeforeSend = useUIStore((s) => s.reviewImagePromptsBeforeSend);
   const imagePortraitWidth = useUIStore((s) => s.imagePortraitWidth);
   const imagePortraitHeight = useUIStore((s) => s.imagePortraitHeight);
+  const imageBackgroundWidth = useUIStore((s) => s.imageBackgroundWidth);
+  const imageBackgroundHeight = useUIStore((s) => s.imageBackgroundHeight);
+  const debugMode = useUIStore((s) => s.debugMode);
   const [appearance, setAppearance] = useState(defaultAppearance ?? "");
   const [connectionId, setConnectionId] = useState<string | null>(null);
   const [useCurrentAvatarReference, setUseCurrentAvatarReference] = useState(false);
@@ -85,6 +90,9 @@ export function AvatarGenerationModal({
   }, [connectionsList]);
   const defaultImageConnectionId = imageConnections.find(isDefaultImageConnection)?.id ?? null;
   const effectiveConnectionId = connectionId ?? defaultImageConnectionId ?? imageConnections[0]?.id ?? null;
+  const isCharacterSheet = mode === "character-sheet";
+  const canvasWidth = isCharacterSheet ? imageBackgroundWidth : imagePortraitWidth;
+  const canvasHeight = isCharacterSheet ? imageBackgroundHeight : imagePortraitHeight;
 
   useEffect(() => {
     if (!open) return;
@@ -125,11 +133,13 @@ export function AvatarGenerationModal({
 
   const buildPayload = (referenceImages?: string[], promptOverrides?: ImagePromptOverride[]) => ({
     connectionId: effectiveConnectionId,
+    purpose: mode,
     name: entityName.trim() || "Character",
     appearance: appearance.trim(),
     referenceImages,
-    width: imagePortraitWidth,
-    height: imagePortraitHeight,
+    width: canvasWidth,
+    height: canvasHeight,
+    debugMode,
     promptOverrides,
   });
 
@@ -161,7 +171,15 @@ export function AvatarGenerationModal({
       setGeneratedAvatar(result.image);
       setGeneratedPrompt(result.prompt);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message :localizeUi("ui.ui.avatargenerationmodal.avatarGenerationFailed"));
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : localizeUi(
+              isCharacterSheet
+                ? "ui.ui.avatargenerationmodal.characterSheetGenerationFailed"
+                : "ui.ui.avatargenerationmodal.avatarGenerationFailed",
+            ),
+      );
     } finally {
       setReviewSubmitting(false);
       setGenerating(false);
@@ -175,7 +193,15 @@ export function AvatarGenerationModal({
       await onUseAvatar(generatedAvatar);
       onClose();
     } catch (error) {
-      toast.error(error instanceof Error ? error.message :localizeUi("ui.ui.avatargenerationmodal.failedToSaveGeneratedAvatar"));
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : localizeUi(
+              isCharacterSheet
+                ? "ui.ui.avatargenerationmodal.failedToSaveGeneratedCharacterSheet"
+                : "ui.ui.avatargenerationmodal.failedToSaveGeneratedAvatar",
+            ),
+      );
     } finally {
       setSaving(false);
     }
@@ -209,13 +235,23 @@ export function AvatarGenerationModal({
               </label>
 
               <label className="space-y-1.5">
-                <span className="block text-xs font-medium text-[var(--foreground)]">{localizeUi("ui.ui.avatargenerationmodal.avatarPrompt")}</span>
+                <span className="block text-xs font-medium text-[var(--foreground)]">
+                  {localizeUi(
+                    isCharacterSheet
+                      ? "ui.ui.avatargenerationmodal.characterSheetPrompt"
+                      : "ui.ui.avatargenerationmodal.avatarPrompt",
+                  )}
+                </span>
                 <textarea
                   value={appearance}
                   onChange={(event) => setAppearance(event.target.value)}
                   rows={7}
                   className="w-full resize-y rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs leading-relaxed text-[var(--foreground)] outline-none ring-1 ring-transparent transition-all placeholder:text-[var(--muted-foreground)] focus:ring-[var(--primary)]/40"
-                  placeholder={localizeUi("ui.ui.avatargenerationmodal.describeTheCharacterSFaceHairBuildOutfitMood")}
+                  placeholder={localizeUi(
+                    isCharacterSheet
+                      ? "ui.ui.avatargenerationmodal.describeCanonicalCharacterSheet"
+                      : "ui.ui.avatargenerationmodal.describeTheCharacterSFaceHairBuildOutfitMood",
+                  )}
                 />
               </label>
 
@@ -232,15 +268,34 @@ export function AvatarGenerationModal({
                     alt={localizeUi("ui.ui.avatargenerationmodal.currentAvatarReference")}
                     className="h-10 w-10 rounded-lg object-cover ring-1 ring-[var(--border)]"
                   />
-                  <span className="min-w-0 flex-1">{localizeUi("ui.ui.avatargenerationmodal.useCurrentAvatarAsAReference")}</span>
+                  <span className="min-w-0 flex-1">
+                    {localizeUi(
+                      isCharacterSheet
+                        ? "ui.ui.avatargenerationmodal.useCurrentAvatarAsLikenessReference"
+                        : "ui.ui.avatargenerationmodal.useCurrentAvatarAsAReference",
+                    )}
+                  </span>
                 </label>
               )}
             </div>
 
             <div className="flex flex-col gap-3">
-              <div className="relative aspect-square overflow-hidden rounded-xl bg-[var(--secondary)] ring-1 ring-[var(--border)]">
+              <div
+                className={cn(
+                  "relative overflow-hidden rounded-xl bg-[var(--secondary)] ring-1 ring-[var(--border)]",
+                  isCharacterSheet ? "aspect-video" : "aspect-square",
+                )}
+              >
                 {generatedAvatar ? (
-                  <img src={generatedAvatar} alt={localizeUi("ui.ui.avatargenerationmodal.generatedAvatar")} className="h-full w-full object-cover" />
+                  <img
+                    src={generatedAvatar}
+                    alt={localizeUi(
+                      isCharacterSheet
+                        ? "ui.ui.avatargenerationmodal.generatedCharacterSheet"
+                        : "ui.ui.avatargenerationmodal.generatedAvatar",
+                    )}
+                    className={cn("h-full w-full", isCharacterSheet ? "object-contain" : "object-cover")}
+                  />
                 ) : defaultAvatarUrl ? (
                   <img src={defaultAvatarUrl} alt={localizeUi("ui.ui.avatargenerationmodal.currentAvatar")} className="h-full w-full object-cover opacity-80" />
                 ) : (
@@ -260,7 +315,13 @@ export function AvatarGenerationModal({
 
           <div className="flex flex-col gap-2 border-t border-[var(--border)]/50 pt-3 sm:flex-row sm:items-center sm:justify-between">
             <span className="text-[0.625rem] text-[var(--muted-foreground)]">
-              {imagePortraitWidth}{localizeUi("ui.panels.imagedimensionrow.x")}{imagePortraitHeight} {localizeUi("ui.ui.avatargenerationmodal.portraitCanvas")}</span>
+              {canvasWidth}{localizeUi("ui.panels.imagedimensionrow.x")}{canvasHeight}{" "}
+              {localizeUi(
+                isCharacterSheet
+                  ? "ui.ui.avatargenerationmodal.characterSheetCanvas"
+                  : "ui.ui.avatargenerationmodal.portraitCanvas",
+              )}
+            </span>
             <div className="flex justify-end gap-2">
               <button
                 type="button"
@@ -294,7 +355,19 @@ export function AvatarGenerationModal({
                     : "bg-[var(--primary)]/15 text-[var(--primary)] ring-[var(--primary)]/30 hover:bg-[var(--primary)]/20",
                 )}
               >
-                {saving ? <Loader2 size="0.875rem" className="animate-spin" /> : <Camera size="0.875rem" />}{localizeUi("ui.ui.avatargenerationmodal.useAvatar")}</button>
+                {saving ? (
+                  <Loader2 size="0.875rem" className="animate-spin" />
+                ) : isCharacterSheet ? (
+                  <IdCard size="0.875rem" />
+                ) : (
+                  <Camera size="0.875rem" />
+                )}
+                {localizeUi(
+                  isCharacterSheet
+                    ? "ui.ui.avatargenerationmodal.saveAsCharacterSheet"
+                    : "ui.ui.avatargenerationmodal.useAvatar",
+                )}
+              </button>
             </div>
           </div>
         </div>

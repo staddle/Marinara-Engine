@@ -9,6 +9,12 @@ export function buildGuidedGenerationInstructionMessage(direction: string): stri
 }
 
 export function stripGenerationGuideInstruction(value: string): string {
-  const match = value.match(/^\[(?:Narrator|Guided generation) instruction [^\]]*? following:\s*([\s\S]*)\]$/);
-  return match?.[1]?.trim() || value;
+  if (!value.endsWith("]")) return value;
+  const prefixes = ["[Narrator instruction ", "[Guided generation instruction "];
+  const prefix = prefixes.find((candidate) => value.startsWith(candidate));
+  if (!prefix) return value;
+  const marker = " following:";
+  const markerIndex = value.indexOf(marker, prefix.length);
+  if (markerIndex < 0 || value.indexOf("]", prefix.length) < markerIndex) return value;
+  return value.slice(markerIndex + marker.length, -1).trim() || value;
 }

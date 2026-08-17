@@ -8,7 +8,6 @@
 // ──────────────────────────────────────────────
 import { normalizeTextForMatch } from "./text-matching.js";
 
-const ENCODED_SPEAKER_TAG_RE = /&(?:lt|#0*60|#x0*3c);([^<>]*?\bspeaker\b[^<>]*?)&(?:gt|#0*62|#x0*3e);/gi;
 export const CLOCK_TOKEN_SOURCE = String.raw`\d{1,2}[:.]\d{2}(?:\s*(?:am|pm))?`;
 export const FULL_DATE_TOKEN_SOURCE = String.raw`\d{1,2}\.\d{1,2}\.\d{2,4}`;
 export const DATE_TIME_TOKEN_SOURCE = String.raw`\d{1,2}\.\d{1,2}(?:\.\d{2,4})?\s+${CLOCK_TOKEN_SOURCE}`;
@@ -22,15 +21,61 @@ function decodeSpeakerTagAttributeEntities(value: string): string {
   return value.replace(/&quot;|&#0*34;|&#x0*22;/gi, '"').replace(/&apos;|&#0*39;|&#x0*27;/gi, "'");
 }
 
-export function decodeEncodedSpeakerTags(value: string): string {
-  return value.replace(ENCODED_SPEAKER_TAG_RE, (match, tagBody: string) => {
-    const decoded = decodeSpeakerTagAttributeEntities(tagBody).trim();
-    if (/^\/\s*speaker\s*$/i.test(decoded)) return "</speaker>";
+function encodedAngleEntityEnd(value: string, index: number, angle: "less" | "greater"): number {
+  const named = angle === "less" ? "&lt;" : "&gt;";
+  if (value.slice(index, index + named.length).toLowerCase() === named) return index + named.length;
+  if (!value.startsWith("&#", index)) return -1;
 
-    const open = decoded.match(/^speaker\s*=\s*(["'])([^"']*)\1\s*$/i);
-    if (!open?.[2]) return match;
-    return `<speaker="${open[2].trim()}">`;
-  });
+  let cursor = index + 2;
+  const isHex = value[cursor]?.toLowerCase() === "x";
+  if (isHex) cursor++;
+  while (value[cursor] === "0") cursor++;
+  const suffix = isHex ? (angle === "less" ? "3c;" : "3e;") : angle === "less" ? "60;" : "62;";
+  return value.slice(cursor, cursor + suffix.length).toLowerCase() === suffix ? cursor + suffix.length : -1;
+}
+
+export function decodeEncodedSpeakerTags(value: string): string {
+  let result = "";
+  let outputCursor = 0;
+  let candidateStart = -1;
+  let bodyStart = -1;
+
+  for (let index = 0; index < value.length; index++) {
+    if (candidateStart < 0) {
+      const openEnd = encodedAngleEntityEnd(value, index, "less");
+      if (openEnd < 0) continue;
+      candidateStart = index;
+      bodyStart = openEnd;
+      index = openEnd - 1;
+      continue;
+    }
+
+    if (value[index] === "<" || value[index] === ">") {
+      candidateStart = -1;
+      bodyStart = -1;
+      continue;
+    }
+    const closeEnd = encodedAngleEntityEnd(value, index, "greater");
+    if (closeEnd < 0) continue;
+
+    const decoded = decodeSpeakerTagAttributeEntities(value.slice(bodyStart, index)).trim();
+    let replacement: string | null = null;
+    if (/^\/\s*speaker\s*$/i.test(decoded)) {
+      replacement = "</speaker>";
+    } else {
+      const open = decoded.match(/^speaker\s*=\s*(["'])([^"']*)\1\s*$/i);
+      if (open?.[2]) replacement = `<speaker="${open[2].trim()}">`;
+    }
+    if (replacement !== null) {
+      result += value.slice(outputCursor, candidateStart) + replacement;
+      outputCursor = closeEnd;
+    }
+    candidateStart = -1;
+    bodyStart = -1;
+    index = closeEnd - 1;
+  }
+
+  return result + value.slice(outputCursor);
 }
 
 /**
@@ -82,26 +127,41 @@ export interface GroupedSegment {
  */
 export function parseSpeakerTags(content: string, knownNames: Set<string>): SpeakerSegment[] | null {
   const decodedContent = decodeEncodedSpeakerTags(content);
-  const regex = /<speaker="([^"]*)">([\s\S]*?)<\/speaker>/g;
-  let match: RegExpExecArray | null;
+  const openTag = '<speaker="';
+  const closeTag = "</speaker>";
   const segments: SpeakerSegment[] = [];
   let lastIndex = 0;
+  let searchIndex = 0;
   let foundTag = false;
-  while ((match = regex.exec(decodedContent)) !== null) {
+  while (searchIndex < decodedContent.length) {
+    const start = decodedContent.indexOf(openTag, searchIndex);
+    if (start < 0) break;
+    const nameStart = start + openTag.length;
+    const nameEnd = decodedContent.indexOf('"', nameStart);
+    if (nameEnd < 0 || decodedContent[nameEnd + 1] !== ">") {
+      searchIndex = start + 1;
+      continue;
+    }
+    const bodyStart = nameEnd + 2;
+    const bodyEnd = decodedContent.indexOf(closeTag, bodyStart);
+    // With no closer left, no later opener can form a complete tag either.
+    if (bodyEnd < 0) break;
+    const end = bodyEnd + closeTag.length;
     foundTag = true;
-    const speakerName = match[1]!.trim();
+    const speakerName = decodedContent.slice(nameStart, nameEnd).trim();
     const knownSpeaker = knownNames.has(normalizeTextForMatch(speakerName));
-    if (match.index > lastIndex) {
-      const before = decodedContent.slice(lastIndex, match.index).trim();
-      if (before) segments.push({ speaker: null, text: before, start: lastIndex, end: match.index });
+    if (start > lastIndex) {
+      const before = decodedContent.slice(lastIndex, start).trim();
+      if (before) segments.push({ speaker: null, text: before, start: lastIndex, end: start });
     }
     segments.push({
       speaker: knownSpeaker ? speakerName : null,
-      text: match[2]!.trim(),
-      start: match.index,
-      end: regex.lastIndex,
+      text: decodedContent.slice(bodyStart, bodyEnd).trim(),
+      start,
+      end,
     });
-    lastIndex = regex.lastIndex;
+    lastIndex = end;
+    searchIndex = end;
   }
   if (lastIndex < decodedContent.length) {
     const after = decodedContent.slice(lastIndex).trim();
@@ -186,7 +246,11 @@ export function groupConsecutiveSegments(segments: SpeakerSegment[]): GroupedSeg
   const groups: GroupedSegment[] = [];
   for (const seg of segments) {
     const last = groups[groups.length - 1];
-    const trimmed = seg.text.replace(/^\n+|\n+$/g, "");
+    let start = 0;
+    let end = seg.text.length;
+    while (seg.text[start] === "\n") start++;
+    while (end > start && seg.text[end - 1] === "\n") end--;
+    const trimmed = seg.text.slice(start, end);
     if (
       last &&
       last.speaker &&

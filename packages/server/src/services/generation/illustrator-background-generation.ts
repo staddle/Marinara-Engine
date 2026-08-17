@@ -9,7 +9,7 @@ import { logger } from "../../lib/logger.js";
 import type { ResolvedAgent } from "../agents/agent-pipeline.js";
 import { normalizeAgentContextSize } from "../agents/agent-executor.js";
 import { generateChatBackground } from "../game/game-asset-generation.js";
-import { resolveConnectionImageDefaults } from "../image/image-generation-defaults.js";
+import { resolveConnectionImageDefaults, resolveConnectionImageQuality } from "../image/image-generation-defaults.js";
 import { loadImageGenerationUserSettings } from "../image/image-generation-settings.js";
 import { createConnectionsStorage } from "../storage/connections.storage.js";
 import { createPromptOverridesStorage } from "../storage/prompt-overrides.storage.js";
@@ -349,6 +349,7 @@ export async function generateIllustratorSceneBackground(args: {
   const imageSettings = await loadImageGenerationUserSettings(args.db);
   const imageFallback = await resolveImageConnectionFallback(connections, imageConnection.id);
   const imageDefaults = resolveConnectionImageDefaults(imageConnection);
+  const imageQuality = resolveConnectionImageQuality(imageConnection);
   const setupConfig = isRecord(args.chatMetadata.gameSetupConfig) ? args.chatMetadata.gameSetupConfig : {};
   const { styleProfileId, styleInstruction } = resolveIllustratorStyleProfile(
     setupConfig,
@@ -379,6 +380,7 @@ export async function generateIllustratorSceneBackground(args: {
     imgEndpointId: imageConnection.imageEndpointId || undefined,
     imgComfyWorkflow: imageConnection.comfyuiWorkflow || undefined,
     imgDefaults: imageDefaults,
+    imgQuality: imageQuality,
     imgFallback: imageFallback,
     styleProfiles: imageSettings.styleProfiles,
     styleProfileId,

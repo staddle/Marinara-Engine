@@ -4,7 +4,9 @@ const SECURITY_HEADERS: Record<string, string> = {
   "Cross-Origin-Opener-Policy": "same-origin",
   "Cross-Origin-Resource-Policy": "same-origin",
   "Origin-Agent-Cluster": "?1",
-  "Referrer-Policy": "strict-origin-when-cross-origin",
+  // Keep user-authored remote media available without disclosing the local
+  // Marinara URL in browser or CSS subresource requests.
+  "Referrer-Policy": "no-referrer",
   "X-Content-Type-Options": "nosniff",
   "X-Frame-Options": "DENY",
   "X-Permitted-Cross-Domain-Policies": "none",

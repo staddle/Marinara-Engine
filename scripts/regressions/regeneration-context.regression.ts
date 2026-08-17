@@ -199,6 +199,28 @@ try {
     );
   }
 
+  const swipeMetadataMessage = createdMessages[5]!;
+  await chatStorage.updateMessageExtra(swipeMetadataMessage.id, {
+    isConversationStart: true,
+    conversationStartForCharacterIds: ["new-character"],
+    hiddenFromAICharacterIds: ["private-character"],
+  });
+  await chatStorage.addSwipe(swipeMetadataMessage.id, "Silent alternate response.", true);
+  const retainedSwipe = (await chatStorage.getSwipes(swipeMetadataMessage.id)).find((swipe) => swipe.index === 1);
+  assert.ok(retainedSwipe);
+  const retainedSwipeExtra = JSON.parse(retainedSwipe.extra as string) as Record<string, unknown>;
+  assert.equal(retainedSwipeExtra.isConversationStart, true);
+  assert.deepEqual(retainedSwipeExtra.conversationStartForCharacterIds, ["new-character"]);
+  assert.deepEqual(retainedSwipeExtra.hiddenFromAICharacterIds, ["private-character"]);
+  await chatStorage.setActiveSwipe(swipeMetadataMessage.id, 1);
+  const switchedMessageExtra = JSON.parse((await chatStorage.getMessage(swipeMetadataMessage.id))!.extra as string) as Record<
+    string,
+    unknown
+  >;
+  assert.deepEqual(switchedMessageExtra.conversationStartForCharacterIds, ["new-character"]);
+  assert.deepEqual(switchedMessageExtra.hiddenFromAICharacterIds, ["private-character"]);
+  assert.equal(switchedMessageExtra.isConversationStart, true);
+
   await db.insert(memoryChunks).values({
     id: "unaffected-earlier-memory",
     chatId: editedChat.id,

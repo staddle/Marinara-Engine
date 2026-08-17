@@ -15,7 +15,7 @@ import { generatePerceptionHints, formatPerceptionHints, type PerceptionContext 
 import { getMoraleTier, formatMoraleContext } from "../game/morale.service.js";
 import { sidecarModelService } from "../sidecar/sidecar-model.service.js";
 import { isInferenceAvailable as isSidecarInferenceAvailable } from "../sidecar/sidecar-inference.service.js";
-import { cardPromptText } from "./generation-text-utils.js";
+import { cardPromptText } from "../prompt/card-text.js";
 import { buildPartyNpcId, isPartyNpcId } from "./game-party-utils.js";
 
 type PromptMessage = {

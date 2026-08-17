@@ -54,14 +54,15 @@ import { sttRoutes } from "./stt.routes.js";
 import { promptOverridesRoutes } from "./prompt-overrides.routes.js";
 import { csrfDiagnosticsRoutes } from "./csrf-diagnostics.routes.js";
 import { professorMariWorkspaceRoutes } from "./professor-mari-workspace.routes.js";
-import { noodleRoutes } from "./noodle.routes.js";
 import { capabilityPackagesRoutes } from "./capability-packages.routes.js";
 import { customAgentRepositoriesRoutes } from "./custom-agent-repositories.routes.js";
 import { personalExtensionsRoutes } from "./personal-extensions.routes.js";
 import { notificationSoundRoutes } from "./notification-sound.routes.js";
 import { libraryFoldersRoutes } from "./library-folders.routes.js";
+import { androidLocalAuthRoutes } from "../middleware/android-local-auth.js";
 
 export async function registerRoutes(app: FastifyInstance) {
+  await app.register(androidLocalAuthRoutes, { prefix: "/api/android-auth" });
   await app.register(chatsRoutes, { prefix: "/api/chats" });
   await app.register(chatFoldersRoutes, { prefix: "/api/chat-folders" });
   await app.register(chatPresetsRoutes, { prefix: "/api/chat-presets" });
@@ -114,7 +115,6 @@ export async function registerRoutes(app: FastifyInstance) {
   await app.register(promptOverridesRoutes, { prefix: "/api/prompt-overrides" });
   await app.register(csrfDiagnosticsRoutes, { prefix: "/api/csrf" });
   await app.register(professorMariWorkspaceRoutes, { prefix: "/api/professor-mari/workspace" });
-  await app.register(noodleRoutes, { prefix: "/api/noodle" });
   await app.register(capabilityPackagesRoutes, { prefix: "/api/capability-packages" });
   await app.register(customAgentRepositoriesRoutes, { prefix: "/api/custom-agent-repositories" });
   await app.register(personalExtensionsRoutes, { prefix: "/api/personal-extensions" });

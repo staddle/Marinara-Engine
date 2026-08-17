@@ -4,6 +4,7 @@ import {
   inferImageSource,
   normalizeImageGenerationProfile,
   type ImageGenerationDefaultsProfile,
+  type ImageGenerationQuality,
 } from "@marinara-engine/shared";
 
 export interface ImageDefaultsConnection {
@@ -12,7 +13,16 @@ export interface ImageDefaultsConnection {
   model?: string | null;
   imageGenerationSource?: string | null;
   imageService?: string | null;
+  imageGenerationQuality?: string | null;
   defaultParameters?: string | Record<string, unknown> | null;
+}
+
+export function resolveConnectionImageQuality(conn: ImageDefaultsConnection): ImageGenerationQuality {
+  return conn.imageGenerationQuality === "low" ||
+    conn.imageGenerationQuality === "medium" ||
+    conn.imageGenerationQuality === "high"
+    ? conn.imageGenerationQuality
+    : "auto";
 }
 
 export function resolveImageGenerationService(conn: ImageDefaultsConnection): string {

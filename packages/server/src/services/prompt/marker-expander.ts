@@ -8,7 +8,6 @@ import {
   formatRpgStatsForPrompt,
   isExternallyImportedAgent,
   resolveMacros,
-  stripMacroComments,
 } from "@marinara-engine/shared";
 import type {
   CharacterMacroProfile,
@@ -25,6 +24,7 @@ import { createCharactersStorage } from "../storage/characters.storage.js";
 import { createAgentsStorage } from "../storage/agents.storage.js";
 import { getCustomAgentImportPolicy } from "../agents/custom-agent-import-policy.service.js";
 import { processLorebooks, type LorebookFinalContentResolver, type LorebookScanResult } from "../lorebook/index.js";
+import { cardPromptText } from "./card-text.js";
 import { wrapContent } from "./format-engine.js";
 import { sanitizeExampleDialoguePromptLeaf, sanitizePromptLeaf } from "./prompt-escaping.js";
 import { agentRuns } from "../../db/schema/index.js";
@@ -113,10 +113,6 @@ export interface ExpandedMarker {
   content: string;
   /** If the marker produces multiple messages (e.g. chat_history), they go here */
   messages?: ChatMLMessage[];
-}
-
-function cardPromptText(value: unknown): string {
-  return typeof value === "string" ? stripMacroComments(value).trim() : "";
 }
 
 function resolveSanitizedPromptLeaf(

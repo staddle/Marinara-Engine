@@ -36,11 +36,13 @@ export * from "./types/spatial-context.js";
 export * from "./types/capability-runtime.js";
 export * from "./types/localization.js";
 export * from "./types/personal-extension.js";
+export * from "./types/home-feed.js";
 
 // Schemas
 export * from "./schemas/chat.schema.js";
 export * from "./schemas/chat-preset.schema.js";
 export * from "./schemas/character.schema.js";
+export * from "./schemas/persona.schema.js";
 export * from "./schemas/lorebook.schema.js";
 export * from "./schemas/prompt.schema.js";
 export * from "./schemas/connection.schema.js";
@@ -61,6 +63,7 @@ export * from "./schemas/personal-extension.schema.js";
 export * from "./schemas/folder.schema.js";
 export * from "./schemas/scene-analysis.schema.js";
 export * from "./schemas/library-folder.schema.js";
+export * from "./schemas/home-widget.schema.js";
 
 // Constants
 export * from "./constants/providers.js";
@@ -72,6 +75,7 @@ export * from "./constants/agent-activation.js";
 export * from "./constants/impersonate.js";
 export * from "./constants/image-generation-defaults.js";
 export * from "./constants/video-generation-defaults.js";
+export * from "./constants/storage-migration-notice.js";
 export * from "./constants/video-generation-settings.js";
 export * from "./constants/image-style-profiles.js";
 export * from "./constants/security.js";
@@ -140,6 +144,7 @@ export * from "./utils/sprite-labels.js";
 export * from "./utils/managed-generation-parameters.js";
 export * from "./utils/conversation-presence.js";
 export * from "./utils/avatar-crop.js";
+export * from "./utils/persona-normalization.js";
 export * from "./utils/noodle-mentions.js";
 export * from "./utils/noodle-polls.js";
 export * from "./utils/noodle-post-images.js";

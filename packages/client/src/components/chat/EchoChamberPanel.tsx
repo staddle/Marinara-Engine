@@ -170,14 +170,22 @@ function CornerPicker({ current, onChange }: { current: EchoChamberSide; onChang
 export function EchoChamberPanel({ hiddenOnMobile = false }: EchoChamberPanelProps) {
   const { t: localizeUi } = useUiTranslation();
   const activeChatId = useChatStore((s) => s.activeChatId);
-  const echoChamberSide = useUIStore((s) => s.echoChamberSide);
-  const setEchoChamberSide = useUIStore((s) => s.setEchoChamberSide);
+  const echoChamberSide = useUIStore((s) =>
+    activeChatId ? (s.echoChamberSideByChatId[activeChatId] ?? s.echoChamberSide) : s.echoChamberSide,
+  );
+  const setEchoChamberSideForChat = useUIStore((s) => s.setEchoChamberSideForChat);
   const echoChamberOpen = useUIStore((s) => s.echoChamberOpen);
   const toggleEchoChamber = useUIStore((s) => s.toggleEchoChamber);
   const rememberedPanelSize = useUIStore((s) =>
     activeChatId ? (s.echoChamberSizeByChatId[activeChatId] ?? null) : null,
   );
   const setEchoChamberSizeForChat = useUIStore((s) => s.setEchoChamberSizeForChat);
+  const setEchoChamberSide = useCallback(
+    (side: EchoChamberSide) => {
+      if (activeChatId) setEchoChamberSideForChat(activeChatId, side);
+    },
+    [activeChatId, setEchoChamberSideForChat],
+  );
   const trackerPanelEnabled = useUIStore((s) => s.trackerPanelEnabled);
   const trackerPanelOpen = useUIStore((s) => s.trackerPanelOpen);
   const trackerPanelSide = useUIStore((s) => s.trackerPanelSide);
@@ -294,9 +302,12 @@ export function EchoChamberPanel({ hiddenOnMobile = false }: EchoChamberPanelPro
   // Auto-scroll when a new message becomes visible
   useEffect(() => {
     if (scrollRef.current) {
-      scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+      scrollRef.current.scrollTo({
+        top: scrollRef.current.scrollHeight,
+        behavior: streamingChatId === activeChatId ? "auto" : "smooth",
+      });
     }
-  }, [visibleCount]);
+  }, [activeChatId, streamingChatId, visibleCount]);
 
   // Name → color map
   const nameColorMap = useMemo(() => {
@@ -405,6 +416,15 @@ export function EchoChamberPanel({ hiddenOnMobile = false }: EchoChamberPanelPro
     },
     [clampPanelSize],
   );
+
+  const handleResizeLostCapture = useCallback(() => {
+    if (!resizeRef.current) return;
+    const pendingSize = pendingPanelSizeRef.current;
+    const rect = panelRef.current?.getBoundingClientRect();
+    resizeRef.current = null;
+    if (pendingSize) commitPanelSize(pendingSize.width, pendingSize.height);
+    else if (rect) commitPanelSize(rect.width, rect.height);
+  }, [commitPanelSize]);
 
   const handleResizeKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLButtonElement>) => {
@@ -681,6 +701,7 @@ export function EchoChamberPanel({ hiddenOnMobile = false }: EchoChamberPanelPro
         onPointerMove={handleResizeMove}
         onPointerUp={handleResizeEnd}
         onPointerCancel={handleResizeCancel}
+        onLostPointerCapture={handleResizeLostCapture}
         onKeyDown={handleResizeKeyDown}
       >
         <span

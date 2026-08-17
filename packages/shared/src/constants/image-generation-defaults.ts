@@ -147,7 +147,8 @@ export interface NormalizeImageGenerationProfileResult {
 export function imageSourceToDefaultsService(value: unknown): ImageDefaultsService | null {
   if (typeof value !== "string") return null;
   const normalized = value.trim().toLowerCase();
-  if (normalized === "drawthings") return "automatic1111";
+  if (normalized === "drawthings" || normalized === "arli") return "automatic1111";
+  if (normalized === "swarmui") return "comfyui";
   return isImageDefaultsService(normalized) ? normalized : null;
 }
 
@@ -172,8 +173,16 @@ export function normalizeImageGenerationProfile(
   rawProfile: unknown,
   service: ImageDefaultsService,
 ): NormalizeImageGenerationProfileResult {
+  const profile = normalizeImageGenerationProfileValue(rawProfile, service);
+  return { profile, changed: JSON.stringify(profile) !== JSON.stringify(rawProfile) };
+}
+
+function normalizeImageGenerationProfileValue(
+  rawProfile: unknown,
+  service: ImageDefaultsService,
+): ImageGenerationDefaultsProfile {
   if (!isRecord(rawProfile)) {
-    return { profile: createDefaultImageGenerationProfile(service), changed: true };
+    return createDefaultImageGenerationProfile(service);
   }
 
   const profile = createDefaultImageGenerationProfile(service);
@@ -188,15 +197,14 @@ export function normalizeImageGenerationProfile(
     profile.novelai = normalizeNovelAiDefaults(rawProfile.novelai);
   }
 
-  const changed = JSON.stringify(profile) !== JSON.stringify(rawProfile);
-  return { profile, changed };
+  return profile;
 }
 
 export function sanitizeImageGenerationProfile(
   profile: ImageGenerationDefaultsProfile,
   service: ImageDefaultsService,
 ): ImageGenerationDefaultsProfile {
-  return normalizeImageGenerationProfile(profile, service).profile;
+  return normalizeImageGenerationProfileValue(profile, service);
 }
 
 export function mergePromptPrefix(prefix: string, prompt: string): string {
@@ -218,10 +226,14 @@ export function mergeNegativePrompt(prefix: string, prompt?: string): string {
 }
 
 function normalizePromptPrefixForMerge(prefix: string): string {
-  return prefix
-    .trim()
-    .replace(/[\s,;.]+$/g, "")
-    .trim();
+  const trimmed = prefix.trim();
+  let end = trimmed.length;
+  while (end > 0) {
+    const character = trimmed[end - 1]!;
+    if (character !== "," && character !== ";" && character !== "." && character.trim() !== "") break;
+    end -= 1;
+  }
+  return trimmed.slice(0, end).trim();
 }
 
 function promptAlreadyStartsWithPrefix(prompt: string, prefix: string): boolean {
@@ -242,9 +254,7 @@ function promptPrefixFragments(value: string): string[] {
   return value
     .split(/[,;\n]+/g)
     .map((fragment) =>
-      fragment
-        .trim()
-        .replace(/^[([{]\s*(.+?)\s*[)\]}]$/g, "$1")
+      unwrapSingleLineBracketedFragment(fragment.trim())
         .replace(/: ?[+-]?\d+(?:\.\d+)?$/g, "")
         .replace(/[^\p{L}\p{N}\s_-]/gu, "")
         .replace(/[_-]+/g, " ")
@@ -253,6 +263,20 @@ function promptPrefixFragments(value: string): string[] {
         .toLowerCase(),
     )
     .filter(Boolean);
+}
+
+function unwrapSingleLineBracketedFragment(fragment: string): string {
+  const first = fragment[0];
+  const last = fragment[fragment.length - 1];
+  if (!first || !last || !"([{".includes(first) || !")]}".includes(last)) return fragment;
+
+  const body = fragment.slice(1, -1).trim();
+  for (const character of body) {
+    if (character === "\n" || character === "\r" || character === "\u2028" || character === "\u2029") {
+      return fragment;
+    }
+  }
+  return body || fragment;
 }
 
 function normalizeAutomatic1111Defaults(rawDefaults: unknown): Automatic1111Defaults {

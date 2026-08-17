@@ -274,7 +274,7 @@ export function RoleplayHUDActionsMenu({
                 clearGameState();
                 onClose();
               }}
-              className="flex w-full items-center gap-2 px-3 py-2 text-[0.625rem] text-[var(--muted-foreground)] transition-colors hover:bg-red-500/10 hover:text-red-300"
+              className="flex w-full items-center gap-2 px-3 py-2 text-[0.625rem] text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)]/45 hover:text-[var(--foreground)]"
             >
               <Trash2 size="0.75rem" className="text-current" />
               <span>{localizeUi("ui.chat.roleplayhudactionsmenu.clearTrackers")}</span>

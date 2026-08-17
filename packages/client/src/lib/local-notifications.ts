@@ -1,10 +1,21 @@
+import { getAndroidBridgeToken } from "@/lib/android-bridge";
+
 export type LocalNotificationPermission = NotificationPermission | "insecure" | "unsupported";
 export type NativeNotificationPermission = "default" | "denied" | "granted" | "unsupported";
 
 type MarinaraAndroidNotificationBridge = {
-  getNotificationPermission?: () => string;
-  requestNotificationPermission?: () => void;
-  showNotification?: (title: string, body: string, tag: string) => void;
+  getNotificationPermission?: {
+    (token: string): string;
+    (): string;
+  };
+  requestNotificationPermission?: {
+    (token: string): void;
+    (): void;
+  };
+  showNotification?: {
+    (token: string, title: string, body: string, tag: string): void;
+    (title: string, body: string, tag: string): void;
+  };
 };
 
 export type LocalMessageNotificationOptions = {
@@ -42,7 +53,8 @@ function normalizeNativePermission(value: string | undefined): NativeNotificatio
 export function getNativeNotificationPermission(): NativeNotificationPermission {
   const bridge = getAndroidNotificationBridge();
   if (typeof bridge?.getNotificationPermission !== "function") return "unsupported";
-  return normalizeNativePermission(bridge.getNotificationPermission());
+  const token = getAndroidBridgeToken();
+  return normalizeNativePermission(token ? bridge.getNotificationPermission(token) : bridge.getNotificationPermission());
 }
 
 export async function requestNativeNotificationPermission(): Promise<NativeNotificationPermission> {
@@ -64,7 +76,9 @@ export async function requestNativeNotificationPermission(): Promise<NativeNotif
     // listener installed so a late Android result is still consumed and cleaned up.
     const timeoutId = window.setTimeout(() => resolve(getNativeNotificationPermission()), 30_000);
     window.addEventListener("marinara:native-notification-permission", handlePermission, { once: true });
-    bridge.requestNotificationPermission?.();
+    const token = getAndroidBridgeToken();
+    if (token) bridge.requestNotificationPermission?.(token);
+    else bridge.requestNotificationPermission?.();
   });
 }
 
@@ -130,10 +144,10 @@ export function showNativeMessageNotification({
   if (typeof bridge?.showNotification !== "function" || getNativeNotificationPermission() !== "granted") {
     return false;
   }
-  bridge.showNotification(
-    resolveMessageNotificationTitle(title, characterName),
-    "Open Marinara to read it.",
-    tag ?? "message",
-  );
+  const notificationTitle = resolveMessageNotificationTitle(title, characterName);
+  const notificationTag = tag ?? "message";
+  const token = getAndroidBridgeToken();
+  if (token) bridge.showNotification(token, notificationTitle, "Open Marinara to read it.", notificationTag);
+  else bridge.showNotification(notificationTitle, "Open Marinara to read it.", notificationTag);
   return true;
 }

@@ -10,6 +10,7 @@ import { newId } from "../utils/id-generator.js";
 import { DATA_DIR } from "../utils/data-dir.js";
 import { assertInsideDir, isAllowedImageBuffer } from "../utils/security.js";
 import { logger } from "../lib/logger.js";
+import { resolveFlatMediaFile, sendValidatedMediaFile, validateImageAssetFile } from "../utils/media-file-security.js";
 import { findGlobalGalleryCapabilityReferences } from "../services/image/global-gallery-capability-references.js";
 import {
   unlinkGalleryFileIfUnreferenced,
@@ -177,12 +178,15 @@ export async function globalGalleryRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: "Invalid path" });
     }
 
-    const filePath = join(GLOBAL_GALLERY_ROOT, filename);
-    if (!existsSync(filePath)) {
+    const filePath = resolveFlatMediaFile(GLOBAL_GALLERY_ROOT, filename);
+    if (!filePath || !existsSync(filePath)) {
       return reply.status(404).send({ error: "Not found" });
     }
 
-    return reply.sendFile(filename, GLOBAL_GALLERY_ROOT);
+    const image = await validateImageAssetFile(filePath, filename);
+    if (!image) return reply.status(404).send({ error: "Not found" });
+
+    return sendValidatedMediaFile(reply, image, { method: req.method, rangeHeader: req.headers.range });
   });
 
   // Move an image into (or out of) a folder. folderId null = root.

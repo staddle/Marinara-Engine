@@ -63,6 +63,7 @@ import { useTranslate } from "../../hooks/use-translate";
 import { useTTSConfig } from "../../hooks/use-tts";
 import { useApplyRegex } from "../../hooks/use-apply-regex";
 import { useBackdropDismiss } from "../../hooks/use-backdrop-dismiss";
+import { useReducedAmbientEffects } from "../../hooks/use-reduced-ambient-effects";
 import {
   CHAT_VISUAL_VIEWPORT_CHANGE_EVENT,
   type ChatVisualViewportChangeDetail,
@@ -73,6 +74,7 @@ import { getDefaultChatTextColor, useUIStore } from "../../stores/ui.store";
 import { useChatStore } from "../../stores/chat.store";
 import { parseChatMetadata } from "../../lib/chat-display";
 import { parseMessageExtraRecord } from "../../lib/chat-message-extra";
+import { estimateGameSessionHistoryTokens } from "../../lib/game-session-history";
 import { createMessageMacroResolver, findCharacterByName } from "../../lib/chat-macros";
 import { animateTextHtml } from "./AnimatedText";
 import { ttsService } from "../../lib/tts-service";
@@ -86,6 +88,7 @@ import {
   type TTSConfig,
   type GameNpc,
   type SkillCheckResult,
+  formatSkillCheckResultSummary,
 } from "@marinara-engine/shared";
 import type { CharacterMap, PersonaInfo } from "../chat/chat-area.types";
 import { MESSAGE_SELECTION_SURFACE_CLASS } from "../chat/message-selection-styles";
@@ -212,33 +215,6 @@ type NarrationMessage = Pick<Message, "id" | "chatId" | "role" | "content" | "ch
   characterName?: string;
 };
 
-const APPROX_MESSAGE_TOKEN_OVERHEAD = 4;
-
-function estimateTextTokenCount(text: string): number {
-  const trimmed = text.trim();
-  if (!trimmed) return 0;
-  const wordEstimate = trimmed.split(/\s+/).filter(Boolean).length * 1.3;
-  const charEstimate = trimmed.length / 4;
-  return Math.ceil(Math.max(wordEstimate, charEstimate));
-}
-
-function estimateMessageTokenCount(message: NarrationMessage): number {
-  const stored = message.extra?.tokenCount;
-  if (typeof stored === "number" && Number.isFinite(stored) && stored > 0) return stored;
-  const textTokens = estimateTextTokenCount(message.content);
-  return textTokens > 0 ? textTokens + APPROX_MESSAGE_TOKEN_OVERHEAD : 0;
-}
-
-function estimateSessionHistoryTokens(messages: NarrationMessage[]): number {
-  let startIndex = 0;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]?.extra?.isConversationStart) {
-      startIndex = i;
-      break;
-    }
-  }
-  return messages.slice(startIndex).reduce((total, message) => total + estimateMessageTokenCount(message), 0);
-}
 
 function formatTokenEstimate(tokens: number): string {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(tokens >= 10_000_000 ? 0 : 1).replace(/\.0$/, "")}m`;
@@ -943,18 +919,7 @@ function formatSkillCheckLogContent(message: NarrationMessage): NarrationSegment
   const skillChecks = parseGmTags(message.content || "").skillChecks;
   if (skillChecks.length === 0) return [];
 
-  const formatResult = (result: SkillCheckResult): string => {
-    const label = result.criticalSuccess
-      ? "Critical success"
-      : result.criticalFailure
-        ? "Critical failure"
-        : result.success
-          ? "Success"
-          : "Failure";
-    const modifier = result.modifier === 0 ? "" : ` ${result.modifier > 0 ? "+" : ""}${result.modifier}`;
-    const rollMode = result.rollMode !== "normal" ? ` (${result.rollMode})` : "";
-    return `${result.skill} check (DC ${result.dc}): [${result.rolls.join(", ")}]${modifier}${rollMode} = ${result.total}. ${label}.`;
-  };
+  const formatResult = (result: SkillCheckResult): string => formatSkillCheckResultSummary(result);
 
   return skillChecks.map((skillCheck, index) => {
     const result = skillCheck.resolvedResult;
@@ -2720,7 +2685,7 @@ export function GameNarration({
           }
         : { key: "", offsetTop: 0, scrollTop: container.scrollTop };
   }, []);
-  const sessionHistoryTokens = useMemo(() => estimateSessionHistoryTokens(messages), [messages]);
+  const sessionHistoryTokens = useMemo(() => estimateGameSessionHistoryTokens(messages), [messages]);
   const loadOlderLogs = useCallback(() => {
     setVisibleLogCount((current) => Math.min(logEntries.length, current + logPageSize));
   }, [logEntries.length, logPageSize]);
@@ -2886,6 +2851,8 @@ export function GameNarration({
   const segmentEnterReady = useRef(false);
   const narrationMessageChanged = Boolean(latestAssistant?.id && latestAssistant.id !== lastNarrationMsgIdRef.current);
   const gameInstantTextReveal = useUIStore((s) => s.gameInstantTextReveal);
+  const reduceAmbientEffects = useReducedAmbientEffects();
+  const revealTextInstantly = gameInstantTextReveal || reduceAmbientEffects;
   const gameTextSpeed = useUIStore((s) => s.gameTextSpeed);
   const gameAutoPlayDelay = useUIStore((s) => s.gameAutoPlayDelay);
   const chatFontColor = useUIStore((s) => s.chatFontColor);
@@ -2905,10 +2872,10 @@ export function GameNarration({
   const getSegmentStartVisibleChars = useCallback(
     (index: number) => {
       const segment = segments[index];
-      if (!segment || !gameInstantTextReveal || directionsActive || scenePreparing) return 0;
+      if (!segment || !revealTextInstantly || directionsActive || scenePreparing) return 0;
       return effectDisplayLength(segment.content);
     },
-    [segments, gameInstantTextReveal, directionsActive, scenePreparing],
+    [segments, revealTextInstantly, directionsActive, scenePreparing],
   );
 
   useEffect(() => {
@@ -3319,7 +3286,7 @@ export function GameNarration({
     tw.pos = visibleChars;
 
     if (tw.pos >= dispLen) return;
-    if (gameInstantTextReveal || gameTextSpeed >= 100) {
+    if (revealTextInstantly || gameTextSpeed >= 100) {
       // Instant
       tw.pos = dispLen;
       setVisibleChars(dispLen);
@@ -3341,7 +3308,7 @@ export function GameNarration({
     }, TICK_MS);
     return () => clearInterval(interval);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, gameInstantTextReveal, gameTextSpeed, directionsActive, scenePreparing, logsOpen]); // visibleChars intentionally excluded — managed internally
+  }, [active, revealTextInstantly, gameTextSpeed, directionsActive, scenePreparing, logsOpen]); // visibleChars intentionally excluded — managed internally
 
   const { data: assetManifest } = useGameAssetManifest();
 
@@ -6672,7 +6639,9 @@ export function formatNarration(content: string, boldDialogue = true): string {
     .replace(/\[state:\s*(\w+)\]/gi, (_match, state: string) =>
       commandBadge("bg-sky-500/20 text-sky-300", "⚡ State", state),
     )
+    .replace(/(^|\n)[ \t]*-#(?:[ \t]+([^\n]*))?(?=\n|$)/g, '$1<small class="mari-md-subtext">$2</small>')
     .replace(/\*\*(.+?)\*\*/gs, "<strong>$1</strong>")
+    .replace(/__(.+?)__/gs, '<u class="mari-md-underline">$1</u>')
     .replace(/\*(.+?)\*/gs, "<em>$1</em>")
     .replace(/\n/g, "<br />");
 
@@ -6681,5 +6650,8 @@ export function formatNarration(content: string, boldDialogue = true): string {
     html = html.replace(narrationQuoteRe, (match) => `<strong>${match}</strong>`);
   }
 
-  return DOMPurify.sanitize(html, { ALLOWED_TAGS: ["strong", "em", "br", "span"], ALLOWED_ATTR: ["class"] });
+  return DOMPurify.sanitize(html, {
+    ALLOWED_TAGS: ["strong", "em", "u", "small", "br", "span"],
+    ALLOWED_ATTR: ["class"],
+  });
 }

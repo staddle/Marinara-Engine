@@ -9,6 +9,7 @@ import { resolveValidatedImage, safeFetch } from "../utils/security.js";
 const CT_API_BASE = "https://character-tavern.com/api";
 const CT_CARDS_CDN = "https://ct-cards.storage.character-tavern.com";
 const AVATAR_PROXY_MAX_BYTES = 10 * 1024 * 1024;
+const CARD_DOWNLOAD_MAX_BYTES = 256 * 1024 * 1024;
 const CT_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
@@ -234,11 +235,16 @@ export async function botBrowserChartavernRoutes(app: FastifyInstance) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60_000);
     try {
-      const res = await fetch(`${CT_CARDS_CDN}/${encodeURI(path)}.png`, {
+      const res = await safeFetch(`${CT_CARDS_CDN}/${encodeURI(path)}.png`, {
         signal: controller.signal,
+        policy: { allowedProtocols: ["https:"] },
+        allowedContentTypes: ["image/png", "application/octet-stream"],
+        allowMissingContentType: true,
+        maxResponseBytes: CARD_DOWNLOAD_MAX_BYTES,
       });
       if (!res.ok) throw new Error(`Download failed: ${res.status}`);
       const buf = Buffer.from(await res.arrayBuffer());
+      if (resolveValidatedImage(buf)?.mimeType !== "image/png") throw new Error("Downloaded card is not a PNG image");
       return reply
         .header("Content-Type", "image/png")
         .header("Content-Disposition", `attachment; filename="character.png"`)

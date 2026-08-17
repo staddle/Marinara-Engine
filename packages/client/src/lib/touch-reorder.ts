@@ -35,11 +35,13 @@ export function getTouchReorderDropIndex({
   if (!root) return null;
 
   const items = Array.from(root.querySelectorAll<HTMLElement>(itemSelector));
-  for (const [index, candidate] of items.entries()) {
+  for (const [domIndex, candidate] of items.entries()) {
+    const candidateIndex = readReorderIndex(candidate) ?? domIndex;
     const rect = candidate.getBoundingClientRect();
-    if (y < rect.top) return index;
-    if (y <= rect.bottom) return y < rect.top + rect.height / 2 ? index : index + 1;
+    if (y < rect.top) return candidateIndex;
+    if (y <= rect.bottom) return y < rect.top + rect.height / 2 ? candidateIndex : candidateIndex + 1;
   }
 
-  return itemCount;
+  const lastIndex = readReorderIndex(items.at(-1) ?? null);
+  return lastIndex === null ? itemCount : Math.min(itemCount, lastIndex + 1);
 }

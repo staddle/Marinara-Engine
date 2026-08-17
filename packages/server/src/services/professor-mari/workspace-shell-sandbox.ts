@@ -1,19 +1,20 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { lstat, mkdtemp, readdir, rm } from "node:fs/promises";
-import { delimiter, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { workspacePathAccessPolicy } from "./workspace-change-review.service.js";
 import { getBubblewrapRuntimeStatus } from "../sandbox/bubblewrap-runtime.js";
 
 export type WorkspaceShellSandboxBackend = "macos-seatbelt" | "linux-bubblewrap";
+export type WorkspaceProcessIsolationBackend = WorkspaceShellSandboxBackend | "node-permission-opt-in";
 
 export type WorkspaceShellSandboxStatus =
   | { available: true; backend: WorkspaceShellSandboxBackend }
   | { available: false; backend: null; reason: string };
 
 export type WorkspaceSandboxedShell = {
-  backend: WorkspaceShellSandboxBackend;
+  backend: WorkspaceProcessIsolationBackend;
   child: ChildProcess;
   cleanup: () => Promise<void>;
 };
@@ -22,6 +23,15 @@ type SpawnWorkspaceShellInput = {
   command: string;
   workspaceRoot: string;
   env: NodeJS.ProcessEnv;
+};
+
+export type SpawnWorkspaceProcessInput = {
+  executable: string;
+  args: string[];
+  workspaceRoot: string;
+  env: NodeJS.ProcessEnv;
+  writableWorkspace?: boolean;
+  allowChildProcesses?: boolean;
 };
 
 const MACOS_SANDBOX_EXEC = "/usr/bin/sandbox-exec";
@@ -135,9 +145,7 @@ async function workspacePolicyPaths(workspaceRoot: string) {
 }
 
 function macosReadRoots(workspaceRoot: string, env: NodeJS.ProcessEnv, sandboxTemp: string) {
-  const pathRoots = (env.PATH ?? "")
-    .split(delimiter)
-    .filter(Boolean);
+  const pathRoots = (env.PATH ?? "").split(delimiter).filter(Boolean);
   return uniqueExistingPaths([
     workspaceRoot,
     sandboxTemp,
@@ -153,6 +161,7 @@ function macosReadRoots(workspaceRoot: string, env: NodeJS.ProcessEnv, sandboxTe
     "/dev",
     "/opt/homebrew",
     "/usr/local",
+    dirname(process.execPath),
     ...pathRoots,
   ]);
 }
@@ -161,23 +170,25 @@ export async function buildMacosWorkspaceShellProfile(
   workspaceRoot: string,
   env: NodeJS.ProcessEnv,
   sandboxTemp: string,
+  writableWorkspace = true,
+  executable = "/bin/bash",
+  allowChildProcesses = true,
 ) {
   const policyPaths = await workspacePolicyPaths(workspaceRoot);
   const readable = macosReadRoots(workspaceRoot, env, sandboxTemp)
     .map((path) => `    (subpath ${sandboxLiteral(path)})`)
     .join("\n");
-  const forbiddenReads = policyPaths.forbidden
-    .map((path) => `    (subpath ${sandboxLiteral(path)})`)
-    .join("\n");
-  const sensitiveWrites = policyPaths.sensitive
-    .map((path) => `    (subpath ${sandboxLiteral(path)})`)
-    .join("\n");
+  const forbiddenReads = policyPaths.forbidden.map((path) => `    (subpath ${sandboxLiteral(path)})`).join("\n");
+  const sensitiveWrites = policyPaths.sensitive.map((path) => `    (subpath ${sandboxLiteral(path)})`).join("\n");
   const forbiddenReadRule = forbiddenReads ? `(deny file-read*\n${forbiddenReads})` : "";
-  const sensitiveWriteRule = sensitiveWrites ? `(deny file-write*\n${sensitiveWrites})` : "";
+  const sensitiveWriteRule = writableWorkspace && sensitiveWrites ? `(deny file-write*\n${sensitiveWrites})` : "";
+  const workspaceWriteRule = writableWorkspace ? `    (subpath ${sandboxLiteral(workspaceRoot)})\n` : "";
+  const processRules = allowChildProcesses
+    ? `(allow process*)\n(allow signal)`
+    : `(allow process-exec (literal ${sandboxLiteral(executable)}))\n(allow process-info* (target self))\n(allow signal (target self))`;
   return `(version 1)
 (deny default)
-(allow process*)
-(allow signal)
+${processRules}
 (allow sysctl-read)
 (allow mach-lookup)
 (allow ipc-posix*)
@@ -186,7 +197,7 @@ export async function buildMacosWorkspaceShellProfile(
     (literal "/")
 ${readable})
 (allow file-write*
-    (subpath ${sandboxLiteral(workspaceRoot)})
+${workspaceWriteRule}
     (subpath ${sandboxLiteral(sandboxTemp)})
     (literal "/dev/null")
     (literal "/dev/tty"))
@@ -197,9 +208,7 @@ ${sensitiveWriteRule}
 }
 
 function linuxReadRoots(workspaceRoot: string, env: NodeJS.ProcessEnv) {
-  const pathRoots = (env.PATH ?? "")
-    .split(delimiter)
-    .filter(Boolean);
+  const pathRoots = (env.PATH ?? "").split(delimiter).filter(Boolean);
   // Preserve paths such as /bin and /lib even when the host exposes them as
   // symlinks into /usr. Bubblewrap starts with an empty root, so canonicalizing
   // those mount destinations would remove the aliases expected by shells and
@@ -212,6 +221,7 @@ function linuxReadRoots(workspaceRoot: string, env: NodeJS.ProcessEnv) {
     "/lib64",
     "/etc",
     "/nix/store",
+    dirname(process.execPath),
     workspaceRoot,
     ...pathRoots,
   ]);
@@ -221,7 +231,9 @@ async function linuxBubblewrapArgs(
   workspaceRoot: string,
   env: NodeJS.ProcessEnv,
   sandboxTemp: string,
-  command: string,
+  executable: string,
+  commandArgs: string[],
+  writableWorkspace: boolean,
 ) {
   const policyPaths = await workspacePolicyPaths(workspaceRoot);
   const args = [
@@ -239,7 +251,7 @@ async function linuxBubblewrapArgs(
     if (root === workspaceRoot) continue;
     args.push("--ro-bind", root, root);
   }
-  args.push("--bind", workspaceRoot, workspaceRoot);
+  args.push(writableWorkspace ? "--bind" : "--ro-bind", workspaceRoot, workspaceRoot);
   args.push("--bind", sandboxTemp, sandboxTemp);
   for (const path of policyPaths.sensitive) {
     args.push("--ro-bind", path, path);
@@ -249,21 +261,21 @@ async function linuxBubblewrapArgs(
     else args.push("--ro-bind", "/dev/null", path);
   }
   args.push("--chdir", workspaceRoot);
-  args.push("/bin/bash", "--noprofile", "--norc", "-c", command);
+  args.push(executable, ...commandArgs);
   return args;
 }
 
-export async function spawnWorkspaceSandboxedShell(
-  input: SpawnWorkspaceShellInput,
+export async function spawnWorkspaceSandboxedProcess(
+  input: SpawnWorkspaceProcessInput,
 ): Promise<WorkspaceSandboxedShell> {
   const status = getWorkspaceShellSandboxStatus();
   if (!status.available) {
-    throw new Error(
-      `${status.reason} Use Professor Mari's structured read, grep, find, ls, edit, write, and app_data tools instead.`,
-    );
+    throw new Error(`${status.reason}`);
   }
 
   const workspaceRoot = resolve(input.workspaceRoot);
+  const writableWorkspace = input.writableWorkspace !== false;
+  const allowChildProcesses = input.allowChildProcesses !== false;
   const sandboxTemp = await mkdtemp(join(tmpdir(), "marinara-mari-shell-"));
   const safeEnv = sanitizeWorkspaceShellEnv(input.env);
   const env: NodeJS.ProcessEnv = {
@@ -283,22 +295,25 @@ export async function spawnWorkspaceSandboxedShell(
         MACOS_SANDBOX_EXEC,
         [
           "-p",
-          await buildMacosWorkspaceShellProfile(workspaceRoot, env, sandboxTemp),
-          "/bin/bash",
-          "--noprofile",
-          "--norc",
-          "-c",
-          input.command,
+          await buildMacosWorkspaceShellProfile(
+            workspaceRoot,
+            env,
+            sandboxTemp,
+            writableWorkspace,
+            input.executable,
+            allowChildProcesses,
+          ),
+          input.executable,
+          ...input.args,
         ],
-        { cwd: workspaceRoot, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] },
+        { cwd: workspaceRoot, env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] },
       );
     } else {
-      child = spawn(findBubblewrap()!, await linuxBubblewrapArgs(workspaceRoot, env, sandboxTemp, input.command), {
-        cwd: workspaceRoot,
-        env,
-        windowsHide: true,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      child = spawn(
+        findBubblewrap()!,
+        await linuxBubblewrapArgs(workspaceRoot, env, sandboxTemp, input.executable, input.args, writableWorkspace),
+        { cwd: workspaceRoot, env, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] },
+      );
     }
   } catch (error) {
     await rm(sandboxTemp, { recursive: true, force: true });
@@ -315,4 +330,22 @@ export async function spawnWorkspaceSandboxedShell(
       await rm(sandboxTemp, { recursive: true, force: true });
     },
   };
+}
+
+export async function spawnWorkspaceSandboxedShell(input: SpawnWorkspaceShellInput): Promise<WorkspaceSandboxedShell> {
+  try {
+    const sandboxed = await spawnWorkspaceSandboxedProcess({
+      executable: "/bin/bash",
+      args: ["--noprofile", "--norc", "-c", input.command],
+      workspaceRoot: input.workspaceRoot,
+      env: input.env,
+    });
+    sandboxed.child.stdin?.end();
+    return sandboxed;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `${message} Use Professor Mari's structured read, grep, find, ls, edit, write, copy, move, remove, and app_data tools instead.`,
+    );
+  }
 }

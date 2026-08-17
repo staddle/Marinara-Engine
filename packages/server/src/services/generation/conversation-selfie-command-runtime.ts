@@ -11,11 +11,12 @@ import {
   resolveImageStyleGuidanceText,
 } from "../image/image-prompt-compiler.js";
 import { persistGeneratedImageToEntityGalleries } from "../image/generated-image-entity-gallery.js";
-import { resolveConnectionImageDefaults } from "../image/image-generation-defaults.js";
+import { resolveConnectionImageDefaults, resolveConnectionImageQuality } from "../image/image-generation-defaults.js";
 import { generateImage, saveImageToDisk } from "../image/image-generation.js";
 import { loadImageGenerationUserSettings } from "../image/image-generation-settings.js";
 import { generateIllustratorImageVariants } from "../image/illustrator-image-variants.js";
 import { resolveConversationSelfieSystemPrompt } from "../conversation/selfie-prompt.js";
+import { appendImagePromptInstructions } from "./image-prompt-instructions.js";
 import type { CharacterCommand, SelfieCommand } from "../conversation/character-commands.js";
 import { createGalleryStorage } from "../storage/gallery.storage.js";
 import { createCharacterGalleryStorage } from "../storage/character-gallery.storage.js";
@@ -58,6 +59,25 @@ type PersonaReference = {
   appearance?: string | null;
 } | null;
 
+const GROUP_SELFIE_REQUEST_RE =
+  /\bgroup\s+(?:selfie|photo|picture)\b|\b(?:selfie|photo|picture)\b[^\n.!?]{0,80}\b(?:together|everyone|everybody|all (?:of us|participants|characters))\b/iu;
+
+export function resolveConversationSelfieRequestedNames(args: {
+  speakerName: string;
+  chatCharacters: ReadonlyArray<{ name: string }>;
+  generationGuide?: string | null;
+  commandContext?: string | null;
+  imagePrompt?: string | null;
+}): string[] {
+  const requestText = [args.generationGuide, args.commandContext, args.imagePrompt]
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .join("\n");
+  const names = GROUP_SELFIE_REQUEST_RE.test(requestText)
+    ? args.chatCharacters.map((character) => character.name)
+    : [args.speakerName];
+  return Array.from(new Set(names.map((name) => name.trim()).filter(Boolean)));
+}
+
 export async function handleConversationSelfieCommand(args: {
   command: CharacterCommand;
   characterId: string | null;
@@ -69,6 +89,7 @@ export async function handleConversationSelfieCommand(args: {
   persona: PersonaReference;
   promptConnection: IllustratorPromptConnection;
   promptConnectionId: string;
+  generationGuide?: string | null;
   debugMode?: boolean;
   serviceTier: "flex" | "priority" | null;
   db: DB;
@@ -181,6 +202,10 @@ async function generateSelfie(
   const selfieSystemPrompt = styleGuidance
     ? `${baseSelfieSystemPrompt}${formatImageStylePromptGuidance(styleGuidance)}`
     : baseSelfieSystemPrompt;
+  const selfieSystemPromptWithImageInstructions = appendImagePromptInstructions(
+    selfieSystemPrompt,
+    imgConnFull.imagePromptInstructions,
+  );
   const userPrompt = args.command.context
     ? `Context for the selfie: ${args.command.context}`
     : `Generate a casual selfie of ${args.charName} based on the current conversation context.`;
@@ -193,7 +218,7 @@ async function generateSelfie(
     [
       {
         role: "system",
-        content: selfieSystemPrompt,
+        content: selfieSystemPromptWithImageInstructions,
       },
       {
         role: "user",
@@ -230,8 +255,16 @@ async function generateSelfie(
   const selfieUseAvatarReferences = args.chatMeta.selfieUseAvatarReferences === true;
   const selfieIncludeCharacterAppearance = args.chatMeta.selfieIncludeCharacterAppearance === true;
   if (selfieUseAvatarReferences || selfieIncludeCharacterAppearance) {
+    const requestedNames = resolveConversationSelfieRequestedNames({
+      speakerName: args.charName,
+      chatCharacters: args.charInfo,
+      generationGuide: args.generationGuide,
+      commandContext: args.command.context,
+      imagePrompt,
+    });
     const referenceResolution = await resolveIllustratorCharacterReferences({
       charactersStore: args.chars,
+      characterGallery: createCharacterGalleryStorage(args.db),
       chatCharacters: args.charInfo.map((character) => ({
         id: character.id,
         name: character.name,
@@ -239,7 +272,7 @@ async function generateSelfie(
         appearance: character.appearance,
       })),
       persona: null,
-      requestedNames: [args.charName],
+      requestedNames,
       promptText: [args.charName, args.command.context ?? "", imagePrompt].join("\n"),
       fallbackToChatCharacters: false,
       maxReferences: 6,
@@ -291,6 +324,7 @@ async function generateSelfie(
         imageEndpointId: imgConnFull.imageEndpointId || undefined,
         comfyWorkflow: imgConnFull.comfyuiWorkflow || undefined,
         imageDefaults,
+        quality: resolveConnectionImageQuality(imgConnFull),
         referenceImages: selfieReferenceImages,
         fallback: imageFallback,
         onFallback: reportFallback,

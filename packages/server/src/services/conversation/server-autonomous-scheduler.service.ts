@@ -119,6 +119,27 @@ function isHardGenerationFailure(error: string, statusCode?: number): boolean {
   return /\b(?:400|401|403|404|405|410|422)\b/u.test(error);
 }
 
+/**
+ * Sweep-gate decisions (#4705), exported pure so the regression suite pins the
+ * state machine against refactors — recording an idle conclusion from a sweep
+ * that didn't evaluate every chat is the dormant-scheduler regression class.
+ */
+export function shouldSkipAutonomousSweep(
+  idleSweepGeneration: number | null,
+  currentGeneration: number | null,
+): boolean {
+  return idleSweepGeneration !== null && currentGeneration !== null && currentGeneration === idleSweepGeneration;
+}
+
+/** Returns the generation to remember as "idle since", or null when the sweep proves nothing. */
+export function concludeAutonomousSweep(args: {
+  inconclusive: boolean;
+  sawEligible: boolean;
+  generation: number | null;
+}): number | null {
+  return !args.inconclusive && !args.sawEligible ? args.generation : null;
+}
+
 export function startServerAutonomousScheduler(app: FastifyInstance) {
   const chats = createChatsStorage(app.db);
   const runningChats = new Set<string>();
@@ -365,17 +386,53 @@ export function startServerAutonomousScheduler(app: FastifyInstance) {
     }
   };
 
+  // Sweep gate (#4705): when a CONCLUSIVE sweep found no eligible chats and
+  // the chats table hasn't been written since, skip the full list + metadata
+  // parse. Any chats-table write (including enabling autonomous messages from
+  // any device — all writes come through this server, and transaction
+  // rollbacks bump the counter too) re-arms the sweep, so pickup stays within
+  // one poll interval. When the store doesn't expose the counter, the gate
+  // degrades to always sweeping.
+  const readChatsWriteGeneration = (): number | null => {
+    const fileStore = (app.db as { _fileStore?: { getTableWriteGeneration?: (table: string) => number } })._fileStore;
+    const generation = fileStore?.getTableWriteGeneration?.("chats");
+    return typeof generation === "number" ? generation : null;
+  };
+  let idleSweepGeneration: number | null = null;
+
   const poll = async () => {
     if (stopped || polling) return;
     polling = true;
     try {
+      // Capture BEFORE listing: a write that lands mid-sweep bumps the live
+      // generation past this snapshot, so the next poll re-sweeps (safe side).
+      const generation = readChatsWriteGeneration();
+      if (shouldSkipAutonomousSweep(idleSweepGeneration, generation)) {
+        return;
+      }
       const allChats = (await chats.list()) as RawChat[];
+      let sawEligible = false;
+      let inconclusive = false;
       for (const chat of allChats) {
-        if (stopped) return;
-        if (runningChats.size >= MAX_SERVER_AUTONOMOUS_CONCURRENT_EVALUATIONS) break;
+        if (stopped) {
+          inconclusive = true;
+          break;
+        }
+        if (runningChats.size >= MAX_SERVER_AUTONOMOUS_CONCURRENT_EVALUATIONS) {
+          // The cap break fires BEFORE eligibility is evaluated, so this sweep
+          // proves nothing about the remaining chats.
+          inconclusive = true;
+          break;
+        }
         if (!shouldConsiderChat(chat)) continue;
+        sawEligible = true;
         void evaluateChat(chat);
       }
+      // Only a sweep that evaluated EVERY chat may record the none-eligible
+      // conclusion: delayed generations can finish through paths that never
+      // write the chats table, so recording it from an inconclusive sweep
+      // could leave the scheduler dormant with enabled chats (#4705).
+      idleSweepGeneration = concludeAutonomousSweep({ inconclusive, sawEligible, generation });
     } catch (err) {
       logger.warn(err, "[autonomous-scheduler] Poll failed");
     } finally {

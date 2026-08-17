@@ -20,8 +20,9 @@ import { ConversationInput } from "./ConversationInput";
 import { ConversationGamesPicker } from "./ConversationGamesPicker";
 import { SceneBanner, EndSceneBar } from "./SceneBanner";
 import { ChatBranchSelector } from "./ChatBranchSelector";
+import { ChatMessageSearch } from "./ChatMessageSearch";
 import { ActiveLorebookEntriesButton } from "./ActiveLorebookEntriesButton";
-import { ChatToolbarButton, ChatToolbarMenu } from "./ChatToolbarControls";
+import { ChatToolbarButton, ChatToolbarMenu, getChatToolbarButtonClass } from "./ChatToolbarControls";
 import { ConversationPresenceCard } from "./ConversationPresenceCard";
 import { PendingTypingDots } from "./PendingTypingDots";
 import { TranscriptWindowControls } from "./TranscriptWindowControls";
@@ -435,6 +436,22 @@ export function ConversationView({
       item.status === "active" && item.manifest.kind.includes("conversation-calls") && item.manifest.entrypoints.client,
   );
   const callCapabilityProps = { chatId, metadata: chatMeta, characterMap, chatCharIds, personaInfo };
+  const activeAgentIds = chatMeta.activeAgentIds;
+  const enabledConversationCapabilities = chatMeta.enableAgents === true
+    ? installedCapabilities.filter((item) => {
+        if (item.status !== "active" || !item.manifest.entrypoints.client) return false;
+        if (item.manifest.kind.includes("conversation-calls")) return false;
+        const contributedAgentIds = item.manifest.contributions?.agentDetail?.agentIds ?? [];
+        return activeAgentIds.includes(item.id) || contributedAgentIds.some((id) => activeAgentIds.includes(id));
+      })
+    : [];
+  const conversationToolbarPackages = enabledConversationCapabilities.filter((item) =>
+    item.manifest.contributions?.slots?.includes("conversation-toolbar"),
+  );
+  const conversationSurfacePackages = enabledConversationCapabilities.filter((item) =>
+    item.manifest.contributions?.slots?.includes("conversation-surface"),
+  );
+  const conversationCapabilityProps = { chatId, metadata: chatMeta, characterMap, chatCharIds, personaInfo };
   const renderToolbarActions = (compact = false) => (
     <>
       <ChatBranchSelector
@@ -462,6 +479,7 @@ export function ConversationView({
           onClick={onSwitchChat}
         />
       )}
+      <ChatMessageSearch chatId={chatId} />
       <ChatToolbarButton
         icon={<Settings2 size="0.875rem" />}
         title={t("chat.toolbar.settings")}
@@ -483,6 +501,18 @@ export function ConversationView({
       />
 
       <div className="ml-2 flex min-w-0 flex-1 items-center justify-end gap-2">
+        {conversationToolbarPackages.map((item) => (
+          <CapabilityElement
+            key={`${item.id}-toolbar`}
+            packageId={item.id}
+            view="toolbar"
+            capabilityProps={{
+              ...conversationCapabilityProps,
+              toolbarButtonClass: getChatToolbarButtonClass(),
+            }}
+            className="contents"
+          />
+        ))}
         {callsPackage && (
           <CapabilityElement
             packageId={callsPackage.id}
@@ -551,7 +581,7 @@ export function ConversationView({
     },
     [scrollToMessagesBottom],
   );
-  useKeepLatestChatMessageVisible(scrollRef, isNearBottomRef, scheduleScrollToMessagesBottom);
+  useKeepLatestChatMessageVisible(scrollRef, scheduleScrollToMessagesBottom);
 
   useEffect(() => {
     if (shouldKeepMobileComposerOpen) setMobileHistoryComposerCollapsed(false);
@@ -659,6 +689,30 @@ export function ConversationView({
     () => getTranscriptRenderWindow(messages, { startIndex: transcriptWindowStart }),
     [messages, transcriptWindowStart],
   );
+  const gotoRequest = useChatStore((state) => state.gotoRequest);
+  // ChatArea clears the request after scrolling; only reveal its transcript window once.
+  const handledTranscriptGotoRef = useRef<typeof gotoRequest>(null);
+
+  useLayoutEffect(() => {
+    handledTranscriptGotoRef.current = null;
+  }, [chatId]);
+
+  useLayoutEffect(() => {
+    if (
+      !gotoRequest ||
+      gotoRequest.chatId !== chatId ||
+      !messages ||
+      handledTranscriptGotoRef.current === gotoRequest
+    ) {
+      return;
+    }
+    const loadedMessageOffset = totalMessageCount - messages.length;
+    const localIndex = gotoRequest.messageNumber - 1 - loadedMessageOffset;
+    if (localIndex >= 0 && localIndex < messages.length) {
+      handledTranscriptGotoRef.current = gotoRequest;
+      setTranscriptWindowStart(localIndex);
+    }
+  }, [chatId, gotoRequest, messages, totalMessageCount]);
 
   const showOlderTranscriptMessages = useCallback(() => {
     setTranscriptWindowStart((current) => {
@@ -1146,6 +1200,7 @@ export function ConversationView({
       {/* ── Messages scroll area ── */}
       <div
         ref={scrollRef}
+        data-chat-scroll
         data-chat-resource-drop-surface
         className="mari-messages-scroll flex-1 overflow-y-auto overflow-x-hidden"
       >
@@ -1438,6 +1493,15 @@ export function ConversationView({
           className="contents"
         />
       )}
+      {conversationSurfacePackages.map((item) => (
+        <CapabilityElement
+          key={`${item.id}-conversation-surface`}
+          packageId={item.id}
+          view="surface"
+          capabilityProps={conversationCapabilityProps}
+          className="contents"
+        />
+      ))}
       {/* Setup modals mounted once here (stable position) so they never double-render.
           Keyed by chatId so their internal selection state resets on a chat switch
           (matches ConversationInput below) — otherwise stale selected ids would

@@ -1,14 +1,33 @@
 // ──────────────────────────────────────────────
 // Storage: Custom Tools
 // ──────────────────────────────────────────────
-import { asc, desc, eq } from "../../db/file-query.js";
+import { and, asc, desc, eq } from "../../db/file-query.js";
 import type { DB } from "../../db/connection.js";
 import { agentConfigs, customTools } from "../../db/schema/index.js";
 import { newId, now } from "../../utils/id-generator.js";
 import { parseAgentSettingsRecord, type CreateCustomToolInput } from "@marinara-engine/shared";
 import { isCustomToolScriptEnabled } from "../../config/runtime-config.js";
+import {
+  decryptCustomToolWebhookUrl,
+  encryptCustomToolWebhookUrl,
+  ENCRYPTED_WEBHOOK_PREFIX,
+} from "../../utils/custom-tool-webhook.js";
 
 export function createCustomToolsStorage(db: DB) {
+  async function decryptRows<T extends { id: string; webhookUrl: string | null }>(rows: T[]): Promise<T[]> {
+    for (const row of rows) {
+      const stored = row.webhookUrl;
+      row.webhookUrl = decryptCustomToolWebhookUrl(stored);
+      if (stored && !stored.startsWith(ENCRYPTED_WEBHOOK_PREFIX)) {
+        await db
+          .update(customTools)
+          .set({ webhookUrl: encryptCustomToolWebhookUrl(stored) })
+          .where(and(eq(customTools.id, row.id), eq(customTools.webhookUrl, stored)));
+      }
+    }
+    return rows;
+  }
+
   async function getNextSortOrder(): Promise<number> {
     const rows = await db.select({ sortOrder: customTools.sortOrder }).from(customTools);
     return rows.reduce((maxOrder, row) => Math.max(maxOrder, row.sortOrder), 0) + 10;
@@ -16,10 +35,11 @@ export function createCustomToolsStorage(db: DB) {
 
   return {
     async list() {
-      return db
+      const rows = await db
         .select()
         .from(customTools)
         .orderBy(asc(customTools.sortOrder), desc(customTools.updatedAt), asc(customTools.id));
+      return decryptRows(rows);
     },
 
     async listEnabled() {
@@ -27,7 +47,7 @@ export function createCustomToolsStorage(db: DB) {
         .select()
         .from(customTools)
         .orderBy(asc(customTools.sortOrder), asc(customTools.name), asc(customTools.id));
-      return rows.filter((row) => {
+      return (await decryptRows(rows)).filter((row) => {
         if (row.enabled !== "true") return false;
         return row.executionType !== "script" || isCustomToolScriptEnabled();
       });
@@ -35,12 +55,12 @@ export function createCustomToolsStorage(db: DB) {
 
     async getById(id: string) {
       const rows = await db.select().from(customTools).where(eq(customTools.id, id));
-      return rows[0] ?? null;
+      return (await decryptRows(rows))[0] ?? null;
     },
 
     async getByName(name: string) {
       const rows = await db.select().from(customTools).where(eq(customTools.name, name));
-      return rows[0] ?? null;
+      return (await decryptRows(rows))[0] ?? null;
     },
 
     async create(input: CreateCustomToolInput) {
@@ -53,7 +73,7 @@ export function createCustomToolsStorage(db: DB) {
         description: input.description ?? "",
         parametersSchema: JSON.stringify(input.parametersSchema ?? {}),
         executionType: input.executionType ?? "static",
-        webhookUrl: input.webhookUrl ?? null,
+        webhookUrl: encryptCustomToolWebhookUrl(input.webhookUrl),
         staticResult: input.staticResult ?? null,
         scriptBody: input.scriptBody ?? null,
         includeHiddenContext: String(input.includeHiddenContext ?? false),
@@ -75,7 +95,9 @@ export function createCustomToolsStorage(db: DB) {
       if (data.executionType !== undefined) {
         updateFields.executionType = data.executionType;
       }
-      if (data.webhookUrl !== undefined) updateFields.webhookUrl = data.webhookUrl;
+      if (data.webhookUrl !== undefined) {
+        updateFields.webhookUrl = encryptCustomToolWebhookUrl(data.webhookUrl);
+      }
       if (data.staticResult !== undefined) updateFields.staticResult = data.staticResult;
       if (data.scriptBody !== undefined) updateFields.scriptBody = data.scriptBody;
       if (data.includeHiddenContext !== undefined) {

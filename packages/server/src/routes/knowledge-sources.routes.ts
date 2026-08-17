@@ -8,6 +8,7 @@ import { createWriteStream, existsSync, mkdirSync, readFileSync } from "fs";
 import { pipeline } from "stream/promises";
 import { nanoid } from "nanoid";
 import { DATA_DIR } from "../utils/data-dir.js";
+import { assertInsideDir } from "../utils/security.js";
 
 const SOURCES_DIR = join(DATA_DIR, "knowledge-sources");
 const META_FILE = join(SOURCES_DIR, "meta.json");
@@ -77,6 +78,17 @@ function readMeta(): MetaStore {
   }
 }
 
+function resolveSourcePath(filename: unknown): string | null {
+  if (typeof filename !== "string" || !filename || filename.includes("\0")) return null;
+  if (basename(filename) !== filename || filename.includes("/") || filename.includes("\\")) return null;
+  if (!ALLOWED_EXTS.has(extname(filename).toLowerCase())) return null;
+  try {
+    return assertInsideDir(SOURCES_DIR, join(SOURCES_DIR, filename));
+  } catch {
+    return null;
+  }
+}
+
 // Simple in-process queue to serialize writes to META_FILE and avoid
 // concurrent write operations that could corrupt or overwrite metadata.
 let metaWriteChain: Promise<void> = Promise.resolve();
@@ -112,8 +124,10 @@ export function getSourceFilePath(
   const meta = readMeta();
   const entry = meta[id];
   if (!entry) return null;
+  const filePath = resolveSourcePath(entry.filename);
+  if (!filePath) return null;
   return {
-    filePath: join(SOURCES_DIR, entry.filename),
+    filePath,
     originalName: entry.originalName,
     size: entry.size,
     uploadedAt: entry.uploadedAt,
@@ -246,7 +260,15 @@ export async function knowledgeSourcesRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "Source not found" });
     }
 
-    const filePath = join(SOURCES_DIR, entry.filename);
+    const filePath = resolveSourcePath(entry.filename);
+    if (!filePath) {
+      await writeMeta((current) => {
+        delete current[id];
+        return current;
+      });
+      deleteCachedText(id);
+      return { success: true };
+    }
     try {
       await unlink(filePath);
     } catch {
@@ -269,8 +291,8 @@ export async function knowledgeSourcesRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "Source not found" });
     }
 
-    const filePath = join(SOURCES_DIR, entry.filename);
-    if (!existsSync(filePath)) {
+    const filePath = resolveSourcePath(entry.filename);
+    if (!filePath || !existsSync(filePath)) {
       return reply.status(404).send({ error: "File not found on disk" });
     }
 

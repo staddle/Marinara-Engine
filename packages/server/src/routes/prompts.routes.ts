@@ -1,7 +1,9 @@
 // ──────────────────────────────────────────────
 // Routes: Prompts (Presets, Groups, Sections, Choices)
 // ──────────────────────────────────────────────
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
+import { mkdir, readFile, unlink, writeFile } from "fs/promises";
+import { extname, join } from "path";
 import {
   createPromptPresetSchema,
   updatePromptPresetSchema,
@@ -12,21 +14,83 @@ import {
   createChoiceBlockSchema,
   updateChoiceBlockSchema,
   createFolderEntry,
-  stripMacroComments,
+  isStockMarinaraUniversalPreset,
   type LorebookEntryTimingState,
 } from "@marinara-engine/shared";
 import type { ExportEnvelope } from "@marinara-engine/shared";
 import { createPromptsStorage } from "../services/storage/prompts.storage.js";
 import { assemblePrompt, type AssemblerInput } from "../services/prompt/index.js";
+import { cardPromptText } from "../services/prompt/card-text.js";
 import { resolveLorebookScopeExclusions } from "../services/lorebook/game-lorebook-scope.js";
 import { createChatsStorage } from "../services/storage/chats.storage.js";
 import { createCharactersStorage } from "../services/storage/characters.storage.js";
 import { normalizeTimestampOverrides } from "../services/import/import-timestamps.js";
 import AdmZip from "adm-zip";
 import { resolveActivePersonaCandidate } from "./generate/generate-route-utils.js";
+import { DATA_DIR } from "../utils/data-dir.js";
+import { assertInsideDir, extensionFromImageMime, isAllowedImageBuffer } from "../utils/security.js";
+import { logger } from "../lib/logger.js";
 
-function cardPromptText(value: unknown): string {
-  return typeof value === "string" ? stripMacroComments(value).trim() : "";
+const PROMPT_IMAGES_DIR = join(DATA_DIR, "prompts", "images");
+const PROMPT_IMAGE_URL_PREFIX = "/api/prompts/images/file/";
+const STOCK_PRESET_READ_ONLY_ERROR =
+  "The stock Marinara Universal preset is read-only. Open it to create an editable copy.";
+
+async function rejectStockPresetMutation(
+  storage: ReturnType<typeof createPromptsStorage>,
+  presetId: string,
+  reply: FastifyReply,
+): Promise<boolean> {
+  const preset = await storage.getById(presetId);
+  if (!preset || !isStockMarinaraUniversalPreset(preset)) return false;
+  reply.status(409).send({ error: STOCK_PRESET_READ_ONLY_ERROR });
+  return true;
+}
+
+function parseImageUpload(image: string): { buffer: Buffer; hintedExt: string } {
+  let base64 = image;
+  let hintedExt = "png";
+  if (base64.startsWith("data:")) {
+    const match = base64.match(/^data:image\/([\w.+-]+);base64,/i);
+    if (match?.[1]) {
+      hintedExt = match[1].replace("+xml", "");
+      base64 = base64.slice(base64.indexOf(",") + 1);
+    }
+  }
+  return { buffer: Buffer.from(base64, "base64"), hintedExt };
+}
+
+function getSafePromptImagePath(filename: string): string | null {
+  if (!filename || filename.includes("..") || filename.includes("/") || filename.includes("\\")) return null;
+  try {
+    return assertInsideDir(PROMPT_IMAGES_DIR, join(PROMPT_IMAGES_DIR, filename));
+  } catch {
+    return null;
+  }
+}
+
+function getLocalPromptImagePath(imagePath: string | null): string | null {
+  if (!imagePath?.startsWith(PROMPT_IMAGE_URL_PREFIX)) return null;
+  return getSafePromptImagePath(imagePath.slice(PROMPT_IMAGE_URL_PREFIX.length));
+}
+
+async function removePromptImageIfUnreferenced(
+  storage: ReturnType<typeof createPromptsStorage>,
+  imagePath: string | null,
+): Promise<void> {
+  const filepath = getLocalPromptImagePath(imagePath);
+  if (!filepath) return;
+
+  const presets = await storage.list();
+  if (presets.some((preset) => preset.imagePath === imagePath)) return;
+
+  try {
+    await unlink(filepath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      logger.warn(error, "Could not remove unreferenced preset image %s", filepath);
+    }
+  }
 }
 
 function safeAsciiDownloadName(value: string): string {
@@ -43,6 +107,9 @@ function safeAsciiDownloadName(value: string): string {
 async function buildPresetExportEnvelope(storage: ReturnType<typeof createPromptsStorage>, id: string) {
   const preset = await storage.getById(id);
   if (!preset) return null;
+  const exportedPreset = { ...preset } as Record<string, unknown>;
+  delete exportedPreset.parameters;
+  delete exportedPreset.systemKey;
   const [sections, groups, choiceBlocks] = await Promise.all([
     storage.listSections(id),
     storage.listGroups(id),
@@ -52,7 +119,7 @@ async function buildPresetExportEnvelope(storage: ReturnType<typeof createPrompt
     type: "marinara_preset",
     version: 1,
     exportedAt: new Date().toISOString(),
-    data: { preset, sections, groups, choiceBlocks },
+    data: { preset: exportedPreset, sections, groups, choiceBlocks },
   };
   return { preset, envelope };
 }
@@ -70,6 +137,28 @@ export async function promptsRoutes(app: FastifyInstance) {
 
   app.get("/default", async () => {
     return storage.getDefault();
+  });
+
+  app.get<{ Params: { filename: string } }>("/images/file/:filename", async (req, reply) => {
+    const filepath = getSafePromptImagePath(req.params.filename);
+    if (!filepath) return reply.status(404).send({ error: "Image not found" });
+
+    let buffer: Buffer;
+    try {
+      buffer = await readFile(filepath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return reply.status(404).send({ error: "Image not found" });
+      }
+      throw error;
+    }
+    const imageInfo = isAllowedImageBuffer(buffer, extname(req.params.filename));
+    if (!imageInfo) return reply.status(404).send({ error: "Image not found" });
+
+    return reply
+      .header("Content-Type", imageInfo.mimeType)
+      .header("Cache-Control", "public, max-age=31536000, immutable")
+      .send(buffer);
   });
 
   app.get<{ Params: { id: string } }>("/:id", async (req, reply) => {
@@ -102,13 +191,50 @@ export async function promptsRoutes(app: FastifyInstance) {
     );
   });
 
-  app.patch<{ Params: { id: string } }>("/:id", async (req) => {
+  app.patch<{ Params: { id: string } }>("/:id", async (req, reply) => {
+    if (await rejectStockPresetMutation(storage, req.params.id, reply)) return;
     const input = updatePromptPresetSchema.parse(req.body);
     return storage.update(req.params.id, input);
   });
 
+  app.post<{ Params: { id: string } }>("/:id/image", async (req, reply) => {
+    const preset = await storage.getById(req.params.id);
+    if (!preset) return reply.status(404).send({ error: "Preset not found" });
+    if (isStockMarinaraUniversalPreset(preset)) {
+      return reply.status(409).send({ error: STOCK_PRESET_READ_ONLY_ERROR });
+    }
+
+    const body = req.body as { image?: string };
+    if (!body.image) return reply.status(400).send({ error: "No image data provided" });
+
+    const { buffer, hintedExt } = parseImageUpload(body.image);
+    const imageInfo = isAllowedImageBuffer(buffer, `.${hintedExt}`);
+    if (!imageInfo) return reply.status(400).send({ error: "Unsupported or invalid preset image" });
+
+    const ext = extensionFromImageMime(imageInfo.mimeType);
+    await mkdir(PROMPT_IMAGES_DIR, { recursive: true });
+    const safeId = req.params.id.replace(/[^a-zA-Z0-9_-]/g, "-");
+    const filename = `preset-${safeId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const filepath = assertInsideDir(PROMPT_IMAGES_DIR, join(PROMPT_IMAGES_DIR, filename));
+    await writeFile(filepath, buffer);
+
+    const nextImagePath = `${PROMPT_IMAGE_URL_PREFIX}${filename}`;
+    const updated = await storage.update(req.params.id, { imagePath: nextImagePath });
+    if (!updated) {
+      await removePromptImageIfUnreferenced(storage, nextImagePath);
+      return reply.status(404).send({ error: "Preset not found" });
+    }
+    await removePromptImageIfUnreferenced(storage, preset.imagePath);
+    return updated;
+  });
+
   app.delete<{ Params: { id: string } }>("/:id", async (req, reply) => {
+    const preset = await storage.getById(req.params.id);
+    if (preset && isStockMarinaraUniversalPreset(preset)) {
+      return reply.status(409).send({ error: STOCK_PRESET_READ_ONLY_ERROR });
+    }
     await storage.remove(req.params.id);
+    await removePromptImageIfUnreferenced(storage, preset?.imagePath ?? null);
     return reply.status(204).send();
   });
 
@@ -180,7 +306,8 @@ export async function promptsRoutes(app: FastifyInstance) {
     return storage.listGroups(req.params.id);
   });
 
-  app.post<{ Params: { id: string } }>("/:id/groups", async (req) => {
+  app.post<{ Params: { id: string } }>("/:id/groups", async (req, reply) => {
+    if (await rejectStockPresetMutation(storage, req.params.id, reply)) return;
     const input = createPromptGroupSchema.parse({
       ...(req.body as Record<string, unknown>),
       presetId: req.params.id,
@@ -188,18 +315,33 @@ export async function promptsRoutes(app: FastifyInstance) {
     return storage.createGroup(input);
   });
 
-  app.patch<{ Params: { presetId: string; groupId: string } }>("/:presetId/groups/:groupId", async (req) => {
+  app.patch<{ Params: { presetId: string; groupId: string } }>("/:presetId/groups/:groupId", async (req, reply) => {
+    const group = await storage.getGroup(req.params.groupId);
+    if (!group || group.presetId !== req.params.presetId) {
+      return reply.status(404).send({ error: "Prompt group not found" });
+    }
+    if (await rejectStockPresetMutation(storage, group.presetId, reply)) return;
     const input = updatePromptGroupSchema.parse(req.body);
-    return storage.updateGroup(req.params.groupId, input);
+    return storage.updateGroup(group.id, input);
   });
 
   app.delete<{ Params: { presetId: string; groupId: string } }>("/:presetId/groups/:groupId", async (req, reply) => {
-    await storage.removeGroup(req.params.groupId);
+    const group = await storage.getGroup(req.params.groupId);
+    if (!group || group.presetId !== req.params.presetId) {
+      return reply.status(404).send({ error: "Prompt group not found" });
+    }
+    if (await rejectStockPresetMutation(storage, group.presetId, reply)) return;
+    await storage.removeGroup(group.id);
     return reply.status(204).send();
   });
 
-  app.put<{ Params: { id: string } }>("/:id/groups/reorder", async (req) => {
+  app.put<{ Params: { id: string } }>("/:id/groups/reorder", async (req, reply) => {
+    if (await rejectStockPresetMutation(storage, req.params.id, reply)) return;
     const { groupIds } = req.body as { groupIds: string[] };
+    const ownedGroupIds = new Set((await storage.listGroups(req.params.id)).map((group) => group.id));
+    if (groupIds.some((groupId) => !ownedGroupIds.has(groupId))) {
+      return reply.status(400).send({ error: "Prompt group does not belong to this preset" });
+    }
     await storage.reorderGroups(req.params.id, groupIds);
     return { success: true };
   });
@@ -212,7 +354,8 @@ export async function promptsRoutes(app: FastifyInstance) {
     return storage.listSections(req.params.id);
   });
 
-  app.post<{ Params: { id: string } }>("/:id/sections", async (req) => {
+  app.post<{ Params: { id: string } }>("/:id/sections", async (req, reply) => {
+    if (await rejectStockPresetMutation(storage, req.params.id, reply)) return;
     const input = createPromptSectionSchema.parse({
       ...(req.body as Record<string, unknown>),
       presetId: req.params.id,
@@ -220,21 +363,36 @@ export async function promptsRoutes(app: FastifyInstance) {
     return storage.createSection(input);
   });
 
-  app.patch<{ Params: { presetId: string; sectionId: string } }>("/:presetId/sections/:sectionId", async (req) => {
+  app.patch<{ Params: { presetId: string; sectionId: string } }>("/:presetId/sections/:sectionId", async (req, reply) => {
+    const section = await storage.getSection(req.params.sectionId);
+    if (!section || section.presetId !== req.params.presetId) {
+      return reply.status(404).send({ error: "Prompt section not found" });
+    }
+    if (await rejectStockPresetMutation(storage, section.presetId, reply)) return;
     const input = updatePromptSectionSchema.parse(req.body);
-    return storage.updateSection(req.params.sectionId, input);
+    return storage.updateSection(section.id, input);
   });
 
   app.delete<{ Params: { presetId: string; sectionId: string } }>(
     "/:presetId/sections/:sectionId",
     async (req, reply) => {
-      await storage.removeSection(req.params.sectionId);
+      const section = await storage.getSection(req.params.sectionId);
+      if (!section || section.presetId !== req.params.presetId) {
+        return reply.status(404).send({ error: "Prompt section not found" });
+      }
+      if (await rejectStockPresetMutation(storage, section.presetId, reply)) return;
+      await storage.removeSection(section.id);
       return reply.status(204).send();
     },
   );
 
-  app.put<{ Params: { id: string } }>("/:id/sections/reorder", async (req) => {
+  app.put<{ Params: { id: string } }>("/:id/sections/reorder", async (req, reply) => {
+    if (await rejectStockPresetMutation(storage, req.params.id, reply)) return;
     const { sectionIds } = req.body as { sectionIds: string[] };
+    const ownedSectionIds = new Set((await storage.listSections(req.params.id)).map((section) => section.id));
+    if (sectionIds.some((sectionId) => !ownedSectionIds.has(sectionId))) {
+      return reply.status(400).send({ error: "Prompt section does not belong to this preset" });
+    }
     await storage.reorderSections(req.params.id, sectionIds);
     return { success: true };
   });
@@ -247,7 +405,8 @@ export async function promptsRoutes(app: FastifyInstance) {
     return storage.listChoiceBlocksForPreset(req.params.presetId);
   });
 
-  app.post<{ Params: { presetId: string } }>("/:presetId/variables", async (req) => {
+  app.post<{ Params: { presetId: string } }>("/:presetId/variables", async (req, reply) => {
+    if (await rejectStockPresetMutation(storage, req.params.presetId, reply)) return;
     const input = createChoiceBlockSchema.parse({
       ...(req.body as Record<string, unknown>),
       presetId: req.params.presetId,
@@ -255,20 +414,31 @@ export async function promptsRoutes(app: FastifyInstance) {
     return storage.createChoiceBlock(input);
   });
 
-  app.patch<{ Params: { presetId: string; variableId: string } }>("/:presetId/variables/:variableId", async (req) => {
+  app.patch<{ Params: { presetId: string; variableId: string } }>("/:presetId/variables/:variableId", async (req, reply) => {
+    const variable = await storage.getChoiceBlock(req.params.variableId);
+    if (!variable || variable.presetId !== req.params.presetId) {
+      return reply.status(404).send({ error: "Preset variable not found" });
+    }
+    if (await rejectStockPresetMutation(storage, variable.presetId, reply)) return;
     const input = updateChoiceBlockSchema.parse(req.body);
-    return storage.updateChoiceBlock(req.params.variableId, input);
+    return storage.updateChoiceBlock(variable.id, input);
   });
 
   app.delete<{ Params: { presetId: string; variableId: string } }>(
     "/:presetId/variables/:variableId",
     async (req, reply) => {
-      await storage.removeChoiceBlock(req.params.variableId);
+      const variable = await storage.getChoiceBlock(req.params.variableId);
+      if (!variable || variable.presetId !== req.params.presetId) {
+        return reply.status(404).send({ error: "Preset variable not found" });
+      }
+      if (await rejectStockPresetMutation(storage, variable.presetId, reply)) return;
+      await storage.removeChoiceBlock(variable.id);
       return reply.status(204).send();
     },
   );
 
-  app.put<{ Params: { presetId: string } }>("/:presetId/variables/reorder", async (req) => {
+  app.put<{ Params: { presetId: string } }>("/:presetId/variables/reorder", async (req, reply) => {
+    if (await rejectStockPresetMutation(storage, req.params.presetId, reply)) return;
     const { variableIds } = req.body as { variableIds: string[] };
     await storage.reorderVariables(req.params.presetId, variableIds);
     return { success: true };

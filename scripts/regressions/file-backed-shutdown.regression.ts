@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq } from "../../packages/server/src/db/file-query.js";
@@ -49,6 +49,10 @@ try {
     key: string;
   }>;
   assert.deepEqual(persisted.map((row) => row.key).sort(), ["before-active-flush", "queued-during-flush"]);
+  if (process.platform !== "win32") {
+    assert.equal(statSync(join(storageDir, "tables")).mode & 0o777, 0o700);
+    assert.equal(statSync(join(storageDir, "tables", "app_settings.json")).mode & 0o777, 0o600);
+  }
   console.info("File-backed graceful shutdown regression passed.");
 } finally {
   releaseWrite();
@@ -63,8 +67,18 @@ try {
   const originalRows = [{ key: "valid-setting", value: "preserved", updatedAt: "2026-08-01" }, null, "invalid", 42, []];
   mkdirSync(tablesDir, { recursive: true });
   writeFileSync(settingsPath, JSON.stringify(originalRows));
+  if (process.platform !== "win32") {
+    chmodSync(malformedRowStorageDir, 0o755);
+    chmodSync(tablesDir, 0o755);
+    chmodSync(settingsPath, 0o644);
+  }
 
   const db = await createFileNativeDB();
+  if (process.platform !== "win32") {
+    assert.equal(statSync(malformedRowStorageDir).mode & 0o777, 0o700);
+    assert.equal(statSync(tablesDir).mode & 0o777, 0o700);
+    assert.equal(statSync(settingsPath).mode & 0o777, 0o600);
+  }
   const rows = await db.select().from(appSettings);
   assert.deepEqual(rows, [{ key: "valid-setting", value: "preserved", updatedAt: "2026-08-01" }]);
 

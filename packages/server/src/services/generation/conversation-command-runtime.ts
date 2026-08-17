@@ -13,6 +13,7 @@ import { wrapContent } from "../prompt/format-engine.js";
 import { resolveSpotifyCredentials, spotifyHasScope } from "../spotify/spotify.service.js";
 import { getActiveTurnGame } from "../turn-games/turn-game-runner.service.js";
 import { getChatHapticIntifaceUrl } from "./haptic-runtime.js";
+import { listCapabilityConversationCommandInstructions } from "../capability-packages/capability-command-registry.service.js";
 
 type ChatRowForCommands = {
   id: string;
@@ -375,6 +376,9 @@ export async function buildConversationCommandsReminder(args: {
       `- [youtube: query="Song title Artist"] - only if you want to play a selected song on the user's active YouTube player. Use this sparingly, when the song choice genuinely fits the moment.`,
     );
   }
+
+  const capabilityCommandLines = listCapabilityConversationCommandInstructions();
+  if (capabilityCommandLines.length > 0) addCommandLines(...capabilityCommandLines);
 
   // Haptic command: only when devices are connected and haptic feedback is enabled
   const hapticEnabled = chatMeta.enableHapticFeedback === true;

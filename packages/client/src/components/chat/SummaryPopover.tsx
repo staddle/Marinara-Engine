@@ -10,6 +10,8 @@ import {
   useMemo,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
+  type DragEvent as ReactDragEvent,
+  type TouchEvent as ReactTouchEvent,
   type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
@@ -18,6 +20,7 @@ import {
   useDeleteSummaryEntry,
   useGenerateSummary,
   useRollingSummaryBackfill,
+  useReorderSummaryEntries,
   useToggleSummaryEntry,
   useUpdateChatMetadata,
   useUpdateSummaryEntry,
@@ -31,6 +34,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useRollingBackfillStore } from "../../stores/backfill.store";
 import {
   Check,
+  ArrowDown,
+  ArrowUp,
   ChevronRight,
   Copy,
   Info,
@@ -38,6 +43,7 @@ import {
   PenLine,
   Plus,
   RefreshCw,
+  GripVertical,
   Save,
   ScrollText,
   Sparkles,
@@ -73,8 +79,11 @@ import {
 } from "@marinara-engine/shared";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { DraftNumberInput } from "../ui/DraftNumberInput";
+import { MacroTextarea } from "../ui/MacroTextarea";
 import { isChatToolbarPanelTrigger } from "./ChatToolbarControls";
 import { useTranslation as useUiTranslation } from "react-i18next";
+import { useTouchFolderDrag } from "../../hooks/use-touch-folder-drag";
+import { getTouchReorderDropIndex } from "../../lib/touch-reorder";
 
 interface SummaryPopoverProps {
   chatId: string;
@@ -126,6 +135,21 @@ const SUMMARY_HEADING_PATTERN = /^(?:#{1,6}\s*)?(?:\*\*)?([^:\n]{3,80})(?:\*\*)?
 const SUMMARY_BULLET_PATTERN = /^[-*•]\s+/;
 const MOBILE_SUMMARY_PADDING = 8;
 const DESKTOP_SUMMARY_WIDTH = 576;
+
+function reorderSummaryEntryIdsToGap(
+  entries: Array<{ id: string }>,
+  sourceIndex: number,
+  targetGapIndex: number,
+): string[] | null {
+  if (sourceIndex < 0 || sourceIndex >= entries.length) return null;
+  if (targetGapIndex < 0 || targetGapIndex > entries.length) return null;
+  if (targetGapIndex === sourceIndex || targetGapIndex === sourceIndex + 1) return null;
+  const next = [...entries];
+  const [moved] = next.splice(sourceIndex, 1);
+  if (!moved) return null;
+  next.splice(targetGapIndex > sourceIndex ? targetGapIndex - 1 : targetGapIndex, 0, moved);
+  return next.map((entry) => entry.id);
+}
 
 function clampSummaryMaxTokens(value: unknown): number {
   const parsed = Number(value);
@@ -377,8 +401,13 @@ export function SummaryPopover({
   const updateSummaryEntry = useUpdateSummaryEntry();
   const deleteSummaryEntry = useDeleteSummaryEntry();
   const toggleSummaryEntry = useToggleSummaryEntry();
+  const reorderSummaryEntries = useReorderSummaryEntries();
   const entryTextareaRef = useRef<HTMLTextAreaElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const summaryEntryListRef = useRef<HTMLDivElement>(null);
+  const [draggingEntryIndex, setDraggingEntryIndex] = useState<number | null>(null);
+  const [dragReadyEntryIndex, setDragReadyEntryIndex] = useState<number | null>(null);
+  const [summaryDropIndex, setSummaryDropIndex] = useState<number | null>(null);
 
   const { startBackfill, stopBackfill } = useRollingSummaryBackfill();
   const backfillState = useRollingBackfillStore();
@@ -551,7 +580,10 @@ export function SummaryPopover({
   const showSummaryInjectionHint = enabledEntryCount > 0 && !!summaryInjectionHint;
   const tokenWarning = enabledTokenEstimate > SUMMARY_TOKEN_WARNING_THRESHOLD;
   const entryMutationPending =
-    updateSummaryEntry.isPending || deleteSummaryEntry.isPending || toggleSummaryEntry.isPending;
+    updateSummaryEntry.isPending ||
+    deleteSummaryEntry.isPending ||
+    toggleSummaryEntry.isPending ||
+    reorderSummaryEntries.isPending;
   const automaticSummariesOn = automaticSummaryEnabled;
   const summaryConnections = useMemo(
     () => (connectionsData ?? []).filter(isSummaryConnectionOption),
@@ -765,6 +797,104 @@ export function SummaryPopover({
     });
   }, []);
 
+  const commitSummaryEntryReorder = useCallback(
+    async (sourceIndex: number, targetGapIndex: number) => {
+      const entryIds = reorderSummaryEntryIdsToGap(displayEntries, sourceIndex, targetGapIndex);
+      if (!entryIds) return;
+      try {
+        await reorderSummaryEntries.mutateAsync({ chatId, entryIds });
+      } catch {
+        toast.error(localizeUi("ui.chat.summarypopover.couldNotReorderSummaryEntries"));
+      }
+    },
+    [chatId, displayEntries, localizeUi, reorderSummaryEntries],
+  );
+
+  const handleSummaryDragStart = useCallback((entryIndex: number, event: ReactDragEvent) => {
+    setDraggingEntryIndex(entryIndex);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", String(entryIndex));
+  }, []);
+
+  const handleSummaryDragOver = useCallback((entryIndex: number, event: ReactDragEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    event.dataTransfer.dropEffect = "move";
+    const rect = event.currentTarget.getBoundingClientRect();
+    setSummaryDropIndex(event.clientY < rect.top + rect.height / 2 ? entryIndex : entryIndex + 1);
+  }, []);
+
+  const finishSummaryDrag = useCallback(() => {
+    setDraggingEntryIndex(null);
+    setDragReadyEntryIndex(null);
+    setSummaryDropIndex(null);
+  }, []);
+
+  const handleSummaryDrop = useCallback(
+    (event: ReactDragEvent) => {
+      event.preventDefault();
+      const sourceIndex = draggingEntryIndex;
+      const targetGapIndex = summaryDropIndex;
+      finishSummaryDrag();
+      if (sourceIndex === null || targetGapIndex === null) return;
+      void commitSummaryEntryReorder(sourceIndex, targetGapIndex);
+    },
+    [commitSummaryEntryReorder, draggingEntryIndex, finishSummaryDrag, summaryDropIndex],
+  );
+
+  const handleSummaryContainerDragOver = useCallback(
+    (event: ReactDragEvent) => {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      const root = summaryEntryListRef.current;
+      if (!root || displayEntries.length === 0) {
+        setSummaryDropIndex(displayEntries.length);
+        return;
+      }
+      const rows = Array.from(root.querySelectorAll<HTMLElement>('[data-touch-reorder-item="summary-entry"]'));
+      const firstRow = rows[0];
+      const lastRow = rows[rows.length - 1];
+      if (firstRow && event.clientY < firstRow.getBoundingClientRect().top) {
+        setSummaryDropIndex(0);
+      } else if (lastRow && event.clientY > lastRow.getBoundingClientRect().bottom) {
+        setSummaryDropIndex(displayEntries.length);
+      }
+    },
+    [displayEntries.length],
+  );
+
+  const moveSummaryEntryByOffset = useCallback(
+    (entryIndex: number, offset: number) => {
+      const targetIndex = entryIndex + offset;
+      if (targetIndex < 0 || targetIndex >= displayEntries.length) return;
+      void commitSummaryEntryReorder(entryIndex, offset < 0 ? targetIndex : targetIndex + 1);
+    },
+    [commitSummaryEntryReorder, displayEntries.length],
+  );
+
+  const { startTouchDrag: startSummaryEntryTouchDrag } = useTouchFolderDrag({
+    onActivate: (entryId) => {
+      const entryIndex = displayEntries.findIndex((entry) => entry.id === entryId);
+      if (entryIndex < 0) return;
+      setDraggingEntryIndex(entryIndex);
+      setDragReadyEntryIndex(entryIndex);
+    },
+    onDrop: (entryId, x, y) => {
+      const sourceIndex = displayEntries.findIndex((entry) => entry.id === entryId);
+      const targetGapIndex = getTouchReorderDropIndex({
+        x,
+        y,
+        itemSelector: '[data-touch-reorder-item="summary-entry"]',
+        rootSelector: "[data-summary-entry-root]",
+        itemCount: displayEntries.length,
+      });
+      finishSummaryDrag();
+      if (sourceIndex < 0 || targetGapIndex === null) return;
+      void commitSummaryEntryReorder(sourceIndex, targetGapIndex);
+    },
+    onCancel: finishSummaryDrag,
+  });
+
   const handleCombineSelected = useCallback(async () => {
     if (selectedEntries.length < 2 || generateSummary.isPending) return;
     try {
@@ -782,6 +912,7 @@ export function SummaryPopover({
       {
         onSuccess: (data) => {
           setSelectedEntryIds(new Set());
+          setShowInactiveSummaries(true);
           const entryId = data.entry?.id;
           if (entryId) setExpandedEntryIds((current) => new Set(current).add(entryId));
         },
@@ -1780,26 +1911,82 @@ export function SummaryPopover({
               )}
 
               {hasEntries ? (
-                visibleEntries.map((entry) => (
-                  <SummaryEntryRow
-                    key={entry.id}
-                    entry={entry}
-                    expanded={expandedEntryIds.has(entry.id)}
-                    editing={editingEntryId === entry.id}
-                    draftEntry={editingEntryId === entry.id ? draftEntry : null}
-                    textareaRef={entryTextareaRef}
-                    mutationPending={entryMutationPending}
-                    selected={selectedEntryIds.has(entry.id)}
-                    onToggleSelected={() => handleToggleSelected(entry.id)}
-                    onToggleExpanded={() => handleToggleExpanded(entry.id)}
-                    onToggleEnabled={(enabled) => handleToggleEntry(entry, enabled)}
-                    onStartEdit={() => handleStartEditEntry(entry)}
-                    onCancelEdit={handleCancelEditEntry}
-                    onSaveEdit={handleSaveEntry}
-                    onDelete={() => void handleDeleteEntry(entry)}
-                    dockedToFooter={entry.id === visibleEntries[visibleEntries.length - 1]?.id}
-                  />
-                ))
+                <div
+                  ref={summaryEntryListRef}
+                  data-summary-entry-root
+                  className="space-y-2"
+                  onDragOver={handleSummaryContainerDragOver}
+                  onDrop={handleSummaryDrop}
+                >
+                  {visibleEntries.map((entry) => {
+                    const entryIndex = displayEntries.findIndex((candidate) => candidate.id === entry.id);
+                    const reorderable = entryIndex >= 0;
+                    const showDropBefore =
+                      reorderable &&
+                      summaryDropIndex === entryIndex &&
+                      draggingEntryIndex !== null &&
+                      draggingEntryIndex !== entryIndex &&
+                      draggingEntryIndex !== entryIndex - 1;
+                    const showDropAfter =
+                      reorderable &&
+                      entryIndex === displayEntries.length - 1 &&
+                      summaryDropIndex === displayEntries.length &&
+                      draggingEntryIndex !== null &&
+                      draggingEntryIndex !== entryIndex;
+
+                    return (
+                      <div key={entry.id}>
+                        {showDropBefore && (
+                          <div className="mari-chrome-accent-progress mari-accent-animated mx-2 mb-2 h-0.5 rounded-full" />
+                        )}
+                        <SummaryEntryRow
+                          entry={entry}
+                          entryIndex={entryIndex}
+                          entryCount={displayEntries.length}
+                          reorderable={reorderable}
+                          dragReady={dragReadyEntryIndex === entryIndex}
+                          dragging={draggingEntryIndex === entryIndex}
+                          expanded={expandedEntryIds.has(entry.id)}
+                          editing={editingEntryId === entry.id}
+                          draftEntry={editingEntryId === entry.id ? draftEntry : null}
+                          textareaRef={entryTextareaRef}
+                          mutationPending={entryMutationPending}
+                          selected={selectedEntryIds.has(entry.id)}
+                          onDragReadyChange={(ready) => setDragReadyEntryIndex(ready ? entryIndex : null)}
+                          onDragStart={(event) => handleSummaryDragStart(entryIndex, event)}
+                          onDragOver={(event) => handleSummaryDragOver(entryIndex, event)}
+                          onDrop={(event) => {
+                            event.stopPropagation();
+                            handleSummaryDrop(event);
+                          }}
+                          onDragEnd={finishSummaryDrag}
+                          onTouchStartDrag={(event) => {
+                            event.stopPropagation();
+                            startSummaryEntryTouchDrag(event, entry.id, {
+                              allowInteractiveTarget: true,
+                              sourceElement: event.currentTarget.closest<HTMLElement>(
+                                '[data-touch-reorder-item="summary-entry"]',
+                              ),
+                            });
+                          }}
+                          onMoveUp={() => moveSummaryEntryByOffset(entryIndex, -1)}
+                          onMoveDown={() => moveSummaryEntryByOffset(entryIndex, 1)}
+                          onToggleSelected={() => handleToggleSelected(entry.id)}
+                          onToggleExpanded={() => handleToggleExpanded(entry.id)}
+                          onToggleEnabled={(enabled) => handleToggleEntry(entry, enabled)}
+                          onStartEdit={() => handleStartEditEntry(entry)}
+                          onCancelEdit={handleCancelEditEntry}
+                          onSaveEdit={handleSaveEntry}
+                          onDelete={() => void handleDeleteEntry(entry)}
+                          dockedToFooter={entry.id === visibleEntries[visibleEntries.length - 1]?.id}
+                        />
+                        {showDropAfter && (
+                          <div className="mari-chrome-accent-progress mari-accent-animated mx-2 mt-2 h-0.5 rounded-full" />
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
               ) : allVisibleEntriesHidden ? (
                 <button
                   type="button"
@@ -1973,12 +2160,25 @@ function SummarySettingsToggle({ label, checked, onChange }: SummarySettingsTogg
 
 interface SummaryEntryRowProps {
   entry: ChatSummaryEntry;
+  entryIndex: number;
+  entryCount: number;
+  reorderable: boolean;
+  dragReady: boolean;
+  dragging: boolean;
   expanded: boolean;
   editing: boolean;
   draftEntry: ChatSummaryEntry | null;
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   mutationPending: boolean;
   selected: boolean;
+  onDragReadyChange: (ready: boolean) => void;
+  onDragStart: (event: ReactDragEvent<HTMLDivElement>) => void;
+  onDragOver: (event: ReactDragEvent<HTMLDivElement>) => void;
+  onDrop: (event: ReactDragEvent<HTMLDivElement>) => void;
+  onDragEnd: () => void;
+  onTouchStartDrag: (event: ReactTouchEvent<HTMLButtonElement>) => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
   onToggleSelected: () => void;
   onToggleExpanded: () => void;
   onToggleEnabled: (enabled: boolean) => void;
@@ -1991,12 +2191,25 @@ interface SummaryEntryRowProps {
 
 function SummaryEntryRow({
   entry,
+  entryIndex,
+  entryCount,
+  reorderable,
+  dragReady,
+  dragging,
   expanded,
   editing,
   draftEntry,
   textareaRef,
   mutationPending,
   selected,
+  onDragReadyChange,
+  onDragStart,
+  onDragOver,
+  onDrop,
+  onDragEnd,
+  onTouchStartDrag,
+  onMoveUp,
+  onMoveDown,
   onToggleSelected,
   onToggleExpanded,
   onToggleEnabled,
@@ -2010,8 +2223,15 @@ function SummaryEntryRow({
   const metaLine = getSummaryEntryMetaLine(entry, localizeUi);
   return (
     <div
+      data-touch-reorder-item={reorderable ? "summary-entry" : undefined}
+      data-touch-reorder-index={reorderable ? entryIndex : undefined}
+      draggable={reorderable && dragReady}
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+      onDragEnd={onDragEnd}
       className={cn(
-        "group overflow-hidden rounded-lg border shadow-sm shadow-black/10 ring-1 ring-[var(--border)]/25 transition-colors",
+        "group overflow-hidden rounded-lg border shadow-sm shadow-black/10 ring-1 ring-[var(--border)]/25 transition-all",
         dockedToFooter && "rounded-b-none border-b-0",
         expanded
           ? "border-[var(--primary)]/45 bg-[var(--accent)]/22 ring-[var(--primary)]/20"
@@ -2020,9 +2240,49 @@ function SummaryEntryRow({
           ? "text-[var(--foreground)]"
           : "border-dashed bg-[var(--secondary)]/14 text-[var(--muted-foreground)] opacity-75 ring-[var(--border)]/35",
         editing && "border-[var(--primary)]/60 bg-[var(--primary)]/10 ring-[var(--primary)]/30",
+        dragging && "opacity-40",
       )}
     >
-      <div className="grid grid-cols-[auto_auto_1fr_auto] items-center gap-2 px-2 py-1.5">
+      <div className="grid grid-cols-[auto_auto_auto_1fr_auto] items-center gap-1.5 px-2 py-1.5">
+        <div className="flex shrink-0 items-center gap-0.5">
+          <button
+            type="button"
+            className={cn(
+              "cursor-grab rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] active:cursor-grabbing",
+              (!reorderable || mutationPending) && "pointer-events-none opacity-30",
+            )}
+            title={localizeUi("ui.chat.summaryentryrow.dragToReorder")}
+            aria-label={localizeUi("ui.chat.summaryentryrow.dragToReorder")}
+            tabIndex={reorderable ? undefined : -1}
+            onMouseDown={() => onDragReadyChange(true)}
+            onMouseUp={() => onDragReadyChange(false)}
+            onTouchStart={onTouchStartDrag}
+          >
+            <GripVertical size="0.875rem" />
+          </button>
+          <div className="flex items-center gap-0.5">
+            <button
+              type="button"
+              onClick={onMoveUp}
+              disabled={!reorderable || entryIndex === 0 || mutationPending}
+              className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:pointer-events-none disabled:opacity-30"
+              title={localizeUi("ui.chat.summaryentryrow.moveSummaryUp", { title: entry.title })}
+              aria-label={localizeUi("ui.chat.summaryentryrow.moveSummaryUp", { title: entry.title })}
+            >
+              <ArrowUp size="0.75rem" />
+            </button>
+            <button
+              type="button"
+              onClick={onMoveDown}
+              disabled={!reorderable || entryIndex === entryCount - 1 || mutationPending}
+              className="rounded p-0.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:pointer-events-none disabled:opacity-30"
+              title={localizeUi("ui.chat.summaryentryrow.moveSummaryDown", { title: entry.title })}
+              aria-label={localizeUi("ui.chat.summaryentryrow.moveSummaryDown", { title: entry.title })}
+            >
+              <ArrowDown size="0.75rem" />
+            </button>
+          </div>
+        </div>
         <input
           type="checkbox"
           checked={selected}
@@ -2152,13 +2412,15 @@ function SummaryEntryEditor({
         placeholder={localizeUi("ui.chat.summaryentryeditor.summaryTitle")}
         className="w-full rounded-md bg-[var(--card)] px-2.5 py-1.5 text-xs font-semibold text-[var(--foreground)] ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
       />
-      <textarea
-        ref={textareaRef}
+      <MacroTextarea
+        textareaRef={textareaRef}
         value={draft.content}
-        onChange={(event) => setDraft((current) => ({ ...current, content: event.target.value }))}
+        onChange={(content) => setDraft((current) => ({ ...current, content }))}
         rows={7}
+        title={localizeUi("ui.chat.summaryentryeditor.summaryTitle")}
+        ariaLabel={localizeUi("ui.chat.summaryentryeditor.writeOrPasteASummaryOfThisChat")}
         placeholder={localizeUi("ui.chat.summaryentryeditor.writeOrPasteASummaryOfThisChat")}
-        className="max-h-64 min-h-36 w-full resize-y rounded-md bg-[var(--card)] p-2.5 text-xs leading-relaxed text-[var(--foreground)] ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+        className="max-h-64 min-h-36 rounded-md bg-[var(--card)] text-xs leading-relaxed"
       />
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="text-[0.625rem] text-[var(--muted-foreground)]">

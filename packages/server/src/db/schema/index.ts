@@ -27,6 +27,7 @@ export * from "./themes.js";
 export * from "./extensions.js";
 export * from "./app-settings.js";
 export * from "./prompt-overrides.js";
+export * from "./mari-instructions.js";
 export * from "./achievements.js";
 export * from "./noodle.js";
 export * from "./library-folders.js";

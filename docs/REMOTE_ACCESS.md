@@ -124,24 +124,24 @@ There is also a broader flag, `ALLOW_UNAUTHENTICATED_REMOTE=true`, which allows 
 
 ## Tailscale and Docker bypass
 
-Two flags let direct Tailscale and Docker traffic skip both the IP allowlist and Basic Auth, the same way loopback does. Both flags are ON by default. That is why a fresh install is already reachable over Tailscale or directly from your Docker containers with no setup:
+Two flags let direct Tailscale and Docker traffic skip both the IP allowlist and Basic Auth, the same way loopback does. Leave them empty for automatic detection:
 
 ```env
-BYPASS_AUTH_TAILSCALE=true
-BYPASS_AUTH_DOCKER=true
+BYPASS_AUTH_TAILSCALE=
+BYPASS_AUTH_DOCKER=
 ```
 
-These defaults assume every Tailscale peer is a trusted Marinara user. Docker bridge addresses and the exact gateway detected from inside the container represent the same Docker host. Even with Basic Auth on, direct Tailscale and Docker clients still skip the prompt. If your tailnet includes less-trusted peers, set `BYPASS_AUTH_TAILSCALE=false`.
+Automatic mode trusts a Tailscale peer only when both ends of its direct socket use Tailnet addresses. It trusts Docker traffic only when Marinara is running in a container and the source matches a detected container interface or its exact gateway. This keeps the usual private Tailscale and same-host Docker setup working without treating unrelated CGNAT, LAN, host-network, or proxy traffic as authenticated.
 
-Set a flag to false if you want a password from those clients too. There are two less common reasons to turn one off.
+Set a flag to `false` if you want normal Basic Auth and IP allowlist checks for those clients. Set it to `true` to retain the older broad bypass when automatic detection is unavailable: Tailscale then trusts all of `100.64.0.0/10`, while Docker also trusts its detected interfaces/gateway and the legacy `172.16.0.0/12` range. Use that compatibility mode only when every matching peer is trusted.
 
-Your internet provider may use CGNAT on the `100.64.0.0/10` range, the same range Tailscale uses. In that case, turn the Tailscale bypass off:
+For example, if your Tailnet includes less-trusted peers, turn the Tailscale bypass off:
 
 ```env
 BYPASS_AUTH_TAILSCALE=false
 ```
 
-Your regular LAN may use `172.16.x.x` addresses. In that case, turn the Docker bypass off, and add your specific containers to `IP_ALLOWLIST`:
+If you do not want detected Docker peers to bypass authentication, turn the Docker bypass off and add specific clients to `IP_ALLOWLIST` if needed:
 
 ```env
 BYPASS_AUTH_DOCKER=false

@@ -7,8 +7,10 @@ interface BuildImpersonateInstructionArgs {
   personaDescription?: string | null;
 }
 
-const LEGACY_IMPERSONATION_DIRECTION_RE =
-  /^\[Impersonation instruction (?:\u2014|-) write \{\{user\}\}'s next response, steering it toward the following:\s*([\s\S]+?)\]$/;
+const LEGACY_IMPERSONATION_DIRECTION_PREFIXES = [
+  "[Impersonation instruction — write {{user}}'s next response, steering it toward the following:",
+  "[Impersonation instruction - write {{user}}'s next response, steering it toward the following:",
+] as const;
 
 function normalizeText(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
@@ -16,8 +18,11 @@ function normalizeText(value: unknown): string {
 
 function normalizeDirection(direction: string | null | undefined): string {
   const rawDirection = normalizeText(direction);
-  const legacyDirectionMatch = rawDirection.match(LEGACY_IMPERSONATION_DIRECTION_RE);
-  return legacyDirectionMatch ? legacyDirectionMatch[1]!.trim() : rawDirection;
+  if (!rawDirection.endsWith("]")) return rawDirection;
+  const prefix = LEGACY_IMPERSONATION_DIRECTION_PREFIXES.find((candidate) => rawDirection.startsWith(candidate));
+  if (!prefix || rawDirection.length === prefix.length + 1) return rawDirection;
+  const normalized = rawDirection.slice(prefix.length, -1).trim();
+  return normalized || rawDirection;
 }
 
 function punctuateDirection(direction: string): string {

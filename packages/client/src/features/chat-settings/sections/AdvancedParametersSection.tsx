@@ -138,10 +138,15 @@ export function AdvancedParametersSection({
       if (!editableKeys.has(key)) sparse[key] = value;
     }
     for (const key of EDITABLE_PARAMETER_KEYS) {
+      if (key === "enabledParameters") continue;
       if (JSON.stringify(next[key]) !== JSON.stringify(defaults[key])) {
         sparse[key] = next[key];
       }
     }
+    // Send toggles are behavior, not merely editable values. Keep the explicit
+    // map even when it matches the editor fallback so an inherited preset value
+    // cannot make a disabled parameter reappear in the provider request.
+    sparse.enabledParameters = next.enabledParameters ?? STRICT_CONNECTION_PARAMETER_SEND_DEFAULTS;
     onChatParametersChange(sparse);
   };
   const toggleExpanded = () => setExpanded((open) => !open);

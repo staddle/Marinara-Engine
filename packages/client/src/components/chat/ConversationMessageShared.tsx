@@ -126,7 +126,8 @@ export interface MessageRenderContext {
   isGuided: boolean;
   regenerateButtonTitle: string;
   regenerateGuidedClass?: string;
-  thinking?: string | null;
+  hasReasoning: boolean;
+  reasoningSummaryUnavailable: boolean;
   thinkingButtonRef: RefObject<HTMLButtonElement | null>;
   generationReplay: MessageExtra["generationReplay"] | null;
   canRegenerate: boolean;

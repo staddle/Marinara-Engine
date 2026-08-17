@@ -72,6 +72,7 @@ type OpenAIProviderKind =
   | "xai"
   | "mistral"
   | "cohere"
+  | "arli"
   | "custom"
   | "openai-chatgpt"
   | "local-sidecar";
@@ -559,6 +560,8 @@ export class OpenAIProvider extends BaseLLMProvider {
         return "Mistral API";
       case "cohere":
         return "Cohere OpenAI-compatible API";
+      case "arli":
+        return "Arli AI API";
       case "local-sidecar":
         return "Local sidecar OpenAI-compatible endpoint";
       case "openai-chatgpt":
@@ -931,8 +934,7 @@ export class OpenAIProvider extends BaseLLMProvider {
     return (
       !this.isGenericCustomProvider() &&
       this.baseUrl.includes("openrouter.ai") &&
-      !!options.enableCaching &&
-      options.model.toLowerCase().includes("claude")
+      !!options.enableCaching
     );
   }
 

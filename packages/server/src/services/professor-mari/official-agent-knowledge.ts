@@ -120,6 +120,14 @@ export const OFFICIAL_AGENT_KNOWLEDGE_ENTRIES: readonly OfficialAgentKnowledgeEn
     summary: "shows a configurable fictional live audience reacting to the current scene",
   },
   {
+    id: "noodle",
+    name: "Noodle",
+    category: "misc",
+    modes: "Home",
+    summary:
+      "adds the optional local Noodle timeline and NoodleR creator-and-fan roleplay feed in a dedicated Home tab",
+  },
+  {
     id: "illustrator",
     name: "Illustrator",
     category: "misc",

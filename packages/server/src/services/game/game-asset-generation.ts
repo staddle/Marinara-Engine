@@ -25,6 +25,7 @@ import {
 import {
   inferImageSource,
   type ImageGenerationDefaultsProfile,
+  type ImageGenerationQuality,
   type ImageStyleProfileSettings,
   type SceneIllustrationCharacterPrompt,
 } from "@marinara-engine/shared";
@@ -32,6 +33,7 @@ import type { ImageGenerationSize } from "../image/image-generation-settings.js"
 import { compileImagePrompt } from "../image/image-prompt-compiler.js";
 import { loadGameStoryboardImagePrompt } from "../image/game-storyboard-image-prompt.js";
 import { SPATIAL_LOCATION_REFERENCE_PROMPT_LINE } from "../image/spatial-location-reference.js";
+import { compactImagePromptInstructions } from "../sidecar/scene-analyzer.js";
 
 const NPC_AVATAR_DIR = join(DATA_DIR, "avatars", "npc");
 const CHAT_BACKGROUND_DIR = join(DATA_DIR, "backgrounds");
@@ -514,6 +516,7 @@ export interface NpcPortraitRequest {
   imgEndpointId?: string | null;
   imgComfyWorkflow?: string | undefined;
   imgDefaults?: ImageGenerationDefaultsProfile | null;
+  imgQuality?: ImageGenerationQuality;
   imgFallback?: ImageGenRequest["fallback"];
   styleProfiles?: ImageStyleProfileSettings;
   styleProfileId?: string | null;
@@ -579,7 +582,7 @@ export async function buildNpcPortraitProviderPrompt(req: NpcPortraitRequest): P
     ],
   });
   return compileGameImagePrompt(
-    req.dynamicPromptGenerator ? { ...req, appearance: null } : req,
+    req.dynamicPromptGenerator ? { ...req, appearance: null, preserveFullSourcePrompt: true } : req,
     "portrait",
     prompt,
     1400,
@@ -599,6 +602,7 @@ function compileGameImagePrompt(
     appearance?: string | null;
     preserveFullBackgroundPrompt?: boolean;
     preserveFullScenePrompt?: boolean;
+    preserveFullSourcePrompt?: boolean;
     omitProfileStyleText?: boolean;
     omitProfileSubjectTags?: boolean;
   },
@@ -625,7 +629,10 @@ function compileGameImagePrompt(
       negativePrompt: [negativePrompt, hardNegative].filter(Boolean).join(", "),
     };
   }
-  if ((kind === "illustration" || kind === "background") && req.preserveFullScenePrompt) {
+  if (
+    req.preserveFullSourcePrompt ||
+    ((kind === "illustration" || kind === "background") && req.preserveFullScenePrompt)
+  ) {
     const compilePrefix = (dedupeAgainstPrompt: string) =>
       compileImagePrompt({
         kind,
@@ -784,6 +791,7 @@ export async function generateNpcPortrait(req: NpcPortraitRequest): Promise<stri
         imageEndpointId: req.imgEndpointId || undefined,
         comfyWorkflow: req.imgComfyWorkflow || undefined,
         imageDefaults: req.imgDefaults ?? undefined,
+        quality: req.imgQuality,
         fallback: req.imgFallback,
         signal: req.signal,
       },
@@ -850,6 +858,7 @@ export interface BackgroundGenRequest {
   imgEndpointId?: string | null;
   imgComfyWorkflow?: string | undefined;
   imgDefaults?: ImageGenerationDefaultsProfile | null;
+  imgQuality?: ImageGenerationQuality;
   imgFallback?: ImageGenRequest["fallback"];
   styleProfiles?: ImageStyleProfileSettings;
   styleProfileId?: string | null;
@@ -928,6 +937,7 @@ export interface SceneIllustrationGenRequest {
   imgEndpointId?: string | null;
   imgComfyWorkflow?: string | undefined;
   imgDefaults?: ImageGenerationDefaultsProfile | null;
+  imgQuality?: ImageGenerationQuality;
   imgFallback?: ImageGenRequest["fallback"];
   styleProfiles?: ImageStyleProfileSettings;
   styleProfileId?: string | null;
@@ -985,7 +995,7 @@ async function buildBackgroundRawPrompt(req: BackgroundGenRequest): Promise<stri
     ? await loadPrompt(req.promptOverridesStorage, GAME_BACKGROUND, backgroundVars)
     : GAME_BACKGROUND.defaultBuilder(backgroundVars);
   const imagePromptInstructionsLine = req.imagePromptInstructions?.trim()
-    ? `User image instructions: ${req.imagePromptInstructions.trim().replace(/\s+/g, " ").slice(0, 5000)}`
+    ? `User image instructions: ${compactImagePromptInstructions(req.imagePromptInstructions)}`
     : "";
   return imagePromptInstructionsLine && !rawPrompt.includes(imagePromptInstructionsLine)
     ? `${rawPrompt}\n${imagePromptInstructionsLine}`
@@ -1057,7 +1067,11 @@ export async function buildBackgroundProviderPrompt(req: BackgroundGenRequest): 
     ],
   });
   return compileGameImagePrompt(
-    req.mapsArtworkContext ? { ...req, artStyle: undefined } : req,
+    req.dynamicPromptGenerator
+      ? { ...req, artStyle: req.mapsArtworkContext ? undefined : req.artStyle, preserveFullSourcePrompt: true }
+      : req.mapsArtworkContext
+        ? { ...req, artStyle: undefined }
+        : req,
     "background",
     prompt,
     req.preserveFullBackgroundPrompt || req.preserveFullScenePrompt ? 7000 : 1000,
@@ -1119,7 +1133,7 @@ async function buildSceneIllustrationRawPrompt(req: SceneIllustrationGenRequest)
   const referenceImages = sceneIllustrationReferenceImagesForProvider(req);
   const characterReferenceImagesAttached = referenceImages.length > (req.locationReferenceImageAttached ? 1 : 0);
   const imagePromptInstructionsLine = req.imagePromptInstructions?.trim()
-    ? `User image instructions: ${req.imagePromptInstructions.trim().replace(/\s+/g, " ").slice(0, 5000)}`
+    ? `User image instructions: ${compactImagePromptInstructions(req.imagePromptInstructions)}`
     : "";
   const useGamePromptTemplate = req.useGamePromptTemplate !== false;
   const scopedScenePrompt = req.prompt.trim();
@@ -1245,7 +1259,13 @@ export async function buildSceneIllustrationProviderPrompt(
         ]
       : [],
   });
-  return compileGameImagePrompt(req, "illustration", prompt, 7000, GAME_ILLUSTRATION_NEGATIVE_PROMPT);
+  return compileGameImagePrompt(
+    req.dynamicPromptGenerator ? { ...req, preserveFullSourcePrompt: true } : req,
+    "illustration",
+    prompt,
+    7000,
+    GAME_ILLUSTRATION_NEGATIVE_PROMPT,
+  );
 }
 
 export async function buildSceneIllustrationImagePrompt(req: SceneIllustrationGenRequest): Promise<string> {
@@ -1299,6 +1319,7 @@ export async function generateBackground(req: BackgroundGenRequest): Promise<str
         imageEndpointId: req.imgEndpointId || undefined,
         comfyWorkflow: req.imgComfyWorkflow || undefined,
         imageDefaults: req.imgDefaults ?? undefined,
+        quality: req.imgQuality,
         fallback: req.imgFallback,
         signal: req.signal,
       },
@@ -1369,6 +1390,7 @@ export async function generateChatBackground(req: ChatBackgroundGenRequest): Pro
         imageEndpointId: req.imgEndpointId || undefined,
         comfyWorkflow: req.imgComfyWorkflow || undefined,
         imageDefaults: req.imgDefaults ?? undefined,
+        quality: req.imgQuality,
         fallback: req.imgFallback,
         signal: req.signal,
       },
@@ -1437,6 +1459,7 @@ export async function generateSceneIllustration(req: SceneIllustrationGenRequest
         imageEndpointId: req.imgEndpointId || undefined,
         comfyWorkflow: req.imgComfyWorkflow || undefined,
         imageDefaults: req.imgDefaults ?? undefined,
+        quality: req.imgQuality,
         fallback: req.imgFallback,
         signal: req.signal,
         referenceImages: referenceImages.length ? referenceImages : undefined,

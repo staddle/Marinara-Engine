@@ -7,22 +7,46 @@ import {
   CUSTOM_GENERATION_PARAMETERS_SETTINGS_KEY,
   EMPTY_IMPERSONATE_PROMPT_TEMPLATE_CATALOG,
   IMPERSONATE_PROMPT_TEMPLATES_SETTINGS_KEY,
+  HOME_CUSTOM_WIDGETS_SETTINGS_KEY,
+  homeCustomWidgetCatalogSchema,
+  STORAGE_MIGRATION_NOTICE_SETTINGS_KEY,
   VIDEO_GENERATION_SETTINGS_KEY,
   appSettingsUpdateSchema,
   impersonatePromptTemplateCatalogSchema,
 } from "@marinara-engine/shared";
 import { logger } from "../lib/logger.js";
+import {
+  HomeWidgetCatalogConflictError,
+  readHomeWidgetCatalog,
+  replaceHomeWidgetCatalog,
+} from "../services/home-widget-catalog.service.js";
 import { createAppSettingsStorage } from "../services/storage/app-settings.storage.js";
 
 const ALLOWED_KEYS = new Set([
   "ui",
   CHAT_SUMMARY_PROMPT_SETTINGS_KEY,
   CUSTOM_GENERATION_PARAMETERS_SETTINGS_KEY,
+  STORAGE_MIGRATION_NOTICE_SETTINGS_KEY,
   VIDEO_GENERATION_SETTINGS_KEY,
 ]);
 
 export async function appSettingsRoutes(app: FastifyInstance) {
   const storage = createAppSettingsStorage(app.db);
+
+  app.get(`/${HOME_CUSTOM_WIDGETS_SETTINGS_KEY}`, () => readHomeWidgetCatalog(app.db));
+
+  app.put(`/${HOME_CUSTOM_WIDGETS_SETTINGS_KEY}`, async (req, reply) => {
+    const requestedCatalog = homeCustomWidgetCatalogSchema.parse(req.body);
+    try {
+      return await replaceHomeWidgetCatalog(app.db, requestedCatalog.revision, requestedCatalog.widgets);
+    } catch (error) {
+      if (error instanceof HomeWidgetCatalogConflictError) {
+        const catalog = await readHomeWidgetCatalog(app.db);
+        return reply.status(409).send({ error: error.message, catalog });
+      }
+      throw error;
+    }
+  });
 
   app.get(`/${IMPERSONATE_PROMPT_TEMPLATES_SETTINGS_KEY}`, async () => {
     const value = await storage.get(IMPERSONATE_PROMPT_TEMPLATES_SETTINGS_KEY);

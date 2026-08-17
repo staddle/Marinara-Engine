@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import Fastify from "../../packages/server/node_modules/fastify/fastify.js";
-import fastifyStatic from "../../packages/server/node_modules/@fastify/static/index.js";
+import { sendValidatedMediaFile } from "../../packages/server/src/utils/media-file-security.js";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const temporaryDirectory = mkdtempSync(join(tmpdir(), "marinara-scene-video-range-"));
@@ -15,12 +16,18 @@ writeFileSync(join(temporaryDirectory, filename), contents);
 const app = Fastify();
 
 try {
-  await app.register(fastifyStatic, { serve: false });
-  app.get("/scene.mp4", async (_request, reply) =>
-    reply
-      .header("Content-Type", "video/mp4")
-      .sendFile(filename, temporaryDirectory, { maxAge: "1y", immutable: true }),
-  );
+  app.get("/scene.mp4", async (request, reply) => {
+    const handle = await open(join(temporaryDirectory, filename), "r");
+    return sendValidatedMediaFile(
+      reply,
+      { handle, size: contents.length, mimeType: "video/mp4" },
+      {
+        method: request.method,
+        rangeHeader: request.headers.range,
+        cacheControl: "public, max-age=31536000, immutable",
+      },
+    );
+  });
   await app.ready();
 
   const full = await app.inject({ method: "GET", url: "/scene.mp4" });
@@ -82,17 +89,11 @@ try {
     const routeEnd = routeSource.indexOf("app.post", routeStart);
     const fileHandlerSource = routeSource.slice(routeStart, routeEnd);
     assert.ok(routeStart >= 0 && routeEnd > routeStart, `${routePath} scene-video file route must be present`);
-    assert.match(fileHandlerSource, /\.sendFile\(filename, join\(GAME_SCENE_VIDEOS_ROOT, chatId\)/u);
+    assert.match(fileHandlerSource, /validateVideoAssetFile\(filePath, filename\)/u);
+    assert.match(fileHandlerSource, /sendValidatedMediaFile\(reply, video,/u);
+    assert.doesNotMatch(fileHandlerSource, /\.sendFile\(/u);
     assert.doesNotMatch(fileHandlerSource, /\.send\(readFileSync\(filePath\)\)/u);
   }
-
-  const appSource = readFileSync(join(repositoryRoot, "packages/server/src/app.ts"), "utf8");
-  const decoratorRegistration = appSource.indexOf("await app.register(fastifyStatic, { serve: false });");
-  assert.ok(decoratorRegistration >= 0);
-  assert.ok(
-    decoratorRegistration < appSource.indexOf("await registerRoutes(app);"),
-    "sendFile must be decorated before API routes register, including API-only startup",
-  );
 } finally {
   await app.close();
   rmSync(temporaryDirectory, { recursive: true, force: true });

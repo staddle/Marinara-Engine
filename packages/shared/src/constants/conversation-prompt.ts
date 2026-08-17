@@ -12,8 +12,17 @@ Here are some important rules for the interaction:
 
 export function unwrapConversationInstructions(prompt: string): string {
   const trimmed = prompt.trim();
-  const match = trimmed.match(/^<instructions(?:\s[^>]*)?>\s*([\s\S]*?)\s*<\/instructions>$/i);
-  return match ? match[1]!.trim() : trimmed;
+  const openingPrefix = "<instructions";
+  const closingTag = "</instructions>";
+  if (trimmed.slice(0, openingPrefix.length).toLowerCase() !== openingPrefix) return trimmed;
+  if (trimmed.slice(-closingTag.length).toLowerCase() !== closingTag) return trimmed;
+
+  const openingBoundary = trimmed[openingPrefix.length];
+  if (openingBoundary !== ">" && openingBoundary?.trim() !== "") return trimmed;
+  const openingEnd = trimmed.indexOf(">", openingPrefix.length);
+  const bodyEnd = trimmed.length - closingTag.length;
+  if (openingEnd < 0 || openingEnd > bodyEnd) return trimmed;
+  return trimmed.slice(openingEnd + 1, bodyEnd).trim();
 }
 
 export function wrapConversationInstructions(prompt: string): string {

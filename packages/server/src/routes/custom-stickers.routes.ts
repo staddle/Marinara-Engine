@@ -10,6 +10,12 @@ import { createCustomStickersStorage } from "../services/storage/custom-stickers
 import { newId } from "../utils/id-generator.js";
 import { DATA_DIR } from "../utils/data-dir.js";
 import { assertInsideDir } from "../utils/security.js";
+import {
+  resolveFlatMediaFile,
+  sendValidatedMediaFile,
+  validateImageAssetBuffer,
+  validateImageAssetFile,
+} from "../utils/media-file-security.js";
 import { readImageDimensionsFromBuffer, readImageDimensionsFromFile } from "../utils/image-metadata.js";
 import { logger } from "../lib/logger.js";
 import { isFileUniqueConstraintError } from "../db/file-schema.js";
@@ -164,9 +170,11 @@ export async function customStickersRoutes(app: FastifyInstance) {
     if (filename.includes("..") || filename.includes("/") || filename.includes("\\")) {
       return reply.status(400).send({ error: "Invalid path" });
     }
-    const filePath = join(CUSTOM_STICKERS_ROOT, filename);
-    if (!existsSync(filePath)) return reply.status(404).send({ error: "Not found" });
-    return reply.sendFile(filename, CUSTOM_STICKERS_ROOT);
+    const filePath = resolveFlatMediaFile(CUSTOM_STICKERS_ROOT, filename);
+    if (!filePath || !existsSync(filePath)) return reply.status(404).send({ error: "Not found" });
+    const image = await validateImageAssetFile(filePath, filename);
+    if (!image) return reply.status(404).send({ error: "Not found" });
+    return sendValidatedMediaFile(reply, image, { method: req.method, rangeHeader: req.headers.range });
   });
 
   // ── Rename ──
@@ -198,8 +206,8 @@ export async function customStickersRoutes(app: FastifyInstance) {
     if (!existing) return reply.status(404).send({ error: "Custom sticker not found" });
     await storage.remove(req.params.id);
     try {
-      const fp = join(CUSTOM_STICKERS_ROOT, existing.filePath);
-      if (existsSync(fp)) unlinkSync(fp);
+      const fp = resolveFlatMediaFile(CUSTOM_STICKERS_ROOT, existing.filePath);
+      if (fp && existsSync(fp)) unlinkSync(fp);
     } catch (err) {
       logger.warn(err, "Failed to remove custom sticker file %s", existing.filePath);
     }
@@ -214,10 +222,12 @@ export async function customStickersRoutes(app: FastifyInstance) {
 
     const stickers: Array<{ name: string; width: number | null; height: number | null; dataUrl: string }> = [];
     for (const row of selected) {
+      const filePath = resolveFlatMediaFile(CUSTOM_STICKERS_ROOT, row.filePath);
       const mime = MIME_BY_EXT[extname(row.filePath).toLowerCase()];
-      if (!mime) continue;
+      if (!mime || !filePath) continue;
       try {
-        const buf = await readFile(join(CUSTOM_STICKERS_ROOT, row.filePath));
+        const buf = await readFile(filePath);
+        if (!validateImageAssetBuffer(buf, row.filePath)) continue;
         stickers.push({
           name: row.name,
           width: row.width,
@@ -258,6 +268,10 @@ export async function customStickersRoutes(app: FastifyInstance) {
       }
 
       const buffer = Buffer.from(base64, "base64");
+      if (!validateImageAssetBuffer(buffer, `sticker${ext}`)) {
+        skipped++;
+        continue;
+      }
       const dimensions = readImageDimensionsFromBuffer(buffer);
       if (!dimensions) {
         skipped++;

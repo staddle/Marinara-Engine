@@ -20,51 +20,209 @@ import { formatSkillCheckResultSummary, type SkillCheckResult } from "@marinara-
  * are preserved as plain text because the roll result is canonical history.
  */
 export function stripGmCommandTags(content: string): string {
-  let text = preserveResolvedSkillCheckResults(content)
-    .replace(/\[music:\s*[^\]]+\]/gi, "")
-    .replace(/\[sfx:\s*[^\]]+\]/gi, "")
-    .replace(/\[bg:\s*[^\]]+\]/gi, "")
-    .replace(/\[ambient:\s*[^\]]+\]/gi, "")
-    .replace(/\[qte:\s*[^\]]+\]/gi, "")
-    .replace(/\[state:\s*[^\]]+\]/gi, "")
-    .replace(/\[reputation:\s*[^\]]+\]/gi, "")
-    .replace(/\[combat:\s*[^\]]+\]/gi, "")
-    .replace(/\[direction:\s*[^\]]+\]/gi, "")
-    .replace(/\[widget:\s*[^\]]+\]/gi, "")
-    .replace(/\[dialogue:\s*npc="[^"]*"\]/gi, "")
-    .replace(/\[session_end:\s*[^\]]*\]/gi, "")
-    .replace(/\[skill_check:\s*[^\]]+\]/gi, "")
-    .replace(/\[element_attack:\s*[^\]]+\]/gi, "")
-    .replace(/\[inventory:\s*[^\]]+\]/gi, "")
-    .replace(/\[party_change:\s*[^\]]+\]/gi, "")
-    .replace(/\[party_add:\s*[^\]]+\]/gi, "")
-    .replace(/\[party-turn\]/gi, "")
-    .replace(/\[party-chat\]/gi, "")
-    .replace(/\[dice:\s*[^\]]+\]/gi, "");
-  // Balanced bracket tags
-  text = stripMapUpdateTag(text);
-  text = stripBalancedTag(text, "[choices:");
+  let text = stripSimpleGmTags(preserveResolvedSkillCheckResults(content));
   // Catch-all for unknown [tag: value] (but NOT [Name] or [Note:/Book:])
-  text = text.replace(/\[(?!Note:|Book:)\w+:[^\]]*\]/g, "");
+  text = stripUnknownGmTags(text);
   text = stripDanglingTagClosers(text);
   return text.trim();
 }
 
+const REMOVABLE_GM_TAGS = new Set([
+  "music",
+  "sfx",
+  "bg",
+  "ambient",
+  "qte",
+  "state",
+  "reputation",
+  "combat",
+  "direction",
+  "widget",
+  "dialogue",
+  "session_end",
+  "skill_check",
+  "element_attack",
+  "inventory",
+  "party_change",
+  "party_add",
+  "party-turn",
+  "party-chat",
+  "dice",
+  "choices",
+  "map_update",
+]);
+const VALUELESS_GM_TAGS = new Set(["party-turn", "party-chat"]);
+const BALANCED_GM_TAGS = new Set(["choices", "map_update"]);
+
+interface GmTagHead {
+  name: string;
+  rawName: string;
+  delimiter: ":" | "]";
+  delimiterIndex: number;
+}
+
+function isAsciiWordCharacter(character: string | undefined): boolean {
+  if (!character) return false;
+  const code = character.charCodeAt(0);
+  return (
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 90) ||
+    code === 95 ||
+    (code >= 97 && code <= 122)
+  );
+}
+
+/** Parse only the name immediately after `[`, so malformed nested input stays linear. */
+function readGmTagHead(content: string, start: number, allowHyphen: boolean): GmTagHead | null {
+  let cursor = start + 1;
+  while (
+    isAsciiWordCharacter(content[cursor]) ||
+    (allowHyphen && content[cursor] === "-")
+  ) {
+    cursor++;
+  }
+  if (cursor === start + 1 || (content[cursor] !== ":" && content[cursor] !== "]")) return null;
+  const rawName = content.slice(start + 1, cursor);
+  return {
+    name: rawName.toLowerCase(),
+    rawName,
+    delimiter: content[cursor] as ":" | "]",
+    delimiterIndex: cursor,
+  };
+}
+
+function stripSimpleGmTags(content: string): string {
+  let result = "";
+  let outputCursor = 0;
+  let searchCursor = 0;
+  while (searchCursor < content.length) {
+    const start = content.indexOf("[", searchCursor);
+    if (start < 0) break;
+    const head = readGmTagHead(content, start, true);
+    if (!head || !REMOVABLE_GM_TAGS.has(head.name)) {
+      searchCursor = start + 1;
+      continue;
+    }
+
+    if (head.delimiter === "]" && !VALUELESS_GM_TAGS.has(head.name)) {
+      searchCursor = start + 1;
+      continue;
+    }
+    if (head.delimiter === ":" && VALUELESS_GM_TAGS.has(head.name)) {
+      searchCursor = start + 1;
+      continue;
+    }
+
+    let endExclusive: number;
+    if (head.delimiter === "]") {
+      endExclusive = head.delimiterIndex + 1;
+    } else if (BALANCED_GM_TAGS.has(head.name)) {
+      const close = findBalancedBracketClose(content, start);
+      if (close >= 0) {
+        endExclusive = close + 1;
+      } else if (head.name === "map_update") {
+        const newline = content.indexOf("\n", head.delimiterIndex + 1);
+        endExclusive = newline < 0 ? content.length : newline + 1;
+      } else {
+        searchCursor = start + 1;
+        continue;
+      }
+    } else {
+      const close = content.indexOf("]", head.delimiterIndex + 1);
+      if (close < 0) break;
+      const hasValue = content.slice(head.delimiterIndex + 1, close).trim().length > 0;
+      if (!hasValue && head.name !== "session_end") {
+        searchCursor = start + 1;
+        continue;
+      }
+      endExclusive = close + 1;
+    }
+
+    result += content.slice(outputCursor, start);
+    outputCursor = endExclusive;
+    searchCursor = endExclusive;
+  }
+  return result + content.slice(outputCursor);
+}
+
+function findBalancedBracketClose(content: string, start: number): number {
+  let depth = 0;
+  for (let index = start; index < content.length; index++) {
+    if (content[index] === "[") depth++;
+    else if (content[index] === "]" && --depth === 0) return index;
+  }
+  return -1;
+}
+
+function stripUnknownGmTags(content: string): string {
+  let result = "";
+  let outputCursor = 0;
+  let searchCursor = 0;
+  while (searchCursor < content.length) {
+    const start = content.indexOf("[", searchCursor);
+    if (start < 0) break;
+    const head = readGmTagHead(content, start, false);
+    if (!head || head.delimiter !== ":" || head.name === "note" || head.name === "book") {
+      searchCursor = start + 1;
+      continue;
+    }
+    const close = content.indexOf("]", head.delimiterIndex + 1);
+    if (close < 0) break;
+    result += content.slice(outputCursor, start);
+    outputCursor = close + 1;
+    searchCursor = close + 1;
+  }
+  return result + content.slice(outputCursor);
+}
+
 function preserveResolvedSkillCheckResults(content: string): string {
-  return content.replace(/\[skill_check:\s*([^\]]+)\]/gi, (fullTag, body: string) => {
-    const result = parseResolvedSkillCheckBody(body);
-    return result ? `Skill check result: ${formatSkillCheckResultSummary(result)}` : fullTag;
-  });
+  const prefix = "[skill_check:";
+  const prefixPattern = /\[skill_check:/gi;
+  let cursor = 0;
+  let resultText = "";
+
+  while (cursor < content.length) {
+    prefixPattern.lastIndex = cursor;
+    const match = prefixPattern.exec(content);
+    if (!match) break;
+    const start = match.index;
+    const close = content.indexOf("]", start + prefix.length);
+    if (close < 0) break;
+    const rawBody = content.slice(start + prefix.length, close);
+    const body = rawBody.trimStart();
+    const result = body ? parseResolvedSkillCheckBody(body) : null;
+    resultText += content.slice(cursor, start);
+    if (result) resultText += `Skill check result: ${formatSkillCheckResultSummary(result)}`;
+    else if (!rawBody) resultText += content.slice(start, close + 1);
+    cursor = close + 1;
+  }
+
+  return resultText + content.slice(cursor);
 }
 
 function parseSkillCheckAttributes(body: string): Map<string, string> {
   const values = new Map<string, string>();
-  const attributes = Array.from(body.matchAll(/(\w+)\s*=\s*("[^"]*"|'[^']*'|[^\s\]]+)/g));
-  for (const match of attributes) {
-    const key = match[1]?.trim().toLowerCase();
-    const rawValue = match[2]?.trim();
-    if (!key || !rawValue) continue;
-    values.set(key, rawValue.replace(/^['"]|['"]$/g, ""));
+  let cursor = 0;
+  while (cursor < body.length) {
+    while (/\s/u.test(body[cursor] ?? "")) cursor++;
+    const keyStart = cursor;
+    while (/\w/u.test(body[cursor] ?? "")) cursor++;
+    if (cursor === keyStart) {
+      cursor++;
+      continue;
+    }
+    const key = body.slice(keyStart, cursor).toLowerCase();
+    while (/\s/u.test(body[cursor] ?? "")) cursor++;
+    if (body[cursor] !== "=") continue;
+    cursor++;
+    while (/\s/u.test(body[cursor] ?? "")) cursor++;
+    const quote = body[cursor] === '"' || body[cursor] === "'" ? body[cursor++] : null;
+    const valueStart = cursor;
+    if (quote) while (cursor < body.length && body[cursor] !== quote) cursor++;
+    else while (cursor < body.length && !/\s/u.test(body[cursor]!) && body[cursor] !== "]") cursor++;
+    const rawValue = body.slice(valueStart, cursor);
+    if (quote && body[cursor] === quote) cursor++;
+    if (rawValue) values.set(key, rawValue);
   }
   return values;
 }
@@ -92,6 +250,7 @@ function parseResolvedSkillCheckBody(body: string): SkillCheckResult | null {
   const modeValue = values.get("mode")?.trim().toLowerCase();
   const rollMode: SkillCheckResult["rollMode"] =
     modeValue === "advantage" ? "advantage" : modeValue === "disadvantage" ? "disadvantage" : "normal";
+  const resolution: SkillCheckResult["resolution"] = values.get("resolution")?.trim().toLowerCase() === "successes" ? "successes" : "sum";
   const explicitUsedRoll = Number.parseInt(values.get("used") ?? "", 10);
   const inferredRollFromTotal = total - modifier;
   const usedRoll = Number.isFinite(explicitUsedRoll)
@@ -118,45 +277,20 @@ function parseResolvedSkillCheckBody(body: string): SkillCheckResult | null {
     criticalSuccess,
     criticalFailure,
     rollMode,
+    resolution,
+    dice: values.get("dice")?.trim().toLowerCase(),
   };
 }
 
 /** Remove dangling closers left behind by malformed or partially stripped tags. */
 function stripDanglingTagClosers(text: string): string {
-  return text.replace(/^\s*[\]}]+\s*$/gm, "");
-}
-
-/** Strip a balanced-bracket tag (handles nested brackets like JSON). */
-function stripBalancedTag(text: string, tagPrefix: string): string {
-  const lower = tagPrefix.toLowerCase();
-  let result = text;
-  let searchFrom = 0;
-  while (true) {
-    const idx = result.toLowerCase().indexOf(lower, searchFrom);
-    if (idx === -1) break;
-    let depth = 0;
-    let end = -1;
-    for (let i = idx; i < result.length; i++) {
-      if (result[i] === "[") depth++;
-      else if (result[i] === "]") {
-        depth--;
-        if (depth === 0) {
-          end = i;
-          break;
-        }
-      }
-    }
-    if (end === -1) {
-      searchFrom = idx + 1;
-      continue;
-    }
-    result = result.slice(0, idx) + result.slice(end + 1);
-  }
-  return result;
-}
-
-function stripMapUpdateTag(text: string): string {
-  return stripBalancedTag(text, "[map_update:").replace(/\[map_update:[^\r\n]*(?:\r?\n|$)/gi, "");
+  return text
+    .split("\n")
+    .map((line) => {
+      const trimmed = line.trim();
+      return trimmed && [...trimmed].every((character) => character === "]" || character === "}") ? "" : line;
+    })
+    .join("\n");
 }
 
 // ── Segment parsing (mirrors client parseNarrationSegments indexing) ──
@@ -234,11 +368,11 @@ function replaceDialogueSpeaker(prefix: string, speaker: string): string {
 function normalizeInlineVnDialogueLines(source: string): string {
   return source
     .replace(
-      /([^\n])\s+(\[[^\]]+\]\s*\[(?:main|side|extra|action|thought|whisper(?::[^\]]+)?)\]\s*(?:\[[^\]]+\])?\s*:)/gi,
+      /(\S)[^\S\r\n]+(\[[^\r\n[\]]+\][^\S\r\n]*\[(?:main|side|extra|action|thought|whisper(?::[^\r\n[\]]+)?)\][^\S\r\n]*(?:\[[^\r\n[\]]+\])?[^\S\r\n]*:)/gi,
       "$1\n$2",
     )
     .replace(
-      /(\[[^\]]+\]\s*\[(?:main|side|extra|whisper(?::[^\]]+)?)\]\s*(?:\[[^\]]+\])?\s*:\s*(?:"[^"]*"|“[^”]*”|«[^»]*»))\s+(?=\S)/gi,
+      /(\[[^\r\n[\]]+\][^\S\r\n]*\[(?:main|side|extra|whisper(?::[^\r\n[\]]+)?)\][^\S\r\n]*(?:\[[^\r\n[\]]+\])?[^\S\r\n]*:[^\S\r\n]*(?:"[^"\r\n]*"|“[^”\r\n]*”|«[^»\r\n]*»))[^\S\r\n]+(?=\S)/gi,
       "$1\n",
     );
 }

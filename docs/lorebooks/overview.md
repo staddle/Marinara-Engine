@@ -78,7 +78,7 @@ Your lorebook has no entries yet. Now add one.
 4. In the entry, add one or more trigger keywords, such as `Eldoria`.
 5. In the entry's **Content** field, write the text you want the AI to receive.
 
-The entry saves on its own a moment after you stop typing. You will see a short **Saved automatically** note. Your lorebook now works: when a keyword matches the recent chat, the entry's content joins the prompt. The entries guide explains keywords, matching rules, and timing options.
+The entry saves on its own a moment after you stop typing. You will see a short **Saved automatically** note. Your lorebook now works: when a keyword matches the recent chat, the entry's content joins the prompt. The [entries guide](entries.md) explains keywords, matching rules, and timing options. Its [Authoring strategy](entries.md#authoring-strategy-choosing-the-right-entry) and [Worked example](entries.md#worked-example-a-small-setting) sections show how to choose the right controls for each entry.
 
 ## The Overview tab settings
 

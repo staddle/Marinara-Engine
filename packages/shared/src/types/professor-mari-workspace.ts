@@ -11,6 +11,9 @@ export type MariWorkspaceToolName =
   | "ls"
   | "edit"
   | "write"
+  | "copy"
+  | "move"
+  | "remove"
   | "bash"
   | "dependency"
   | "app_data";
@@ -226,6 +229,7 @@ export interface MariWorkspaceConnectionSummary {
   name: string;
   provider: string;
   model: string;
+  maxContext: number;
 }
 
 export interface MariWorkspaceSkillSummary {
@@ -246,6 +250,32 @@ export interface MariWorkspaceSkillDetail extends MariWorkspaceSkillSummary {
 export interface MariWorkspaceSkillsResponse {
   skills: MariWorkspaceSkillDetail[];
   diagnostics: string[];
+}
+
+// #4851: Professor Mari's saved memories (the mari_instructions store). The list
+// surfaces full detail (content included) so the Memories management panel can edit
+// in place, mirroring the Skills panel.
+export interface MariInstructionSummary {
+  id: string;
+  name: string;
+  description: string;
+  persistent: boolean;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MariInstructionDetail extends MariInstructionSummary {
+  content: string;
+}
+
+export interface MariInstructionsResponse {
+  instructions: MariInstructionDetail[];
+}
+
+export interface MariInstructionMutationResponse {
+  ok: boolean;
+  instruction: MariInstructionDetail;
 }
 
 export interface MariDbValidationIssue {
@@ -282,11 +312,28 @@ export interface MariDbDiffSummary {
   truncated: boolean;
 }
 
+/**
+ * Signals how a structured read was bounded so the model gets a machine-readable
+ * cue instead of a silent mid-field cut. `fields` lists whole values elided from
+ * an object read (largest first) with the exact `field` path to re-read each;
+ * `field` describes a single windowed field read (`app_data { field, offset }`).
+ */
+export interface MariDbReadTruncation {
+  truncated: boolean;
+  fields?: Array<{ path: string; fullLength: number; returnedLength: number }>;
+  field?: { path: string; offset: number; returned: number; total: number };
+  /** Set when even structured elision could not fit the overview and it was hard-capped. */
+  hardCapped?: boolean;
+  /** Set when a `field=` read named a path that did not resolve on this row. */
+  unresolvedField?: string;
+}
+
 export interface MariDbCommandResult {
   ok: boolean;
   mode: "read" | "dry-run" | "apply";
   command: string;
   output?: unknown;
+  truncation?: MariDbReadTruncation;
   summary?: MariDbDiffSummary;
   validation?: MariDbValidationResult;
   approval?: {

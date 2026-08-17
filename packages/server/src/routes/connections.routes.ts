@@ -27,8 +27,15 @@ import { resetMemoryRecallVectorizerCache } from "../services/memory-recall-embe
 import { createLLMProvider } from "../services/llm/provider-registry.js";
 import { fetchOpenAIChatGPTModels, getOpenAIChatGPTAuth } from "../services/llm/openai-chatgpt-auth.js";
 import { fetchGrokCliModels } from "../services/llm/providers/grok-subscription.provider.js";
-import { buildGoogleVertexModelUrl, googleAuthHeadersForVertex } from "../services/llm/providers/google.provider.js";
-import { resolveConnectionImageDefaults } from "../services/image/image-generation-defaults.js";
+import {
+  buildGoogleVertexModelUrl,
+  googleAuthHeadersForVertex,
+  normalizeGoogleGenerativeLanguageBaseUrl,
+} from "../services/llm/providers/google.provider.js";
+import {
+  resolveConnectionImageDefaults,
+  resolveConnectionImageQuality,
+} from "../services/image/image-generation-defaults.js";
 import { buildVeniceApiUrl, normalizeVeniceImageModels } from "../services/image/venice-image.js";
 import { isImageLocalUrlsEnabled, isProviderLocalUrlsEnabled } from "../config/runtime-config.js";
 import { logDebugOverride } from "../lib/logger.js";
@@ -43,7 +50,9 @@ import { DATA_DIR } from "../utils/data-dir.js";
 
 const CONNECTION_TEST_ERROR_PREVIEW_CHARS = 2000;
 const CONNECTION_IMAGES_DIR = join(DATA_DIR, "connections", "images");
+const SWARMUI_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_COMFYUI_VIDEO_BASE_URL = "http://127.0.0.1:8188";
+const DEFAULT_SWARMUI_VIDEO_BASE_URL = "http://127.0.0.1:7801";
 const DEFAULT_GEMINI_OMNI_VIDEO_MODEL = "gemini-omni-flash-preview";
 const DEFAULT_GEMINI_OMNI_VIDEO_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_GOOGLE_VEO_VIDEO_MODEL = "veo-3.1-generate-preview";
@@ -112,7 +121,7 @@ function formatProviderErrorBody(body: string): string {
 }
 
 function isOpenAICompatibleProvider(provider: string): boolean {
-  return ["openai", "openrouter", "nanogpt", "xai", "mistral", "custom", "cohere"].includes(provider);
+  return ["openai", "openrouter", "nanogpt", "xai", "mistral", "custom", "cohere", "arli"].includes(provider);
 }
 
 function usesResponsesEndpointForTestMessage(provider: string, model: string): boolean {
@@ -175,30 +184,78 @@ export function parseComfyLoaderModelNames(info: unknown, nodeName: string, inpu
 
 function localUrlPolicyForProvider(provider: string, imageSource: string) {
   const isLocalImageBackend =
-    provider === "image_generation" && (imageSource === "comfyui" || imageSource === "automatic1111");
+    provider === "image_generation" &&
+    (imageSource === "comfyui" || imageSource === "swarmui" || imageSource === "automatic1111");
   const isImage = provider === "image_generation";
   const isVideo = provider === "video_generation";
+  const isLocalVideoBackend = isVideo && (imageSource === "comfyui" || imageSource === "swarmui");
   return {
     allowLocal: isVideo
-      ? false
+      ? isLocalVideoBackend
       : isLocalImageBackend || (isImage && isImageLocalUrlsEnabled())
         ? true
         : isProviderLocalUrlsEnabled(),
     allowLoopback: true,
-    allowMdns: !isVideo && (provider !== "image_generation" || isLocalImageBackend || isImageLocalUrlsEnabled()),
+    allowMdns:
+      isLocalVideoBackend ||
+      (!isVideo && (provider !== "image_generation" || isLocalImageBackend || isImageLocalUrlsEnabled())),
     allowedProtocols: ["https:", "http:"],
     flagName: isImage ? "IMAGE_LOCAL_URLS_ENABLED" : "PROVIDER_LOCAL_URLS_ENABLED",
   };
 }
 
+function swarmUiHeaders(apiKey: string): Record<string, string> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const token = apiKey.trim();
+  if (token) headers.Cookie = `swarm_token=${encodeURIComponent(token)}`;
+  return headers;
+}
+
+async function postSwarmUiJson(baseUrl: string, apiKey: string, route: string, body: Record<string, unknown>) {
+  const response = await safeFetch(`${baseUrl.replace(/\/+$/, "")}/API/${route}`, {
+    method: "POST",
+    headers: swarmUiHeaders(apiKey),
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(SWARMUI_CONTROL_REQUEST_TIMEOUT_MS),
+    policy: localUrlPolicyForProvider("image_generation", "swarmui"),
+    maxResponseBytes: 5 * 1024 * 1024,
+    decodeCompressedResponse: true,
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`SwarmUI returned ${response.status}: ${formatProviderErrorBody(text)}`);
+  }
+  let result: unknown;
+  try {
+    result = JSON.parse(text) as unknown;
+  } catch {
+    throw new Error("SwarmUI returned invalid JSON");
+  }
+  if (isRecord(result) && (typeof result.error === "string" || typeof result.error_id === "string")) {
+    const message =
+      typeof result.error === "string"
+        ? result.error
+        : typeof result.error_id === "string"
+          ? result.error_id
+          : "Unknown error";
+    throw new Error(`SwarmUI API error: ${trimProviderError(message)}`);
+  }
+  return result;
+}
+
+async function createSwarmUiSession(baseUrl: string, apiKey: string): Promise<string> {
+  const result = await postSwarmUiJson(baseUrl, apiKey, "GetNewSession", {});
+  const sessionId = isRecord(result) && typeof result.session_id === "string" ? result.session_id.trim() : "";
+  if (!sessionId) throw new Error("SwarmUI did not return a session_id");
+  return sessionId;
+}
+
 export function buildGoogleModelsPageUrl(baseUrl: string, modelsEndpoint: string, pageToken = ""): string {
-  return (
-    `${baseUrl}${modelsEndpoint}?pageSize=1000` +
-    (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "")
-  );
+  return `${baseUrl}${modelsEndpoint}?pageSize=1000` + (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "");
 }
 
 function normalizeConnectionTestBaseUrl(baseUrl: string, provider: string): string {
+  if (provider === "google") return normalizeGoogleGenerativeLanguageBaseUrl(baseUrl);
   if (provider !== "image_generation") return baseUrl.replace(/\/+$/, "");
   try {
     return normalizeLoopbackUrl(baseUrl).replace(/\/+$/, "");
@@ -584,6 +641,14 @@ export async function connectionsRoutes(app: FastifyInstance) {
       } else if (conn.provider === "image_generation" && imageSource === "comfyui") {
         // ComfyUI: ping the system stats endpoint
         testUrl = `${baseUrl}/system_stats`;
+      } else if (conn.provider === "image_generation" && imageSource === "swarmui") {
+        await createSwarmUiSession(baseUrl, conn.apiKey || "");
+        return {
+          success: true,
+          message: "Connection successful",
+          latencyMs: Date.now() - start,
+          modelName: conn.model,
+        };
       } else if (conn.provider === "image_generation" && imageSource === "automatic1111") {
         // AUTOMATIC1111 / SD Web UI: ping the internal ping endpoint
         testUrl = `${baseUrl}/sdapi/v1/options`;
@@ -682,7 +747,7 @@ export async function connectionsRoutes(app: FastifyInstance) {
         if (videoSource === "atlas") {
           return { models: ATLAS_CLOUD_VIDEO_MODELS.map((model) => ({ id: model.id, name: model.name })) };
         }
-        if (videoSource !== "comfyui") {
+        if (videoSource !== "comfyui" && videoSource !== "swarmui") {
           const models = MODEL_LISTS.video_generation.map((m) => ({ id: m.id, name: m.name }));
           return { models };
         }
@@ -794,11 +859,24 @@ export async function connectionsRoutes(app: FastifyInstance) {
         return { models: knownStabilityImageModels() };
       }
 
+      if ((conn.provider === "image_generation" || conn.provider === "video_generation") && mediaSource === "swarmui") {
+        const sessionId = await createSwarmUiSession(baseUrl, conn.apiKey || "");
+        const result = await postSwarmUiJson(baseUrl, conn.apiKey || "", "ListT2IParams", { session_id: sessionId });
+        const modelGroups = isRecord(result) && isRecord(result.models) ? result.models : {};
+        const modelNames = Array.isArray(modelGroups["Stable-Diffusion"])
+          ? modelGroups["Stable-Diffusion"].filter((model): model is string => typeof model === "string")
+          : [];
+        const loraNames = Array.isArray(modelGroups.LoRA)
+          ? modelGroups.LoRA.filter((model): model is string => typeof model === "string")
+          : [];
+        return {
+          models: modelNames.map((name) => ({ id: name, name })),
+          loras: loraNames.map((name) => ({ id: name, name })),
+        };
+      }
+
       // ComfyUI: fetch checkpoints and diffusion models from object_info
-      if (
-        (conn.provider === "image_generation" || conn.provider === "video_generation") &&
-        mediaSource === "comfyui"
-      ) {
+      if ((conn.provider === "image_generation" || conn.provider === "video_generation") && mediaSource === "comfyui") {
         const fetchComfyLoaderModelNames = async (nodeName: string, inputName: string) => {
           const res = await safeFetch(`${baseUrl}/object_info/${nodeName}`, {
             policy: localUrlPolicyForProvider(conn.provider, mediaSource),
@@ -1097,6 +1175,8 @@ export async function connectionsRoutes(app: FastifyInstance) {
         height: 1024,
         comfyWorkflow: conn.comfyuiWorkflow || undefined,
         imageDefaults,
+        quality: resolveConnectionImageQuality(conn),
+        debugMode: readDebugMode(req.body),
       });
       return {
         success: true,
@@ -1137,15 +1217,18 @@ export async function connectionsRoutes(app: FastifyInstance) {
       explicitVideoSource || (inferredVideoSource !== "gemini_omni" ? inferredVideoSource : defaults.service);
     const rawVideoServiceHint = conn.videoService || videoSource;
     const videoServiceHint =
-      rawVideoServiceHint === "google_ai_studio"
-        ? inferVideoSource(conn.model || "", conn.baseUrl || "")
-        : rawVideoServiceHint;
+      videoSource === "swarmui"
+        ? "swarmui"
+        : rawVideoServiceHint === "google_ai_studio"
+          ? inferVideoSource(conn.model || "", conn.baseUrl || "")
+          : rawVideoServiceHint;
     const isXaiVideo = videoSource === "xai" || videoServiceHint === "xai";
     const isGoogleVeoVideo = videoSource === "google_veo" || videoServiceHint === "google_veo";
     const isOpenRouterVideo = videoSource === "openrouter" || videoServiceHint === "openrouter";
     const isAtlasVideo = videoSource === "atlas" || videoServiceHint === "atlas";
     const isSeedanceVideo = videoSource === "seedance" || videoServiceHint === "seedance";
-    const isComfyUiVideo = videoSource === "comfyui" || videoServiceHint === "comfyui";
+    const isSwarmUiVideo = videoSource === "swarmui" || videoServiceHint === "swarmui";
+    const isComfyUiVideo = videoSource === "comfyui" || videoServiceHint === "comfyui" || isSwarmUiVideo;
     const baseUrl = (
       conn.baseUrl ||
       (isXaiVideo
@@ -1158,9 +1241,11 @@ export async function connectionsRoutes(app: FastifyInstance) {
               ? DEFAULT_ATLAS_CLOUD_VIDEO_BASE_URL
               : isSeedanceVideo
                 ? DEFAULT_SEEDANCE_VIDEO_BASE_URL
-                : isComfyUiVideo
-                  ? DEFAULT_COMFYUI_VIDEO_BASE_URL
-                  : providerDef?.defaultBaseUrl || DEFAULT_GEMINI_OMNI_VIDEO_BASE_URL)
+                : isSwarmUiVideo
+                  ? DEFAULT_SWARMUI_VIDEO_BASE_URL
+                  : isComfyUiVideo
+                    ? DEFAULT_COMFYUI_VIDEO_BASE_URL
+                    : providerDef?.defaultBaseUrl || DEFAULT_GEMINI_OMNI_VIDEO_BASE_URL)
     ).replace(/\/+$/, "");
     const videoModel =
       conn.model ||

@@ -142,9 +142,9 @@ function savePendingSpatialTransitions(m: Map<string, PendingSpatialTransitionDr
   }
 }
 
-function abortGenerationForChat(chatId: string, controller?: AbortController) {
+export async function abortGenerationForChat(chatId: string, controller?: AbortController): Promise<void> {
   controller?.abort();
-  void api.post("/generate/abort", { chatId }).catch(() => {});
+  await api.post("/generate/abort", { chatId });
 }
 
 const notificationAutoDismissTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -440,8 +440,16 @@ export const useChatStore = create<ChatState>()(
       // Only reset agent + game state when actually switching chats — re-selecting the
       // same chat should not blow away loaded tracker data.
       if (id !== prev) {
-        useAgentStore.getState().reset();
+        // Professor Mari suggestions and guided plans are already scoped to their chat IDs.
+        // Keep them through temporary editor navigation so reopening the chat does not flash
+        // or replace them with the starter suggestions (#4953).
+        useAgentStore.getState().resetForChatChange();
         useGameStateStore.getState().setGameState(null);
+        if (id) {
+          // Opening a chat is meaningful recency even when the user only reads it.
+          // The lightweight touch keeps Home's Continue Chatting shelf in visit order.
+          void api.post(`/chats/${encodeURIComponent(id)}/touch`).catch(() => undefined);
+        }
         // Background is NOT cleared here — it's managed by ChatArea's restore effect.
         // Clearing it would cause a black flash and wipe the background for new chats.
         // Restore per-chat typing/delayed indicators for the newly active chat
@@ -559,7 +567,7 @@ export const useChatStore = create<ChatState>()(
             ? [streamingChatId]
             : [...abortControllers.keys()];
       for (const targetChatId of new Set(targetIds)) {
-        abortGenerationForChat(targetChatId, abortControllers.get(targetChatId));
+        void abortGenerationForChat(targetChatId, abortControllers.get(targetChatId)).catch(() => {});
       }
     },
     appendStreamBuffer: (text, chatId) =>
@@ -1027,7 +1035,7 @@ export const useChatStore = create<ChatState>()(
       chatNotificationSources.clear();
       const { abortControllers } = useChatStore.getState();
       for (const [chatId, controller] of abortControllers) {
-        abortGenerationForChat(chatId, controller);
+        void abortGenerationForChat(chatId, controller).catch(() => {});
       }
       clearAllNotificationTimers();
       currentInputSnapshot = "";

@@ -164,9 +164,39 @@ const THEME_TOKEN_BLOCKLIST = [
   "--color-sidebar-accent-foreground",
 ];
 
-/** Strip CSS comments */
+/** Strip CSS comments while retaining the token boundary they represent. */
 function stripComments(css: string): string {
-  return css.replace(/\/\*[\s\S]*?\*\//g, "");
+  let result = "";
+  let quote: '"' | "'" | null = null;
+  let escaped = false;
+
+  for (let index = 0; index < css.length; index++) {
+    const ch = css[index]!;
+    const next = css[index + 1];
+    if (quote) {
+      result += ch;
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      result += ch;
+      continue;
+    }
+    if (ch !== "/" || next !== "*") {
+      result += ch;
+      continue;
+    }
+
+    result += " ";
+    index += 2;
+    while (index < css.length && !(css[index] === "*" && css[index + 1] === "/")) index++;
+    if (index < css.length) index++;
+  }
+
+  return result;
 }
 
 function sanitizeContentText(text: string): string {
@@ -324,6 +354,45 @@ function canonicalizeKeywordEscapes(css: string): string {
   });
 }
 
+function neutralizeUnsafeImageSets(css: string): string {
+  const startPattern = /(?:-webkit-)?image-set\s*\(/giu;
+  let result = "";
+  let cursor = 0;
+  for (let match = startPattern.exec(css); match; match = startPattern.exec(css)) {
+    let quote: '"' | "'" | null = null;
+    let escaped = false;
+    let depth = 1;
+    let index = startPattern.lastIndex;
+    for (; index < css.length && depth > 0; index++) {
+      const ch = css[index]!;
+      if (quote) {
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === quote) quote = null;
+        continue;
+      }
+      if (ch === '"' || ch === "'") quote = ch;
+      else if (ch === "(") depth++;
+      else if (ch === ")") depth--;
+    }
+    if (depth !== 0) break;
+    const expression = css.slice(match.index, index);
+    const sources = expression.match(/(?:url\s*\(\s*)?["']?data:image\/[^")'\s]+["']?\s*\)?/giu) ?? [];
+    const remainder = expression
+      .replace(/^(?:-webkit-)?image-set\s*\(/iu, "")
+      .replace(/\)$/u, "")
+      .replace(/(?:url\s*\(\s*)?["']?data:image\/[^")'\s]+["']?\s*\)?/giu, "")
+      .replace(/\btype\s*\([^)]*\)/giu, "")
+      .replace(/(?:\d+(?:\.\d+)?x|\d+dpi|\d+dpcm|\d+dppx)/giu, "")
+      .replace(/[\s,]/gu, "");
+    result += css.slice(cursor, match.index);
+    result += sources.length > 0 && remainder.length === 0 ? expression : "url(about:invalid)";
+    cursor = index;
+    startPattern.lastIndex = index;
+  }
+  return result + css.slice(cursor);
+}
+
 /**
  * Strip the CSS constructs that are dangerous no matter where the CSS is injected:
  * network exfiltration (url()/@import/@namespace/@font-face), script execution
@@ -352,10 +421,14 @@ export function stripDangerousCss(css: string): string {
     /url\s*\(\s*(['"]?)\s*(?!['"]?\s*data:(?:image\/|font\/|application\/(?:font|x-font)))[^)]*\)/gi,
     "url(about:invalid)",
   );
+  // CSS Images also accepts a bare quoted URL inside image-set(). Normalize
+  // those sources to url() so the same allowlist above governs them. Embedded
+  // data:image choices remain usable; external/relative sources become inert.
+  out = neutralizeUnsafeImageSets(out);
   // Strip @import (network request + CSS injection)
-  out = out.replace(/@import\b[^;]*;/gi, "");
+  out = out.replace(/@import\b[^;]*(?:;|$)/gi, " ");
   // Strip @namespace
-  out = out.replace(/@namespace\b[^;]*;/gi, "");
+  out = out.replace(/@namespace\b[^;]*(?:;|$)/gi, " ");
   // Keep an @font-face block only if every source is a FONT data: URI. The block must carry
   // at least one url() (an empty url() set would otherwise pass vacuously), every url() must
   // be a font data: URI, and local() sources are rejected — they reference installed fonts
@@ -368,15 +441,17 @@ export function stripDangerousCss(css: string): string {
       urls.length > 0 &&
       urls.every((u) => /url\s*\(\s*(['"]?)\s*data:(?:font\/|application\/(?:font|x-font))/i.test(u));
     const hasLocalSource = /\blocal\s*\(/i.test(block);
-    return allFontData && !hasLocalSource ? block : "";
+    return allFontData && !hasLocalSource ? block : " ";
   });
 
   // ── Script/expression injection ──
-  out = out.replace(/expression\s*\([^)]*\)/gi, "");
-  out = out.replace(/javascript\s*:/gi, "");
-  out = out.replace(/vbscript\s*:/gi, "");
-  out = out.replace(/behavior\s*:[^;]*/gi, "");
-  out = out.replace(/-moz-binding\s*:[^;]*/gi, "");
+  // Preserve a space whenever syntax is removed so surrounding fragments can
+  // never concatenate into a new forbidden token after this pass.
+  out = out.replace(/expression\s*\([^)]*\)/gi, " ");
+  out = out.replace(/javascript\s*:/gi, " ");
+  out = out.replace(/vbscript\s*:/gi, " ");
+  out = out.replace(/behavior\s*:[^;]*/gi, " ");
+  out = out.replace(/-moz-binding\s*:[^;]*/gi, " ");
 
   // ── History probing ──
   // Strip :visited — can detect browsing history via style differences
@@ -402,7 +477,7 @@ function sanitizeChatCss(css: string): string {
 
   // ── Scope escape prevention ──
   // Strip :has() — can probe elements outside the scoped container
-  out = out.replace(/:has\s*\([^)]*\)/gi, "");
+  out = out.replace(/:has\s*\([^)]*\)/gi, " ");
   // Convert position:fixed to position:absolute (prevent viewport overlays)
   out = out.replace(/position\s*:\s*fixed/gi, "position:absolute");
 
@@ -411,7 +486,7 @@ function sanitizeChatCss(css: string): string {
   // Strip HTML-like characters and cap length to prevent phishing/UI spoofing.
   out = sanitizeContentDeclarations(out);
   // Strip </style (prevent injection breakout)
-  out = out.replace(/<\/style/gi, "");
+  out = out.replace(/<\/style/gi, " ");
 
   // ── Theme protection ──
   // Strip theme token declarations
@@ -420,10 +495,10 @@ function sanitizeChatCss(css: string): string {
       `(${THEME_TOKEN_BLOCKLIST.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\s*:[^;]*;?`,
       "gi",
     ),
-    "",
+    " ",
   );
   // Strip !important (prevent overriding app styles)
-  out = out.replace(/!important/gi, "");
+  out = out.replace(/!important/gi, " ");
 
   return out;
 }

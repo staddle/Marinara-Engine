@@ -61,7 +61,9 @@ function sanitizePresetAgentMap(value: unknown) {
 
 function sanitizePresetMetadataValue(key: string, value: unknown) {
   if (key === "activeAgentIds") return sanitizePresetAgentIds(value);
-  if (key === "agentOverrides" || key === "agentPromptTemplateIds") return sanitizePresetAgentMap(value);
+  if (key === "agentOverrides" || key === "agentPromptTemplateIds" || key === "customAgentImageSettings") {
+    return sanitizePresetAgentMap(value);
+  }
   return value;
 }
 
@@ -283,6 +285,7 @@ export function createChatPresetsStorage(db: DB) {
         const rows = await db.select().from(chats).where(eq(chats.id, chatId));
         const chatRow = rows[0];
         if (!chatRow) return null;
+        if (preset.mode !== chatRow.mode) return null;
 
         const currentMetadata: Record<string, unknown> = (() => {
           try {
@@ -292,7 +295,7 @@ export function createChatPresetsStorage(db: DB) {
           }
         })();
 
-        const presetMetadata = (preset.settings.metadata ?? {}) as Record<string, unknown>;
+        const presetMetadata = (sanitizePresetSettings(preset.settings).metadata ?? {}) as Record<string, unknown>;
 
         // Preserve only chat-specific (non-profile) metadata keys.
         const preserved: Record<string, unknown> = {};
@@ -307,6 +310,9 @@ export function createChatPresetsStorage(db: DB) {
         }
         if (!Object.prototype.hasOwnProperty.call(presetMetadata, "agentPromptTemplateIds")) {
           preserved.agentPromptTemplateIds = sanitizePresetAgentMap(currentMetadata.agentPromptTemplateIds);
+        }
+        if (!Object.prototype.hasOwnProperty.call(presetMetadata, "customAgentImageSettings")) {
+          preserved.customAgentImageSettings = sanitizePresetAgentMap(currentMetadata.customAgentImageSettings);
         }
 
         const baseDefaults: Record<string, unknown> = {

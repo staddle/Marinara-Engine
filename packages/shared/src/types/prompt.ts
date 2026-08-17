@@ -4,6 +4,14 @@
 
 import type { ThinkingTagPair } from "../utils/thinking-tags.js";
 
+export const MARINARA_UNIVERSAL_PRESET_NAME = "Marinara's Universal Preset";
+export const MARINARA_UNIVERSAL_PRESET_AUTHOR = "Marinara";
+export const MARINARA_UNIVERSAL_PRESET_SYSTEM_KEY = "marinara-universal-preset";
+
+export function isStockMarinaraUniversalPreset(preset: { systemKey?: unknown }): boolean {
+  return preset.systemKey === MARINARA_UNIVERSAL_PRESET_SYSTEM_KEY;
+}
+
 /** Role for a prompt section. */
 export type PromptRole = "system" | "user" | "assistant";
 
@@ -51,6 +59,8 @@ export interface PromptPreset {
   id: string;
   name: string;
   description: string;
+  /** Optional custom picture shown in preset lists and editors. */
+  imagePath: string | null;
   /** Conversation-mode system prompt template. Empty means use the built-in fallback. */
   conversationPrompt: string;
   /** Game-mode GM prompt template. Empty means use the built-in fallback. */
@@ -73,6 +83,8 @@ export interface PromptPreset {
   isDefault: boolean;
   /** Author of this preset */
   author: string;
+  /** Reserved identifier for Engine-owned presets. Empty for user presets. */
+  systemKey: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -275,6 +287,8 @@ export interface ChatMLMessage {
   characterId?: string | null;
   /** Internal Roleplay audience filter. Removed before messages reach a provider. */
   hiddenFromAICharacterIds?: string[];
+  /** Internal per-character Roleplay context boundary. Removed before messages reach a provider. */
+  conversationStartForCharacterIds?: string[];
   /** Base64 data URLs for multimodal image inputs */
   images?: string[];
   /** Base64 data URLs for provider-native file/document inputs */

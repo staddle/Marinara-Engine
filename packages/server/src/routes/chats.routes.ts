@@ -4,12 +4,14 @@
 import type { FastifyInstance } from "fastify";
 import AdmZip from "adm-zip";
 import { logger } from "../lib/logger.js";
+import { cardPromptText } from "../services/prompt/card-text.js";
 import {
   PROFESSOR_MARI_ID,
   createChatSchema,
   createMessageSchema,
   appendChatSummaryEntryToMetadata,
   CHAT_SUMMARY_PROMPT_SETTINGS_KEY,
+  combineChatSummaryEntryHistory,
   compileChatSummaryEntries,
   createChatSummaryEntry,
   DEFAULT_CONVERSATION_PROMPT,
@@ -19,12 +21,12 @@ import {
   nameToXmlTag,
   normalizeChatSummaryEntries,
   resolveMacros,
-  stripMacroComments,
   summariesPatchSchema,
   coerceGameStateTextValue,
   normalizeWorldCustomFields,
   normalizeTrackerFieldLocks,
   normalizeTrackerHiddenFields,
+  HOME_FEED_SPRITE_EXPRESSION_MAX_LENGTH,
   parseTrackerFieldLocks,
   parseTrackerHiddenFields,
   characterTrackerCustomFieldDefaultsToRecord,
@@ -45,8 +47,13 @@ import type {
   PresentCharacter,
   RPGStatsConfig,
   WorldCustomField,
+  HomeFeedSnapshot,
 } from "@marinara-engine/shared";
-import { createChatsStorage } from "../services/storage/chats.storage.js";
+import {
+  createChatsStorage,
+  InvalidMessageCursorError,
+  parseMessageCursor,
+} from "../services/storage/chats.storage.js";
 import { createAppSettingsStorage } from "../services/storage/app-settings.storage.js";
 import { createCharactersStorage } from "../services/storage/characters.storage.js";
 import { createConnectionsStorage } from "../services/storage/connections.storage.js";
@@ -124,6 +131,10 @@ import {
 } from "../services/generation/roleplay-summary-runtime.js";
 import { resolveLorebookTokenBudget } from "../services/generation/lorebook-generation-runtime.js";
 import { resolveGameGmPromptTemplate } from "../services/generation/game-gm-prompt-runtime.js";
+import {
+  isBackgroundAutonomousCandidate,
+  hasRoleplayDmThreadMarkers,
+} from "../services/conversation/autonomous-candidates.js";
 
 type TrackerWrapFormat = "xml" | "markdown" | "none";
 type EntryStateOverrides = Record<string, { ephemeral?: number | null; enabled?: boolean }>;
@@ -146,6 +157,18 @@ function parseSnapshotJson<T>(value: unknown, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function normalizeMessageCharacterIds(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return Array.from(
+    new Set(
+      value
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  );
 }
 
 function toSafeExportName(name: string, fallback: string) {
@@ -308,7 +331,8 @@ export function normalizeChatForResponse<T extends { metadata?: unknown; charact
 type SummaryEntriesPatchBody =
   | { operation: "replace"; entry: Partial<ChatSummaryEntry> & { id: string; content: string } }
   | { operation: "delete"; entryId: string }
-  | { operation: "toggle"; entryId: string; enabled: boolean };
+  | { operation: "toggle"; entryId: string; enabled: boolean }
+  | { operation: "reorder"; entryIds: string[] };
 
 async function loadLatestChatGameSnapshot(
   app: FastifyInstance,
@@ -361,10 +385,6 @@ function toPeekPromptMessages(
     role: message.role,
     content: message.content,
   }));
-}
-
-function cardPromptText(value: unknown): string {
-  return typeof value === "string" ? stripMacroComments(value).trim() : "";
 }
 
 async function buildPersonaSnapshotForChat(
@@ -582,10 +602,7 @@ export async function chatsRoutes(app: FastifyInstance) {
       const metadata = parseChatMetadata(chat.metadata);
       const isRoleplayDmThread = metadata.roleplayDmThread === true || typeof metadata.dmOriginChatId === "string";
       if (!isRoleplayDmThread) continue;
-      if ((await storage.countMessages(chat.id)) > 0) continue;
-
-      await storage.remove(chat.id);
-      removed += 1;
+      if (await storage.removeEmptyRoleplayDmChat(chat.id)) removed += 1;
     }
     if (removed > 0) {
       logger.warn("[chats] Removed %d empty orphaned Roleplay DM chat(s)", removed);
@@ -627,6 +644,128 @@ export async function chatsRoutes(app: FastifyInstance) {
     await cleanupEmptyRoleplayDmChats();
     const chats = await storage.list();
     return chats.filter((chat) => !shouldHideProfessorMariChat(chat)).map(normalizeChatForResponse);
+  });
+
+  // Bounded Home data. This deliberately returns one short visible-message
+  // glimpse per chat instead of making the browser load recent transcripts.
+  app.get("/home-feed", async (): Promise<HomeFeedSnapshot> => {
+    const recentChats = [];
+    const seenRecentChatIds = new Set<string>();
+    const pageSize = 24;
+    let offset = 0;
+    while (recentChats.length < 6) {
+      const page = await storage.listRecent(pageSize, offset);
+      if (page.length === 0) break;
+      for (const chat of page) {
+        if (!shouldHideProfessorMariChat(chat) && !seenRecentChatIds.has(chat.id)) {
+          seenRecentChatIds.add(chat.id);
+          recentChats.push(chat);
+        }
+        if (recentChats.length === 6) break;
+      }
+      offset += page.length;
+      if (page.length < pageSize) break;
+    }
+    return {
+      generatedAt: new Date().toISOString(),
+      recentChats: await Promise.all(
+        recentChats.map(async (chat) => {
+          const messages = await storage.listMessagePreviews(chat.id, 12);
+          const metadata = parseChatMetadata(chat.metadata);
+          const background = typeof metadata.background === "string" ? metadata.background.trim() : "";
+          const gameBackgroundTag =
+            chat.mode === "game" && typeof metadata.gameSceneBackground === "string"
+              ? metadata.gameSceneBackground.trim()
+              : "";
+          const chatCharacterIds = resolveChatCharacterIds(chat.characterIds).slice(0, 12);
+          const spriteCharacterIds = Array.isArray(metadata.spriteCharacterIds)
+            ? metadata.spriteCharacterIds
+                .filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+                .slice(0, 12)
+            : [];
+          const spriteDisplayModes = Array.isArray(metadata.spriteDisplayModes)
+            ? metadata.spriteDisplayModes
+                .filter((mode): mode is "expressions" | "full-body" => mode === "expressions" || mode === "full-body")
+                .slice(0, 12)
+            : [];
+          const spriteExpressionCharacterIds = new Set([...spriteCharacterIds, ...chatCharacterIds].slice(0, 12));
+          const spriteExpressions: Record<string, string> = {};
+          if (isRecord(metadata.spriteExpressions)) {
+            for (const [characterId, expression] of Object.entries(metadata.spriteExpressions)) {
+              if (
+                spriteExpressionCharacterIds.has(characterId) &&
+                typeof expression === "string" &&
+                expression.trim()
+              ) {
+                spriteExpressions[characterId] = expression.trim().slice(0, HOME_FEED_SPRITE_EXPRESSION_MAX_LENGTH);
+              }
+            }
+          }
+          for (const message of messages) {
+            const extra = parseSnapshotJson<Record<string, unknown>>(message.extra, {});
+            if (!isRecord(extra.spriteExpressions)) continue;
+            for (const [characterId, expression] of Object.entries(extra.spriteExpressions)) {
+              if (
+                spriteExpressionCharacterIds.has(characterId) &&
+                typeof expression === "string" &&
+                expression.trim()
+              ) {
+                spriteExpressions[characterId] = expression.trim().slice(0, HOME_FEED_SPRITE_EXPRESSION_MAX_LENGTH);
+              }
+            }
+          }
+          const latest = [...messages]
+            .reverse()
+            .find((message) => message.role !== "system" && message.content.trim().length > 0);
+          return {
+            chat: {
+              id: chat.id,
+              name: chat.name.slice(0, 160),
+              mode: chat.mode,
+              groupId: chat.groupId ?? null,
+              characterIds: chatCharacterIds,
+              background: background.length > 0 && background.length <= 2_048 ? background : null,
+              gameBackgroundTag:
+                gameBackgroundTag.length > 0 && gameBackgroundTag.length <= 2_048 ? gameBackgroundTag : null,
+              spriteCharacterIds,
+              spriteDisplayModes,
+              spriteExpressions,
+            },
+            latestMessage: latest
+              ? {
+                  id: latest.id,
+                  role: latest.role,
+                  characterId: latest.characterId,
+                  content: latest.content.trim().replace(/\s+/gu, " ").slice(0, 280),
+                  createdAt: latest.createdAt,
+                }
+              : null,
+          };
+        }),
+      ),
+    };
+  });
+
+  // Lightweight candidate ids for the background-autonomous poller (#4704):
+  // the poller only needs ids, so skip the full-list materialization,
+  // metadata serialization, and DM-cleanup scans the / route performs.
+  // Static path — Fastify prefers it over GET /:id.
+  app.get("/autonomous-candidates", async () => {
+    const chats = await storage.list();
+    const candidates = chats.filter(isBackgroundAutonomousCandidate);
+    // Exclude EMPTIED Roleplay DM threads: the legacy poll's GET /chats ran
+    // cleanupEmptyRoleplayDmChats as a side effect, and an emptied thread with
+    // stale in-memory activity state could otherwise receive an autonomous
+    // message, permanently exempting it from cleanup. countMessages runs only
+    // for DM-marker candidates, so the scan cost this route avoids stays avoided.
+    const eligible = [];
+    for (const chat of candidates) {
+      if (hasRoleplayDmThreadMarkers(parseChatMetadata(chat.metadata))) {
+        if ((await storage.countMessages(chat.id)) === 0) continue;
+      }
+      eligible.push({ id: chat.id });
+    }
+    return eligible;
   });
 
   app.get("/internal/professor-mari/chats", async () => {
@@ -1137,6 +1276,15 @@ export async function chatsRoutes(app: FastifyInstance) {
       if (typeof body.entryId !== "string" || !body.entryId.trim() || typeof body.enabled !== "boolean") {
         return reply.status(400).send({ error: "toggle requires entryId and enabled" });
       }
+    } else if (body.operation === "reorder") {
+      if (
+        !Array.isArray(body.entryIds) ||
+        body.entryIds.length === 0 ||
+        !body.entryIds.every((id) => typeof id === "string" && id.trim()) ||
+        new Set(body.entryIds).size !== body.entryIds.length
+      ) {
+        return reply.status(400).send({ error: "reorder requires unique entryIds" });
+      }
     } else {
       return reply.status(400).send({ error: "Unsupported summary entry operation" });
     }
@@ -1171,6 +1319,7 @@ export async function chatsRoutes(app: FastifyInstance) {
       }
     }
 
+    let reorderConflict = false;
     const updated = await storage.patchMetadata(req.params.id, (freshMeta) => {
       const entries = normalizeChatSummaryEntries(freshMeta.summaryEntries, {
         legacySummary: typeof freshMeta.summary === "string" ? freshMeta.summary : null,
@@ -1201,6 +1350,14 @@ export async function chatsRoutes(app: FastifyInstance) {
         nextEntries = entries.map((entry) =>
           entry.id === body.entryId ? { ...entry, enabled: body.enabled, updatedAt: now } : entry,
         );
+      } else if (body.operation === "reorder") {
+        const entriesById = new Map(entries.map((entry) => [entry.id, entry]));
+        if (body.entryIds.length !== entries.length || body.entryIds.some((id) => !entriesById.has(id))) {
+          reorderConflict = true;
+          nextEntries = entries;
+        } else {
+          nextEntries = body.entryIds.map((id) => entriesById.get(id)!);
+        }
       } else {
         nextEntries = entries;
       }
@@ -1211,6 +1368,9 @@ export async function chatsRoutes(app: FastifyInstance) {
       };
     });
 
+    if (reorderConflict) {
+      return reply.status(409).send({ error: "Summary entries changed before they could be reordered" });
+    }
     if (!updated) return reply.status(404).send({ error: "Chat not found" });
     return normalizeChatForResponse(updated);
   });
@@ -1556,10 +1716,20 @@ export async function chatsRoutes(app: FastifyInstance) {
   // List messages for a chat (supports pagination via ?limit=N&before=CURSOR)
   app.get<{ Params: { id: string }; Querystring: { limit?: string; before?: string } }>(
     "/:id/messages",
-    async (req) => {
+    async (req, reply) => {
       const limit = req.query.limit ? parseInt(req.query.limit, 10) : 0;
       if (limit > 0) {
-        return storage.listMessagesPaginated(req.params.id, limit, req.query.before || undefined);
+        if (req.query.before && !parseMessageCursor(req.query.before)) {
+          return reply.status(400).send({ error: "Invalid message cursor" });
+        }
+        try {
+          return await storage.listMessagesPaginated(req.params.id, limit, req.query.before || undefined);
+        } catch (error) {
+          if (error instanceof InvalidMessageCursorError) {
+            return reply.status(400).send({ error: error.message });
+          }
+          throw error;
+        }
       }
       return storage.listMessages(req.params.id);
     },
@@ -1861,7 +2031,12 @@ export async function chatsRoutes(app: FastifyInstance) {
   app.patch<{ Params: { chatId: string; messageId: string } }>(
     "/:chatId/messages/:messageId/extra",
     async (req, reply) => {
-      const partial = req.body as Record<string, unknown>;
+      const partial = { ...(req.body as Record<string, unknown>) };
+      for (const key of ["hiddenFromAICharacterIds", "conversationStartForCharacterIds"] as const) {
+        if (Object.prototype.hasOwnProperty.call(partial, key)) {
+          partial[key] = normalizeMessageCharacterIds(partial[key]);
+        }
+      }
       const updated = await storage.updateMessageExtra(req.params.messageId, partial);
       if (!updated) return reply.status(404).send({ error: "Message not found" });
       // A lone user reaction (no text after it) is a valid turn: feed it to the
@@ -1888,12 +2063,18 @@ export async function chatsRoutes(app: FastifyInstance) {
       if (Object.prototype.hasOwnProperty.call(partial, "hiddenFromAICharacterIds")) {
         syncAllSwipeExtra.hiddenFromAICharacterIds = partial.hiddenFromAICharacterIds;
       }
+      if (Object.prototype.hasOwnProperty.call(partial, "isConversationStart")) {
+        syncAllSwipeExtra.isConversationStart = partial.isConversationStart;
+      }
+      if (Object.prototype.hasOwnProperty.call(partial, "conversationStartForCharacterIds")) {
+        syncAllSwipeExtra.conversationStartForCharacterIds = partial.conversationStartForCharacterIds;
+      }
       if (Object.prototype.hasOwnProperty.call(partial, "reactions")) {
         syncAllSwipeExtra.reactions = partial.reactions;
       }
 
       if (Object.keys(syncAllSwipeExtra).length > 0) {
-        // AI visibility and reactions are message-level fields, so keep them
+        // AI visibility, context boundaries, and reactions are message-level fields, so keep them
         // stable across swipe changes instead of binding them to one swipe.
         const swipes = await storage.getSwipes(req.params.messageId);
         for (const swipe of swipes) {
@@ -2362,12 +2543,7 @@ export async function chatsRoutes(app: FastifyInstance) {
         : typeof chatMeta.presetId === "string" && chatMeta.presetId
           ? chatMeta.presetId
           : null;
-    if (
-      presetId ||
-      chatMode === "conversation" ||
-      chatMode === "game" ||
-      chatMode === "roleplay"
-    ) {
+    if (presetId || chatMode === "conversation" || chatMode === "game" || chatMode === "roleplay") {
       try {
         const { createPromptsStorage } = await import("../services/storage/prompts.storage.js");
         const { createCharactersStorage } = await import("../services/storage/characters.storage.js");
@@ -2378,12 +2554,7 @@ export async function chatsRoutes(app: FastifyInstance) {
 
         const preset = presetId ? await presetStore.getById(presetId) : null;
         const chatMode = (chat.mode as string) ?? "roleplay";
-        if (
-          preset ||
-          chatMode === "conversation" ||
-          chatMode === "game" ||
-          chatMode === "roleplay"
-        ) {
+        if (preset || chatMode === "conversation" || chatMode === "game" || chatMode === "roleplay") {
           // Apply conversation-start filter
           let scopedMessages = chatMessages;
           for (let i = chatMessages.length - 1; i >= 0; i--) {
@@ -2508,8 +2679,7 @@ export async function chatsRoutes(app: FastifyInstance) {
           const generationTriggers = Array.from(new Set([chatMode, "chat"]));
           const lorebookTokenBudget = resolveLorebookTokenBudget(chatMeta);
           const forcedLorebookEntryIds =
-            ownerSpatialProjection &&
-            ownerSpatialProjection.ownerMode === chatMode
+            ownerSpatialProjection && ownerSpatialProjection.ownerMode === chatMode
               ? ownerSpatialProjection.lorebookEntryIds
               : [];
           if (chatMode === "conversation") {
@@ -3681,7 +3851,7 @@ export async function chatsRoutes(app: FastifyInstance) {
       branchName: "New Branch",
       branchParentChatId: sourceChat.id,
       branchParentMessageId: forkSourceMessage?.id ?? null,
-      branchMessageId: forkSourceMessage ? sourceToBranchedMessageId.get(forkSourceMessage.id) ?? null : null,
+      branchMessageId: forkSourceMessage ? (sourceToBranchedMessageId.get(forkSourceMessage.id) ?? null) : null,
       summary: compileChatSummaryEntries(inheritedEntries),
       summaryEntries: inheritedEntries,
       ...(inheritedLastAutomaticSummaryMessageId
@@ -3927,10 +4097,7 @@ export async function chatsRoutes(app: FastifyInstance) {
       if (selectedEntries.length !== requestedIds.size) {
         return reply.status(400).send({ error: "One or more selected summary entries no longer exist" });
       }
-      const effectiveSummaryMaxTokens = Math.min(
-        summaryMaxTokens,
-        provider.maxTokensOverrideValue ?? summaryMaxTokens,
-      );
+      const effectiveSummaryMaxTokens = Math.min(summaryMaxTokens, provider.maxTokensOverrideValue ?? summaryMaxTokens);
       const requestedPromptTemplateId =
         typeof body.promptTemplateId === "string" && body.promptTemplateId.trim()
           ? body.promptTemplateId.trim()
@@ -3998,7 +4165,6 @@ export async function chatsRoutes(app: FastifyInstance) {
         const starts = selected.flatMap((entry) => entry.rangeStartIndex ?? []);
         const ends = selected.flatMap((entry) => entry.rangeEndIndex ?? []);
         const now = new Date().toISOString();
-        const firstIndex = entries.findIndex((entry) => requestedIds.has(entry.id));
         combinedEntry = createChatSummaryEntry(
           {
             kind: "rolling",
@@ -4021,9 +4187,7 @@ export async function chatsRoutes(app: FastifyInstance) {
           },
           { createId: newId, now },
         );
-        const nextEntries = entries.filter((entry) => !requestedIds.has(entry.id));
-        nextEntries.splice(Math.max(0, firstIndex), 0, combinedEntry);
-        combinedEntries = normalizeChatSummaryEntries(nextEntries);
+        combinedEntries = combineChatSummaryEntryHistory(entries, requestedIds, combinedEntry, now);
         combinedSummary = compileChatSummaryEntries(combinedEntries);
         return {
           summary: combinedSummary,
@@ -4137,12 +4301,21 @@ export async function chatsRoutes(app: FastifyInstance) {
     // summarized set minus the protected tail, so manual hiding honors
     // `summaryTailMessages` like the automatic path. Persisted on the entry (when
     // hiding is enabled) so deletion restores exactly what was hidden.
-    const hideEnabled = chatMeta.hideSummarisedMessages === true;
+    const [latestChatBeforeHide, latestMessagesBeforeHide] = await Promise.all([
+      storage.getById(req.params.id),
+      storage.listMessages(req.params.id),
+    ]);
+    const latestMetaBeforeHide = latestChatBeforeHide
+      ? (parseExtra(latestChatBeforeHide.metadata) as Record<string, unknown>)
+      : chatMeta;
+    const hideEnabled = latestMetaBeforeHide.hideSummarisedMessages === true;
+    // Keep ownership tied to the exact messages sent to the provider, but use
+    // the live list to protect the real current tail if messages arrived while it ran.
     const eligibleToHide = hideEnabled
       ? computeSummaryHideIds({
-          messages: allMessages,
+          messages: latestMessagesBeforeHide,
           entryMessageIds: messageIds,
-          tail: resolveRoleplaySummaryTail(chatMeta.summaryTailMessages),
+          tail: resolveRoleplaySummaryTail(latestMetaBeforeHide.summaryTailMessages),
         })
       : [];
     // Perform the hide on the server, BEFORE the entry records hiddenMessageIds, so

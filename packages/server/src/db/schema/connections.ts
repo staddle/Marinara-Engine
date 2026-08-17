@@ -20,6 +20,7 @@ export const apiConnections = fileTable("api_connections", {
       "openrouter",
       "nanogpt",
       "xai",
+      "arli",
       "custom",
       "image_generation",
       "video_generation",
@@ -28,6 +29,8 @@ export const apiConnections = fileTable("api_connections", {
   baseUrl: text("base_url").notNull().default(""),
   /** Encrypted API key */
   apiKeyEncrypted: text("api_key_encrypted").notNull().default(""),
+  /** Imported endpoints stay unavailable until the user reviews and saves them locally. */
+  profileImportReviewRequired: text("profile_import_review_required").notNull().default("false"),
   model: text("model").notNull().default(""),
   imagePath: text("image_path"),
   maxContext: integer("max_context").notNull().default(128000),
@@ -62,6 +65,10 @@ export const apiConnections = fileTable("api_connections", {
   imageService: text("image_service"),
   /** For endpoint-based image services (e.g. RunPod Serverless ComfyUI): the endpoint ID. */
   imageEndpointId: text("image_endpoint_id"),
+  /** Instructions passed to the default language model before image generation. */
+  imagePromptInstructions: text("image_prompt_instructions"),
+  /** OpenAI GPT Image quality for this connection. */
+  imageGenerationQuality: text("image_generation_quality").notNull().default("auto"),
   /** Explicit video backend selection for video-generation connections. */
   videoGenerationSource: text("video_generation_source"),
   /** Video generation: explicitly selected service ID. */

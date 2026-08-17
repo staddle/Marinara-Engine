@@ -84,7 +84,8 @@ function logAgentDebugToBrowserConsole(entry: AgentDebugEntry) {
   const round = call.round != null ? ` round ${call.round}` : "";
   const usage = usageParts.length > 0 ? ` | ${usageParts.join(", ")} tokens` : "";
   const duration = call.durationMs != null ? ` | ${call.durationMs}ms` : "";
-  const label = `[Marinara Agent Debug] ${call.stage}${round}: ${call.agentName} (${call.agentType}) | ${call.model}${usage}${duration}`;
+  const elapsed = call.elapsedMs != null ? ` | ${call.elapsedMs}ms total` : "";
+  const label = `[Marinara Agent Debug] ${call.stage}${round}: ${call.agentName} (${call.agentType}) | ${call.model}${usage}${duration}${elapsed}`;
 
   console.groupCollapsed(label);
   console.debug("Event", call);
@@ -195,6 +196,8 @@ interface AgentState {
   enqueuePendingAgentWriteApproval: (entry: PendingAgentWriteApproval) => void;
   dismissPendingAgentWriteApproval: (id: string) => void;
   clearPendingAgentWriteApprovals: () => void;
+  /** Clear chat-runtime Agent state while retaining Professor Mari's chat-scoped continuation UI. */
+  resetForChatChange: () => void;
   reset: () => void;
 }
 
@@ -432,5 +435,15 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     })),
   clearPendingAgentWriteApprovals: () => set({ pendingAgentWriteApprovals: [] }),
 
+  resetForChatChange: () =>
+    set((state) => ({
+      ...createInitialAgentDataState(),
+      mariChips: state.mariChips,
+      mariChipsChatId: state.mariChipsChatId,
+      mariPlan: state.mariPlan,
+      mariPlanChatId: state.mariPlanChatId,
+      mariPlanCursor: state.mariPlanCursor,
+      mariPlanAnswers: state.mariPlanAnswers,
+    })),
   reset: () => set(createInitialAgentDataState()),
 }));

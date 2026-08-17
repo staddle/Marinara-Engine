@@ -19,6 +19,7 @@ interface TurnGameCommandArgs {
   baseUrl: string;
   reply: FastifyReply;
   signal: AbortSignal;
+  debugLog?: (message: string, ...args: unknown[]) => void;
 }
 
 function normalizeGameType(commandType: string) {
@@ -93,6 +94,7 @@ export async function handleTurnGameCommand(args: TurnGameCommandArgs): Promise<
       baseUrl: args.baseUrl,
       reply: args.reply,
       signal: args.signal,
+      debugLog: args.debugLog,
     });
     return true;
   } catch (error) {

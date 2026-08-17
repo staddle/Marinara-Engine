@@ -38,6 +38,7 @@ import {
   Hash,
   Star,
   MessageCircle,
+  Bot,
 } from "lucide-react";
 import { getCharacterTitle } from "../../lib/character-display";
 import {
@@ -156,6 +157,7 @@ export function CharactersPanel() {
   const openModal = useUIStore((s) => s.openModal);
   const openCharacterDetail = useUIStore((s) => s.openCharacterDetail);
   const openCharacterLibrary = useUIStore((s) => s.openCharacterLibrary);
+  const openBotBrowser = useUIStore((s) => s.openBotBrowser);
   const sort = useUIStore((s) => s.characterLibrarySort);
   const setCharacterLibrarySort = useUIStore((s) => s.setCharacterLibrarySort);
   const search = useUIStore((s) => s.characterPanelSearch);
@@ -746,14 +748,38 @@ export function CharactersPanel() {
       data-component="CharactersPanelScroll"
       className="flex h-full min-h-0 flex-col gap-2 overflow-y-auto p-3 [scrollbar-gutter:stable]"
     >
-      <button
-        onClick={openCharacterLibrary}
-        className="mari-chrome-control mari-chrome-control--primary w-full text-xs"
-        title={localizeUi("ui.panels.characterspanel.openCharactersLibrary")}
+      <div
+        className="mari-chrome-segmented mari-chrome-segmented--two"
+        data-component="CharacterLibraryActions"
+        style={{ gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}
       >
-        <Users size="0.875rem" />
-        {localizeUi("ui.panels.characterspanel.openCharactersLibrary")}
-      </button>
+        <button
+          type="button"
+          onClick={openBotBrowser}
+          className="mari-chrome-segmented__button min-w-0 justify-center gap-1 overflow-hidden px-1.5 py-2 text-[0.625rem] leading-normal"
+          title={localizeUi("ui.panels.resourceLibraryLauncher.downloadCards")}
+        >
+          <span className="shrink-0 leading-none">
+            <Bot size="0.875rem" />
+          </span>
+          <span className="inline-flex min-h-4 min-w-0 items-center justify-center truncate whitespace-nowrap pb-px leading-normal">
+            {localizeUi("ui.panels.resourceLibraryLauncher.download")}
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={openCharacterLibrary}
+          className="mari-chrome-segmented__button min-w-0 justify-center gap-1 overflow-hidden px-1.5 py-2 text-[0.625rem] leading-normal"
+          title={localizeUi("ui.panels.characterspanel.openCharactersLibrary")}
+        >
+          <span className="shrink-0 leading-none">
+            <Users size="0.875rem" />
+          </span>
+          <span className="inline-flex min-h-4 min-w-0 items-center justify-center truncate whitespace-nowrap pb-px leading-normal">
+            {localizeUi("ui.panels.resourceLibraryLauncher.openLibrary")}
+          </span>
+        </button>
+      </div>
 
       {/* Actions */}
       <div className="flex gap-2">
@@ -1258,11 +1284,13 @@ export function CharactersPanel() {
                       {!selectionMode && (
                         <div
                           data-character-row-actions
-                          className="pointer-events-none absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-0.5 rounded-lg bg-[var(--sidebar)] p-0.5 opacity-0 shadow-sm ring-1 ring-[var(--border)] transition-opacity group-hover/member:opacity-100 [@media(pointer:fine)]:group-focus-within/member:opacity-100 max-md:static max-md:translate-y-0 max-md:opacity-100 [@media(pointer:coarse)]:static [@media(pointer:coarse)]:translate-y-0 [@media(pointer:coarse)]:opacity-100 group-hover/member:[&_button]:pointer-events-auto [@media(pointer:fine)]:group-focus-within/member:[&_button]:pointer-events-auto max-md:[&_button]:pointer-events-auto [@media(pointer:coarse)]:[&_button]:pointer-events-auto"
+                          className="pointer-events-none absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5 rounded-lg bg-[var(--sidebar)] p-0.5 opacity-0 shadow-sm ring-1 ring-[var(--border)] transition-opacity group-hover/member:opacity-100 [@media(pointer:fine)]:group-focus-within/member:opacity-100 max-md:static max-md:translate-y-0 max-md:opacity-100 [@media(pointer:coarse)]:static [@media(pointer:coarse)]:translate-y-0 [@media(pointer:coarse)]:opacity-100 group-hover/member:[&_button]:pointer-events-auto [@media(pointer:fine)]:group-focus-within/member:[&_button]:pointer-events-auto max-md:[&_button]:pointer-events-auto [@media(pointer:coarse)]:[&_button]:pointer-events-auto"
                         >
                           <ChatResourceActionButton
                             payload={{ version: 1, kind: "character", ids: [memberId], label: memberName }}
-                            className="flex h-5 min-h-5 w-5 items-center justify-center rounded-md p-0"
+                            size="row"
+                            className="flex h-5 min-h-5 w-5 items-center justify-center rounded-md p-0 active:scale-90"
+                            iconClassName="h-2.5 w-2.5 shrink-0"
                           />
                           <button
                             type="button"
@@ -1594,11 +1622,13 @@ export function CharactersPanel() {
               {!selectionMode && (
                 <div
                   data-character-row-actions
-                  className="pointer-events-none absolute right-2 top-1/2 flex w-auto -translate-y-1/2 items-center gap-0.5 rounded-lg bg-[var(--sidebar)] p-1 opacity-0 shadow-sm ring-1 ring-[var(--border)] transition-opacity group-hover:opacity-100 [@media(pointer:fine)]:group-focus-within:opacity-100 max-md:opacity-100 [@media(pointer:coarse)]:opacity-100 group-hover:[&_button]:pointer-events-auto [@media(pointer:fine)]:group-focus-within:[&_button]:pointer-events-auto max-md:[&_button]:pointer-events-auto [@media(pointer:coarse)]:[&_button]:pointer-events-auto"
+                  className="pointer-events-none absolute right-2 top-1/2 z-10 flex w-auto -translate-y-1/2 items-center gap-0.5 rounded-lg bg-[var(--sidebar)] p-1 opacity-0 shadow-sm ring-1 ring-[var(--border)] transition-opacity group-hover:opacity-100 [@media(pointer:fine)]:group-focus-within:opacity-100 max-md:opacity-100 [@media(pointer:coarse)]:opacity-100 group-hover:[&_button]:pointer-events-auto [@media(pointer:fine)]:group-focus-within:[&_button]:pointer-events-auto max-md:[&_button]:pointer-events-auto [@media(pointer:coarse)]:[&_button]:pointer-events-auto"
                 >
                   <ChatResourceActionButton
                     payload={{ version: 1, kind: "character", ids: [char.id], label: charName }}
+                    size="row"
                     className="mari-character-row-action flex w-7 items-center justify-center max-md:w-6"
+                    iconClassName="h-4 w-4 shrink-0 max-md:h-3.5 max-md:w-3.5"
                   />
                   <button
                     type="button"

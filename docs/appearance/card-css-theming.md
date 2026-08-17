@@ -327,14 +327,16 @@ Paste it whole into **Creator Notes**, then enable **Card Theming** in **Chat Se
 
 ```html
 <style>
-  /* shared keyframe */
+  /* shared keyframe. Animate OPACITY, never box-shadow: box-shadow is a "paint"
+     property, so animating it repaints and re-blurs the whole element every frame
+     (which pins weak GPUs). Animating a layer's opacity is GPU-composited and cheap. */
   @keyframes grimoire-pulse {
     0%,
     100% {
-      box-shadow: 0 0 12px rgba(168, 85, 247, 0.35), inset 0 0 18px rgba(80, 0, 60, 0.5);
+      opacity: 0.35;
     }
     50% {
-      box-shadow: 0 0 24px rgba(220, 38, 120, 0.55), inset 0 0 26px rgba(120, 0, 80, 0.6);
+      opacity: 1;
     }
   }
 
@@ -389,9 +391,27 @@ Paste it whole into **Creator Notes**, then enable **Card Theming** in **Chat Se
       background: linear-gradient(135deg, #1a0a24 0%, #2d0a2e 55%, #3a0a1e 100%);
       border: 1px solid rgba(220, 38, 120, 0.45);
       border-radius: 4px 16px 16px 16px;
-      animation: grimoire-pulse 4s ease-in-out infinite;
       position: relative;
       overflow: hidden;
+      /* a steady outer halo. An element's own box-shadow is not clipped by its own
+         overflow: hidden, so this bloom shows even though message content is clipped.
+         (No inset here: the pulsing inset glow lives on the ::after, so a static inset
+         would stack with it and over-brighten the inner glow.) */
+      box-shadow: 0 0 16px rgba(190, 70, 190, 0.4);
+    }
+    /* the breathing inner glow. Animate a full-bleed overlay's OPACITY (cheap, GPU
+       composited) instead of the bubble's box-shadow (expensive: a full repaint every
+       frame). overflow: hidden clips a child's OUTER shadow, so the pulse rides the inset
+       glow while the halo above stays steady. pointer-events keeps it click-through. */
+    [data-card-css] .mari-message-bubble::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+      pointer-events: none;
+      box-shadow: inset 0 0 26px rgba(120, 0, 80, 0.65);
+      animation: grimoire-pulse 4s ease-in-out infinite;
+      will-change: opacity;
     }
     [data-card-css] .mari-message-bubble::before {
       content: "✦";

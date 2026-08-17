@@ -45,7 +45,11 @@ export function AgentUpdatePrompter({ presentationAllowed }: { presentationAllow
           let succeeded = 0;
           for (const update of updates) {
             try {
-              const installed = await install.mutateAsync({ id: update.id, expectedVersion: update.version });
+              const installed = await install.mutateAsync({
+                id: update.id,
+                expectedVersion: update.version,
+                expectedArtifactSha256: update.artifactSha256,
+              });
               restartRequired ||= installed.status === "restart-required";
               succeeded += 1;
             } catch (error) {

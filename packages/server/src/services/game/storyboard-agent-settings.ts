@@ -137,6 +137,14 @@ export async function applyStoryboardAgentSettings(
           meta.roleplayStoryboardVideoPromptTemplates,
           settings.videoTemplates,
         ),
+        storyboardAgentAnimationRefinementTemplateId:
+          meta.storyboardAgentAnimationRefinementTemplateId ?? settings.animationRefinementTemplateId,
+        storyboardAgentAnimationRefinementTemplates: mergeTemplates(
+          meta.storyboardAgentAnimationRefinementTemplates,
+          settings.animationRefinementTemplates,
+        ),
+        storyboardAgentImageAwareShotPlanningEnabled:
+          meta.storyboardAgentImageAwareShotPlanningEnabled ?? settings.imageAwareShotPlanningEnabled,
       };
     }
 
@@ -182,6 +190,14 @@ export async function applyStoryboardAgentSettings(
         meta.gameStoryboardVideoPromptTemplates,
         settings.videoTemplates,
       ),
+      storyboardAgentAnimationRefinementTemplateId:
+        meta.storyboardAgentAnimationRefinementTemplateId ?? settings.animationRefinementTemplateId,
+      storyboardAgentAnimationRefinementTemplates: mergeTemplates(
+        meta.storyboardAgentAnimationRefinementTemplates,
+        settings.animationRefinementTemplates,
+      ),
+      storyboardAgentImageAwareShotPlanningEnabled:
+        meta.storyboardAgentImageAwareShotPlanningEnabled ?? settings.imageAwareShotPlanningEnabled,
     };
   } catch (error) {
     logger.warn(error, "[storyboard-agent] Failed to load Storyboard Agent settings");

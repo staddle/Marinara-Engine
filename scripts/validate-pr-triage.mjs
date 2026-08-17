@@ -32,15 +32,15 @@ export function validatePullRequestTriage() {
   const triageWorkflow = readFileSync(
     new URL("../.github/workflows/pull-request-triage.yml", import.meta.url),
     "utf8",
-  );
+  ).replace(/\r\n/gu, "\n");
   const reviewSignal = readFileSync(
     new URL("../.github/workflows/owner-approval-review-signal.yml", import.meta.url),
     "utf8",
-  );
+  ).replace(/\r\n/gu, "\n");
   const reviewEvaluator = readFileSync(
     new URL("../.github/workflows/owner-approval-review.yml", import.meta.url),
     "utf8",
-  );
+  ).replace(/\r\n/gu, "\n");
   const approvalEvaluator = readFileSync(new URL("./evaluate-owner-approval.mjs", import.meta.url), "utf8");
   const codeOwners = readFileSync(new URL("../.github/CODEOWNERS", import.meta.url), "utf8");
   const triggersSectionStart = triageWorkflow.indexOf("\non:\n");

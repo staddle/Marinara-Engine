@@ -8,12 +8,21 @@ import { startSseKeepalive, startSseReply, trySendSseEvent } from "./generate/ss
 import { getProfessorMariWorkspaceService } from "../services/professor-mari/workspace-agent.service.js";
 import { getProfessorMariWorkspaceSkillsService } from "../services/professor-mari/workspace-skills.service.js";
 import { getMariDbService } from "../services/mari-db/mari-db.service.js";
+import { renderMariEditPrompt } from "../services/professor-mari/workspace-edit-render.js";
+import { logger } from "../lib/logger.js";
 import { personalServerExtensionRuntime } from "../services/extensions/personal-server-extension-runtime.js";
+import {
+  createMariInstructionsStorage,
+  MAX_INSTRUCTION_CONTENT_LENGTH,
+  MAX_INSTRUCTION_DESCRIPTION_LENGTH,
+  MAX_INSTRUCTION_NAME_LENGTH,
+} from "../services/storage/mari-instructions.storage.js";
 
 const promptSchema = z.object({
   chatId: z.string().min(1),
   message: z.string().min(1),
   connectionId: z.string().optional().nullable(),
+  debugMode: z.boolean().optional().default(false),
   existingUserMessageId: z.string().min(1).optional(),
   attachments: z
     .array(
@@ -54,10 +63,49 @@ const skillUpdateSchema = z.object({
   enabled: z.boolean().optional(),
 });
 
+// #4851: memories are edited directly by the user in the Memories panel (the user is
+// the reviewer of their own memory), so these routes deliberately do NOT call
+// workspaceService.reset(); a reset aborts Mari's in-flight turn, and the memory
+// injection is re-read live per turn, so no agent rebuild is needed.
+const instructionCreateSchema = z.object({
+  name: z.string().min(1).max(MAX_INSTRUCTION_NAME_LENGTH),
+  description: z.string().max(MAX_INSTRUCTION_DESCRIPTION_LENGTH).optional().default(""),
+  content: z.string().min(1).max(MAX_INSTRUCTION_CONTENT_LENGTH),
+  persistent: z.boolean().optional().default(false),
+  enabled: z.boolean().optional().default(false),
+});
+
+const instructionUpdateSchema = z.object({
+  name: z.string().min(1).max(MAX_INSTRUCTION_NAME_LENGTH).optional(),
+  description: z.string().max(MAX_INSTRUCTION_DESCRIPTION_LENGTH).optional(),
+  content: z.string().min(1).max(MAX_INSTRUCTION_CONTENT_LENGTH).optional(),
+  persistent: z.boolean().optional(),
+  enabled: z.boolean().optional(),
+});
+
+const approveSchema = z.object({
+  enable: z.boolean().optional(),
+});
+
+// #4931: per-row reject. Each row is the diffPreview index plus a {table,id,action} consistency
+// tuple the server re-checks against plan.changes[index] before reverting.
+const rejectRowRowSchema = z.object({
+  index: z.number().int().nonnegative(),
+  table: z.string().min(1),
+  id: z.string().min(1),
+  action: z.enum(["insert", "update", "replace", "delete"]),
+});
+
+const rejectRowsSchema = z.object({
+  rows: z.array(rejectRowRowSchema).min(1),
+});
+
+// #4931: synthetic Peek-Prompt render of one reviewed character/preset row (same identity tuple).
+const renderPromptSchema = rejectRowRowSchema;
+
 function privileged(request: FastifyRequest, reply: FastifyReply, loopbackOnly = false) {
   return requirePrivilegedAccess(request, reply, {
     loopbackOnly,
-    trustedNetwork: !loopbackOnly,
     feature: "Professor Mari workspace",
   });
 }
@@ -109,6 +157,34 @@ export async function professorMariWorkspaceRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
+  // #4851: Memories management panel. Direct, reset-free writes (see instructionCreateSchema note).
+  app.get("/instructions", async (req, reply) => {
+    if (!privileged(req, reply)) return;
+    return { instructions: await createMariInstructionsStorage(app.db).list() };
+  });
+
+  app.post("/instructions", async (req, reply) => {
+    if (!privileged(req, reply)) return;
+    const input = instructionCreateSchema.parse(req.body);
+    const instruction = await createMariInstructionsStorage(app.db).create(input);
+    return { ok: true, instruction };
+  });
+
+  app.put<{ Params: { id: string } }>("/instructions/:id", async (req, reply) => {
+    if (!privileged(req, reply)) return;
+    const input = instructionUpdateSchema.parse(req.body);
+    const instruction = await createMariInstructionsStorage(app.db).update(req.params.id, input);
+    if (!instruction) return reply.status(404).send({ error: "Memory not found" });
+    return { ok: true, instruction };
+  });
+
+  app.delete<{ Params: { id: string } }>("/instructions/:id", async (req, reply) => {
+    if (!privileged(req, reply)) return;
+    const removed = await createMariInstructionsStorage(app.db).remove(req.params.id);
+    if (!removed) return reply.status(404).send({ error: "Memory not found" });
+    return { ok: true };
+  });
+
   app.post("/prompt", async (req, reply) => {
     if (!privileged(req, reply)) return;
     const body = promptSchema.parse(req.body);
@@ -138,6 +214,7 @@ export async function professorMariWorkspaceRoutes(app: FastifyInstance) {
         chatId: body.chatId,
         text: body.message,
         connectionId: body.connectionId ?? null,
+        debugMode: body.debugMode,
         attachments: body.attachments,
         existingUserMessageId: body.existingUserMessageId,
         onEvent: send,
@@ -168,7 +245,10 @@ export async function professorMariWorkspaceRoutes(app: FastifyInstance) {
       if (!securityResult.ok) return reply.status(409).send(securityResult);
       return securityResult;
     }
-    const result = await getMariDbService(app.db).keepAppliedReviewAndWait(req.params.id);
+    // #4851: "Keep & Enable" for a memory insert passes { enable: true } so the kept row
+    // is switched on in the same action (memories land disabled by default).
+    const { enable } = approveSchema.parse(req.body ?? {});
+    const result = await getMariDbService(app.db).keepAppliedReviewAndWait(req.params.id, { enable });
     if (!result) return reply.status(404).send({ error: "Applied change review not found" });
     if (result.approval.affectedTables.installed_extensions) await personalServerExtensionRuntime.reloadAll();
     return { ok: true, ...result };
@@ -183,8 +263,47 @@ export async function professorMariWorkspaceRoutes(app: FastifyInstance) {
     }
     const result = await getMariDbService(app.db).restoreAppliedReview(req.params.id);
     if (!result) return reply.status(404).send({ error: "Applied change review not found" });
+    if ("outcome" in result && result.outcome === "state_changed") {
+      // #4852 F2: the row changed after Mari staged this review, so the restore was a no-op that
+      // left the newer data intact. Return 200 with ok:false (a non-2xx would land in the client's
+      // generic "could not restore" catch instead of rendering the state_changed notice), and skip
+      // the extension reload below since nothing was reverted.
+      return { ok: false, completed: true, ...result };
+    }
     if (result.approval.affectedTables.installed_extensions) await personalServerExtensionRuntime.reloadAll();
     return { ok: true, ...result, completed: true };
+  });
+
+  app.post<{ Params: { id: string } }>("/approvals/:id/reject-rows", async (req, reply) => {
+    if (!privileged(req, reply)) return;
+    const { rows } = rejectRowsSchema.parse(req.body ?? {});
+    const result = await getMariDbService(app.db).rejectRows(req.params.id, rows);
+    if (!result) return reply.status(404).send({ error: "Applied change review not found" });
+    if ("outcome" in result) {
+      // state_changed (#4852 F2) or invalid_selection: nothing was reverted. Return 200 with
+      // ok:false so the client shows result.error inline instead of a generic catch, mirroring the
+      // whole-batch reject's convention.
+      return { ok: false, ...result };
+    }
+    return { ok: true, ...result };
+  });
+
+  app.post<{ Params: { id: string } }>("/approvals/:id/render-prompt", async (req, reply) => {
+    if (!privileged(req, reply)) return;
+    const body = renderPromptSchema.parse(req.body ?? {});
+    const change = getMariDbService(app.db).getPendingChangeRaw(req.params.id, body.index);
+    if (!change) return reply.status(404).send({ error: "Applied change review not found" });
+    if (change.table !== body.table || change.id !== body.id || change.action !== body.action) {
+      return reply.status(409).send({ error: "This review changed since it was shown. Reopen it and try again." });
+    }
+    // The preview is best-effort: it loads preset rows and assembles two prompts, so it can throw.
+    // Convert any failure into the same unavailable-preview response instead of a 500.
+    const render = await renderMariEditPrompt(app.db, change).catch((err) => {
+      logger.warn(err, "[professor-mari] prompt preview render failed for review %s", req.params.id);
+      return null;
+    });
+    if (!render) return reply.status(422).send({ error: "This change can't be shown as a prompt preview." });
+    return { ok: true, ...render };
   });
 
   app.get("/history", async (req, reply) => {

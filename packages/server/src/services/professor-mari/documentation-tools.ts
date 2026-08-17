@@ -15,6 +15,7 @@ const MAX_SEARCH_LIMIT = 8;
 const DEFAULT_READ_CHARS = 8_000;
 const MAX_READ_CHARS = 16_000;
 const MAX_EXCERPT_CHARS = 700;
+const MAX_HEADINGS_IN_MISS = 40;
 
 interface DocumentationSection {
   path: string;
@@ -189,29 +190,57 @@ function markdownSections(
 }
 
 function firstMarkdownHeading(content: string) {
-  return content.match(/^#{1,6}\s+(.+?)\s*#*\s*$/mu)?.[1]?.trim() ?? "Document overview";
+  return iterateMarkdownHeadings(content.split(/\r?\n/)).next().value?.heading ?? "Document overview";
+}
+
+/**
+ * Iterate ATX headings, skipping fenced code blocks and preserving terminal '#'
+ * characters that belong to the heading text (e.g. "C#"). Shared by heading
+ * listing and lookup so the two always agree on what counts as a heading.
+ */
+function* iterateMarkdownHeadings(
+  lines: string[],
+): Generator<{ index: number; level: number; heading: string }> {
+  let fence: { char: string; length: number } | null = null;
+  for (const [index, line] of lines.entries()) {
+    const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*(.*)$/u);
+    if (fenceMatch) {
+      const run = fenceMatch[1]!;
+      const marker = run[0]!;
+      // Close only on the same marker, an equal-or-longer run, and no trailing text.
+      if (fence === null) fence = { char: marker, length: run.length };
+      else if (marker === fence.char && run.length >= fence.length && fenceMatch[2]!.trim() === "") fence = null;
+      continue;
+    }
+    if (fence !== null) continue;
+    // Closing '#' run is stripped only when whitespace-separated, so "C#" survives.
+    const match = line.match(/^(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/u);
+    if (match) yield { index, level: match[1]!.length, heading: match[2]!.trim() };
+  }
+}
+
+function listMarkdownHeadings(content: string): string[] {
+  return [...iterateMarkdownHeadings(content.split(/\r?\n/))].map((entry) => entry.heading);
 }
 
 function readMarkdownHeading(path: string, content: string, requestedHeading: string): DocumentationSection | null {
   const lines = content.split(/\r?\n/);
   const normalizedHeading = requestedHeading.toLocaleLowerCase();
-  for (const [index, line] of lines.entries()) {
-    const match = line.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/u);
-    if (!match || match[2]!.trim().toLocaleLowerCase() !== normalizedHeading) continue;
-    const level = match[1]!.length;
+  const headings = [...iterateMarkdownHeadings(lines)];
+  for (const [position, entry] of headings.entries()) {
+    if (entry.heading.toLocaleLowerCase() !== normalizedHeading) continue;
     let end = lines.length;
-    for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
-      const nextHeading = lines[cursor]!.match(/^(#{1,6})\s+/u);
-      if (nextHeading && nextHeading[1]!.length <= level) {
-        end = cursor;
+    for (let next = position + 1; next < headings.length; next += 1) {
+      if (headings[next]!.level <= entry.level) {
+        end = headings[next]!.index;
         break;
       }
     }
     return {
       path,
-      heading: match[2]!.trim(),
-      content: lines.slice(index + 1, end).join("\n"),
-      startLine: index + 1,
+      heading: entry.heading,
+      content: lines.slice(entry.index + 1, end).join("\n"),
+      startLine: entry.index + 1,
     };
   }
   return null;
@@ -386,7 +415,18 @@ export async function readCanonicalDocumentation(
   if (content === null) throw new Error(`Documentation file not found or too large: ${normalized}`);
   const heading = requestedHeading?.trim();
   const section = heading ? readMarkdownHeading(normalized, content, heading) : null;
-  if (heading && !section) throw new Error(`Heading not found in ${normalized}: ${heading}`);
+  if (heading && !section) {
+    const available = listMarkdownHeadings(content);
+    let hint: string;
+    if (available.length === 0) {
+      hint = " This document has no headings; omit `heading` to read the document (the result may be truncated by maxChars).";
+    } else {
+      const shown = available.slice(0, MAX_HEADINGS_IN_MISS);
+      const more = available.length > shown.length ? `, …(+${available.length - shown.length} more)` : "";
+      hint = ` Available headings: ${shown.map((entry) => `"${entry}"`).join(", ")}${more}.`;
+    }
+    throw new Error(`Heading not found in ${normalized}: "${heading}".${hint}`);
+  }
   const selected = section?.content ?? content;
   const maxChars = Math.max(1_000, Math.min(MAX_READ_CHARS, Math.trunc(requestedMaxChars) || DEFAULT_READ_CHARS));
   const truncated = selected.length > maxChars;

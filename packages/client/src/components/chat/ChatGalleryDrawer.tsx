@@ -13,9 +13,16 @@ import {
   ROLEPLAY_POPOVER_SHELL,
   ROLEPLAY_POPOVER_TITLE,
 } from "./roleplay-popover-styles";
-import type { Chat } from "@marinara-engine/shared";
+import {
+  BUILT_IN_AGENTS,
+  customAgentHasCapability,
+  isAgentConfigDeleted,
+  parseAgentSettingsRecord,
+  type Chat,
+} from "@marinara-engine/shared";
 import type { ChatImage } from "../../hooks/use-gallery";
-import { useInstalledCapabilityPackages } from "../../hooks/use-capability-packages";
+import { useAgentConfigs } from "../../hooks/use-agents";
+import { useCapabilityAgentRegistry, useInstalledCapabilityPackages } from "../../hooks/use-capability-packages";
 import { isDesktopShellNavigationTarget } from "../../lib/chat-floating-ui-events";
 import { parseChatMetadata } from "../../lib/chat-display";
 import {
@@ -32,6 +39,8 @@ interface ChatGalleryDrawerProps {
   anchor?: ChatToolbarFloatingPanelAnchor;
   /** Manually trigger the Illustrator agent */
   onIllustrate?: () => void | Promise<void>;
+  /** Manually trigger an active custom image-generation agent. */
+  onIllustrateWithAgent?: (agentType: string) => void | Promise<void>;
   /** Generate an on-demand Conversation selfie. */
   onGenerateSelfie?: (characterId?: string) => void | Promise<void>;
   selfieCharacters?: Array<{ id: string; name: string }>;
@@ -58,6 +67,7 @@ export function ChatGalleryDrawer({
   onClose,
   anchor,
   onIllustrate,
+  onIllustrateWithAgent,
   onGenerateSelfie,
   selfieCharacters,
   onGenerateBackground,
@@ -73,6 +83,8 @@ export function ChatGalleryDrawer({
     [chat.metadata],
   );
   const { data: installedCapabilities = [] } = useInstalledCapabilityPackages(open);
+  const { data: capabilityAgents = [] } = useCapabilityAgentRegistry(open);
+  const { data: agentConfigs = [] } = useAgentConfigs(open);
   const illustratorInstalled = installedCapabilities.some(
     (item) => item.id === "illustrator" && item.status === "active",
   );
@@ -89,6 +101,24 @@ export function ChatGalleryDrawer({
         : chatMetadata.enableAgents === true &&
           chatMetadata.activeAgentIds?.includes("illustrator");
   const illustratorAvailable = illustratorInstalled && illustratorEnabledForChat;
+  const customImageAgents = useMemo(() => {
+    if (chatMetadata.enableAgents !== true || !onIllustrateWithAgent) return [];
+    const activeAgentIds = new Set(chatMetadata.activeAgentIds ?? []);
+    const reservedAgentIds = new Set([
+      ...BUILT_IN_AGENTS.map((agent) => agent.id),
+      ...capabilityAgents.map((agent) => agent.id),
+    ]);
+    return agentConfigs
+      .filter(
+        (agent) =>
+          activeAgentIds.has(agent.type) &&
+          !reservedAgentIds.has(agent.type) &&
+          !isAgentConfigDeleted(agent.settings) &&
+          customAgentHasCapability(parseAgentSettingsRecord(agent.settings), "trigger_image_generation"),
+      )
+      .map((agent) => ({ id: agent.type, name: agent.name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [agentConfigs, capabilityAgents, chatMetadata.activeAgentIds, chatMetadata.enableAgents, onIllustrateWithAgent]);
 
   useEffect(() => {
     if (!open || typeof document === "undefined") return;
@@ -147,6 +177,8 @@ export function ChatGalleryDrawer({
             chatId={chat.id}
             mode={chat.mode}
             onIllustrate={illustratorAvailable ? onIllustrate : undefined}
+            illustrateAgents={customImageAgents}
+            onIllustrateWithAgent={onIllustrateWithAgent}
             onGenerateSelfie={illustratorAvailable ? onGenerateSelfie : undefined}
             selfieCharacters={selfieCharacters}
             onGenerateStoryboard={onGenerateStoryboard}

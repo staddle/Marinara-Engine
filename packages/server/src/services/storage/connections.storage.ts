@@ -34,18 +34,24 @@ export function createConnectionsStorage(db: DB) {
     /** Get connection with decrypted API key (for internal use only). */
     async getWithKey(id: string) {
       const conn = await this.getById(id);
-      if (!conn) return null;
+      if (!conn || conn.profileImportReviewRequired === "true") return null;
       return { ...conn, apiKey: decryptApiKey(conn.apiKeyEncrypted) };
     },
 
     async getDefault() {
-      const rows = await db.select().from(apiConnections).where(eq(apiConnections.isDefault, "true"));
+      const rows = await db
+        .select()
+        .from(apiConnections)
+        .where(and(eq(apiConnections.isDefault, "true"), ne(apiConnections.profileImportReviewRequired, "true")));
       return rows[0] ?? null;
     },
 
     /** Get the language connection used after a main generation failure. */
     async getFallbackForMain() {
-      const rows = await db.select().from(apiConnections).where(eq(apiConnections.fallbackForMain, "true"));
+      const rows = await db
+        .select()
+        .from(apiConnections)
+        .where(and(eq(apiConnections.fallbackForMain, "true"), ne(apiConnections.profileImportReviewRequired, "true")));
       const row = rows.find((candidate) => defaultCategoryForProvider(candidate.provider) === "language");
       if (!row) return null;
       return { ...row, apiKey: decryptApiKey(row.apiKeyEncrypted) };
@@ -53,7 +59,12 @@ export function createConnectionsStorage(db: DB) {
 
     /** Get the connection marked as default for agents (with decrypted key). */
     async getDefaultForAgents() {
-      const rows = await db.select().from(apiConnections).where(eq(apiConnections.defaultForAgents, "true"));
+      const rows = await db
+        .select()
+        .from(apiConnections)
+        .where(
+          and(eq(apiConnections.defaultForAgents, "true"), ne(apiConnections.profileImportReviewRequired, "true")),
+        );
       const row = rows.find((candidate) => defaultCategoryForProvider(candidate.provider) === "language");
       if (!row) return null;
       return { ...row, apiKey: decryptApiKey(row.apiKeyEncrypted) };
@@ -61,7 +72,12 @@ export function createConnectionsStorage(db: DB) {
 
     /** Get the language connection used after an agent generation failure. */
     async getFallbackForAgents() {
-      const rows = await db.select().from(apiConnections).where(eq(apiConnections.fallbackForAgents, "true"));
+      const rows = await db
+        .select()
+        .from(apiConnections)
+        .where(
+          and(eq(apiConnections.fallbackForAgents, "true"), ne(apiConnections.profileImportReviewRequired, "true")),
+        );
       const row = rows.find((candidate) => defaultCategoryForProvider(candidate.provider) === "language");
       if (!row) return null;
       return { ...row, apiKey: decryptApiKey(row.apiKeyEncrypted) };
@@ -72,7 +88,13 @@ export function createConnectionsStorage(db: DB) {
       const rows = await db
         .select()
         .from(apiConnections)
-        .where(and(eq(apiConnections.defaultForAgents, "true"), eq(apiConnections.provider, "image_generation")));
+        .where(
+          and(
+            eq(apiConnections.defaultForAgents, "true"),
+            eq(apiConnections.provider, "image_generation"),
+            ne(apiConnections.profileImportReviewRequired, "true"),
+          ),
+        );
       const row = rows[0] ?? null;
       if (!row) return null;
       return { ...row, apiKey: decryptApiKey(row.apiKeyEncrypted) };
@@ -83,7 +105,13 @@ export function createConnectionsStorage(db: DB) {
       const rows = await db
         .select()
         .from(apiConnections)
-        .where(and(eq(apiConnections.fallbackForAgents, "true"), eq(apiConnections.provider, "image_generation")));
+        .where(
+          and(
+            eq(apiConnections.fallbackForAgents, "true"),
+            eq(apiConnections.provider, "image_generation"),
+            ne(apiConnections.profileImportReviewRequired, "true"),
+          ),
+        );
       const row = rows[0] ?? null;
       if (!row) return null;
       return { ...row, apiKey: decryptApiKey(row.apiKeyEncrypted) };
@@ -94,7 +122,13 @@ export function createConnectionsStorage(db: DB) {
       const rows = await db
         .select()
         .from(apiConnections)
-        .where(and(eq(apiConnections.defaultForAgents, "true"), eq(apiConnections.provider, "video_generation")));
+        .where(
+          and(
+            eq(apiConnections.defaultForAgents, "true"),
+            eq(apiConnections.provider, "video_generation"),
+            ne(apiConnections.profileImportReviewRequired, "true"),
+          ),
+        );
       const row = rows[0] ?? null;
       if (!row) return null;
       return { ...row, apiKey: decryptApiKey(row.apiKeyEncrypted) };
@@ -105,7 +139,13 @@ export function createConnectionsStorage(db: DB) {
       const rows = await db
         .select()
         .from(apiConnections)
-        .where(and(eq(apiConnections.fallbackForAgents, "true"), eq(apiConnections.provider, "video_generation")));
+        .where(
+          and(
+            eq(apiConnections.fallbackForAgents, "true"),
+            eq(apiConnections.provider, "video_generation"),
+            ne(apiConnections.profileImportReviewRequired, "true"),
+          ),
+        );
       const row = rows[0] ?? null;
       if (!row) return null;
       return { ...row, apiKey: decryptApiKey(row.apiKeyEncrypted) };
@@ -121,6 +161,7 @@ export function createConnectionsStorage(db: DB) {
         provider: input.provider,
         baseUrl: input.baseUrl ?? "",
         apiKeyEncrypted: encryptApiKey(input.apiKey ?? ""),
+        profileImportReviewRequired: "false",
         model: input.model ?? "",
         imagePath: input.imagePath ?? null,
         maxContext: input.maxContext ?? 128000,
@@ -141,6 +182,8 @@ export function createConnectionsStorage(db: DB) {
         comfyuiWorkflow: input.comfyuiWorkflow ?? null,
         imageService: input.imageService ?? null,
         imageEndpointId: input.imageEndpointId ?? null,
+        imagePromptInstructions: input.imagePromptInstructions ?? null,
+        imageGenerationQuality: input.imageGenerationQuality ?? "auto",
         videoGenerationSource: input.videoGenerationSource ?? null,
         videoService: input.videoService ?? null,
         promptPresetId: input.promptPresetId ?? null,
@@ -215,7 +258,19 @@ export function createConnectionsStorage(db: DB) {
 
       const effectiveProvider = data.provider ?? existing.provider;
       const effectiveProviderCategory = defaultCategoryForProvider(effectiveProvider);
-      const updateFields: Record<string, unknown> = { updatedAt: now() };
+      // Saving through the connection editor is the explicit local review
+      // boundary for a connection restored from someone else's profile.
+      const updateFields: Record<string, unknown> = {
+        updatedAt: now(),
+      };
+      if (
+        data.provider !== undefined ||
+        data.baseUrl !== undefined ||
+        data.apiKey !== undefined ||
+        data.model !== undefined
+      ) {
+        updateFields.profileImportReviewRequired = "false";
+      }
       const shouldClearDefault = data.isDefault === true;
       const shouldClearMainFallback = effectiveProviderCategory === "language" && data.fallbackForMain === true;
       const shouldClearAgentDefaults =
@@ -281,6 +336,12 @@ export function createConnectionsStorage(db: DB) {
       }
       if (data.imageEndpointId !== undefined) {
         updateFields.imageEndpointId = data.imageEndpointId;
+      }
+      if (data.imagePromptInstructions !== undefined) {
+        updateFields.imagePromptInstructions = data.imagePromptInstructions;
+      }
+      if (data.imageGenerationQuality !== undefined) {
+        updateFields.imageGenerationQuality = data.imageGenerationQuality;
       }
       if (data.videoGenerationSource !== undefined) {
         updateFields.videoGenerationSource = data.videoGenerationSource;
@@ -394,6 +455,7 @@ export function createConnectionsStorage(db: DB) {
         provider: source.provider,
         baseUrl: source.baseUrl,
         apiKeyEncrypted: source.apiKeyEncrypted,
+        profileImportReviewRequired: source.profileImportReviewRequired,
         model: source.model,
         imagePath: source.imagePath,
         maxContext: source.maxContext,
@@ -414,6 +476,8 @@ export function createConnectionsStorage(db: DB) {
         comfyuiWorkflow: source.comfyuiWorkflow,
         imageService: source.imageService,
         imageEndpointId: source.imageEndpointId,
+        imagePromptInstructions: source.imagePromptInstructions,
+        imageGenerationQuality: source.imageGenerationQuality,
         videoGenerationSource: source.videoGenerationSource,
         videoService: source.videoService,
         promptPresetId: source.promptPresetId,
@@ -429,7 +493,10 @@ export function createConnectionsStorage(db: DB) {
 
     /** Get all connections marked for the random pool (with decrypted keys). */
     async listRandomPool() {
-      const rows = await db.select().from(apiConnections).where(eq(apiConnections.useForRandom, "true"));
+      const rows = await db
+        .select()
+        .from(apiConnections)
+        .where(and(eq(apiConnections.useForRandom, "true"), ne(apiConnections.profileImportReviewRequired, "true")));
       return rows.map((r: any) => ({ ...r, apiKey: decryptApiKey(r.apiKeyEncrypted) }));
     },
 

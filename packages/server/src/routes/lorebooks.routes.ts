@@ -15,7 +15,6 @@ import {
   createLorebookFolderSchema,
   updateLorebookFolderSchema,
   LOCAL_SIDECAR_CONNECTION_ID,
-  stripMacroComments,
   canReparentFolder,
   type CreateLorebookEntryInput,
   type LorebookEntryTimingState,
@@ -39,6 +38,7 @@ import {
   resolvePromptIdleDuration,
 } from "../services/prompt/index.js";
 import { parseGameStateRow, resolveVisibleGameStateAnchor } from "./generate/generate-route-utils.js";
+import { cardPromptText } from "../services/prompt/card-text.js";
 import {
   syncCharacterBookFromLorebook,
   clearCharacterEmbeddedLorebook,
@@ -69,10 +69,6 @@ function toSafeExportName(name: string, fallback: string) {
     .replace(/\s+/g, " ")
     .trim();
   return sanitized || fallback;
-}
-
-function cardPromptText(value: unknown): string {
-  return typeof value === "string" ? stripMacroComments(value).trim() : "";
 }
 
 type ExportFormat = "native" | "compatible";
@@ -1162,11 +1158,18 @@ export async function lorebooksRoutes(app: FastifyInstance) {
     if (!allEntries.length) return { vectorized: 0, total: 0, skipped: 0 };
     const lorebook = (await storage.getById(req.params.id)) as Record<string, unknown> | null;
     if (lorebook?.excludeFromVectorization === true) {
-      return { vectorized: 0, total: allEntries.length, skipped: allEntries.length };
+      return reply.status(409).send({
+        error: "Enable Lorebook vectors and save the Lorebook before vectorizing its entries.",
+      });
     }
     const vectorizableEntries = allEntries.filter(
       (entry) => !(entry as Record<string, unknown>).excludeFromVectorization,
     );
+    if (vectorizableEntries.length === 0) {
+      return reply.status(409).send({
+        error: "Every entry is excluded from vectorization. Include at least one entry before vectorizing.",
+      });
+    }
     const entries = body.onlyMissing
       ? vectorizableEntries.filter((entry) => {
           const embedding = (entry as Record<string, unknown>).embedding;

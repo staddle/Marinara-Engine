@@ -28,10 +28,42 @@ function activeChatId(): string | null {
 }
 
 export function normalizeCardAssetImageSyntax(text: string): string {
-  return text.replace(/\(([^)\n]*)\)\[(card:\/\/[^\]\s]+)\]/g, (_match, alt: string, url: string) => {
-    const safeAlt = alt.replace(/[\]\r\n]/g, " ").trim();
-    return `![${safeAlt}](${url})`;
-  });
+  let result = "";
+  let outputCursor = 0;
+  let candidateStart = -1;
+
+  for (let index = 0; index < text.length; index++) {
+    const character = text[index]!;
+    if (character === "\n") {
+      candidateStart = -1;
+      continue;
+    }
+    if (character === "(" && candidateStart < 0) {
+      candidateStart = index;
+      continue;
+    }
+    if (character !== ")" || candidateStart < 0) continue;
+
+    if (!text.startsWith("[card://", index + 1)) {
+      candidateStart = -1;
+      continue;
+    }
+    const urlStart = index + 2;
+    let urlEnd = urlStart;
+    while (urlEnd < text.length && text[urlEnd] !== "]" && !/\s/u.test(text[urlEnd]!)) urlEnd++;
+    if (urlEnd <= urlStart + "card://".length || text[urlEnd] !== "]") {
+      candidateStart = -1;
+      continue;
+    }
+
+    const safeAlt = text.slice(candidateStart + 1, index).replace(/[\]\r\n]/g, " ").trim();
+    result += `${text.slice(outputCursor, candidateStart)}![${safeAlt}](${text.slice(urlStart, urlEnd)})`;
+    outputCursor = urlEnd + 1;
+    index = urlEnd;
+    candidateStart = -1;
+  }
+
+  return result + text.slice(outputCursor);
 }
 
 /**

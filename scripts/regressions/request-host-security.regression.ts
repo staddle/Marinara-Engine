@@ -10,10 +10,13 @@ process.env.HOST = "0.0.0.0";
 delete process.env.TRUSTED_HOSTS;
 delete process.env.CSRF_TRUSTED_ORIGINS;
 delete process.env.CORS_ORIGINS;
+delete process.env.MARINARA_E2E_DISABLE_RATE_LIMIT;
 
 const { corsDelegate } = await import("../../packages/server/src/config/cors-config.js");
 const { hostValidationHook, parseRequestHostname } =
   await import("../../packages/server/src/middleware/host-validation.js");
+const { rateLimitHook, resetRateLimitBucketsForTests } =
+  await import("../../packages/server/src/middleware/rate-limit.js");
 
 assert.equal(parseRequestHostname("192.168.1.50:7860"), "192.168.1.50");
 assert.equal(parseRequestHostname("[fd7a:115c:a1e0::1]:7860"), "fd7a:115c:a1e0::1");
@@ -22,6 +25,21 @@ assert.equal(parseRequestHostname("attacker.example/path"), null);
 assert.equal(parseRequestHostname("attacker.example:0"), null);
 assert.equal(parseRequestHostname("attacker.example:99999"), null);
 assert.equal(parseRequestHostname("attacker.example, localhost:7860"), null);
+
+const rateLimitedApp = Fastify();
+rateLimitedApp.addHook("onRequest", rateLimitHook);
+rateLimitedApp.post("/api/backup/", async () => ({ ok: true }));
+try {
+  for (let requestNumber = 1; requestNumber <= 30; requestNumber += 1) {
+    const response = await rateLimitedApp.inject({ method: "POST", url: "/api/backup/" });
+    assert.equal(response.statusCode, 200, `backup request ${requestNumber} remains within its explicit limit`);
+  }
+  const rejectedBackup = await rateLimitedApp.inject({ method: "POST", url: "/api/backup/" });
+  assert.equal(rejectedBackup.statusCode, 429, "expensive backup routes are capped at 30 requests per minute and IP");
+} finally {
+  await rateLimitedApp.close();
+  resetRateLimitBucketsForTests();
+}
 
 const app = Fastify();
 app.addHook("onRequest", hostValidationHook);
@@ -115,6 +133,11 @@ try {
     /updateInstalledPackagesToLatest/u,
     "App startup must never download and execute Agent updates without user consent",
   );
+  const rateLimitHookIndex = appSource.indexOf('app.addHook("onRequest", rateLimitHook)');
+  const androidLocalAuthHookIndex = appSource.indexOf('app.addHook("onRequest", androidLocalAuthHook)');
+  assert.ok(rateLimitHookIndex >= 0, "API rate limiting must be registered");
+  assert.ok(androidLocalAuthHookIndex >= 0, "Android authorization must be registered");
+  assert.ok(rateLimitHookIndex < androidLocalAuthHookIndex, "API rate limiting must run before Android authorization");
 
   const composeSource = readFileSync(join(repositoryRoot, "docker-compose.yml"), "utf8");
   for (const name of ["TRUSTED_HOSTS", "CORS_ORIGINS", "CSRF_TRUSTED_ORIGINS"]) {
@@ -127,6 +150,28 @@ try {
 
   const dockerfileSource = readFileSync(join(repositoryRoot, "Dockerfile"), "utf8");
   assert.match(dockerfileSource, /apt-get install[\s\S]*\bbubblewrap\b/u, "The official image must install Bubblewrap");
+  const dockerBaseStages = dockerfileSource
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => /^FROM\s+/iu.test(line));
+  assert.equal(dockerBaseStages.length, 2, "The full image must retain its reviewed build and production stages");
+  const pinnedNodeBase = /^FROM\s+node:24-trixie-slim@(sha256:[0-9a-f]{64})(?:\s+AS\s+[a-z0-9_.-]+)?$/iu;
+  // Offline evidence recorded from the pinned OCI index. A base-image bump
+  // must update this reviewed index -> linux/arm64 manifest relationship.
+  const arm64ManifestByIndex = new Map([
+    [
+      "sha256:0711b541c1c33a8a530ac4f0d391baa9a15b3d804695b1b24a47daa5fb60e74d",
+      "sha256:8525258f39fa3365fcf9a9d01e85458c7280ad00bd30c5e67655311262257e9e",
+    ],
+  ]);
+  for (const stage of dockerBaseStages) {
+    const match = pinnedNodeBase.exec(stage);
+    assert.ok(match, `Every full-image stage must pin node:24-trixie-slim by digest: ${stage}`);
+    assert.ok(
+      arm64ManifestByIndex.has(match[1]!),
+      `The pinned Node manifest must have reviewed linux/arm64 support: ${match[1]}`,
+    );
+  }
 } finally {
   delete process.env.TRUSTED_HOSTS;
   delete process.env.CSRF_TRUSTED_ORIGINS;

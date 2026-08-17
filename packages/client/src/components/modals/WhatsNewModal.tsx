@@ -24,9 +24,11 @@ type ReleaseHighlight = {
 type ReleaseStorySection = {
   id: string;
   copyKey: string;
+  linkUrl?: string;
   media?: Array<{
     url: string;
     altKey: string;
+    kind?: "image" | "video";
   }>;
 };
 
@@ -47,6 +49,84 @@ function localizedCopy(key: string): ReleaseCopy {
 // Add each release here before its version ships. Versions without a tailored
 // entry still get a one-time update notice and a link to their full release.
 const RELEASE_ANNOUNCEMENTS: Record<string, ReleaseAnnouncement> = {
+  "2.4.2": {
+    headline: localizedCopy("ui.modals.whatsnewmodal.release242.headline"),
+    intro: localizedCopy("ui.modals.whatsnewmodal.release242.intro"),
+    highlights: [],
+    story: [
+      {
+        id: "home-widgets",
+        copyKey: "ui.modals.whatsnewmodal.release242.paragraphs.homeWidgets",
+        media: [
+          {
+            url: "/releases/2.4.2/home-widgets.mp4",
+            altKey: "ui.modals.whatsnewmodal.release242.media.homeWidgets",
+            kind: "video",
+          },
+          {
+            url: "/releases/2.4.2/home-widgets-custom.mp4",
+            altKey: "ui.modals.whatsnewmodal.release242.media.homeWidgetsCustom",
+            kind: "video",
+          },
+        ],
+      },
+      {
+        id: "home-navigator",
+        copyKey: "ui.modals.whatsnewmodal.release242.paragraphs.homeNavigator",
+        media: [
+          {
+            url: "/releases/2.4.2/home-navigator.mp4",
+            altKey: "ui.modals.whatsnewmodal.release242.media.homeNavigator",
+            kind: "video",
+          },
+        ],
+      },
+      {
+        id: "handle-with-care",
+        copyKey: "ui.modals.whatsnewmodal.release242.paragraphs.handleWithCare",
+      },
+      {
+        id: "professor-mari-memories",
+        copyKey: "ui.modals.whatsnewmodal.release242.paragraphs.professorMariMemories",
+        media: [
+          {
+            url: "/releases/2.4.2/professor-mari-memories.png",
+            altKey: "ui.modals.whatsnewmodal.release242.media.professorMariMemories",
+          },
+        ],
+      },
+      {
+        id: "noodle-agent",
+        copyKey: "ui.modals.whatsnewmodal.release242.paragraphs.noodleAgent",
+        media: [
+          {
+            url: "/releases/2.4.2/noodle-agent.png",
+            altKey: "ui.modals.whatsnewmodal.release242.media.noodleAgent",
+          },
+        ],
+      },
+      {
+        id: "character-downloads",
+        copyKey: "ui.modals.whatsnewmodal.release242.paragraphs.characterDownloads",
+        media: [
+          {
+            url: "/releases/2.4.2/character-downloads.png",
+            altKey: "ui.modals.whatsnewmodal.release242.media.characterDownloads",
+          },
+        ],
+      },
+      {
+        id: "full-changelog",
+        copyKey: "ui.modals.whatsnewmodal.release242.paragraphs.fullChangelog",
+      },
+      {
+        id: "release-link",
+        copyKey: "ui.modals.whatsnewmodal.release242.paragraphs.releaseLink",
+        linkUrl: "https://github.com/Pasta-Devs/Marinara-Engine/releases/tag/v2.4.2",
+      },
+    ],
+    outro: localizedCopy("ui.modals.whatsnewmodal.release242.outro"),
+  },
   "2.4.1": {
     headline: localizedCopy("ui.modals.whatsnewmodal.release241.headline"),
     intro: localizedCopy("ui.modals.whatsnewmodal.release241.intro"),
@@ -311,11 +391,14 @@ export function WhatsNewModal({
             <span className="inline-flex rounded-full border border-[var(--marinara-chat-chrome-button-border-active)] bg-[var(--marinara-chat-chrome-button-bg-active)] px-2.5 py-1 text-[0.625rem] font-bold uppercase tracking-[0.14em] text-[var(--marinara-chat-chrome-button-text-active)]">
               {localizeUi("ui.characters.metadatatab.version")} {APP_VERSION}
             </span>
-            <h3 className="mt-3 text-balance text-2xl font-bold tracking-tight text-[var(--marinara-chat-chrome-panel-title)] sm:text-3xl">
+            <h3
+              data-release-copy
+              className="mt-3 text-balance text-2xl font-bold tracking-tight text-[var(--marinara-chat-chrome-panel-title)] sm:text-3xl"
+            >
               {releaseCopy(announcement.headline)}
             </h3>
             {announcement.intro ? (
-              <p className="mt-2 text-sm leading-6 text-[var(--marinara-chat-chrome-panel-muted)]">
+              <p data-release-copy className="mt-2 text-sm leading-6 text-[var(--marinara-chat-chrome-panel-muted)]">
                 {releaseCopy(announcement.intro)}
               </p>
             ) : null}
@@ -325,29 +408,56 @@ export function WhatsNewModal({
             <div className="space-y-6" data-release-story={APP_VERSION}>
               {announcement.story.map((section) => (
                 <section key={section.id} className="space-y-3">
-                  <p className="text-sm leading-6 text-[var(--marinara-chat-chrome-panel-muted)]">
-                    <Trans
-                      i18nKey={section.copyKey}
-                      components={{
-                        strong: <strong className="font-semibold text-[var(--marinara-chat-chrome-panel-title)]" />,
-                        env: (
-                          <code className="rounded bg-[var(--marinara-chat-chrome-highlight-bg)] px-1 py-0.5 text-[0.8125rem] text-[var(--marinara-chat-chrome-highlight-text)]" />
-                        ),
-                      }}
-                    />
+                  <p data-release-copy className="text-sm leading-6 text-[var(--marinara-chat-chrome-panel-muted)]">
+                    {section.linkUrl ? (
+                      <a
+                        href={section.linkUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="break-all text-[var(--marinara-chat-chrome-accent)] underline decoration-current/40 underline-offset-2 hover:decoration-current"
+                      >
+                        {localizeUi(section.copyKey)}
+                      </a>
+                    ) : (
+                      <Trans
+                        i18nKey={section.copyKey}
+                        components={{
+                          strong: <strong className="font-semibold text-[var(--marinara-chat-chrome-panel-title)]" />,
+                          env: (
+                            <code className="rounded bg-[var(--marinara-chat-chrome-highlight-bg)] px-1 py-0.5 text-[0.8125rem] text-[var(--marinara-chat-chrome-highlight-text)]" />
+                          ),
+                        }}
+                      />
+                    )}
                   </p>
                   {section.media?.length ? (
                     <div className="grid grid-cols-1 gap-3" data-release-media-group={section.id}>
-                      {section.media.map((media) => (
-                        <img
-                          key={media.url}
-                          src={media.url}
-                          alt={localizeUi(media.altKey)}
-                          loading="lazy"
-                          referrerPolicy="no-referrer"
-                          className="mx-auto max-h-[30rem] w-full rounded-xl border border-[var(--marinara-chat-chrome-panel-divider)] bg-[var(--marinara-chat-chrome-highlight-bg)] object-contain shadow-sm"
-                        />
-                      ))}
+                      {section.media.map((media) =>
+                        media.kind === "video" ? (
+                          <video
+                            key={media.url}
+                            src={media.url}
+                            aria-label={localizeUi(media.altKey)}
+                            autoPlay
+                            controls
+                            loop
+                            muted
+                            playsInline
+                            preload="metadata"
+                            data-release-media-kind="video"
+                            className="mx-auto max-h-[30rem] w-full rounded-xl border border-[var(--marinara-chat-chrome-panel-divider)] bg-[var(--marinara-chat-chrome-highlight-bg)] object-contain shadow-sm"
+                          />
+                        ) : (
+                          <img
+                            key={media.url}
+                            src={media.url}
+                            alt={localizeUi(media.altKey)}
+                            loading="lazy"
+                            data-release-media-kind="image"
+                            className="mx-auto max-h-[30rem] w-full rounded-xl border border-[var(--marinara-chat-chrome-panel-divider)] bg-[var(--marinara-chat-chrome-highlight-bg)] object-contain shadow-sm"
+                          />
+                        ),
+                      )}
                     </div>
                   ) : null}
                 </section>
@@ -400,7 +510,7 @@ export function WhatsNewModal({
           ) : null}
 
           {announcement.outro ? (
-            <p className="text-sm leading-6 text-[var(--marinara-chat-chrome-panel-muted)]">
+            <p data-release-copy className="text-sm leading-6 text-[var(--marinara-chat-chrome-panel-muted)]">
               {releaseCopy(announcement.outro)}
             </p>
           ) : null}

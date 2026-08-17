@@ -5,6 +5,7 @@ import { type ReactNode } from "react";
 import { normalizeCardAssetImageSyntax, resolveCardAssetUrl } from "./card-asset-links";
 import { convertBasicLatexSymbols, convertBasicLatexSymbolsInHtml } from "./latex-symbols";
 import { useUIStore } from "../stores/ui.store";
+import { DISCORD_SUBTEXT_RE, INLINE_MD_RE, MD_LINK_TARGET_SOURCE } from "./inline-markdown-regex";
 
 // ─── Inline Markdown ────────────────────────────────────────────────────────
 
@@ -19,18 +20,10 @@ import { useUIStore } from "../stores/ui.store";
  *   7     Strikethrough     ~~text~~
  *   8     Bold-italic       ***text***   (must precede bold)
  *   9     Bold              **text**
- *   10    Italic (__)       __text__
+ *   10    Underline         __text__
  *   11    Italic (*)        *text*
  *   12    Italic (_)        _text_   (not inside a word)
  */
-const MD_LINK_TARGET_SOURCE = String.raw`(?:https?:\/\/[^)\s]+|card:\/\/[^)\s]+|\/api\/[^)\s]+)`;
-const INLINE_MD_RE = new RegExp(
-  "\\\\([-\\\\*_~`#|>!=\\[\\]{}])|(!?\\[([^\\]]*)\\]\\((" +
-    MD_LINK_TARGET_SOURCE +
-    ")\\))|`([^`\\n]+)`|==(.+?)==|~~(.+?)~~|\\*\\*\\*(.+?)\\*\\*\\*|\\*\\*(.+?)\\*\\*|__(.+?)__|\\*(.+?)\\*|(?<![_\\w])_([^_]+?)_(?![_\\w])",
-  "g",
-);
-
 /** Maximum recursion depth for nested inline markdown. */
 const MAX_INLINE_DEPTH = 6;
 const CHAT_TEXT_HTML_ENTITY_RE = /&(amp|lt|gt|quot|apos|#\d{1,7}|#x[0-9a-f]{1,6});/gi;
@@ -116,6 +109,7 @@ export function applyInlineMarkdown(text: string, keyPrefix: string, _depth = 0)
             className="my-1 inline-block max-w-full rounded-lg align-bottom sm:max-w-md"
             loading="lazy"
             decoding="async"
+            referrerPolicy="no-referrer"
           />,
         );
       } else {
@@ -166,8 +160,12 @@ export function applyInlineMarkdown(text: string, keyPrefix: string, _depth = 0)
       // ── Bold: **text** ──
       nodes.push(<strong key={`${keyPrefix}b${key++}`}>{recurse(match[9], "b")}</strong>);
     } else if (match[10] != null) {
-      // ── Italic: __text__ ──
-      nodes.push(<em key={`${keyPrefix}di${key++}`}>{recurse(match[10], "di")}</em>);
+      // ── Underline: __text__ ──
+      nodes.push(
+        <u key={`${keyPrefix}u${key++}`} className="mari-md-underline">
+          {recurse(match[10], "u")}
+        </u>,
+      );
     } else if (match[11] != null) {
       // ── Italic: *text* ──
       nodes.push(<em key={`${keyPrefix}i${key++}`}>{recurse(match[11], "i")}</em>);
@@ -551,6 +549,7 @@ export function renderMarkdownBlocks(
           className="my-1 max-w-full rounded-lg sm:max-w-md"
           loading="lazy"
           decoding="async"
+          referrerPolicy="no-referrer"
         />,
       );
       continue;
@@ -592,6 +591,19 @@ export function renderMarkdownBlocks(
     // If we were in a table and this line doesn't continue it, flush
     if (tableRows.length > 0) {
       flushTable();
+    }
+
+    // ── Discord-style subtext (must be checked before regular UL) ──
+    const subtextMatch = DISCORD_SUBTEXT_RE.exec(line);
+    if (subtextMatch) {
+      flushText();
+      flushList();
+      segments.push(
+        <small key={`${keyBase}sub${key++}`} className="mari-md-subtext">
+          {renderInline(subtextMatch[1] ?? "", `${keyBase}sub${key}`)}
+        </small>,
+      );
+      continue;
     }
 
     // ── Task list item (must be checked before regular UL) ──
@@ -711,8 +723,8 @@ export function applyInlineMarkdownHTML(html: string): string {
       .replace(/\*\*\*(.+?)\*\*\*/g, "<strong><em>$1</em></strong>")
       // Bold: **text**
       .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-      // Italic: __text__
-      .replace(/__(.+?)__/g, "<em>$1</em>")
+      // Underline: __text__
+      .replace(/__(.+?)__/g, '<u class="mari-md-underline">$1</u>')
       // Italic: *text* (single asterisk, not part of **)
       .replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, "<em>$1</em>")
       // Italic: _text_ (not inside a word)
@@ -722,5 +734,7 @@ export function applyInlineMarkdownHTML(html: string): string {
         /(?:^|(?<=<br[^>]*>))\s*&gt;\s?(.+?)(?=<br|$)/g,
         '<blockquote class="mari-md-blockquote">$1</blockquote>',
       )
+      // Discord-style subtext: -# text
+      .replace(/(?:^|(?<=<br[^>]*>))[ \t]*-#(?:[ \t]+(.*?))?(?=<br|$)/g, '<small class="mari-md-subtext">$1</small>')
   );
 }

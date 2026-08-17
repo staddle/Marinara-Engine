@@ -3,6 +3,7 @@ package com.marinara.engine;
 import android.annotation.SuppressLint;
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -16,6 +17,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.PackageInstaller;
+import android.content.pm.PackageInfo;
+import android.content.pm.Signature;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -45,12 +48,22 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.File;
+import java.io.ByteArrayOutputStream;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
+
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+
+import org.json.JSONObject;
 
 public class MainActivity extends Activity {
 
@@ -71,7 +84,23 @@ public class MainActivity extends Activity {
     private static final String TERMUX_RUN_COMMAND_PERMISSION = "com.termux.permission.RUN_COMMAND";
     private static final String TERMUX_DOWNLOAD_PAGE = "https://f-droid.org/en/packages/com.termux/";
     private static final String TERMUX_APK_DOWNLOAD_URL = "https://f-droid.org/repo/com.termux_1002.apk";
+    private static final long TERMUX_APK_SIZE = 113_880_067L;
+    private static final long TERMUX_APK_VERSION_CODE = 1002L;
+    private static final String TERMUX_APK_SHA256 =
+            "e6265a57eb5ca363808488e3b01955958bed93bc0c8a0d281849b363b11027ec";
+    private static final String TERMUX_SIGNER_SHA256 =
+            "228fb2cfe90831c1499ec3ccaf61e96e8e1ce70766b9474672ce427334d41c42";
+    private static final String TERMUX_PLAY_STORE_SIGNER_SHA256 =
+            "738f0a30a04d3c8a1be304af18d0779bcf3ea88fb60808f657a3521861c2ebf9";
+    private static final String TERMUX_DEVS_SIGNER_SHA256 =
+            "f7a038eb551f1be8fdf388686b784abab4552a5d82df423e3d8f1b5cbe1c69ae";
+    // Termux's GitHub APKs use a publicly shared test key, so they require the
+    // same explicit one-session confirmation as any other unverified build.
     private static final String TERMUX_INSTALL_STATUS_ACTION = "com.marinara.engine.TERMUX_INSTALL_STATUS";
+    private static final String SECURITY_PREFS = "marinara_security";
+    private static final String ANDROID_SECRET_PREF = "android_local_secret";
+    private static final String INSTALL_SESSION_PREF = "termux_install_session";
+    private static final String INSTALL_NONCE_PREF = "termux_install_nonce";
     private static final String TERMUX_HOME = "/data/data/com.termux/files/home";
     private static final String TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash";
     private static final String TERMUX_EXTERNAL_APPS_COMMAND =
@@ -83,6 +112,7 @@ public class MainActivity extends Activity {
     private View splashView;
     private ProgressBar spinner;
     private TextView statusText;
+    private Button manualServerButton;
     private ValueCallback<Uri[]> fileUploadCallback;
     private byte[] pendingFileSaveData;
     private String pendingFileSaveName;
@@ -91,6 +121,9 @@ public class MainActivity extends Activity {
     private boolean isCheckingServer;
     private boolean mainFrameLoadFailed;
     private boolean connectionRetryPaused;
+    private volatile boolean bridgeEnabled;
+    private volatile String bridgeToken;
+    private String approvedUnverifiedTermuxSigner;
     private String currentMainFrameUrl;
     private long currentMainFrameNavigationId;
     private long activeServerMainFrameNavigationId;
@@ -174,6 +207,11 @@ public class MainActivity extends Activity {
         });
         actions.addView(retryButton, buildActionButtonLayoutParams());
 
+        manualServerButton = buildActionButton("Open manual server");
+        manualServerButton.setVisibility(View.GONE);
+        manualServerButton.setOnClickListener(v -> confirmManualServerAccess());
+        actions.addView(manualServerButton, buildActionButtonLayoutParams());
+
         container.addView(actions);
 
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
@@ -220,14 +258,14 @@ public class MainActivity extends Activity {
         settings.setCacheMode(WebSettings.LOAD_DEFAULT);
         settings.setUserAgentString(settings.getUserAgentString() + " MarinaraEngine/Android");
 
-        webView.addJavascriptInterface(new MarinaraAndroidBridge(), "MarinaraAndroid");
+        webView.addJavascriptInterface(new MarinaraAndroidBridge(), "MarinaraAndroidNative");
 
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 String url = request.getUrl().toString();
-                // Keep loopback navigation inside the WebView
-                if (url.startsWith("http://localhost") || url.startsWith("http://127.0.0.1")) {
+                // Keep only the exact configured Marinara origin inside the WebView.
+                if (isServerUrl(url)) {
                     return false;
                 }
                 // Open external links in the default browser
@@ -239,6 +277,8 @@ public class MainActivity extends Activity {
             @Override
             public void onPageStarted(WebView view, String url, android.graphics.Bitmap favicon) {
                 super.onPageStarted(view, url, favicon);
+                bridgeEnabled = false;
+                bridgeToken = null;
                 currentMainFrameUrl = url;
                 currentMainFrameNavigationId++;
                 if (isServerUrl(url)) {
@@ -252,8 +292,8 @@ public class MainActivity extends Activity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
-                if (isActiveServerMainFrame(url) && !mainFrameLoadFailed) {
-                    showWebView();
+                if (isActiveServerMainFrame(url) && isDisplayableServerUrl(url) && !mainFrameLoadFailed) {
+                    enableBridgeForNavigation(view, url);
                 }
             }
 
@@ -308,14 +348,19 @@ public class MainActivity extends Activity {
 
         isCheckingServer = true;
         new Thread(() -> {
-            boolean reachable = isServerReachable();
+            AndroidSessionAttempt attempt = prepareAndroidSession();
             runOnUiThread(() -> {
                 isCheckingServer = false;
                 if (connectionRetryPaused) return;
-                if (reachable) {
+                if (attempt.session != null) {
                     mainFrameLoadFailed = false;
                     statusText.setText("Opening Marinara Engine…");
-                    webView.loadUrl(SERVER_URL);
+                    webView.postUrl(
+                            SERVER_URL + "/api/android-auth/session",
+                            attempt.session.formBody().getBytes(StandardCharsets.UTF_8)
+                    );
+                } else if (attempt.manualServerDetected) {
+                    showManualServerOption();
                 } else {
                     retryConnection();
                 }
@@ -335,10 +380,40 @@ public class MainActivity extends Activity {
     }
 
     private void showBootstrap(String message, boolean showSpinner) {
+        bridgeEnabled = false;
+        bridgeToken = null;
         statusText.setText(message);
         spinner.setVisibility(showSpinner ? View.VISIBLE : View.GONE);
+        if (manualServerButton != null) manualServerButton.setVisibility(View.GONE);
         splashView.setVisibility(View.VISIBLE);
         webView.setVisibility(View.INVISIBLE);
+    }
+
+    private void showManualServerOption() {
+        pauseConnectionRetryLoop();
+        showBootstrap(
+                "A manually installed Marinara server is running, but it does not support APK authentication.\n"
+                        + "You can still open it after confirming that you started this server in Termux.",
+                false
+        );
+        manualServerButton.setVisibility(View.VISIBLE);
+    }
+
+    private void confirmManualServerAccess() {
+        new AlertDialog.Builder(this)
+                .setTitle("Open manual Marinara server?")
+                .setMessage(
+                        "The Android app cannot verify this server's identity. Continue only if you started "
+                                + "Marinara in Termux yourself. This keeps manual installations available."
+                )
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Open server", (dialog, which) -> {
+                    resumeConnectionRetryLoop();
+                    mainFrameLoadFailed = false;
+                    showBootstrap("Opening the confirmed manual server…", true);
+                    webView.loadUrl(SERVER_URL);
+                })
+                .show();
     }
 
     private void handleServerLoadFailure() {
@@ -367,19 +442,43 @@ public class MainActivity extends Activity {
         connectionRetryPaused = false;
     }
 
-    private boolean isServerReachable() {
+    private AndroidSessionAttempt prepareAndroidSession() {
         HttpURLConnection connection = null;
         try {
-            connection = (HttpURLConnection) new URL(SERVER_URL).openConnection();
+            String secret = getOrCreateAndroidSecret();
+            String clientNonce = randomHex(32);
+            byte[] requestBody = new JSONObject().put("clientNonce", clientNonce)
+                    .toString()
+                    .getBytes(StandardCharsets.UTF_8);
+            connection = (HttpURLConnection) new URL(SERVER_URL + "/api/android-auth/challenge").openConnection();
             connection.setConnectTimeout(1_000);
             connection.setReadTimeout(1_500);
             connection.setInstanceFollowRedirects(false);
             connection.setUseCaches(false);
+            connection.setRequestMethod("POST");
+            connection.setDoOutput(true);
             connection.setRequestProperty("User-Agent", "MarinaraEngine/Android");
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            connection.setFixedLengthStreamingMode(requestBody.length);
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(requestBody);
+            }
             int status = connection.getResponseCode();
-            return status >= 200 && status < 300;
+            if (status == HttpURLConnection.HTTP_NOT_FOUND) return AndroidSessionAttempt.manualServer();
+            if (status != HttpURLConnection.HTTP_OK) return AndroidSessionAttempt.unavailable();
+
+            JSONObject response = new JSONObject(readSmallResponse(connection));
+            String serverNonce = response.getString("serverNonce").toLowerCase();
+            String proof = response.getString("proof").toLowerCase();
+            if (!isHex256(serverNonce)) return AndroidSessionAttempt.unavailable();
+            String expectedProof = hmacHex(secret, "server:" + clientNonce + ":" + serverNonce);
+            if (!constantTimeEquals(proof, expectedProof)) return AndroidSessionAttempt.unavailable();
+            String clientProof = hmacHex(secret, "client:" + clientNonce + ":" + serverNonce);
+            return AndroidSessionAttempt.authenticated(
+                    new AndroidSessionBootstrap(clientNonce, serverNonce, clientProof)
+            );
         } catch (Exception e) {
-            return false;
+            return AndroidSessionAttempt.unavailable();
         } finally {
             if (connection != null) {
                 connection.disconnect();
@@ -393,10 +492,10 @@ public class MainActivity extends Activity {
             Uri serverUri = Uri.parse(SERVER_URL);
             Uri candidateUri = Uri.parse(url);
             return textEquals(serverUri.getScheme(), candidateUri.getScheme())
-                    && hostsReferToSameServer(serverUri.getHost(), candidateUri.getHost())
+                    && textEquals(serverUri.getHost(), candidateUri.getHost())
                     && serverUri.getPort() == candidateUri.getPort();
         } catch (Exception e) {
-            return url.startsWith(SERVER_URL);
+            return false;
         }
     }
 
@@ -406,28 +505,196 @@ public class MainActivity extends Activity {
                 && isServerUrl(url);
     }
 
-    private boolean hostsReferToSameServer(String left, String right) {
-        if (textEquals(left, right)) return true;
-        return isLoopbackHost(left) && isLoopbackHost(right);
+    private boolean isDisplayableServerUrl(String url) {
+        if (!isServerUrl(url)) return false;
+        String path = Uri.parse(url).getPath();
+        return path == null
+                || (!path.startsWith("/api/android-auth") && !"/android-login".equals(path));
     }
 
-    private boolean isLoopbackHost(String host) {
-        if (host == null) return false;
-        String normalized = host.toLowerCase();
-        return "localhost".equals(normalized)
-                || "127.0.0.1".equals(normalized)
-                || "::1".equals(normalized)
-                || "[::1]".equals(normalized);
+    private void enableBridgeForNavigation(WebView view, String url) {
+        if (bridgeToken != null) return;
+        final long navigationId = currentMainFrameNavigationId;
+        final String token = randomHex(32);
+        bridgeToken = token;
+        String script = "(() => {"
+                + "if (window !== window.top) return false;"
+                + "const nativeBridge = window.MarinaraAndroidNative;"
+                + "if (!nativeBridge) return false;"
+                + "Object.defineProperty(window, '__MARINARA_ANDROID_BRIDGE_TOKEN__', {"
+                + "value: '" + token + "', configurable: false, enumerable: false, writable: false"
+                + "});"
+                + "const withoutToken = (values) => values[0] === '" + token + "' ? values.slice(1) : values;"
+                + "const bridge = Object.freeze({"
+                + "isStatusBarVisible: () => nativeBridge.isStatusBarVisible('" + token + "'),"
+                + "setStatusBarVisible: (...values) => nativeBridge.setStatusBarVisible('" + token + "', Boolean(withoutToken(values)[0])),"
+                + "getNotificationPermission: () => nativeBridge.getNotificationPermission('" + token + "'),"
+                + "requestNotificationPermission: () => nativeBridge.requestNotificationPermission('" + token + "'),"
+                + "showNotification: (...values) => nativeBridge.showNotification('" + token + "', ...withoutToken(values)),"
+                + "saveFile: (...values) => nativeBridge.saveFile('" + token + "', ...withoutToken(values)),"
+                + "openConsole: () => nativeBridge.openConsole('" + token + "')"
+                + "});"
+                + "Object.defineProperty(window, 'MarinaraAndroid', {"
+                + "value: bridge, configurable: false, enumerable: false, writable: false"
+                + "});"
+                + "return true;"
+                + "})()";
+        view.evaluateJavascript(script, result -> {
+            if (navigationId != currentMainFrameNavigationId
+                    || !isActiveServerMainFrame(url)
+                    || !constantTimeEquals(token, bridgeToken)) {
+                return;
+            }
+            if (!"true".equals(result)) {
+                bridgeEnabled = false;
+                bridgeToken = null;
+                handleServerLoadFailure();
+                return;
+            }
+            bridgeEnabled = true;
+            view.evaluateJavascript(
+                    "window.dispatchEvent(new Event('marinara:android-bridge-ready'))",
+                    null
+            );
+            showWebView();
+        });
+    }
+
+    private boolean isTrustedBridgeCaller(String token) {
+        return bridgeEnabled && constantTimeEquals(bridgeToken, token);
     }
 
     private boolean textEquals(String left, String right) {
         return left == null ? right == null : left.equals(right);
     }
 
+    private synchronized String getOrCreateAndroidSecret() {
+        String existing = getSharedPreferences(SECURITY_PREFS, MODE_PRIVATE)
+                .getString(ANDROID_SECRET_PREF, null);
+        if (isHex256(existing)) return existing.toLowerCase();
+
+        String created = randomHex(32);
+        boolean saved = getSharedPreferences(SECURITY_PREFS, MODE_PRIVATE)
+                .edit()
+                .putString(ANDROID_SECRET_PREF, created)
+                .commit();
+        if (!saved) throw new IllegalStateException("Could not store Android local secret");
+        return created;
+    }
+
+    private String randomHex(int byteCount) {
+        byte[] value = new byte[byteCount];
+        new SecureRandom().nextBytes(value);
+        return hex(value);
+    }
+
+    private String hmacHex(String secretHex, String value) throws Exception {
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(hexBytes(secretHex), "HmacSHA256"));
+        return hex(mac.doFinal(value.getBytes(StandardCharsets.UTF_8)));
+    }
+
+    private boolean constantTimeEquals(String left, String right) {
+        if (left == null || right == null) return false;
+        return MessageDigest.isEqual(
+                left.getBytes(StandardCharsets.US_ASCII),
+                right.getBytes(StandardCharsets.US_ASCII)
+        );
+    }
+
+    private boolean isHex256(String value) {
+        return value != null && value.matches("^[a-fA-F0-9]{64}$");
+    }
+
+    private byte[] hexBytes(String value) {
+        if (value == null || (value.length() & 1) != 0) {
+            throw new IllegalArgumentException("Invalid hexadecimal value");
+        }
+        byte[] result = new byte[value.length() / 2];
+        for (int i = 0; i < result.length; i++) {
+            int high = Character.digit(value.charAt(i * 2), 16);
+            int low = Character.digit(value.charAt(i * 2 + 1), 16);
+            if (high < 0 || low < 0) throw new IllegalArgumentException("Invalid hexadecimal value");
+            result[i] = (byte) ((high << 4) | low);
+        }
+        return result;
+    }
+
+    private String hex(byte[] value) {
+        StringBuilder result = new StringBuilder(value.length * 2);
+        for (byte entry : value) result.append(String.format("%02x", entry & 0xff));
+        return result.toString();
+    }
+
+    private String readSmallResponse(HttpURLConnection connection) throws Exception {
+        try (InputStream input = connection.getInputStream();
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[4096];
+            int total = 0;
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                total += read;
+                if (total > 16 * 1024) throw new IllegalStateException("Authentication response is too large");
+                output.write(buffer, 0, read);
+            }
+            return output.toString(StandardCharsets.UTF_8.name());
+        }
+    }
+
+    private static class AndroidSessionBootstrap {
+        private final String clientNonce;
+        private final String serverNonce;
+        private final String proof;
+
+        AndroidSessionBootstrap(String clientNonce, String serverNonce, String proof) {
+            this.clientNonce = clientNonce;
+            this.serverNonce = serverNonce;
+            this.proof = proof;
+        }
+
+        String formBody() {
+            try {
+                return "clientNonce=" + URLEncoder.encode(clientNonce, StandardCharsets.UTF_8.name())
+                        + "&serverNonce=" + URLEncoder.encode(serverNonce, StandardCharsets.UTF_8.name())
+                        + "&proof=" + URLEncoder.encode(proof, StandardCharsets.UTF_8.name());
+            } catch (Exception error) {
+                throw new IllegalStateException("UTF-8 is unavailable", error);
+            }
+        }
+    }
+
+    private static class AndroidSessionAttempt {
+        private final AndroidSessionBootstrap session;
+        private final boolean manualServerDetected;
+
+        private AndroidSessionAttempt(AndroidSessionBootstrap session, boolean manualServerDetected) {
+            this.session = session;
+            this.manualServerDetected = manualServerDetected;
+        }
+
+        static AndroidSessionAttempt authenticated(AndroidSessionBootstrap session) {
+            return new AndroidSessionAttempt(session, false);
+        }
+
+        static AndroidSessionAttempt manualServer() {
+            return new AndroidSessionAttempt(null, true);
+        }
+
+        static AndroidSessionAttempt unavailable() {
+            return new AndroidSessionAttempt(null, false);
+        }
+    }
+
     private void startTermuxSetup() {
         pauseConnectionRetryLoop();
         if (!isTermuxInstalled()) {
             startTermuxInstallFlow();
+            return;
+        }
+
+        String signer = installedTermuxSignerSha256();
+        if (!isTrustedTermuxSigner(signer) && !textEquals(approvedUnverifiedTermuxSigner, signerLabel(signer))) {
+            confirmUnverifiedTermux(signer);
             return;
         }
 
@@ -489,7 +756,8 @@ public class MainActivity extends Activity {
     private File downloadTermuxApk() throws Exception {
         File target = new File(getCacheDir(), "termux-fdroid.apk");
         File temp = new File(getCacheDir(), "termux-fdroid.apk.download");
-        if (target.exists() && target.length() > 1_000_000) return target;
+        if (target.exists() && verifyTermuxApk(target)) return target;
+        if (target.exists()) target.delete();
         if (temp.exists()) temp.delete();
 
         HttpURLConnection connection = (HttpURLConnection) new URL(TERMUX_APK_DOWNLOAD_URL).openConnection();
@@ -503,6 +771,10 @@ public class MainActivity extends Activity {
         }
 
         int contentLength = connection.getContentLength();
+        if (contentLength > 0 && contentLength != TERMUX_APK_SIZE) {
+            connection.disconnect();
+            throw new IllegalStateException("F-Droid returned an unexpected Termux APK size");
+        }
         try (InputStream in = connection.getInputStream();
              OutputStream out = new FileOutputStream(temp)) {
             byte[] buffer = new byte[64 * 1024];
@@ -512,6 +784,9 @@ public class MainActivity extends Activity {
             while ((read = in.read(buffer)) != -1) {
                 out.write(buffer, 0, read);
                 copied += read;
+                if (copied > TERMUX_APK_SIZE) {
+                    throw new IllegalStateException("Termux APK download exceeded its expected size");
+                }
                 if (contentLength > 0) {
                     int progress = (int) Math.min(99, (copied * 100) / contentLength);
                     if (progress >= lastProgress + 10) {
@@ -531,11 +806,55 @@ public class MainActivity extends Activity {
         if (!temp.renameTo(target)) {
             throw new IllegalStateException("Could not prepare downloaded Termux APK");
         }
+        if (!verifyTermuxApk(target)) {
+            target.delete();
+            throw new IllegalStateException("Downloaded Termux APK failed integrity verification");
+        }
         return target;
+    }
+
+    private boolean verifyTermuxApk(File apkFile) {
+        try {
+            if (!apkFile.isFile() || apkFile.length() != TERMUX_APK_SIZE) return false;
+            if (!TERMUX_APK_SHA256.equals(sha256(apkFile))) return false;
+
+            int flags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                    ? PackageManager.GET_SIGNING_CERTIFICATES
+                    : PackageManager.GET_SIGNATURES;
+            PackageInfo info = getPackageManager().getPackageArchiveInfo(apkFile.getAbsolutePath(), flags);
+            if (info == null || !TERMUX_PACKAGE.equals(info.packageName)) return false;
+            long versionCode = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                    ? info.getLongVersionCode()
+                    : info.versionCode;
+            if (versionCode != TERMUX_APK_VERSION_CODE) return false;
+
+            Signature[] signatures = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && info.signingInfo != null
+                    ? info.signingInfo.getApkContentsSigners()
+                    : info.signatures;
+            if (signatures == null || signatures.length != 1) return false;
+            return TERMUX_SIGNER_SHA256.equals(hex(
+                    MessageDigest.getInstance("SHA-256").digest(signatures[0].toByteArray())
+            ));
+        } catch (Exception error) {
+            return false;
+        }
+    }
+
+    private String sha256(File file) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        try (InputStream input = new FileInputStream(file)) {
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = input.read(buffer)) != -1) digest.update(buffer, 0, read);
+        }
+        return hex(digest.digest());
     }
 
     private void launchTermuxPackageInstall(File apkFile) {
         try {
+            if (!verifyTermuxApk(apkFile)) {
+                throw new IllegalStateException("Termux APK integrity verification failed");
+            }
             PackageInstaller installer = getPackageManager().getPackageInstaller();
             PackageInstaller.SessionParams params = new PackageInstaller.SessionParams(
                     PackageInstaller.SessionParams.MODE_FULL_INSTALL
@@ -557,6 +876,17 @@ public class MainActivity extends Activity {
             Intent callback = new Intent(this, MainActivity.class);
             callback.setAction(TERMUX_INSTALL_STATUS_ACTION);
             callback.putExtra("termuxInstallSessionId", sessionId);
+            String callbackNonce = randomHex(32);
+            callback.putExtra("termuxInstallNonce", callbackNonce);
+            boolean storedCallback = getSharedPreferences(SECURITY_PREFS, MODE_PRIVATE)
+                    .edit()
+                    .putInt(INSTALL_SESSION_PREF, sessionId)
+                    .putString(INSTALL_NONCE_PREF, callbackNonce)
+                    .commit();
+            if (!storedCallback) {
+                session.abandon();
+                throw new IllegalStateException("Could not secure the Termux install callback");
+            }
             int flags = PendingIntent.FLAG_UPDATE_CURRENT;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 flags |= PendingIntent.FLAG_MUTABLE;
@@ -565,7 +895,7 @@ public class MainActivity extends Activity {
             }
             PendingIntent pendingIntent = PendingIntent.getActivity(
                     this,
-                    TERMUX_INSTALL_STATUS_REQUEST,
+                    TERMUX_INSTALL_STATUS_REQUEST + sessionId,
                     callback,
                     flags
             );
@@ -573,6 +903,7 @@ public class MainActivity extends Activity {
             session.close();
             showBootstrap("Termux is ready to install.\nApprove the Android install prompt, then return here.", false);
         } catch (Exception e) {
+            clearPendingInstallCallback();
             showBootstrap("Android blocked the built-in Termux installer.\nUse Get Termux manually, then return here.", false);
             openTermuxDownload();
         }
@@ -587,17 +918,68 @@ public class MainActivity extends Activity {
         }
     }
 
+    private String installedTermuxSignerSha256() {
+        try {
+            int flags = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                    ? PackageManager.GET_SIGNING_CERTIFICATES
+                    : PackageManager.GET_SIGNATURES;
+            PackageInfo info = getPackageManager().getPackageInfo(TERMUX_PACKAGE, flags);
+            Signature[] signatures = Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && info.signingInfo != null
+                    ? info.signingInfo.getApkContentsSigners()
+                    : info.signatures;
+            if (signatures == null || signatures.length != 1) return null;
+            return hex(MessageDigest.getInstance("SHA-256").digest(signatures[0].toByteArray()));
+        } catch (Exception error) {
+            return null;
+        }
+    }
+
+    private boolean isTrustedTermuxSigner(String signer) {
+        return constantTimeEquals(TERMUX_SIGNER_SHA256, signer)
+                || constantTimeEquals(TERMUX_PLAY_STORE_SIGNER_SHA256, signer)
+                || constantTimeEquals(TERMUX_DEVS_SIGNER_SHA256, signer);
+    }
+
+    private String signerLabel(String signer) {
+        return signer == null ? "unavailable" : signer;
+    }
+
+    private void confirmUnverifiedTermux(String signer) {
+        String fingerprint = signer == null
+                ? "Android could not read its signing certificate."
+                : "Certificate SHA-256: " + signer;
+        showBootstrap("Termux needs verification before Marinara can send its setup command.", false);
+        new AlertDialog.Builder(this)
+                .setTitle("Unverified Termux installation")
+                .setMessage(
+                        "This Termux app is not signed by F-Droid, Google Play, or the Termux developers. "
+                                + "Marinara's setup command includes a private local-access secret.\n\n"
+                                + fingerprint
+                                + "\n\nContinue only if you trust where this Termux app came from."
+                )
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Trust for this session", (dialog, which) -> {
+                    approvedUnverifiedTermuxSigner = signerLabel(signer);
+                    startTermuxSetup();
+                })
+                .show();
+    }
+
     private boolean hasTermuxRunCommandPermission() {
         return Build.VERSION.SDK_INT < Build.VERSION_CODES.M
                 || checkSelfPermission(TERMUX_RUN_COMMAND_PERMISSION) == PackageManager.PERMISSION_GRANTED;
     }
 
     private void sendTermuxSetupCommand() {
+        String signer = installedTermuxSignerSha256();
+        if (!isTrustedTermuxSigner(signer) && !textEquals(approvedUnverifiedTermuxSigner, signerLabel(signer))) {
+            confirmUnverifiedTermux(signer);
+            return;
+        }
         Intent intent = new Intent();
         intent.setClassName(TERMUX_PACKAGE, "com.termux.app.RunCommandService");
         intent.setAction("com.termux.RUN_COMMAND");
         intent.putExtra("com.termux.RUN_COMMAND_PATH", TERMUX_BASH);
-        intent.putExtra("com.termux.RUN_COMMAND_ARGUMENTS", new String[]{"-lc", buildTermuxSetupCommand()});
         intent.putExtra("com.termux.RUN_COMMAND_WORKDIR", TERMUX_HOME);
         intent.putExtra("com.termux.RUN_COMMAND_BACKGROUND", false);
         intent.putExtra("com.termux.RUN_COMMAND_SESSION_ACTION", "0");
@@ -607,6 +989,7 @@ public class MainActivity extends Activity {
                 "Installs Git and Node.js in Termux, fetches Marinara Engine, and starts the local server.");
 
         try {
+            intent.putExtra("com.termux.RUN_COMMAND_ARGUMENTS", new String[]{"-lc", buildTermuxSetupCommand(true)});
             startService(intent);
             resumeConnectionRetryLoop();
             showBootstrap("Termux setup launched.\nWatch Termux finish installing, then this shell will connect automatically.", true);
@@ -619,19 +1002,47 @@ public class MainActivity extends Activity {
         }
     }
 
-    private String buildTermuxSetupCommand() {
-        String releaseTag = shellQuote(BuildConfig.MARINARA_RELEASE_TAG);
+    private String buildTermuxSetupCommand(boolean provisionAndroidSecret) {
+        String releaseCommitValue = BuildConfig.MARINARA_RELEASE_COMMIT;
+        if (releaseCommitValue == null || !releaseCommitValue.matches("^[a-fA-F0-9]{40}$")) {
+            throw new IllegalStateException("This Android build has no valid source commit");
+        }
+        String releaseCommit = shellQuote(releaseCommitValue.toLowerCase());
+        String secretProvisioning = "";
+        if (provisionAndroidSecret) {
+            String androidSecret = shellQuote(getOrCreateAndroidSecret());
+            secretProvisioning = "mkdir -p \"$HOME/.marinara-engine\"\n"
+                    + "printf '%s\\n' " + androidSecret + " > \"$HOME/.marinara-engine/android-secret\"\n"
+                    + "chmod 600 \"$HOME/.marinara-engine/android-secret\"\n";
+        }
         return "set -e\n"
+                + "umask 077\n"
                 + "pkg update -y\n"
                 + "pkg install -y git nodejs-lts\n"
                 + "if [ ! -d \"$HOME/Marinara-Engine/.git\" ]; then\n"
-                + "  git clone --depth 1 --branch " + releaseTag + " https://github.com/Pasta-Devs/Marinara-Engine.git \"$HOME/Marinara-Engine\" || git clone https://github.com/Pasta-Devs/Marinara-Engine.git \"$HOME/Marinara-Engine\"\n"
+                + "  mkdir -p \"$HOME/Marinara-Engine\"\n"
+                + "  git -C \"$HOME/Marinara-Engine\" init\n"
                 + "fi\n"
                 + "cd \"$HOME/Marinara-Engine\"\n"
-                + "git fetch --tags origin || true\n"
-                + "git checkout -f " + releaseTag + " || true\n"
+                + "if git remote get-url origin >/dev/null 2>&1; then git remote set-url origin https://github.com/Pasta-Devs/Marinara-Engine.git; else git remote add origin https://github.com/Pasta-Devs/Marinara-Engine.git; fi\n"
+                + "git fetch --depth 1 origin " + releaseCommit + "\n"
+                + "test \"$(git rev-parse FETCH_HEAD)\" = " + releaseCommit + "\n"
+                + "if [ -f scripts/protect-launcher-data.mjs ]; then\n"
+                + "  guard_status=0\n"
+                + "  node scripts/protect-launcher-data.mjs check-target " + releaseCommit + " || guard_status=$?\n"
+                + "  if [ \"$guard_status\" -eq 2 ]; then\n"
+                + "    echo 'This Marinara Android build is older than your stored data format. Install a newer APK.'\n"
+                + "    exit 1\n"
+                + "  elif [ \"$guard_status\" -ne 0 ]; then\n"
+                + "    echo 'Could not verify that this Marinara Android build can safely read your stored data. Install a newer APK or retry later.'\n"
+                + "    exit 1\n"
+                + "  fi\n"
+                + "fi\n"
+                + "git checkout --detach -f " + releaseCommit + "\n"
+                + "test \"$(git rev-parse HEAD)\" = " + releaseCommit + "\n"
+                + secretProvisioning
                 + "chmod +x start-termux.sh\n"
-                + "./start-termux.sh\n";
+                + "./start-termux.sh --skip-update\n";
     }
 
     private String shellQuote(String value) {
@@ -652,11 +1063,16 @@ public class MainActivity extends Activity {
     private void showManualTermuxSetupInstructions(String reason) {
         ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
         if (clipboard != null) {
-            clipboard.setPrimaryClip(ClipData.newPlainText("Marinara Termux setup", buildTermuxSetupCommand()));
+            clipboard.setPrimaryClip(ClipData.newPlainText("Marinara Termux setup", buildTermuxSetupCommand(false)));
             Toast.makeText(this, "Copied Marinara setup command", Toast.LENGTH_LONG).show();
         }
         pauseConnectionRetryLoop();
-        showBootstrap(reason + "\nOpen Termux, paste the copied setup command, then return here.", false);
+        showBootstrap(
+                reason
+                        + "\nOpen Termux and paste the copied secret-free setup command. "
+                        + "When it starts, return here, tap Retry connection, then Open manual server.",
+                false
+        );
         openTermux();
     }
 
@@ -703,22 +1119,26 @@ public class MainActivity extends Activity {
 
     private class MarinaraAndroidBridge {
         @JavascriptInterface
-        public boolean isStatusBarVisible() {
+        public boolean isStatusBarVisible(String token) {
+            if (!isTrustedBridgeCaller(token)) return false;
             return MainActivity.this.isStatusBarVisible();
         }
 
         @JavascriptInterface
-        public void setStatusBarVisible(boolean visible) {
+        public void setStatusBarVisible(String token, boolean visible) {
+            if (!isTrustedBridgeCaller(token)) return;
             runOnUiThread(() -> MainActivity.this.setStatusBarVisible(visible));
         }
 
         @JavascriptInterface
-        public String getNotificationPermission() {
+        public String getNotificationPermission(String token) {
+            if (!isTrustedBridgeCaller(token)) return "denied";
             return getNotificationPermissionStatus();
         }
 
         @JavascriptInterface
-        public void requestNotificationPermission() {
+        public void requestNotificationPermission(String token) {
+            if (!isTrustedBridgeCaller(token)) return;
             runOnUiThread(() -> {
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU
                         || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
@@ -738,13 +1158,15 @@ public class MainActivity extends Activity {
         }
 
         @JavascriptInterface
-        public void showNotification(String title, String body, String tag) {
+        public void showNotification(String token, String title, String body, String tag) {
+            if (!isTrustedBridgeCaller(token)) return;
             runOnUiThread(() -> showNativeMessageNotification(title, body, tag));
         }
 
         /** Saves a base64-encoded web download through Android's native storage APIs. */
         @JavascriptInterface
-        public void saveFile(String base64Data, String mimeType, String filename) {
+        public void saveFile(String token, String base64Data, String mimeType, String filename) {
+            if (!isTrustedBridgeCaller(token)) return;
             new Thread(() -> {
                 try {
                     byte[] data = Base64.decode(base64Data, Base64.DEFAULT);
@@ -766,7 +1188,8 @@ public class MainActivity extends Activity {
         }
 
         @JavascriptInterface
-        public void openConsole() {
+        public void openConsole(String token) {
+            if (!isTrustedBridgeCaller(token)) return;
             runOnUiThread(() -> {
                 if (!isTermuxInstalled()) {
                     Toast.makeText(
@@ -946,6 +1369,21 @@ public class MainActivity extends Activity {
     private void handleTermuxInstallStatus(Intent intent) {
         if (intent == null || !TERMUX_INSTALL_STATUS_ACTION.equals(intent.getAction())) return;
 
+        int expectedSession = getSharedPreferences(SECURITY_PREFS, MODE_PRIVATE)
+                .getInt(INSTALL_SESSION_PREF, -1);
+        String expectedNonce = getSharedPreferences(SECURITY_PREFS, MODE_PRIVATE)
+                .getString(INSTALL_NONCE_PREF, null);
+        int suppliedSession = intent.getIntExtra("termuxInstallSessionId", -1);
+        int installerSession = intent.getIntExtra(PackageInstaller.EXTRA_SESSION_ID, suppliedSession);
+        String suppliedNonce = intent.getStringExtra("termuxInstallNonce");
+        if (expectedSession < 0
+                || suppliedSession != expectedSession
+                || installerSession != expectedSession
+                || !constantTimeEquals(expectedNonce, suppliedNonce)) {
+            intent.setAction(null);
+            return;
+        }
+
         int status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE);
         if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
             Intent confirmationIntent = intent.getParcelableExtra(Intent.EXTRA_INTENT);
@@ -956,6 +1394,8 @@ public class MainActivity extends Activity {
             }
             return;
         }
+
+        clearPendingInstallCallback();
 
         if (status == PackageInstaller.STATUS_SUCCESS) {
             showBootstrap("Termux installed.\nContinuing Marinara setup…", true);
@@ -970,6 +1410,14 @@ public class MainActivity extends Activity {
             return;
         }
         showBootstrap("Termux installation failed.\n" + (message != null ? message : "Use Get Termux manually, then return here."), false);
+    }
+
+    private void clearPendingInstallCallback() {
+        getSharedPreferences(SECURITY_PREFS, MODE_PRIVATE)
+                .edit()
+                .remove(INSTALL_SESSION_PREF)
+                .remove(INSTALL_NONCE_PREF)
+                .apply();
     }
 
     @Override
@@ -1060,6 +1508,8 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        bridgeEnabled = false;
+        bridgeToken = null;
         cancelPendingConnectionRetry();
         handler.removeCallbacksAndMessages(null);
         if (webView != null) {

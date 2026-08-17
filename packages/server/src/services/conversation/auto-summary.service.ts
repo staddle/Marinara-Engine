@@ -5,6 +5,7 @@
 
 import type { DaySummaryEntry, WeekSummaryEntry } from "@marinara-engine/shared";
 import type { BaseLLMProvider } from "../llm/base-provider.js";
+import { tryParseJsonRecord } from "../../lib/json-repair.js";
 import { stripConversationPromptTimestamps } from "./transcript-sanitize.js";
 import { formatZonedConversationDate, toZonedWallClockDate } from "./timezone.js";
 
@@ -236,23 +237,22 @@ function cleanJsonishResponse(raw: string): string {
   if (fenceMatch) return fenceMatch[1]!.trim();
   const first = trimmed.indexOf("{");
   const last = trimmed.lastIndexOf("}");
-  if (first >= 0 && last > first) return trimmed.slice(first, last + 1);
+  if (first >= 0) return trimmed.slice(first, last > first ? last + 1 : undefined);
   return trimmed;
 }
 
-function parseSummaryResponse(raw: string): DaySummaryEntry {
+export function parseSummaryResponse(raw: string): DaySummaryEntry {
   const trimmed = raw.trim();
-  try {
-    const parsed = JSON.parse(cleanJsonishResponse(trimmed)) as Record<string, unknown>;
+  const parsed = tryParseJsonRecord(cleanJsonishResponse(trimmed));
+  if (parsed) {
     return {
       summary: (typeof parsed.summary === "string" ? parsed.summary : trimmed).trim(),
       keyDetails: Array.isArray(parsed.keyDetails)
         ? parsed.keyDetails.filter((detail): detail is string => typeof detail === "string" && detail.trim().length > 0)
         : [],
     };
-  } catch {
-    return { summary: trimmed, keyDetails: [] };
   }
+  return { summary: trimmed, keyDetails: [] };
 }
 
 function dailySummarySystemPrompt(date: string, scope: string): string {

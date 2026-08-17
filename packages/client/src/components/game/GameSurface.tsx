@@ -82,7 +82,7 @@ import { useGenerate } from "../../hooks/use-generate";
 import { useBackdropDismiss } from "../../hooks/use-backdrop-dismiss";
 import { useGenerateSpatialMapDraft, useSpatialContext } from "../../hooks/use-spatial-context";
 import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { spriteKeys, type SpriteInfo } from "../../hooks/use-characters";
+import { spriteKeys, useUploadAvatar, useUploadPersonaAvatar, type SpriteInfo } from "../../hooks/use-characters";
 import { lorebookKeys } from "../../hooks/use-lorebooks";
 import { api, getJsonRepairRequest, type JsonRepairRequest } from "../../lib/api-client";
 import { useRenderTimer } from "../../lib/perf-diagnostics";
@@ -132,6 +132,7 @@ import type {
   EncounterInitResponse,
   EncounterSettings,
   GameInitialSetupSnapshot,
+  GameSetupConfig,
   HudWidget,
   SceneSpotifyTrackCandidate,
   SceneSpotifyTrackSelection,
@@ -147,10 +148,13 @@ import {
   STORYBOARD_AGENT_ID,
   formatTextQuotes,
   mergeBuiltInAgentSettings,
+  parseAgentSettingsRecord,
   normalizeAvatarCrop,
   normalizeStoryboardAgentSettings,
   normalizeRpgStatPools,
   normalizeTextForMatch,
+  resolveGameImageDynamicPromptEnabled,
+  mergeGameSetupConfigPreservingDynamicPrompt,
   resolveGameSetupArtStylePrompt,
   scoreMusic,
   scoreAmbient,
@@ -729,6 +733,120 @@ function combatLevelFromHp(maxHp: number, fallbackLevel: number): number {
   return Math.max(1, Math.round(maxHp / 20));
 }
 
+type StoredGameCombatCard = {
+  name?: unknown;
+  abilities?: unknown;
+  rpgStats?: {
+    attributes?: Array<{ name?: unknown; value?: unknown }>;
+    hp?: { value?: unknown; max?: unknown };
+    pools?: Array<{ name?: unknown; value?: unknown; max?: unknown }>;
+  } | null;
+};
+
+function readCombatNumber(value: unknown): number | null {
+  if (value == null || (typeof value !== "number" && typeof value !== "string")) return null;
+  if (typeof value === "string" && !value.trim()) return null;
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) ? numericValue : null;
+}
+
+function normalizeCombatStatName(value: unknown): string {
+  return typeof value === "string"
+    ? value
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, " ")
+        .trim()
+    : "";
+}
+
+function readGameCardAttribute(card: StoredGameCombatCard | undefined, ...aliases: string[]): number | null {
+  const accepted = new Set(aliases.map(normalizeCombatStatName));
+  for (const attribute of card?.rpgStats?.attributes ?? []) {
+    if (!accepted.has(normalizeCombatStatName(attribute?.name))) continue;
+    const value = readCombatNumber(attribute?.value);
+    if (value != null) return value;
+  }
+  return null;
+}
+
+function readGameCardPool(
+  card: StoredGameCombatCard | undefined,
+  ...aliases: string[]
+): { value: number; max: number } | null {
+  const accepted = new Set(aliases.map(normalizeCombatStatName));
+  for (const pool of card?.rpgStats?.pools ?? []) {
+    if (!accepted.has(normalizeCombatStatName(pool?.name))) continue;
+    const value = readCombatNumber(pool?.value);
+    const max = readCombatNumber(pool?.max);
+    if (value == null && max == null) continue;
+    const safeMax = Math.max(1, max ?? value ?? 1);
+    return { value: Math.max(0, Math.min(safeMax, value ?? safeMax)), max: safeMax };
+  }
+  return null;
+}
+
+function inferCombatSkillType(value: string): NonNullable<Combatant["skills"]>[number]["type"] {
+  if (/(?:^|\W)(heal|healing|cure|mend|recover|restore|regen(?:eration)?|revive)(?:\W|$)/i.test(value)) {
+    return "heal";
+  }
+  if (/(?:^|\W)(debuff|weaken|poison|stun|slow|curse|blind|silence|drain|cripple)(?:\W|$)/i.test(value)) {
+    return "debuff";
+  }
+  if (/(?:^|\W)(buff|boost|empower|inspire|shield|guard|haste|strengthen|enhance)(?:\W|$)/i.test(value)) {
+    return "buff";
+  }
+  return "attack";
+}
+
+export function combatSkillsFromSheet(value: unknown): Combatant["skills"] {
+  if (!Array.isArray(value)) return undefined;
+  const seen = new Set<string>();
+  const skills: NonNullable<Combatant["skills"]> = [];
+
+  for (const [index, entry] of value.entries()) {
+    if (typeof entry !== "string") continue;
+    const raw = entry.trim();
+    if (!raw) continue;
+    const declaredType = raw.match(/^\s*\[?(attack|heal(?:ing)?|buff|debuff)\]?/i)?.[1]?.toLowerCase();
+    const withoutTypePrefix = raw
+      .replace(/^\s*\[(?:attack|heal|healing|buff|debuff)]\s*/i, "")
+      .replace(/^\s*(?:attack|heal|healing|buff|debuff)\s*[:|-]\s*/i, "");
+    const separator = withoutTypePrefix.match(/\s*(?::|\s[—–-]\s)\s*/);
+    const name = (separator ? withoutTypePrefix.slice(0, separator.index) : withoutTypePrefix).trim() || raw;
+    const description = separator
+      ? withoutTypePrefix.slice((separator.index ?? 0) + separator[0].length).trim()
+      : withoutTypePrefix;
+    const id = slugifyCombatantId(`${name}-${index}`);
+    const dedupeKey = slugifyCombatantId(name);
+    if (!id || !dedupeKey || seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    const type =
+      declaredType === "heal" || declaredType === "healing"
+        ? "heal"
+        : declaredType === "buff" || declaredType === "debuff" || declaredType === "attack"
+          ? declaredType
+          : inferCombatSkillType(withoutTypePrefix);
+    skills.push({
+      id,
+      name,
+      type,
+      mpCost: type === "heal" ? 10 : 8,
+      power: type === "attack" ? 1.35 : type === "heal" ? 1.15 : 1,
+      description,
+    });
+  }
+
+  return skills.length > 0 ? skills : undefined;
+}
+
+export function findGameCombatCard(
+  cards: StoredGameCombatCard[],
+  targetName: string,
+): StoredGameCombatCard | undefined {
+  return findNamedEntry(cards, targetName, (card) => (typeof card.name === "string" ? card.name : null));
+}
+
 function combatStatusEffectsFromGenerated(
   statuses: CombatPartyMember["statuses"] | CombatEnemy["statuses"] | undefined,
 ): Combatant["statusEffects"] {
@@ -757,18 +875,24 @@ function combatSkillsFromGeneratedAttacks(
     const id = slugifyCombatantId(`${name}-${index}`);
     if (!id || seen.has(id)) continue;
     seen.add(id);
+    const description = attack.description || (attack.type === "AoE" ? "Area combat ability" : "Combat ability");
+    const type = inferCombatSkillType(`${name} ${description} ${attack.statusEffect ?? ""}`);
     skills.push({
       id,
       name,
-      type: "attack",
+      type,
       mpCost: Math.max(4, Math.min(18, 5 + level)),
       power:
         typeof attack.power === "number" && Number.isFinite(attack.power)
           ? Math.max(0.5, Math.min(3, attack.power))
-          : attack.type === "AoE"
-            ? 1.15
-            : 1.35,
-      description: attack.description || (attack.type === "AoE" ? "Area combat ability" : "Combat ability"),
+          : type !== "attack"
+            ? type === "heal"
+              ? 1.15
+              : 1
+            : attack.type === "AoE"
+              ? 1.15
+              : 1.35,
+      description,
       cooldown: typeof attack.cooldown === "number" ? attack.cooldown : undefined,
       element: typeof attack.element === "string" ? attack.element : undefined,
       statusEffect: typeof attack.statusEffect === "string" ? attack.statusEffect : undefined,
@@ -804,16 +928,24 @@ function isValidCombatant(value: unknown): value is Combatant {
   );
 }
 
-function generatedPartyMemberToCombatant(
+export function generatedPartyMemberToCombatant(
   member: CombatPartyMember,
   index: number,
   avatarCandidates: GamePartyMemberInfo[],
   fallbackLevel: number,
+  gameCard?: StoredGameCombatCard,
 ): Combatant {
   const matchedAvatar = findNamedEntry(avatarCandidates, member.name, (entry) => entry.name);
-  const maxHp = Math.max(1, Number(member.maxHp) || Number(member.hp) || 1);
-  const hp = Math.max(0, Math.min(maxHp, Number(member.hp) || maxHp));
-  const level = combatLevelFromHp(maxHp, fallbackLevel);
+  const cardHp = gameCard?.rpgStats?.hp;
+  const generatedMaxHp = readCombatNumber(member.maxHp) ?? readCombatNumber(member.hp) ?? 1;
+  const maxHp = Math.max(1, readCombatNumber(cardHp?.max) ?? generatedMaxHp);
+  const generatedHp = readCombatNumber(member.hp) ?? maxHp;
+  const hp = Math.max(0, Math.min(maxHp, readCombatNumber(cardHp?.value) ?? generatedHp));
+  const level = Math.max(
+    1,
+    Math.round(readGameCardAttribute(gameCard, "level", "lvl") ?? combatLevelFromHp(maxHp, fallbackLevel)),
+  );
+  const mana = readGameCardPool(gameCard, "mp", "mana", "magic points", "energy");
   const element = member.attacks?.find((attack) => attack.element)?.element;
   const combatClass = typeof member.class === "string" && member.class.trim() ? member.class.trim() : undefined;
   return {
@@ -821,16 +953,16 @@ function generatedPartyMemberToCombatant(
     name: member.name || `Ally ${index + 1}`,
     hp,
     maxHp,
-    mp: 20 + level * 3,
-    maxMp: 20 + level * 3,
-    attack: 8 + level * 2,
-    defense: 5 + level,
-    speed: 6 + level,
+    mp: mana?.value ?? 20 + level * 3,
+    maxMp: mana?.max ?? 20 + level * 3,
+    attack: readGameCardAttribute(gameCard, "attack", "atk", "strength", "str") ?? 8 + level * 2,
+    defense: readGameCardAttribute(gameCard, "defense", "def", "constitution", "con") ?? 5 + level,
+    speed: readGameCardAttribute(gameCard, "speed", "spd", "dexterity", "dex", "agility") ?? 6 + level,
     level,
     side: "player",
     sprite: matchedAvatar?.avatarUrl ?? undefined,
     statusEffects: combatStatusEffectsFromGenerated(member.statuses),
-    skills: combatSkillsFromGeneratedAttacks(member.attacks, level),
+    skills: combatSkillsFromSheet(gameCard?.abilities) ?? combatSkillsFromGeneratedAttacks(member.attacks, level),
     element,
     combatClass,
   };
@@ -852,9 +984,9 @@ function hydrateCombatPartyAvatars(party: Combatant[], avatarCandidates: GamePar
   return changed ? nextParty : party;
 }
 
-function generatedEnemyToCombatant(enemy: CombatEnemy, index: number, fallbackLevel: number): Combatant {
-  const maxHp = Math.max(1, Number(enemy.maxHp) || Number(enemy.hp) || 1);
-  const hp = Math.max(0, Math.min(maxHp, Number(enemy.hp) || maxHp));
+export function generatedEnemyToCombatant(enemy: CombatEnemy, index: number, fallbackLevel: number): Combatant {
+  const maxHp = Math.max(1, readCombatNumber(enemy.maxHp) ?? readCombatNumber(enemy.hp) ?? 1);
+  const hp = Math.max(0, Math.min(maxHp, readCombatNumber(enemy.hp) ?? maxHp));
   const level = combatLevelFromHp(maxHp, fallbackLevel);
   const element = enemy.attacks?.find((attack) => attack.element)?.element;
   const combatClass = typeof enemy.class === "string" && enemy.class.trim() ? enemy.class.trim() : undefined;
@@ -2134,7 +2266,7 @@ function GameSurfaceComponent({
    *  package to actually be there. */
   const experienceOwnsGame =
     experienceSurfaceActive || (gameExperienceId !== null && installedCapabilityPackagesPending);
-  const { data: agentConfigs } = useAgentConfigs(storyboardAgentActive);
+  const { data: agentConfigs } = useAgentConfigs(storyboardAgentActive || chatMeta.enableSpriteGeneration === true);
   const storyboardAgentConfig = useMemo(
     () => agentConfigs?.find((config) => config.type === STORYBOARD_AGENT_ID) ?? null,
     [agentConfigs],
@@ -2144,6 +2276,11 @@ function GameSurfaceComponent({
       normalizeStoryboardAgentSettings(mergeBuiltInAgentSettings(STORYBOARD_AGENT_ID, storyboardAgentConfig?.settings)),
     [storyboardAgentConfig?.settings],
   );
+  const illustratorImageConnectionId = useMemo(() => {
+    const illustrator = agentConfigs?.find((config) => config.type === "illustrator");
+    const connectionId = parseAgentSettingsRecord(illustrator?.settings).imageConnectionId;
+    return typeof connectionId === "string" ? connectionId.trim() : "";
+  }, [agentConfigs]);
 
   useEffect(() => {
     return () => {
@@ -2209,8 +2346,7 @@ function GameSurfaceComponent({
   const useJsonMusicDjGameMusic = useYoutubeGameMusic || useCustomGameMusic;
   const useMusicDjPlayerMusic = useSpotifyGameMusic || useJsonMusicDjGameMusic;
   const { data: ttsConfig } = useTTSConfig();
-  const generateGameSoundEffects =
-    ttsConfig?.source === "elevenlabs" && ttsConfig.elevenLabsGameSoundEffects === true;
+  const generateGameSoundEffects = ttsConfig?.source === "elevenlabs" && ttsConfig.elevenLabsGameSoundEffects === true;
   const generateGameMusic =
     ttsConfig?.source === "elevenlabs" && ttsConfig.elevenLabsGameMusic === true && !useMusicDjPlayerMusic;
   const activeGameMetaId = typeof chatMeta.gameId === "string" ? chatMeta.gameId : "";
@@ -2391,31 +2527,28 @@ function GameSurfaceComponent({
       ...generatedAudioAssetsRef.current,
     };
   }, [gameAssetExcludedFolders, queryClient]);
-  const generateGameAudioAsset = useCallback(
-    async (kind: "sfx" | "music", prompt: string): Promise<string | null> => {
-      const category = kind === "sfx" ? "sfx" : "music";
-      if (prompt.startsWith(`${category}:generated:`)) return prompt;
-      try {
-        const generated = await withTimeout(
-          (signal) => api.post<{ tag: string; path: string }>("/tts/game-audio", { kind, prompt }, { signal }),
-          GAME_AUDIO_GENERATION_TIMEOUT_MS,
-        );
-        generatedAudioAssetsRef.current[generated.tag] = {
-          tag: generated.tag,
-          category,
-          subcategory: "generated",
-          name: generated.tag.split(":").at(-1) ?? generated.tag,
-          path: generated.path,
-          ext: ".mp3",
-        };
-        return generated.tag;
-      } catch (error) {
-        console.warn(`[game-audio] Failed to generate ${kind}:`, error);
-        return null;
-      }
-    },
-    [],
-  );
+  const generateGameAudioAsset = useCallback(async (kind: "sfx" | "music", prompt: string): Promise<string | null> => {
+    const category = kind === "sfx" ? "sfx" : "music";
+    if (prompt.startsWith(`${category}:generated:`)) return prompt;
+    try {
+      const generated = await withTimeout(
+        (signal) => api.post<{ tag: string; path: string }>("/tts/game-audio", { kind, prompt }, { signal }),
+        GAME_AUDIO_GENERATION_TIMEOUT_MS,
+      );
+      generatedAudioAssetsRef.current[generated.tag] = {
+        tag: generated.tag,
+        category,
+        subcategory: "generated",
+        name: generated.tag.split(":").at(-1) ?? generated.tag,
+        path: generated.path,
+        ext: ".mp3",
+      };
+      return generated.tag;
+    } catch (error) {
+      console.warn(`[game-audio] Failed to generate ${kind}:`, error);
+      return null;
+    }
+  }, []);
   const materializeGeneratedGameAudio = useCallback(
     async (input: SceneAnalysis): Promise<SceneAnalysis> => {
       if (!generateGameSoundEffects && !generateGameMusic) return input;
@@ -2437,9 +2570,7 @@ function GameSurfaceComponent({
               next.music = (await generateGameAudioAsset("music", next.music)) ?? undefined;
             }
             if (generateGameSoundEffects && next.sfx?.length) {
-              const generated = await Promise.all(
-                next.sfx.map((prompt) => generateGameAudioAsset("sfx", prompt)),
-              );
+              const generated = await Promise.all(next.sfx.map((prompt) => generateGameAudioAsset("sfx", prompt)));
               next.sfx = generated.filter((tag): tag is string => !!tag);
             }
             return next;
@@ -3817,8 +3948,8 @@ function GameSurfaceComponent({
 
   const gameImageGenerationEnabled =
     chatMeta.enableSpriteGeneration === true &&
-    typeof chatMeta.gameImageConnectionId === "string" &&
-    chatMeta.gameImageConnectionId.trim().length > 0;
+    ((typeof chatMeta.gameImageConnectionId === "string" && chatMeta.gameImageConnectionId.trim().length > 0) ||
+      illustratorImageConnectionId.length > 0);
   const storyboardImageGenerationEnabled =
     storyboardAgentActive && (gameImageGenerationEnabled || Boolean(storyboardAgentSettings.imageConnectionId));
   const gameSceneVideosEnabled = chatMeta.gameSceneVideosEnabled !== false;
@@ -5068,8 +5199,7 @@ function GameSurfaceComponent({
         let preview: GameAssetGenerationPreview | undefined;
         try {
           preview = await withTimeout(
-            (signal) =>
-              api.post<GameAssetGenerationPreview>("/game/generate-assets/preview", payload, { signal }),
+            (signal) => api.post<GameAssetGenerationPreview>("/game/generate-assets/preview", payload, { signal }),
             GAME_ASSET_PREVIEW_TIMEOUT_MS,
             () => {
               toast.error(
@@ -5159,10 +5289,7 @@ function GameSurfaceComponent({
     [clearFailedNpcAvatars, fetchManifest, installGeneratedIllustration],
   );
 
-  async function applySceneResult(
-    incomingResult: SceneAnalysis,
-    msg: { id: string; content?: string | null },
-  ) {
+  async function applySceneResult(incomingResult: SceneAnalysis, msg: { id: string; content?: string | null }) {
     const result = await materializeGeneratedGameAudio(incomingResult);
     setSceneAnalysisFailed(false);
     // NOTE: Game state transitions are owned exclusively by the GM model via [state: ...] tags.
@@ -6458,33 +6585,59 @@ function GameSurfaceComponent({
   // Engine state handed to the slot, recomputed per turn so the surface tracks streaming and new
   // messages. Builds nothing unless the surface is mounted, so a Classic game never pays for it.
   const experienceSurfaceProps = useMemo(
-    () => (!experienceSurfaceActive ? undefined : {
-      chatId: activeChatId,
+    () =>
+      !experienceSurfaceActive
+        ? undefined
+        : {
+            chatId: activeChatId,
+            chatMeta,
+            messages,
+            latestAssistant: latestAssistantMsg,
+            isStreaming,
+            scopedAssetMap,
+            sendMessage: sendExperienceMessage,
+            setExperienceBackgroundTag: pushExperienceBackground,
+            setExperienceSpeakerAvatars,
+            setExperienceChrome,
+            // Who is speaking RIGHT NOW, as the narration plays. Deriving it from the turn text instead yields
+            // only the LAST speaker of the turn, which leaves a VN sprite stuck on whoever spoke last.
+            activeSpeaker: activeSpeaker
+              ? { name: activeSpeaker.name, expression: activeSpeaker.expression ?? null }
+              : null,
+            experienceChoiceSlotEl,
+            // Per-turn state, so the surface can hold its menu until the narration finishes.
+            narrationDone,
+            latestNarrationText,
+            scenePreparing,
+            directionsPlaying,
+            assetGenerationBlocksScene,
+            replayActive,
+            sessionInteractive: (chatMeta.gameSessionStatus as string) !== "concluded",
+            // The host's sprite-size setting, so the player's slider keeps working in this mode.
+            spriteScale: gameFullBodySpriteScale,
+          },
+    [
+      experienceSurfaceActive,
+      activeChatId,
       chatMeta,
       messages,
-      latestAssistant: latestAssistantMsg,
+      latestAssistantMsg,
       isStreaming,
       scopedAssetMap,
-      sendMessage: sendExperienceMessage,
-      setExperienceBackgroundTag: pushExperienceBackground,
+      sendExperienceMessage,
+      pushExperienceBackground,
       setExperienceSpeakerAvatars,
       setExperienceChrome,
-      // Who is speaking RIGHT NOW, as the narration plays. Deriving it from the turn text instead yields
-      // only the LAST speaker of the turn, which leaves a VN sprite stuck on whoever spoke last.
-      activeSpeaker: activeSpeaker ? { name: activeSpeaker.name, expression: activeSpeaker.expression ?? null } : null,
+      activeSpeaker,
       experienceChoiceSlotEl,
-      // Per-turn state, so the surface can hold its menu until the narration finishes.
       narrationDone,
       latestNarrationText,
       scenePreparing,
       directionsPlaying,
       assetGenerationBlocksScene,
       replayActive,
-      sessionInteractive: (chatMeta.gameSessionStatus as string) !== "concluded",
-      // The host's sprite-size setting, so the player's slider keeps working in this mode.
-      spriteScale: gameFullBodySpriteScale,
-    }),
-    [experienceSurfaceActive, activeChatId, chatMeta, messages, latestAssistantMsg, isStreaming, scopedAssetMap, sendExperienceMessage, pushExperienceBackground, setExperienceSpeakerAvatars, setExperienceChrome, activeSpeaker, experienceChoiceSlotEl, narrationDone, latestNarrationText, scenePreparing, directionsPlaying, assetGenerationBlocksScene, replayActive, gameFullBodySpriteScale],
+      gameFullBodySpriteScale,
+    ],
   );
 
   // Game mutations
@@ -6503,6 +6656,8 @@ function GameSurfaceComponent({
   const generateMap = useGenerateMap();
   const deleteChat = useDeleteChat();
   const updateChatMetadata = useUpdateChatMetadata();
+  const uploadCharacterAvatar = useUploadAvatar();
+  const uploadPersonaAvatar = useUploadPersonaAvatar();
   const updateSessionHistoryMetadata = useUpdateChatMetadata();
   const updateMessage = useUpdateMessage(activeChatId);
   const startSessionLocked = startSession.isPending || startSessionRequested;
@@ -6516,8 +6671,9 @@ function GameSurfaceComponent({
     selection: unknown;
     attempt: number;
   };
-  const [pendingSharedWorldSetupApply, setPendingSharedWorldSetupApply] =
-    useState<PendingSharedWorldSetupApply | null>(null);
+  const [pendingSharedWorldSetupApply, setPendingSharedWorldSetupApply] = useState<PendingSharedWorldSetupApply | null>(
+    null,
+  );
   const pendingSharedWorldSetupApplyRef = useRef<PendingSharedWorldSetupApply | null>(null);
   const updatePendingSharedWorldSetupApply = useCallback((pending: PendingSharedWorldSetupApply | null) => {
     pendingSharedWorldSetupApplyRef.current = pending;
@@ -6527,12 +6683,7 @@ function GameSurfaceComponent({
   activeChatIdRef.current = activeChatId;
   const clearPendingSharedWorldSetupApply = useCallback((chatId: string, attempt: number) => {
     const pending = pendingSharedWorldSetupApplyRef.current;
-    if (
-      activeChatIdRef.current !== chatId ||
-      !pending ||
-      pending.chatId !== chatId ||
-      pending.attempt !== attempt
-    ) {
+    if (activeChatIdRef.current !== chatId || !pending || pending.chatId !== chatId || pending.attempt !== attempt) {
       return false;
     }
     pendingSharedWorldSetupApplyRef.current = null;
@@ -6556,6 +6707,7 @@ function GameSurfaceComponent({
     | {
         mode: "ai";
         size: SpatialMapDraftSize;
+        targetLocationCount: number;
         groundingMode: SpatialMapGroundingMode;
         sourceLorebookIds: string[];
         instructions?: string;
@@ -6622,6 +6774,7 @@ function GameSurfaceComponent({
           chatId,
           operation: "create",
           size: plan.size,
+          targetLocationCount: plan.targetLocationCount,
           groundingMode: plan.groundingMode,
           sourceLorebookIds: plan.sourceLorebookIds,
           instructions: plan.instructions,
@@ -6919,6 +7072,35 @@ function GameSurfaceComponent({
     [activeChatId, clearFailedNpcAvatars, updateChatMetadata, localizeUi],
   );
 
+  const handlePartyPortraitUpload = useCallback(
+    async (memberId: string, memberName: string, file: File) => {
+      try {
+        const character = characters.find((candidate) => candidate.id === memberId);
+        if (!character && !memberId.startsWith("persona:")) {
+          await handleNpcPortraitUpload(memberName, file);
+          return;
+        }
+        const avatar = await readFileAsDataUrl(file);
+        if (character) {
+          await uploadCharacterAvatar.mutateAsync({ id: memberId, avatar });
+        } else {
+          const encodedId = memberId.slice("persona:".length);
+          const personaId = !["active", "default"].includes(encodedId) ? encodedId : personaInfo?.id;
+          if (!personaId) throw new Error(localizeUi("ui.game.gamesurfacecomponent.noPersonaAvailableForPortrait"));
+          await uploadPersonaAvatar.mutateAsync({ id: personaId, avatar, filename: file.name });
+        }
+        toast.success(localizeUi("ui.game.gamesurfacecomponent.value1PortraitUpdated", { value1: memberName }));
+      } catch (error) {
+        toast.error(
+          error instanceof Error
+            ? error.message
+            : localizeUi("ui.game.gamesurfacecomponent.failedToUpdateValue1Portrait", { value1: memberName }),
+        );
+      }
+    },
+    [characters, handleNpcPortraitUpload, localizeUi, personaInfo?.id, uploadCharacterAvatar, uploadPersonaAvatar],
+  );
+
   const handleNpcPortraitGenerate = useCallback(
     async (npcName: string) => {
       if (!activeChatId) return;
@@ -6927,7 +7109,7 @@ function GameSurfaceComponent({
       const normalizedName = normalizeNpcAvatarName(displayName);
       if (!normalizedName) return;
 
-      if (!chatMeta.enableSpriteGeneration || !chatMeta.gameImageConnectionId) {
+      if (!gameImageGenerationEnabled) {
         toast.error(localizeUi("ui.game.gamesurfacecomponent.enableGameImageGenerationAndChooseAnImageConnection"));
         return;
       }
@@ -7000,10 +7182,9 @@ function GameSurfaceComponent({
     [
       activeChatId,
       applyGeneratedAssets,
-      chatMeta.enableSpriteGeneration,
-      chatMeta.gameImageConnectionId,
       chatMeta.gameNpcs,
       clearFailedNpcAvatars,
+      gameImageGenerationEnabled,
       runGameAssetGeneration,
       localizeUi,
     ],
@@ -7909,9 +8090,18 @@ function GameSurfaceComponent({
   const hydrateGeneratedCombatState = useCallback(
     (combatState: CombatInitState): { party: Combatant[]; enemies: Combatant[] } | null => {
       const fallbackLevel = sessionNumber ?? 5;
+      const gameCharacterCards = Array.isArray(chatMeta.gameCharacterCards)
+        ? (chatMeta.gameCharacterCards as StoredGameCombatCard[])
+        : [];
       const partyCombatants = Array.isArray(combatState.party)
         ? combatState.party.map((member, index) =>
-            generatedPartyMemberToCombatant(member, index, combatAvatarCandidates, fallbackLevel),
+            generatedPartyMemberToCombatant(
+              member,
+              index,
+              combatAvatarCandidates,
+              fallbackLevel,
+              findGameCombatCard(gameCharacterCards, member.name),
+            ),
           )
         : [];
       const enemyCombatants = Array.isArray(combatState.enemies)
@@ -7921,7 +8111,7 @@ function GameSurfaceComponent({
       if (partyCombatants.length === 0 || enemyCombatants.length === 0) return null;
       return { party: partyCombatants, enemies: enemyCombatants };
     },
-    [combatAvatarCandidates, sessionNumber],
+    [chatMeta.gameCharacterCards, combatAvatarCandidates, sessionNumber],
   );
 
   useEffect(() => {
@@ -8365,14 +8555,6 @@ function GameSurfaceComponent({
     setPendingEncounter(null);
 
     type CombatStatLike = { name: string; value: number; max?: number };
-    type StoredGameCard = {
-      name?: unknown;
-      abilities?: unknown;
-      rpgStats?: {
-        attributes?: Array<{ name?: unknown; value?: unknown }>;
-        hp?: { value?: unknown; max?: unknown };
-      } | null;
-    };
 
     const normalizeKey = (value: string) =>
       value
@@ -8380,12 +8562,6 @@ function GameSurfaceComponent({
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, " ")
         .trim();
-    const skillIdFromName = (value: string) =>
-      value
-        .trim()
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-+|-+$/g, "");
     const aliasMatches = (value: string, aliases: string[]) => aliases.some((alias) => value === normalizeKey(alias));
     const findStat = (stats: CombatStatLike[], aliases: string[]) =>
       stats.find((stat) => aliasMatches(normalizeKey(stat.name), aliases));
@@ -8393,46 +8569,9 @@ function GameSurfaceComponent({
       const numericValue = Number(value);
       return Number.isFinite(numericValue) ? numericValue : null;
     };
-    const inferSkillType = (value: string): NonNullable<Combatant["skills"]>[number]["type"] =>
-      /(heal|cure|mend|recovery|recover|restore|regeneration|regen|revive|blessing|prayer)/i.test(value)
-        ? "heal"
-        : "attack";
-    const buildCombatSkills = (value: unknown): Combatant["skills"] => {
-      if (!Array.isArray(value)) return undefined;
-
-      const seenIds = new Set<string>();
-      const skills = value
-        .map((entry) => String(entry).trim())
-        .filter(Boolean)
-        .map((name) => {
-          const id = skillIdFromName(name);
-          if (!id || seenIds.has(id)) return null;
-          seenIds.add(id);
-
-          const type = inferSkillType(name);
-          return {
-            id,
-            name,
-            type,
-            mpCost: type === "heal" ? 10 : 8,
-            power: type === "heal" ? 1.15 : 1.35,
-            description: `${name} (${type === "heal" ? "healing" : "combat"} ability)`,
-          };
-        })
-        .filter((skill): skill is Exclude<typeof skill, null> => !!skill);
-
-      return skills.length > 0 ? skills : undefined;
-    };
-
-    const gameCardByName = new Map<string, StoredGameCard>();
     const gameCharacterCards = Array.isArray(chatMeta.gameCharacterCards)
       ? (chatMeta.gameCharacterCards as Array<Record<string, unknown>>)
       : [];
-    for (const card of gameCharacterCards as StoredGameCard[]) {
-      if (typeof card?.name === "string" && card.name.trim()) {
-        gameCardByName.set(normalizeTextForMatch(card.name), card);
-      }
-    }
 
     const playerBarStats = [
       ...((gameSnapshot?.playerStats?.stats ?? []) as CombatStatLike[]),
@@ -8536,7 +8675,7 @@ function GameSurfaceComponent({
               (pc) => pc.characterId === m.id || normalizeTextForMatch(pc.name) === normalizeTextForMatch(m.name),
             );
         const stats = (isPlayerMember ? playerBarStats : (snap?.stats ?? [])) as CombatStatLike[];
-        const gameCard = gameCardByName.get(normalizeTextForMatch(m.name));
+        const gameCard = findGameCombatCard(gameCharacterCards as StoredGameCombatCard[], m.name);
         const cardRpgStats = gameCard?.rpgStats ?? null;
         const cardAttributes = new Map(
           Array.isArray(cardRpgStats?.attributes)
@@ -8551,8 +8690,6 @@ function GameSurfaceComponent({
         );
         const hpStat = findStat(stats, ["hp", "health", "hit points"]);
         const mpStat = findStat(stats, ["mp", "mana", "magic points", "energy"]);
-        const levelStat = findStat(stats, ["level", "lvl"]);
-        const pLevel = levelStat?.value ?? sessionNumber ?? 5;
         const hpFromCard = readNumeric(cardRpgStats?.hp?.value) ?? readNumeric(cardRpgStats?.hp?.max);
         const maxHpFromCard = readNumeric(cardRpgStats?.hp?.max) ?? hpFromCard;
         const attributeValue = (...aliases: string[]) => {
@@ -8565,6 +8702,12 @@ function GameSurfaceComponent({
           }
           return null;
         };
+        const levelStat = findStat(stats, ["level", "lvl"]);
+        const pLevel = Math.max(
+          1,
+          Math.round(attributeValue("level", "lvl") ?? levelStat?.value ?? sessionNumber ?? 5),
+        );
+        const manaFromCard = readGameCardPool(gameCard, "mp", "mana", "magic points", "energy");
         const attackStat = findStat(stats, ["attack", "atk", "power", "strength"]);
         const defenseStat = findStat(stats, ["defense", "def", "armor", "guard"]);
         const speedStat = findStat(stats, ["speed", "spd", "agility", "dexterity"]);
@@ -8574,8 +8717,9 @@ function GameSurfaceComponent({
         const derivedSpeed = attributeValue("speed", "spd", "dex", "dexterity", "agility") ?? 5 + pLevel;
         const derivedMaxHp = maxHpFromCard ?? 50 + pLevel * 10;
         const derivedHp = hpFromCard ?? derivedMaxHp;
-        const derivedMaxMp = intelligenceValue != null ? 12 + intelligenceValue * 2 : 20 + pLevel * 3;
-        const derivedMp = derivedMaxMp;
+        const derivedMaxMp =
+          manaFromCard?.max ?? (intelligenceValue != null ? 12 + intelligenceValue * 2 : 20 + pLevel * 3);
+        const derivedMp = manaFromCard?.value ?? derivedMaxMp;
 
         return {
           id: m.id,
@@ -8590,7 +8734,7 @@ function GameSurfaceComponent({
           level: pLevel,
           side: "player" as const,
           sprite: m.avatarUrl ?? undefined,
-          skills: buildCombatSkills(gameCard?.abilities),
+          skills: combatSkillsFromSheet(gameCard?.abilities),
         };
       });
 
@@ -8676,7 +8820,12 @@ function GameSurfaceComponent({
         status: npc?.description || undefined,
         avatarUrl: c?.avatarUrl ?? npc?.avatarUrl ?? null,
         avatarCrop: c?.avatarCrop ?? null,
-        level: sessionNumber,
+        level: Math.max(
+          1,
+          Math.round(
+            readGameCardAttribute(gc as StoredGameCombatCard | undefined, "level", "lvl") ?? sessionNumber ?? 1,
+          ),
+        ),
         gameCard: gc
           ? {
               shortDescription: (gc.shortDescription as string) || "",
@@ -8728,7 +8877,12 @@ function GameSurfaceComponent({
         subtitle: "Player Character",
         avatarUrl: personaInfo.avatarUrl ?? null,
         avatarCrop: personaInfo.avatarCrop ?? null,
-        level: sessionNumber,
+        level: Math.max(
+          1,
+          Math.round(
+            readGameCardAttribute(gc as StoredGameCombatCard | undefined, "level", "lvl") ?? sessionNumber ?? 1,
+          ),
+        ),
         status: gameSnapshot?.playerStats?.status || undefined,
         stats: [
           ...(gameSnapshot?.personaStats ?? []).map((s) => ({
@@ -9104,9 +9258,14 @@ function GameSurfaceComponent({
       const selectedChoice = choice.trim().replace(/\s+/g, " ");
       if (!selectedChoice) return;
       setActiveChoices(null);
-      sendMessage(`[choice: ${selectedChoice}]`);
+      const pendingSpatialTransition = useChatStore.getState().pendingSpatialTransitions.get(activeChatId);
+      sendMessage(
+        `[choice: ${selectedChoice}]`,
+        undefined,
+        pendingSpatialTransition?.status === "ready" ? pendingSpatialTransition.transition : undefined,
+      );
     },
-    [sendMessage, sessionInteractive],
+    [activeChatId, sendMessage, sessionInteractive],
   );
 
   const handleDismissChoices = useCallback(() => {
@@ -10088,7 +10247,8 @@ function GameSurfaceComponent({
         updateChat.isPending ||
         updateChatMetadata.isPending ||
         activePendingSharedWorldSetupApply
-      ) return;
+      )
+        return;
       useGameModeStore.getState().setSetupActive(false);
       if (canAutoDeleteEmptySetupChat) {
         deleteChat.mutate(activeChatId, {
@@ -10158,8 +10318,9 @@ function GameSurfaceComponent({
                   chatMeta.gameSetupConfig &&
                   typeof chatMeta.gameSetupConfig === "object" &&
                   !Array.isArray(chatMeta.gameSetupConfig)
-                    ? (chatMeta.gameSetupConfig as Record<string, unknown>)
+                    ? (chatMeta.gameSetupConfig as Partial<GameSetupConfig>)
                     : {};
+                const effectiveSetupConfig = mergeGameSetupConfigPreservingDynamicPrompt(storedSetupConfig, config);
                 try {
                   await Promise.all([
                     updateChat.mutateAsync({
@@ -10169,7 +10330,8 @@ function GameSurfaceComponent({
                     }),
                     updateChatMetadata.mutateAsync({
                       id: chatId,
-                      gameSetupConfig: { ...storedSetupConfig, ...config },
+                      gameSetupConfig: effectiveSetupConfig,
+                      gameImageDynamicPromptEnabled: resolveGameImageDynamicPromptEnabled(effectiveSetupConfig),
                     }),
                   ]);
                   if (mapPlan) {
@@ -10523,15 +10685,15 @@ function GameSurfaceComponent({
           <div className="ml-auto flex shrink-0 items-center gap-1 pt-0.5">
             {/* Hidden for an experience game: it opens a tour of chrome that isn't on screen. */}
             {!experienceOwnsGame ? (
-            <button
-              type="button"
-              onClick={() => setTutorialOpen(true)}
-              className="flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--marinara-chat-chrome-button-border)] bg-[var(--marinara-chat-chrome-button-bg)] text-[var(--marinara-chat-chrome-button-text)] transition-colors hover:border-[var(--marinara-chat-chrome-button-border-hover)] hover:bg-[var(--marinara-chat-chrome-highlight-bg-hover)] hover:text-[var(--marinara-chat-chrome-highlight-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--marinara-chat-chrome-focus-ring)]"
-              title={localizeUi("ui.game.gamesurfacecomponent.gameTutorial")}
-              aria-label={localizeUi("ui.game.gamesurfacecomponent.gameTutorial")}
-            >
-              <CircleHelp size={14} />
-            </button>
+              <button
+                type="button"
+                onClick={() => setTutorialOpen(true)}
+                className="flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--marinara-chat-chrome-button-border)] bg-[var(--marinara-chat-chrome-button-bg)] text-[var(--marinara-chat-chrome-button-text)] transition-colors hover:border-[var(--marinara-chat-chrome-button-border-hover)] hover:bg-[var(--marinara-chat-chrome-highlight-bg-hover)] hover:text-[var(--marinara-chat-chrome-highlight-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--marinara-chat-chrome-focus-ring)]"
+                title={localizeUi("ui.game.gamesurfacecomponent.gameTutorial")}
+                aria-label={localizeUi("ui.game.gamesurfacecomponent.gameTutorial")}
+              >
+                <CircleHelp size={14} />
+              </button>
             ) : null}
             <button
               type="button"
@@ -10639,9 +10801,7 @@ function GameSurfaceComponent({
                 onClose={() => setSessionPanelOpen(false)}
                 onNpcPortraitClick={handleNpcPortraitClick}
                 onNpcPortraitGenerate={handleNpcPortraitGenerate}
-                npcPortraitGenerationEnabled={
-                  chatMeta.enableSpriteGeneration === true && typeof chatMeta.gameImageConnectionId === "string"
-                }
+                npcPortraitGenerationEnabled={gameImageGenerationEnabled}
                 generatingNpcPortraitNames={generatingNpcPortraitNames}
                 onNpcRemove={handleRemoveNpcFromJournal}
                 embedded
@@ -11476,10 +11636,7 @@ function GameSurfaceComponent({
               <div
                 ref={hudSurfaceRef}
                 data-chat-resource-drop-surface
-                className={cn(
-                  "relative flex min-h-0 flex-1 flex-col overflow-hidden",
-                  experienceSurfaceClass,
-                )}
+                className={cn("relative flex min-h-0 flex-1 flex-col overflow-hidden", experienceSurfaceClass)}
               >
                 {/* Main mount. pointer-events-none lets clicks fall through empty regions to the
                     narration underneath; the package sets pointer-events-auto on its own chrome. */}
@@ -11906,10 +12063,7 @@ function GameSurfaceComponent({
                           onNpcPortraitClick={handleNpcPortraitClick}
                           onNpcPortraitGenerate={handleNpcPortraitGenerate}
                           onNpcPortraitLoadError={handleNpcPortraitLoadError}
-                          npcPortraitGenerationEnabled={
-                            chatMeta.enableSpriteGeneration === true &&
-                            typeof chatMeta.gameImageConnectionId === "string"
-                          }
+                          npcPortraitGenerationEnabled={gameImageGenerationEnabled}
                           generatingNpcPortraitNames={generatingNpcPortraitNames}
                           autoPlayBlocked={narrationAutoPlayBlocked || storyboardBackgroundAnimationPlaying}
                           voicePlaybackBlocked={narrationVoicePlaybackBlocked}
@@ -11947,22 +12101,22 @@ function GameSurfaceComponent({
                           onMaxNavOffsetChange={handleMaxNavOffsetChange}
                           inputSlot={
                             activeExperienceChrome?.providesPlayerInput ? undefined : (
-                            <GameInput
-                              onSend={handleSendGameTurn}
-                              onRollDice={handleRollDice}
-                              hasPartyMembers={partyMembers.length > 0}
-                              pendingMoveLabel={pendingMapMove?.label ?? null}
-                              onClearPendingMove={() => setPendingMapMove(null)}
-                              disabled={gameInputGenerationBlocked || !sessionInteractive}
-                              draftDisabled={!sessionInteractive}
-                              isStreaming={gameInputGenerationBlocked}
-                              inline
-                              draftKey={activeChatId}
-                              focusToken={gameInputFocusToken}
-                              onIllustrate={handleManualSceneIllustration}
-                              spatialCapabilityEnabled={hierarchicalMapsActive}
-                              interruptMode={pendingInterruptMode}
-                            />
+                              <GameInput
+                                onSend={handleSendGameTurn}
+                                onRollDice={handleRollDice}
+                                hasPartyMembers={partyMembers.length > 0}
+                                pendingMoveLabel={pendingMapMove?.label ?? null}
+                                onClearPendingMove={() => setPendingMapMove(null)}
+                                disabled={gameInputGenerationBlocked || !sessionInteractive}
+                                draftDisabled={!sessionInteractive}
+                                isStreaming={gameInputGenerationBlocked}
+                                inline
+                                draftKey={activeChatId}
+                                focusToken={gameInputFocusToken}
+                                onIllustrate={handleManualSceneIllustration}
+                                spatialCapabilityEnabled={hierarchicalMapsActive}
+                                interruptMode={pendingInterruptMode}
+                              />
                             )
                           }
                         />
@@ -11998,9 +12152,7 @@ function GameSurfaceComponent({
                       onNpcPortraitClick={handleNpcPortraitClick}
                       onNpcPortraitGenerate={handleNpcPortraitGenerate}
                       onNpcPortraitLoadError={handleNpcPortraitLoadError}
-                      npcPortraitGenerationEnabled={
-                        chatMeta.enableSpriteGeneration === true && typeof chatMeta.gameImageConnectionId === "string"
-                      }
+                      npcPortraitGenerationEnabled={gameImageGenerationEnabled}
                       generatingNpcPortraitNames={generatingNpcPortraitNames}
                       autoPlayBlocked={narrationAutoPlayBlocked || storyboardBackgroundAnimationPlaying}
                       voicePlaybackBlocked={narrationVoicePlaybackBlocked}
@@ -12040,22 +12192,22 @@ function GameSurfaceComponent({
                       // declaration is dynamic, so the input returns when it has no action to offer.
                       inputSlot={
                         activeExperienceChrome?.providesPlayerInput ? undefined : (
-                        <GameInput
-                          onSend={handleSendGameTurn}
-                          onRollDice={handleRollDice}
-                          hasPartyMembers={partyMembers.length > 0}
-                          pendingMoveLabel={pendingMapMove?.label ?? null}
-                          onClearPendingMove={() => setPendingMapMove(null)}
-                          disabled={gameInputGenerationBlocked || !sessionInteractive}
-                          draftDisabled={!sessionInteractive}
-                          isStreaming={gameInputGenerationBlocked}
-                          inline
-                          draftKey={activeChatId}
-                          focusToken={gameInputFocusToken}
-                          onIllustrate={handleManualSceneIllustration}
-                          spatialCapabilityEnabled={hierarchicalMapsActive}
-                          interruptMode={pendingInterruptMode}
-                        />
+                          <GameInput
+                            onSend={handleSendGameTurn}
+                            onRollDice={handleRollDice}
+                            hasPartyMembers={partyMembers.length > 0}
+                            pendingMoveLabel={pendingMapMove?.label ?? null}
+                            onClearPendingMove={() => setPendingMapMove(null)}
+                            disabled={gameInputGenerationBlocked || !sessionInteractive}
+                            draftDisabled={!sessionInteractive}
+                            isStreaming={gameInputGenerationBlocked}
+                            inline
+                            draftKey={activeChatId}
+                            focusToken={gameInputFocusToken}
+                            onIllustrate={handleManualSceneIllustration}
+                            spatialCapabilityEnabled={hierarchicalMapsActive}
+                            interruptMode={pendingInterruptMode}
+                          />
                         )
                       }
                     />
@@ -12187,6 +12339,9 @@ function GameSurfaceComponent({
                   onClose={handleCloseGalleryPanel}
                   anchor={resolvedGalleryAnchor}
                   onIllustrate={handleManualSceneIllustration}
+                  onIllustrateWithAgent={async (agentType) => {
+                    await retryAgents(activeChatId, [agentType], { forceImageGeneration: true });
+                  }}
                   onGenerateStoryboard={handleGenerateTurnStoryboard}
                   onViewStoryboard={
                     latestTurnStoryboard || storyboardGenerating ? handleViewStoryboardFromGallery : undefined
@@ -12253,29 +12408,33 @@ function GameSurfaceComponent({
 
               {/* HUD Widgets - Left & Right, tops aligned */}
               {/* Hidden while the package owns the game — it draws its own HUD. */}
-              {!replayActive && !combatUiActive && !experienceOwnsGame && hudWidgets.length > 0 && !compactHudWidgets && (
-                <>
-                  {/* Desktop: full widget cards */}
-                  <div className="pointer-events-none absolute inset-x-3 bottom-24 z-30 hidden items-end justify-between md:flex">
-                    <div className="w-44" data-game-widget-rail="left">
-                      <GameWidgetPanel
-                        widgets={normalizedWidgets}
-                        position="hud_left"
-                        chatId={activeChatId}
-                        constraintsRef={hudSurfaceRef}
-                      />
+              {!replayActive &&
+                !combatUiActive &&
+                !experienceOwnsGame &&
+                hudWidgets.length > 0 &&
+                !compactHudWidgets && (
+                  <>
+                    {/* Desktop: full widget cards */}
+                    <div className="pointer-events-none absolute inset-x-3 bottom-24 z-30 hidden items-end justify-between md:flex">
+                      <div className="w-44" data-game-widget-rail="left">
+                        <GameWidgetPanel
+                          widgets={normalizedWidgets}
+                          position="hud_left"
+                          chatId={activeChatId}
+                          constraintsRef={hudSurfaceRef}
+                        />
+                      </div>
+                      <div className="w-44" data-game-widget-rail="right">
+                        <GameWidgetPanel
+                          widgets={normalizedWidgets}
+                          position="hud_right"
+                          chatId={activeChatId}
+                          constraintsRef={hudSurfaceRef}
+                        />
+                      </div>
                     </div>
-                    <div className="w-44" data-game-widget-rail="right">
-                      <GameWidgetPanel
-                        widgets={normalizedWidgets}
-                        position="hud_right"
-                        chatId={activeChatId}
-                        constraintsRef={hudSurfaceRef}
-                      />
-                    </div>
-                  </div>
-                </>
-              )}
+                  </>
+                )}
             </div>
           </div>
         </DirectionEngine>
@@ -12298,6 +12457,9 @@ function GameSurfaceComponent({
           isRegenerating={regenerateCharacterSheet.isPending}
           onSave={(gameCard: GameCharacterSheetGameCard | undefined) =>
             handleSaveCharacterSheet(partyCards[characterSheetCharId].title, gameCard)
+          }
+          onAvatarSelect={(file) =>
+            handlePartyPortraitUpload(characterSheetCharId, partyCards[characterSheetCharId].title, file)
           }
         />
       )}

@@ -81,15 +81,18 @@ function ExpandedMacroEditor({
   const { t: localizeUi } = useUiTranslation();
   const [localValue, setLocalValue] = useState(value);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const valueRef = useRef(value);
+  valueRef.current = value;
 
   useEffect(() => {
     if (!open) {
       return;
     }
 
-    setLocalValue(value);
-    window.setTimeout(() => textareaRef.current?.focus(), 20);
-  }, [open, value]);
+    setLocalValue(valueRef.current);
+    const focusTimer = window.setTimeout(() => textareaRef.current?.focus(), 20);
+    return () => window.clearTimeout(focusTimer);
+  }, [open]);
 
   useEffect(() => {
     if (!open) {
@@ -109,11 +112,12 @@ function ExpandedMacroEditor({
 
   const handleChange = useCallback(
     (event: ChangeEvent<HTMLTextAreaElement>) => {
+      const textarea = event.currentTarget;
       const nextValue = formatOnChange
-        ? formatOnChange(event.currentTarget, event.nativeEvent as InputEvent)
-        : event.currentTarget.value;
-      setLocalValue(nextValue);
+        ? formatOnChange(textarea, event.nativeEvent as InputEvent)
+        : textarea.value;
       onChange(nextValue);
+      setLocalValue(textarea.value);
     },
     [formatOnChange, onChange],
   );

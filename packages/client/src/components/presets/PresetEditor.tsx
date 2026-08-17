@@ -2,7 +2,17 @@
 // Full-Page Preset Editor
 // Tabs: Overview · Sections · Prompts
 // ──────────────────────────────────────────────
-import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef, type FC, type ReactNode } from "react";
+import {
+  useState,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  type ChangeEvent,
+  type FC,
+  type ReactNode,
+} from "react";
 import { createPortal } from "react-dom";
 import { useTranslation, useTranslation as useUiTranslation } from "react-i18next";
 import { useUIStore } from "../../stores/ui.store";
@@ -14,6 +24,7 @@ import {
   usePresetFull,
   useUpdatePreset,
   useDeletePreset,
+  useDuplicatePreset,
   useCreateSection,
   useUpdateSection,
   useDeleteSection,
@@ -25,6 +36,7 @@ import {
   useUpdateVariable,
   useDeleteVariable,
   useReorderVariables,
+  useUploadPresetImage,
 } from "../../hooks/use-presets";
 import {
   ArrowDown,
@@ -55,6 +67,8 @@ import {
   ListChecks,
   Shuffle,
   Copy,
+  Camera,
+  Loader2,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { HelpTooltip } from "../ui/HelpTooltip";
@@ -63,7 +77,13 @@ import { MacroTextarea } from "../ui/MacroTextarea";
 import { applyTextareaQuoteFormat } from "../../lib/textarea-quotes";
 import { api } from "../../lib/api-client";
 import { useAgentConfigs, type AgentConfigRow } from "../../hooks/use-agents";
-import { type MarkerType, type PromptSection, type WrapFormat } from "@marinara-engine/shared";
+import {
+  isStockMarinaraUniversalPreset,
+  type MarkerType,
+  type PromptPreset,
+  type PromptSection,
+  type WrapFormat,
+} from "@marinara-engine/shared";
 import { useCapabilityAgentRegistry } from "../../hooks/use-capability-packages";
 import { useQuoteFormatter } from "../../hooks/use-quote-formatter";
 import { EditorTabRail } from "../ui/EditorTabRail";
@@ -71,6 +91,7 @@ import { useTouchFolderDrag } from "../../hooks/use-touch-folder-drag";
 import { getTouchReorderDropIndex } from "../../lib/touch-reorder";
 import { handleTextareaTab } from "../../lib/textarea-editing";
 import { SettingsSwitch } from "../panels/settings/SettingControls";
+import { resolvePresetArtwork } from "../../lib/preset-artwork";
 
 // ── Input caret helpers ──
 type TextSelection = { start: number; end: number };
@@ -236,13 +257,16 @@ function readMarkerConfig(value: unknown) {
 export function PresetEditor() {
   const { t: localizeUi } = useUiTranslation();
   const presetDetailId = useUIStore((s) => s.presetDetailId);
+  const presetDetailInitialTab = useUIStore((s) => s.presetDetailInitialTab) as TabId | null;
   const closePresetDetail = useUIStore((s) => s.closePresetDetail);
+  const openPresetDetail = useUIStore((s) => s.openPresetDetail);
   const activeChatId = useChatStore((s) => s.activeChatId);
 
   const { data, isLoading } = usePresetFull(presetDetailId);
   const { data: activeChat } = useChat(activeChatId);
   const updatePreset = useUpdatePreset();
   const deletePreset = useDeletePreset();
+  const { mutateAsync: duplicatePreset } = useDuplicatePreset();
   const createSection = useCreateSection();
   const updateSection = useUpdateSection();
   const deleteSection = useDeleteSection();
@@ -255,7 +279,10 @@ export function PresetEditor() {
   const deleteVariable = useDeleteVariable();
   const reorderVariables = useReorderVariables();
 
-  const [activeTab, setActiveTab] = useState<TabId>("overview");
+  const [activeTab, setActiveTab] = useState<TabId>(() => presetDetailInitialTab ?? "overview");
+  useEffect(() => {
+    setActiveTab(presetDetailInitialTab ?? "overview");
+  }, [presetDetailId, presetDetailInitialTab]);
   const [dirty, setDirty] = useState(false);
   const setEditorDirty = useUIStore((s) => s.setEditorDirty);
   useEffect(() => {
@@ -263,6 +290,8 @@ export function PresetEditor() {
   }, [dirty, setEditorDirty]);
   const [showUnsavedWarning, setShowUnsavedWarning] = useState(false);
   const [showSaved, setShowSaved] = useState(false);
+  const [stockCopyError, setStockCopyError] = useState<string | null>(null);
+  const stockCopyAttemptRef = useRef<string | null>(null);
 
   // Local editable state
   const [localName, setLocalName] = useState("");
@@ -292,6 +321,37 @@ export function PresetEditor() {
     setLocalConversationPrompt(p.conversationPrompt ?? "");
     setLocalGamePrompt(p.gamePrompt ?? "");
   }, [data, presetDetailId]);
+
+  useEffect(() => {
+    if (stockCopyAttemptRef.current && stockCopyAttemptRef.current !== presetDetailId) {
+      stockCopyAttemptRef.current = null;
+      setStockCopyError(null);
+    }
+  }, [presetDetailId]);
+
+  useEffect(() => {
+    const preset = data?.preset;
+    if (!presetDetailId || !preset || !isStockMarinaraUniversalPreset(preset)) return;
+    if (stockCopyAttemptRef.current === presetDetailId) return;
+
+    stockCopyAttemptRef.current = presetDetailId;
+    setStockCopyError(null);
+    void duplicatePreset(presetDetailId)
+      .then((copy) => {
+        if (useUIStore.getState().presetDetailId !== presetDetailId) return;
+        if (!copy?.id) throw new Error(localizeUi("ui.presets.preseteditor.couldNotCreateEditableCopy"));
+        toast.success(localizeUi("ui.presets.preseteditor.createdEditableCopy"));
+        openPresetDetail(copy.id, { initialTab: presetDetailInitialTab ?? undefined });
+      })
+      .catch((error) => {
+        if (useUIStore.getState().presetDetailId !== presetDetailId) return;
+        setStockCopyError(
+          error instanceof Error
+            ? error.message
+            : localizeUi("ui.presets.preseteditor.couldNotCreateEditableCopy"),
+        );
+      });
+  }, [data?.preset, duplicatePreset, localizeUi, openPresetDetail, presetDetailId, presetDetailInitialTab]);
 
   const handleClose = useCallback(() => {
     if (dirty) {
@@ -441,6 +501,33 @@ export function PresetEditor() {
     );
   }
 
+  if (isStockMarinaraUniversalPreset(data.preset)) {
+    return (
+      <div className="mari-editor-shell flex flex-1 items-center justify-center p-6">
+        <div className="mari-editor-panel flex max-w-md flex-col items-center gap-3 p-5 text-center">
+          {stockCopyError ? (
+            <>
+              <p className="text-sm text-[var(--destructive)]">{stockCopyError}</p>
+              <button type="button" onClick={closePresetDetail} className="mari-editor-action inline-flex px-3 py-2">
+                <ArrowLeft size="0.875rem" />
+                {localizeUi("ui.presets.preseteditor.backToPresets")}
+              </button>
+            </>
+          ) : (
+            <>
+              <Loader2 size="1.25rem" className="animate-spin text-[var(--primary)]" />
+              <p className="text-sm text-[var(--marinara-editor-muted)]">
+                {localizeUi("ui.presets.preseteditor.preparingEditableCopy")}
+              </p>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  const presetArtwork = resolvePresetArtwork(data.preset);
+
   return (
     <div className="mari-editor-shell mari-editor-legacy-bridge flex flex-1 flex-col overflow-hidden">
       {/* ── Header ── */}
@@ -448,8 +535,12 @@ export function PresetEditor() {
         <button onClick={handleClose} className="mari-editor-action inline-flex">
           <ArrowLeft size="1.125rem" />
         </button>
-        <div className="mari-editor-icon-tile mari-panel-gradient-surface mari-panel-gradient--presets">
-          <FileText size="1.125rem" className="max-md:!h-[0.875rem] max-md:!w-[0.875rem]" />
+        <div className="mari-editor-icon-tile mari-panel-gradient-surface mari-panel-gradient--presets overflow-hidden">
+          {presetArtwork ? (
+            <img src={presetArtwork} alt="" className="h-full w-full object-cover" draggable={false} />
+          ) : (
+            <FileText size="1.125rem" className="max-md:!h-[0.875rem] max-md:!w-[0.875rem]" />
+          )}
         </div>
         <input
           value={localName}
@@ -539,6 +630,7 @@ export function PresetEditor() {
             {/* ── Overview Tab ── */}
             {activeTab === "overview" && (
               <OverviewTab
+                preset={data.preset}
                 name={localName}
                 onNameChange={(v) => {
                   setLocalName(v);
@@ -613,12 +705,15 @@ export function PresetEditor() {
 export function QuickPresetSectionsEditor({
   presetId,
   parentChatHasLorebook = false,
+  onEditableCopyCreated,
 }: {
   presetId: string;
   parentChatHasLorebook?: boolean;
+  onEditableCopyCreated: (presetId: string) => void;
 }) {
   const { t } = useTranslation();
   const { data, isLoading } = usePresetFull(presetId);
+  const { mutateAsync: duplicatePreset } = useDuplicatePreset();
   const createSection = useCreateSection();
   const updateSection = useUpdateSection();
   const deleteSection = useDeleteSection();
@@ -630,6 +725,42 @@ export function QuickPresetSectionsEditor({
   const updateVariable = useUpdateVariable();
   const deleteVariable = useDeleteVariable();
   const reorderVariables = useReorderVariables();
+  const quickCopyAttemptRef = useRef<string | null>(null);
+  const quickEditorMountedRef = useRef(true);
+  const [quickCopyError, setQuickCopyError] = useState<string | null>(null);
+
+  useEffect(() => {
+    quickEditorMountedRef.current = true;
+    return () => {
+      quickEditorMountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const preset = data?.preset;
+    if (!preset || !isStockMarinaraUniversalPreset(preset)) {
+      quickCopyAttemptRef.current = null;
+      setQuickCopyError(null);
+      return;
+    }
+    if (quickCopyAttemptRef.current === presetId) return;
+
+    quickCopyAttemptRef.current = presetId;
+    setQuickCopyError(null);
+    void duplicatePreset(presetId)
+      .then((copy) => {
+        if (!quickEditorMountedRef.current) return;
+        if (!copy?.id) throw new Error(t("ui.presets.preseteditor.couldNotCreateEditableCopy"));
+        toast.success(t("ui.presets.preseteditor.createdEditableCopy"));
+        onEditableCopyCreated(copy.id);
+      })
+      .catch((error) => {
+        if (!quickEditorMountedRef.current) return;
+        setQuickCopyError(
+          error instanceof Error ? error.message : t("ui.presets.preseteditor.couldNotCreateEditableCopy"),
+        );
+      });
+  }, [data?.preset, duplicatePreset, onEditableCopyCreated, presetId, t]);
 
   const sectionOrder = useMemo<string[]>(() => {
     const rawOrder = data?.preset?.sectionOrder;
@@ -678,6 +809,21 @@ export function QuickPresetSectionsEditor({
     );
   }
 
+  if (isStockMarinaraUniversalPreset(data.preset)) {
+    return (
+      <div className="mari-editor-empty flex min-h-24 items-center justify-center gap-2 px-3 py-6 text-xs">
+        {quickCopyError ? (
+          <span className="text-[var(--destructive)]">{quickCopyError}</span>
+        ) : (
+          <>
+            <Loader2 size="0.875rem" className="animate-spin text-[var(--primary)]" />
+            <span>{t("ui.presets.preseteditor.preparingEditableCopy")}</span>
+          </>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="mari-editor-legacy-bridge mari-quick-preset-editor">
       <SectionsTab
@@ -710,6 +856,7 @@ export function QuickPresetSectionsEditor({
 // ═══════════════════════════════════════════════
 
 function OverviewTab({
+  preset,
   name,
   onNameChange,
   description,
@@ -721,6 +868,7 @@ function OverviewTab({
   sectionCount,
   groupCount,
 }: {
+  preset: PromptPreset;
   name: string;
   onNameChange: (v: string) => void;
   description: string;
@@ -735,6 +883,8 @@ function OverviewTab({
   const { t: localizeUi } = useUiTranslation();
   return (
     <>
+      <PresetPictureField preset={preset} />
+
       <FieldGroup label={localizeUi("ui.presets.overviewtab.name")} help={localizeUi("ui.presets.overviewtab.theDisplayNameForThisPresetUsedInThe")}>
         <input
           value={name}
@@ -811,6 +961,80 @@ function OverviewTab({
   );
 }
 
+function PresetPictureField({ preset }: { preset: PromptPreset }) {
+  const { t: localizeUi } = useUiTranslation();
+  const uploadPresetImage = useUploadPresetImage();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const artwork = resolvePresetArtwork(preset);
+  const pictureLabel = artwork
+    ? localizeUi("ui.panels.presetspanel.replacePresetPicture")
+    : localizeUi("ui.panels.presetspanel.uploadPresetPicture");
+
+  const handleImageSelected = useCallback(
+    (event: ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+      if (!file.type.startsWith("image/")) {
+        toast.error(localizeUi("ui.panels.presetspanel.chooseAnImageFileForThePresetPicture"));
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = async () => {
+        const image = typeof reader.result === "string" ? reader.result : "";
+        if (!image) {
+          toast.error(localizeUi("ui.panels.agentspanel.couldNotReadThatImage"));
+          return;
+        }
+        try {
+          await uploadPresetImage.mutateAsync({ id: preset.id, image });
+          toast.success(localizeUi("ui.panels.presetspanel.presetPictureUpdated"));
+        } catch (error) {
+          toast.error(
+            error instanceof Error
+              ? error.message
+              : localizeUi("ui.panels.presetspanel.failedToUploadPresetPicture"),
+          );
+        }
+      };
+      reader.onerror = () => toast.error(localizeUi("ui.panels.agentspanel.couldNotReadThatImage"));
+      reader.readAsDataURL(file);
+    },
+    [localizeUi, preset.id, uploadPresetImage],
+  );
+
+  return (
+    <FieldGroup
+      label={localizeUi("ui.presets.overviewtab.picture")}
+      help={localizeUi("ui.presets.overviewtab.pictureHelp")}
+    >
+      <input ref={inputRef} type="file" accept="image/*" className="hidden" onChange={handleImageSelected} />
+      <button
+        type="button"
+        data-preset-overview-picture
+        onClick={() => {
+          if (!inputRef.current) return;
+          inputRef.current.value = "";
+          inputRef.current.click();
+        }}
+        disabled={uploadPresetImage.isPending}
+        className="mari-panel-gradient-surface mari-panel-gradient--presets group relative flex h-24 w-24 items-center justify-center overflow-hidden rounded-xl shadow-sm transition-transform hover:scale-[1.02] focus:outline-none focus:ring-2 focus:ring-[var(--marinara-chat-chrome-focus-ring)] disabled:opacity-60"
+        title={pictureLabel}
+        aria-label={pictureLabel}
+      >
+        {artwork ? (
+          <img src={artwork} alt="" className="h-full w-full object-cover" draggable={false} />
+        ) : (
+          <FileText size="1.5rem" />
+        )}
+        <span className="absolute inset-0 flex items-center justify-center bg-black/45 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 [@media(pointer:coarse)]:opacity-100">
+          <Camera size="1.125rem" />
+        </span>
+      </button>
+    </FieldGroup>
+  );
+}
+
 // ═══════════════════════════════════════════════
 //  Prompts Tab
 // ═══════════════════════════════════════════════
@@ -847,6 +1071,7 @@ function PromptsTab({
           placeholder={localizeUi("ui.presets.promptstab.leaveEmptyToUseMarinaraSBuiltInConversation")}
           className="mari-editor-field min-h-[12rem] w-full p-3 font-mono text-xs"
           formatOnChange={formatPrompt}
+          showMarkdownPreview
           spellCheck={false}
         />
       </FieldGroup>
@@ -866,6 +1091,7 @@ function PromptsTab({
           placeholder={localizeUi("ui.presets.promptstab.leaveEmptyToUseMarinaraSBuiltInGame")}
           className="mari-editor-field min-h-[12rem] w-full p-3 font-mono text-xs"
           formatOnChange={formatPrompt}
+          showMarkdownPreview
           spellCheck={false}
         />
       </FieldGroup>
@@ -1510,7 +1736,21 @@ function SectionsTab({
                         )}
                       </button>
                       <button
-                        onClick={() => onDeleteSection.mutate({ presetId, sectionId: section.id })}
+                        onClick={async () => {
+                          if (
+                            !(await showConfirmDialog({
+                              title: localizeUi("ui.presets.sectionstab.deletePromptBlock"),
+                              message: localizeUi("dialog.delete.namedPermanent", {
+                                name: section.name || localizeUi("ui.presets.sectionstab.promptBlock"),
+                              }),
+                              confirmLabel: localizeUi("lorebook.editor.batch.delete"),
+                              tone: "destructive",
+                            }))
+                          ) {
+                            return;
+                          }
+                          onDeleteSection.mutate({ presetId, sectionId: section.id });
+                        }}
                         className="rounded-lg p-1 text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
                         title={localizeUi("lorebook.editor.batch.delete")}
                       >
@@ -2722,6 +2962,7 @@ function SectionContentTextarea({
       onExpandedClose={commit}
       formatOnChange={(textarea, inputEvent) => applyTextareaQuoteFormat(textarea, quoteFormat, inputEvent)}
       title={sectionName ?localizeUi("ui.presets.sectioncontenttextarea.editValue1", { value1: sectionName }) :localizeUi("ui.presets.sectioncontenttextarea.editPrompt")}
+      showMarkdownPreview
       className="mari-editor-field min-h-[7.5rem] w-full p-2.5 font-mono text-xs"
       placeholder={localizeUi("ui.presets.sectioncontenttextarea.promptContentSupportsUserCharCommentTrimMacros")}
     />

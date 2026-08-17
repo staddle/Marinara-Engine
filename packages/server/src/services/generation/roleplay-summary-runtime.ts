@@ -7,6 +7,7 @@ import {
   isLongTermMemoryChatSummaryPromptAllowed,
   normalizeChatSummaryPromptSettings,
 } from "@marinara-engine/shared";
+import { tryParseJsonRecord } from "../../lib/json-repair.js";
 
 const RETIRED_CHAT_SUMMARY_AGENT_ID = "chat-summary";
 const DEFAULT_AUTOMATIC_SUMMARY_INTERVAL = 5;
@@ -137,24 +138,17 @@ export function parseChatSummaryResult(rawContent: string): ParsedChatSummaryRes
     .trim()
     .replace(/```(?:json)?\s*/giu, "")
     .replace(/```/gu, "");
-  try {
-    const first = cleaned.indexOf("{");
-    const last = cleaned.lastIndexOf("}");
-    if (first >= 0 && last > first) {
-      const parsed = JSON.parse(cleaned.slice(first, last + 1)) as {
-        summary?: unknown;
-        name?: unknown;
-        title?: unknown;
+  const first = cleaned.indexOf("{");
+  const last = cleaned.lastIndexOf("}");
+  if (first >= 0) {
+    const candidate = cleaned.slice(first, last > first ? last + 1 : undefined);
+    const parsed = tryParseJsonRecord(candidate);
+    if (typeof parsed?.summary === "string") {
+      return {
+        summary: parsed.summary.trim(),
+        title: normalizeChatSummaryTitle(parsed.name ?? parsed.title),
       };
-      if (typeof parsed.summary === "string") {
-        return {
-          summary: parsed.summary.trim(),
-          title: normalizeChatSummaryTitle(parsed.name ?? parsed.title),
-        };
-      }
     }
-  } catch {
-    // Fall through to raw text.
   }
   return { summary: cleaned.trim(), title: "" };
 }

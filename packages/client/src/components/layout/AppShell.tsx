@@ -13,6 +13,7 @@ import { ChatResourceMobileDropDock } from "../chat/ChatResourceMobileDropDock";
 import { hasProfessorMariFloatingFollowup } from "../chat/professor-mari-floating-events";
 import {
   getTrackerPanelWidthForProfile,
+  MOBILE_SHELL_MEDIA_QUERY,
   RIGHT_PANEL_WIDTH_MAX,
   RIGHT_PANEL_WIDTH_MIN,
   SIDEBAR_WIDTH_MAX,
@@ -31,9 +32,11 @@ import { useCapabilityAgentRegistry, useCapabilityClientModules } from "../../ho
 import { CapabilityElement } from "../capabilities/CapabilityElement";
 import { FeatureAgentDetailHost } from "../agents/FeatureAgentDetailHost";
 import { getCssBackgroundStyle } from "../../lib/css-colors";
+import { resolveFeatureAgentPackage } from "../../lib/feature-agent-package";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { cn } from "../../lib/utils";
 import { parseChatMetadata } from "../../lib/chat-display";
+import { requestChatSummaryOpen } from "../../lib/chat-floating-ui-events";
 import { resolveTrackerPanelContentScale, resolveTrackerPanelDesktopWidth } from "../../lib/tracker-panel-layout";
 import {
   closeTrackerPanelWindow,
@@ -92,7 +95,6 @@ const BotBrowserView = lazy(() =>
 const GameAssetsBrowserView = lazy(() =>
   import("../game-assets/GameAssetsBrowserView").then((module) => ({ default: module.GameAssetsBrowserView })),
 );
-const NoodleView = lazy(() => import("../noodle/NoodleView").then((module) => ({ default: module.NoodleView })));
 const RightPanel = lazy(() => import("./RightPanel").then((module) => ({ default: module.RightPanel })));
 const TrackerDataSidebar = lazy(() =>
   import("./TrackerDataSidebar").then((module) => ({ default: module.TrackerDataSidebar })),
@@ -353,6 +355,7 @@ export function AppShell() {
   const setEditorDirty = useUIStore((s) => s.setEditorDirty);
   const openLorebookDetail = useUIStore((s) => s.openLorebookDetail);
   const closeAgentDetail = useUIStore((s) => s.closeAgentDetail);
+  const openPresetDetail = useUIStore((s) => s.openPresetDetail);
   const openRightPanel = useUIStore((s) => s.openRightPanel);
   const openAgentCatalog = useUIStore((s) => s.openAgentCatalog);
   const setTrackerPanelOpen = useUIStore((s) => s.setTrackerPanelOpen);
@@ -368,6 +371,10 @@ export function AppShell() {
     },
     [openLorebookDetail, refreshLorebooks],
   );
+  const closeFeatureDetail = useCallback(() => {
+    closeAgentDetail();
+    openRightPanel("agents");
+  }, [closeAgentDetail, openRightPanel]);
   const [sidebarDragWidth, setSidebarDragWidth] = useState<number | null>(null);
   const [rightPanelDragWidth, setRightPanelDragWidth] = useState<number | null>(null);
   const sidebarDragWidthRef = useRef<number | null>(null);
@@ -382,6 +389,8 @@ export function AppShell() {
   const trackerPanelWidth = getTrackerPanelWidthForProfile(trackerPanelSizeProfile);
   const [trackerPanelResolvedWidth, setTrackerPanelResolvedWidth] = useState(trackerPanelWidth);
   const [trackerPanelWindowTarget, setTrackerPanelWindowTarget] = useState<TrackerPanelWindowTarget | null>(null);
+  const trackerPanelWindowTargetRef = useRef<TrackerPanelWindowTarget | null>(null);
+  const trackerPanelDockingPopupRef = useRef<TrackerPanelWindowTarget["popup"] | null>(null);
   const detachTrackerPanelPendingRef = useRef(false);
   const [trackerPanelHost] = useState(() => {
     const host = document.createElement("div");
@@ -396,9 +405,11 @@ export function AppShell() {
     : undefined;
 
   // Track mobile breakpoint for right-panel animation strategy
-  const [isMobile, setIsMobile] = useState(() => typeof window !== "undefined" && window.innerWidth < 768);
+  const [isMobile, setIsMobile] = useState(
+    () => typeof window !== "undefined" && window.matchMedia(MOBILE_SHELL_MEDIA_QUERY).matches,
+  );
   useEffect(() => {
-    const mq = window.matchMedia("(max-width: 767px)");
+    const mq = window.matchMedia(MOBILE_SHELL_MEDIA_QUERY);
     const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
     mq.addEventListener("change", handler);
     return () => mq.removeEventListener("change", handler);
@@ -539,7 +550,6 @@ export function AppShell() {
   const regexDetailId = useUIStore((s) => s.regexDetailId);
   const botBrowserOpen = useUIStore((s) => s.botBrowserOpen);
   const gameAssetsBrowserOpen = useUIStore((s) => s.gameAssetsBrowserOpen);
-  const noodleOpen = useUIStore((s) => s.noodleOpen);
   const hasCompletedOnboarding = useUIStore((s) => s.hasCompletedOnboarding);
   const activeChatId = useChatStore((s) => s.activeChatId);
   const activeChat = useChatStore((s) => s.activeChat);
@@ -562,11 +572,7 @@ export function AppShell() {
   );
   const selectedFeaturePackage = useMemo(
     () =>
-      selectedFeatureAgent
-        ? ((installedCapabilities.data ?? []).find((item) =>
-            item.manifest.contributions?.agentDetail?.agentIds.includes(selectedFeatureAgent.id),
-          ) ?? null)
-        : null,
+      selectedFeatureAgent ? resolveFeatureAgentPackage(selectedFeatureAgent, installedCapabilities.data ?? []) : null,
     [installedCapabilities.data, selectedFeatureAgent],
   );
   const activeChatMetadata = parseChatMetadata(activeChat?.metadata);
@@ -604,6 +610,18 @@ export function AppShell() {
     },
     [activeChat?.metadata, activeChatId, selectedFeatureAgent, selectedFeatureSupportsActiveChat, updateChatMetadata],
   );
+  const openChatSummarySettings = useCallback(() => {
+    if (!activeChatId || activeChat?.mode !== "roleplay") return;
+    const chatId = activeChatId;
+    closeAgentDetail();
+    closeRightPanel();
+    window.requestAnimationFrame(() => requestChatSummaryOpen(chatId));
+  }, [activeChat?.mode, activeChatId, closeAgentDetail, closeRightPanel]);
+  const openActivePromptPresetEditor = useCallback(() => {
+    const presetId = activeChat?.promptPresetId;
+    if (!activeChat || !presetId) return;
+    openPresetDetail(presetId, { initialTab: "sections" });
+  }, [activeChat, openPresetDetail]);
 
   useEffect(() => {
     if (!activeChatId || isClearingAutonomousUnread) return;
@@ -758,10 +776,7 @@ export function AppShell() {
         activeChatSupported={selectedFeatureSupportsActiveChat}
         enabledForChat={selectedFeatureEnabledForChat}
         onEnabledForChatChange={setSelectedFeatureEnabledForChat}
-        onClose={() => {
-          closeAgentDetail();
-          openRightPanel("agents");
-        }}
+        onClose={closeFeatureDetail}
         onManagePackage={openAgentCatalog}
         capabilityProps={{
           debugMode,
@@ -769,6 +784,10 @@ export function AppShell() {
           onDirtyChange: setEditorDirty,
           onOpenLorebook: openSpatialLorebook,
           onLorebooksChanged: refreshLorebooks,
+          onOpenChatSummarySettings: activeChat?.mode === "roleplay" ? openChatSummarySettings : undefined,
+          onOpenActivePromptPresetEditor: activeChat?.promptPresetId
+            ? openActivePromptPresetEditor
+            : undefined,
         }}
       />
     ) : (
@@ -788,30 +807,34 @@ export function AppShell() {
     <LorebookEditor />
   ) : null;
 
-  const showAmbientDecor =
-    isPageActive && !activeChatId && !detailView && !botBrowserOpen && !gameAssetsBrowserOpen && !noodleOpen;
+  const showAmbientDecor = isPageActive && !activeChatId && !detailView && !botBrowserOpen && !gameAssetsBrowserOpen;
   const hasDetailView = detailView != null;
   const trackerPanelModeAvailable = activeChat?.mode === "roleplay";
   const trackerPanelActive = trackerPanelEnabled && trackerPanelOpen;
   const trackerPanelDetached = trackerPanelWindowTarget !== null;
   const trackerPanelSurfaceAvailable =
-    trackerPanelModeAvailable && !botBrowserOpen && !gameAssetsBrowserOpen && !noodleOpen && !hasDetailView;
+    trackerPanelModeAvailable && !botBrowserOpen && !gameAssetsBrowserOpen && !hasDetailView;
   const trackerPanelVisible = trackerPanelActive && trackerPanelSurfaceAvailable && !trackerPanelDetached;
   const chatSurfaceActive =
     !botBrowserOpen &&
     !gameAssetsBrowserOpen &&
-    !noodleOpen &&
     !hasDetailView &&
     (!shellOverlayMode || (!sidebarOpen && !rightPanelOpen && !trackerPanelVisible));
   const trackerWindowHost = trackerPanelWindowTarget?.popup ?? window;
 
   const dockTrackerPanel = useCallback(() => {
-    if (trackerPanelWindowTarget) closeTrackerPanelWindow(trackerPanelWindowTarget);
+    const target = trackerPanelWindowTargetRef.current;
+    if (target) {
+      trackerPanelDockingPopupRef.current = target.popup;
+      closeTrackerPanelWindow(target);
+      trackerPanelWindowTargetRef.current = null;
+    }
     setTrackerPanelWindowTarget(null);
-  }, [trackerPanelWindowTarget]);
+  }, []);
 
   const detachTrackerPanel = useCallback(async () => {
     if (detachTrackerPanelPendingRef.current) return;
+    trackerPanelDockingPopupRef.current = null;
     detachTrackerPanelPendingRef.current = true;
 
     try {
@@ -823,6 +846,7 @@ export function AppShell() {
         toast.error(localizeUi("ui.layout.appshell.trackerPanelPopupBlocked"));
         return;
       }
+      trackerPanelWindowTargetRef.current = target;
       setTrackerPanelWindowTarget(target);
     } catch {
       toast.error(localizeUi("ui.layout.appshell.trackerPanelWindowFailed"));
@@ -831,9 +855,16 @@ export function AppShell() {
     }
   }, [localizeUi, trackerPanelWidth]);
 
-  const handleTrackerPanelWindowClosed = useCallback(() => {
+  const handleTrackerPanelWindowClosed = useCallback((closedTarget: TrackerPanelWindowTarget) => {
+    if (trackerPanelDockingPopupRef.current === closedTarget.popup) {
+      trackerPanelDockingPopupRef.current = null;
+      return;
+    }
+    if (trackerPanelWindowTargetRef.current?.popup !== closedTarget.popup) return;
+    trackerPanelWindowTargetRef.current = null;
     setTrackerPanelWindowTarget(null);
-  }, []);
+    setTrackerPanelOpen(false, activeChatId);
+  }, [activeChatId, setTrackerPanelOpen]);
 
   const professorMariFloatingActive = hasDetailView && hasProfessorMariFloatingFollowup();
 
@@ -847,6 +878,7 @@ export function AppShell() {
   useEffect(() => {
     if (!trackerPanelWindowTarget || (trackerPanelActive && trackerPanelModeAvailable)) return;
     closeTrackerPanelWindow(trackerPanelWindowTarget);
+    trackerPanelWindowTargetRef.current = null;
     setTrackerPanelWindowTarget(null);
   }, [trackerPanelActive, trackerPanelModeAvailable, trackerPanelWindowTarget]);
   useEffect(() => {
@@ -1212,7 +1244,10 @@ export function AppShell() {
       {/* Overlay sidebar backdrop */}
       {sidebarOpen && shellOverlayMode && (
         <div
-          className={cn("fixed inset-x-0 bottom-0 z-30 bg-black/50 backdrop-blur-sm", MOBILE_SHELL_PANEL_TOP_CLASS)}
+          className={cn(
+            "fixed inset-x-0 bottom-0 z-[45] bg-black/50 backdrop-blur-sm",
+            MOBILE_SHELL_PANEL_TOP_CLASS,
+          )}
           onClick={() => setSidebarOpen(false)}
         />
       )}
@@ -1225,12 +1260,13 @@ export function AppShell() {
         aria-hidden={!sidebarOpen}
         inert={!sidebarOpen}
         className={cn(
-          "mari-shell-panel-slot flex-shrink-0 overflow-hidden md:relative",
+          "mari-shell-panel-slot flex-shrink-0 overflow-hidden",
+          !shellOverlayMode && "md:relative",
           sidebarDragWidth != null && "!transition-none",
           !sidebarOpen && "pointer-events-none",
           shellOverlayMode &&
             cn(
-              "fixed bottom-0 left-0 z-40 max-h-none pb-[max(env(safe-area-inset-bottom),0.5rem)] shadow-2xl",
+              "fixed bottom-0 left-0 z-50 max-h-none pb-[max(env(safe-area-inset-bottom),0.5rem)] shadow-2xl",
               MOBILE_SHELL_PANEL_TOP_CLASS,
             ),
         )}
@@ -1297,7 +1333,7 @@ export function AppShell() {
           <div
             className={cn(
               "mari-app-background-paint flex flex-1 flex-col overflow-hidden",
-              (botBrowserOpen || gameAssetsBrowserOpen || (!shellOverlayMode && hasDetailView && !noodleOpen)) &&
+              (botBrowserOpen || gameAssetsBrowserOpen || (!shellOverlayMode && hasDetailView)) &&
                 "hidden",
             )}
             style={
@@ -1309,14 +1345,14 @@ export function AppShell() {
             }
           >
             <Suspense fallback={<MainPaneFallback />}>
-              {noodleOpen ? <NoodleView /> : (shellOverlayMode || !hasDetailView) && <ChatArea />}
+              {(shellOverlayMode || !hasDetailView) && <ChatArea />}
             </Suspense>
           </div>
           {/* Keep the detail host at one React tree position across the mobile breakpoint.
               Moving an editor between separate desktop/mobile branches remounts it and
               discards component-local unsaved form state. */}
           <AnimatePresence mode="wait">
-            {detailView && (shellOverlayMode || !noodleOpen) && (
+            {detailView && (
               <motion.aside
                 key="detail-editor"
                 initial={shellOverlayMode ? { opacity: 0, x: 24 } : false}
@@ -1362,7 +1398,10 @@ export function AppShell() {
       {/* Overlay tracker panel backdrop */}
       {trackerPanelVisible && shellOverlayMode && (
         <div
-          className={cn("fixed inset-x-0 bottom-0 z-30 bg-black/50 backdrop-blur-sm", MOBILE_SHELL_PANEL_TOP_CLASS)}
+          className={cn(
+            "fixed inset-x-0 bottom-0 z-[45] bg-black/50 backdrop-blur-sm",
+            MOBILE_SHELL_PANEL_TOP_CLASS,
+          )}
           onClick={() => setTrackerPanelOpen(false, activeChatId)}
         />
       )}
@@ -1380,7 +1419,7 @@ export function AppShell() {
               data-component="TrackerDataSidebarMobile"
               aria-label={localizeUi("ui.layout.appshell.trackerDataPanel")}
               className={cn(
-                "mari-tracker-panel !fixed bottom-0 z-40 w-screen max-w-none overflow-hidden bg-zinc-950/95 pb-[max(env(safe-area-inset-bottom),0.5rem)] shadow-2xl ring-1 ring-zinc-700/80 backdrop-blur-xl",
+                "mari-tracker-panel !fixed bottom-0 z-50 w-screen max-w-none overflow-hidden bg-zinc-950/95 pb-[max(env(safe-area-inset-bottom),0.5rem)] shadow-2xl ring-1 ring-zinc-700/80 backdrop-blur-xl",
                 MOBILE_SHELL_PANEL_TOP_CLASS,
                 trackerPanelSide === "left" ? "left-0" : "right-0",
               )}
@@ -1395,7 +1434,10 @@ export function AppShell() {
       {/* Overlay right panel backdrop */}
       {rightPanelOpen && shellOverlayMode && (
         <div
-          className={cn("fixed inset-x-0 bottom-0 z-30 bg-black/50 backdrop-blur-sm", MOBILE_SHELL_PANEL_TOP_CLASS)}
+          className={cn(
+            "fixed inset-x-0 bottom-0 z-[45] bg-black/50 backdrop-blur-sm",
+            MOBILE_SHELL_PANEL_TOP_CLASS,
+          )}
           onClick={() => closeRightPanel()}
         />
       )}
@@ -1415,7 +1457,7 @@ export function AppShell() {
               data-component="RightPanelMobile"
               aria-label={localizeUi("ui.layout.appshell.settingsAndToolsPanel")}
               className={cn(
-                "mari-right-panel !fixed bottom-0 right-0 z-40 !w-full overflow-hidden bg-[var(--background)]/80 pb-[max(env(safe-area-inset-bottom),0.5rem)] shadow-2xl backdrop-blur-xl",
+                "mari-right-panel !fixed bottom-0 right-0 z-50 !w-full overflow-hidden bg-[var(--background)]/80 pb-[max(env(safe-area-inset-bottom),0.5rem)] shadow-2xl backdrop-blur-xl",
                 MOBILE_SHELL_PANEL_TOP_CLASS,
               )}
               style={{ "--mari-right-panel-width": "100vw" } as CSSProperties}

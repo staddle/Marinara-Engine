@@ -14,11 +14,12 @@ import {
   type QuoteFormat,
   type ScenePromptPreferences,
 } from "@marinara-engine/shared";
-import type { NoodleNavigationState } from "../components/noodle/noodle-navigation.types";
+import type { LegacyNoodleNavigationState as NoodleNavigationState } from "../lib/legacy-noodle-navigation";
 import { isCssGradient, RAINBOW_GRADIENT_PRESET } from "../lib/css-colors";
 import { announceChatFloatingUiDismiss } from "../lib/chat-floating-ui-events";
 import { detectConversationTimeZone, normalizeConversationTimeZone } from "../lib/conversation-time-zone";
 import { BASIC_PANEL_SORT_OPTIONS, normalizeBasicPanelSort, type BasicPanelSort } from "../lib/panel-sort";
+import { resetProfessorMariNavigator } from "../lib/professor-mari-navigation";
 import { DEFAULT_APP_LANGUAGE, type AppLanguage } from "../localization/locale-types";
 
 export type Panel =
@@ -36,6 +37,7 @@ export type ChatModeShortcut = "conversation" | "roleplay" | "game";
 export const CHARACTER_LIBRARY_SORT_OPTIONS = ["name-asc", "name-desc", "newest", "oldest", "favorites"] as const;
 export type CharacterLibrarySort = (typeof CHARACTER_LIBRARY_SORT_OPTIONS)[number];
 export type CardLibraryKind = "characters" | "personas";
+export const MOBILE_SHELL_MEDIA_QUERY = "(max-width: 767px), (max-width: 1366px) and (any-pointer: coarse)";
 export const CHARACTER_PANEL_FAVORITE_FILTER_OPTIONS = ["all", "favorites", "non-favorites"] as const;
 export type CharacterPanelFavoriteFilter = (typeof CHARACTER_PANEL_FAVORITE_FILTER_OPTIONS)[number];
 export const LOREBOOK_PANEL_CATEGORY_OPTIONS = [
@@ -154,8 +156,26 @@ function normalizeEchoChamberSizes(value: unknown): Record<string, EchoChamberSi
   return normalized;
 }
 
+function normalizeEchoChamberSides(value: unknown): Record<string, EchoChamberSide> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const normalized: Record<string, EchoChamberSide> = {};
+  for (const [chatId, side] of Object.entries(value)) {
+    const normalizedChatId = chatId.trim();
+    if (
+      !normalizedChatId ||
+      typeof side !== "string" ||
+      !["top-left", "top-right", "bottom-left", "bottom-right"].includes(side)
+    ) {
+      continue;
+    }
+    normalized[normalizedChatId] = side as EchoChamberSide;
+  }
+  return normalized;
+}
+
 interface ImmediateUiStorageSnapshot {
   customCursorEnabled: boolean | undefined;
+  echoChamberSides: string;
   echoChamberSizes: string;
 }
 
@@ -163,6 +183,7 @@ function readImmediateUiStorageSnapshot(value: string | null): ImmediateUiStorag
   if (!value) {
     return {
       customCursorEnabled: undefined,
+      echoChamberSides: "{}",
       echoChamberSizes: "{}",
     };
   }
@@ -171,17 +192,20 @@ function readImmediateUiStorageSnapshot(value: string | null): ImmediateUiStorag
     const parsed = JSON.parse(value) as {
       state?: {
         customCursorEnabled?: unknown;
+        echoChamberSideByChatId?: unknown;
         echoChamberSizeByChatId?: unknown;
       };
     };
     return {
       customCursorEnabled:
         typeof parsed.state?.customCursorEnabled === "boolean" ? parsed.state.customCursorEnabled : undefined,
+      echoChamberSides: JSON.stringify(normalizeEchoChamberSides(parsed.state?.echoChamberSideByChatId)),
       echoChamberSizes: JSON.stringify(normalizeEchoChamberSizes(parsed.state?.echoChamberSizeByChatId)),
     };
   } catch {
     return {
       customCursorEnabled: undefined,
+      echoChamberSides: "{}",
       echoChamberSizes: "{}",
     };
   }
@@ -192,6 +216,7 @@ function shouldFlushUiStorageImmediately(previousValue: string | null, nextValue
   const next = readImmediateUiStorageSnapshot(nextValue);
   return (
     previous.customCursorEnabled !== next.customCursorEnabled ||
+    previous.echoChamberSides !== next.echoChamberSides ||
     previous.echoChamberSizes !== next.echoChamberSizes
   );
 }
@@ -315,7 +340,7 @@ function normalizeScrollTop(value: unknown) {
 }
 
 function isMobileShellViewport() {
-  return typeof window !== "undefined" && window.innerWidth < 768;
+  return typeof window !== "undefined" && window.matchMedia(MOBILE_SHELL_MEDIA_QUERY).matches;
 }
 
 function dismissChatFloatingUiForMobilePanel(open: boolean) {
@@ -506,6 +531,9 @@ export interface CustomQuickReply {
   icon?: string;
 }
 
+export type MariPanelSortMode = "az" | "za" | "newest" | "oldest";
+export type MariEditViewMode = "easy" | "raw";
+
 interface UIState {
   sidebarOpen: boolean;
   sidebarWidth: number;
@@ -528,7 +556,7 @@ interface UIState {
   trackerPanelSectionOrder: TrackerPanelSectionOrder;
   settingsTab: string;
   /** Transient control id that the Settings panel should reveal and focus. */
-  settingsTargetControlId: typeof QUICK_REPLIES_SETTINGS_CONTROL_ID | null;
+  settingsTargetControlId: string | null;
   modal: { type: string; props?: Record<string, unknown> } | null;
   theme: "dark" | "light";
   appBackgroundColor: string;
@@ -536,6 +564,9 @@ interface UIState {
   appAccentPulseMode: boolean;
   appAccentRgbMode: boolean;
   customCursorEnabled: boolean;
+  reduceAmbientEffects: boolean;
+  mariPanelSortMode: MariPanelSortMode;
+  mariEditViewMode: MariEditViewMode;
   chatBackground: string | null;
   /** Default background applied when a Roleplay chat has no saved background yet. */
   defaultRoleplayBackground: string;
@@ -547,6 +578,8 @@ interface UIState {
   lorebookDetailId: string | null;
   /** When set, the main area shows the full-page preset editor instead of chat */
   presetDetailId: string | null;
+  /** One-shot tab the preset editor should open to. */
+  presetDetailInitialTab: string | null;
   /** When set, the main area shows the full-page connection editor instead of chat */
   connectionDetailId: string | null;
   /** When set, the main area shows the full-page agent editor. Value is the agent *type* id (e.g. "world-state") */
@@ -674,6 +707,8 @@ interface UIState {
   imageBackgroundHeight: number;
   imageIllustrationWidth: number;
   imageIllustrationHeight: number;
+  imageNoodleWidth: number;
+  imageNoodleHeight: number;
   imageGameWidth: number;
   imageGameHeight: number;
   imagePortraitWidth: number;
@@ -720,6 +755,8 @@ interface UIState {
   chibiProfessorMariEnabled: boolean;
   /** When true, Professor Mari shows generated suggestion chips and guided-plan options. */
   professorMariSuggestionsEnabled: boolean;
+  /** When true, Professor Mari's deterministic Home navigator is available. */
+  professorMariNavigationEnabled: boolean;
   /** When true, achievements appear on Home and announce unlocks. Backend tracking stays silent either way. */
   achievementsEnabled: boolean;
   /** When true, show the global Music Player surface. */
@@ -820,6 +857,7 @@ interface UIState {
   enterToSendRP: boolean;
   enterToSendConvo: boolean;
   enterToSendGame: boolean;
+  enterToSendProfessorMari: boolean;
 
   // ── Roleplay Effects ──
   weatherEffects: boolean;
@@ -843,6 +881,7 @@ interface UIState {
   // ── EchoChamber ──
   echoChamberOpen: boolean;
   echoChamberSide: EchoChamberSide;
+  echoChamberSideByChatId: Record<string, EchoChamberSide>;
   echoChamberSizeByChatId: Record<string, EchoChamberSize>;
 
   // ── User Status ──
@@ -898,7 +937,7 @@ interface UIState {
   closeRightPanel: () => void;
   toggleRightPanel: (panel: Panel) => void;
   setSettingsTab: (tab: string) => void;
-  setSettingsTargetControlId: (controlId: typeof QUICK_REPLIES_SETTINGS_CONTROL_ID | null) => void;
+  setSettingsTargetControlId: (controlId: string | null) => void;
   openModal: (type: string, props?: Record<string, unknown>) => void;
   closeModal: () => void;
   setTheme: (theme: "dark" | "light") => void;
@@ -907,6 +946,9 @@ interface UIState {
   setAppAccentPulseMode: (enabled: boolean) => void;
   setAppAccentRgbMode: (enabled: boolean) => void;
   setCustomCursorEnabled: (enabled: boolean) => void;
+  setReduceAmbientEffects: (enabled: boolean) => void;
+  setMariPanelSortMode: (mode: MariPanelSortMode) => void;
+  setMariEditViewMode: (mode: MariEditViewMode) => void;
   setChatBackground: (url: string | null) => void;
   setDefaultRoleplayBackground: (url: string) => void;
   setChatBackgroundBlur: (v: number) => void;
@@ -935,7 +977,7 @@ interface UIState {
   closeCharacterDetail: () => void;
   openLorebookDetail: (id: string, options?: { initialTab?: string }) => void;
   closeLorebookDetail: () => void;
-  openPresetDetail: (id: string) => void;
+  openPresetDetail: (id: string, options?: { initialTab?: string }) => void;
   closePresetDetail: () => void;
   openConnectionDetail: (id: string) => void;
   closeConnectionDetail: () => void;
@@ -993,6 +1035,7 @@ interface UIState {
   setReviewImagePromptsBeforeSend: (v: boolean) => void;
   setImageBackgroundDimensions: (width: number, height: number) => void;
   setImageIllustrationDimensions: (width: number, height: number) => void;
+  setImageNoodleDimensions: (width: number, height: number) => void;
   setImageGameDimensions: (width: number, height: number) => void;
   setImagePortraitDimensions: (width: number, height: number) => void;
   setImageSelfieDimensions: (width: number, height: number) => void;
@@ -1025,6 +1068,7 @@ interface UIState {
   setTTSLineVolume: (v: number) => void;
   setChibiProfessorMariEnabled: (v: boolean) => void;
   setProfessorMariSuggestionsEnabled: (v: boolean) => void;
+  setProfessorMariNavigationEnabled: (v: boolean) => void;
   setAchievementsEnabled: (v: boolean) => void;
   setMusicPlayerEnabled: (v: boolean) => void;
   setMusicPlayerSource: (v: MusicPlayerSource) => void;
@@ -1079,6 +1123,7 @@ interface UIState {
   setEnterToSendRP: (v: boolean) => void;
   setEnterToSendConvo: (v: boolean) => void;
   setEnterToSendGame: (v: boolean) => void;
+  setEnterToSendProfessorMari: (v: boolean) => void;
   setWeatherEffects: (v: boolean) => void;
   // Impersonate settings actions
   setImpersonatePromptTemplate: (v: string) => void;
@@ -1097,6 +1142,7 @@ interface UIState {
   dismissLinkApiBanner: () => void;
   toggleEchoChamber: () => void;
   setEchoChamberSide: (side: EchoChamberSide) => void;
+  setEchoChamberSideForChat: (chatId: string, side: EchoChamberSide) => void;
   setEchoChamberSizeForChat: (chatId: string, size: EchoChamberSize) => void;
   setUserStatus: (status: UserStatus) => void;
   setUserStatusManual: (status: UserStatus) => void;
@@ -1179,6 +1225,7 @@ export function pickSyncedSettings(state: UIState) {
     theme: state.theme,
     appBackgroundColor: state.appBackgroundColor,
     appAccentColor: state.appAccentColor,
+    reduceAmbientEffects: state.reduceAmbientEffects,
     chatBackground: state.chatBackground,
     defaultRoleplayBackground: state.defaultRoleplayBackground,
     chatBackgroundBlur: state.chatBackgroundBlur,
@@ -1198,6 +1245,8 @@ export function pickSyncedSettings(state: UIState) {
     imageBackgroundHeight: state.imageBackgroundHeight,
     imageIllustrationWidth: state.imageIllustrationWidth,
     imageIllustrationHeight: state.imageIllustrationHeight,
+    imageNoodleWidth: state.imageNoodleWidth,
+    imageNoodleHeight: state.imageNoodleHeight,
     imageGameWidth: state.imageGameWidth,
     imageGameHeight: state.imageGameHeight,
     imagePortraitWidth: state.imagePortraitWidth,
@@ -1231,6 +1280,7 @@ export function pickSyncedSettings(state: UIState) {
     ttsLineVolume: state.ttsLineVolume,
     chibiProfessorMariEnabled: state.chibiProfessorMariEnabled,
     professorMariSuggestionsEnabled: state.professorMariSuggestionsEnabled,
+    professorMariNavigationEnabled: state.professorMariNavigationEnabled,
     achievementsEnabled: state.achievementsEnabled,
     musicPlayerEnabled: state.musicPlayerEnabled,
     musicPlayerSource: state.musicPlayerSource,
@@ -1264,6 +1314,8 @@ export function pickSyncedSettings(state: UIState) {
     convoGradient: state.convoGradient,
     enterToSendRP: state.enterToSendRP,
     enterToSendConvo: state.enterToSendConvo,
+    enterToSendGame: state.enterToSendGame,
+    enterToSendProfessorMari: state.enterToSendProfessorMari,
     weatherEffects: state.weatherEffects,
     hasCompletedOnboarding: state.hasCompletedOnboarding,
     gameTutorialDisabled: state.gameTutorialDisabled,
@@ -1324,12 +1376,16 @@ export const useUIStore = create<UIState>()(
       appAccentPulseMode: false,
       appAccentRgbMode: false,
       customCursorEnabled: true,
+      reduceAmbientEffects: false,
+      mariPanelSortMode: "az",
+      mariEditViewMode: "easy",
       chatBackground: null,
       defaultRoleplayBackground: DEFAULT_ROLEPLAY_BACKGROUND_URL,
       chatBackgroundBlur: 0,
       characterDetailId: null,
       lorebookDetailId: null,
       presetDetailId: null,
+      presetDetailInitialTab: null,
       connectionDetailId: null,
       agentDetailId: null,
       toolDetailId: null,
@@ -1394,6 +1450,8 @@ export const useUIStore = create<UIState>()(
       imageBackgroundHeight: 720,
       imageIllustrationWidth: 896,
       imageIllustrationHeight: 1280,
+      imageNoodleWidth: 1024,
+      imageNoodleHeight: 1536,
       imageGameWidth: 1280,
       imageGameHeight: 720,
       imagePortraitWidth: 1024,
@@ -1427,6 +1485,7 @@ export const useUIStore = create<UIState>()(
       ttsLineVolume: 50,
       chibiProfessorMariEnabled: true,
       professorMariSuggestionsEnabled: true,
+      professorMariNavigationEnabled: true,
       achievementsEnabled: true,
       musicPlayerEnabled: true,
       musicPlayerSource: "youtube" as MusicPlayerSource,
@@ -1478,6 +1537,7 @@ export const useUIStore = create<UIState>()(
       enterToSendRP: false,
       enterToSendConvo: true,
       enterToSendGame: true,
+      enterToSendProfessorMari: true,
       weatherEffects: true,
       activeCustomTheme: null,
       customThemes: [],
@@ -1487,6 +1547,7 @@ export const useUIStore = create<UIState>()(
       linkApiBannerDismissed: false,
       echoChamberOpen: true,
       echoChamberSide: "bottom-right" as EchoChamberSide,
+      echoChamberSideByChatId: {},
       echoChamberSizeByChatId: {},
       userStatusManual: "active" as const,
       userStatus: "active" as UserStatus,
@@ -1565,8 +1626,7 @@ export const useUIStore = create<UIState>()(
       setTrackerPanelUseExpressionSprites: (enabled) => set({ trackerPanelUseExpressionSprites: enabled }),
       setTrackerPanelThoughtBubbleDisplay: (display) =>
         set({ trackerPanelThoughtBubbleDisplay: normalizeTrackerThoughtBubbleDisplay(display) }),
-      setTrackerStatDisplayMode: (display) =>
-        set({ trackerStatDisplayMode: normalizeTrackerStatDisplayMode(display) }),
+      setTrackerStatDisplayMode: (display) => set({ trackerStatDisplayMode: normalizeTrackerStatDisplayMode(display) }),
       setTrackerPanelDockedThoughtsAlwaysVisible: (visible) =>
         set({ trackerPanelDockedThoughtsAlwaysVisible: visible }),
       setTrackerPanelSizeProfile: (profile) =>
@@ -1620,6 +1680,9 @@ export const useUIStore = create<UIState>()(
       setAppAccentPulseMode: (enabled) => set({ appAccentPulseMode: enabled }),
       setAppAccentRgbMode: (enabled) => set({ appAccentRgbMode: enabled }),
       setCustomCursorEnabled: (enabled) => set({ customCursorEnabled: enabled }),
+      setReduceAmbientEffects: (enabled) => set({ reduceAmbientEffects: enabled }),
+      setMariPanelSortMode: (mode) => set({ mariPanelSortMode: mode }),
+      setMariEditViewMode: (mode) => set({ mariEditViewMode: mode }),
       setChatBackground: (url) => set({ chatBackground: url }),
       setDefaultRoleplayBackground: (url) =>
         set({ defaultRoleplayBackground: normalizeDefaultRoleplayBackground(url) }),
@@ -1701,9 +1764,10 @@ export const useUIStore = create<UIState>()(
           editorDirty: false,
           ...restoreMobileDetailReturnPanel(s.detailReturnRightPanel),
         })),
-      openPresetDetail: (id) =>
+      openPresetDetail: (id, options) =>
         set((s) => ({
           presetDetailId: id,
+          presetDetailInitialTab: options?.initialTab ?? null,
           characterLibraryOpen: false,
           agentCatalogOpen: false,
           botBrowserOpen: false,
@@ -1722,6 +1786,7 @@ export const useUIStore = create<UIState>()(
       closePresetDetail: () =>
         set((s) => ({
           presetDetailId: null,
+          presetDetailInitialTab: null,
           editorDirty: false,
           ...restoreMobileDetailReturnPanel(s.detailReturnRightPanel),
         })),
@@ -2135,6 +2200,11 @@ export const useUIStore = create<UIState>()(
           imageIllustrationWidth: clampImageDimension(width),
           imageIllustrationHeight: clampImageDimension(height),
         }),
+      setImageNoodleDimensions: (width, height) =>
+        set({
+          imageNoodleWidth: clampImageDimension(width),
+          imageNoodleHeight: clampImageDimension(height),
+        }),
       setImageGameDimensions: (width, height) =>
         set({
           imageGameWidth: clampImageDimension(width),
@@ -2201,6 +2271,11 @@ export const useUIStore = create<UIState>()(
       setTTSLineVolume: (v) => set({ ttsLineVolume: Math.max(0, Math.min(100, Math.round(v))) }),
       setChibiProfessorMariEnabled: (v) => set({ chibiProfessorMariEnabled: v }),
       setProfessorMariSuggestionsEnabled: (v) => set({ professorMariSuggestionsEnabled: v }),
+      setProfessorMariNavigationEnabled: (v) => {
+        const wasEnabled = get().professorMariNavigationEnabled;
+        set({ professorMariNavigationEnabled: v });
+        if (v && !wasEnabled) resetProfessorMariNavigator();
+      },
       setAchievementsEnabled: (v) => set({ achievementsEnabled: v }),
       setMusicPlayerEnabled: (v) => set({ musicPlayerEnabled: v }),
       setMusicPlayerSource: (v) =>
@@ -2281,6 +2356,9 @@ export const useUIStore = create<UIState>()(
           appAccentColor: "",
           appAccentRgbMode: false,
           customCursorEnabled: true,
+          reduceAmbientEffects: false,
+          mariPanelSortMode: "az",
+          mariEditViewMode: "easy",
           chatBackground: null,
           defaultRoleplayBackground: DEFAULT_ROLEPLAY_BACKGROUND_URL,
           chatBackgroundBlur: 0,
@@ -2364,6 +2442,7 @@ export const useUIStore = create<UIState>()(
       setEnterToSendRP: (v) => set({ enterToSendRP: v }),
       setEnterToSendConvo: (v) => set({ enterToSendConvo: v }),
       setEnterToSendGame: (v) => set({ enterToSendGame: v }),
+      setEnterToSendProfessorMari: (v) => set({ enterToSendProfessorMari: v }),
       setWeatherEffects: (v) => set({ weatherEffects: v }),
       setImpersonatePromptTemplate: (v) => set({ impersonatePromptTemplate: v }),
       selectImpersonatePromptTemplate: (template) =>
@@ -2383,6 +2462,17 @@ export const useUIStore = create<UIState>()(
       dismissLinkApiBanner: () => set({ linkApiBannerDismissed: true }),
       toggleEchoChamber: () => set((s) => ({ echoChamberOpen: !s.echoChamberOpen })),
       setEchoChamberSide: (side) => set({ echoChamberSide: side }),
+      setEchoChamberSideForChat: (chatId, side) => {
+        const normalizedChatId = chatId.trim();
+        if (!normalizedChatId) return;
+        set((state) => ({
+          echoChamberSide: side,
+          echoChamberSideByChatId: {
+            ...state.echoChamberSideByChatId,
+            [normalizedChatId]: side,
+          },
+        }));
+      },
       setEchoChamberSizeForChat: (chatId, size) => {
         const normalizedChatId = chatId.trim();
         const normalizedSize = normalizeEchoChamberSize(size);
@@ -2411,7 +2501,7 @@ export const useUIStore = create<UIState>()(
     }),
     {
       name: "marinara-engine-ui",
-      version: 88,
+      version: 93,
       // Debounce localStorage writes to avoid sync I/O on every state change
       storage: createJSONStorage(() => {
         let timer: ReturnType<typeof setTimeout> | null = null;
@@ -2456,6 +2546,10 @@ export const useUIStore = create<UIState>()(
         };
       }),
       migrate: (persisted: any, version: number) => {
+        if (version <= 91 && persisted.rightPanel === "bot-browser") {
+          persisted.rightPanel = "characters";
+          persisted.rightPanelOpen = false;
+        }
         if (version === 0 && persisted.fontSize === 14) {
           persisted.fontSize = 17;
         }
@@ -2633,25 +2727,11 @@ export const useUIStore = create<UIState>()(
         if (version <= 22) {
           persisted.trackerPanelWidth = clampTrackerPanelWidth(persisted.trackerPanelWidth);
         }
-        // v23 -> v24: remember collapsed tracker data panels.
-        if (version <= 23) {
-          persisted.trackerPanelCollapsedSections = normalizeTrackerPanelCollapsedSections(
-            persisted.trackerPanelCollapsedSections,
-          );
-        }
         persisted.trackerPanelCollapsedSections = normalizeTrackerPanelCollapsedSections(
           persisted.trackerPanelCollapsedSections,
         );
-        // v24 -> v25: require an explicit tracker-panel opt-in before expression sprites replace portraits.
-        if (version <= 24 && persisted.trackerPanelUseExpressionSprites === undefined) {
-          persisted.trackerPanelUseExpressionSprites = false;
-        }
         if (persisted.trackerPanelUseExpressionSprites === undefined) {
           persisted.trackerPanelUseExpressionSprites = false;
-        }
-        // v25 -> v26: allow users to reorder tracker panel cards.
-        if (version <= 25) {
-          persisted.trackerPanelSectionOrder = normalizeTrackerPanelSectionOrder(persisted.trackerPanelSectionOrder);
         }
         persisted.trackerPanelSectionOrder = normalizeTrackerPanelSectionOrder(persisted.trackerPanelSectionOrder);
         // v26 -> v27: add Roleplay avatar and default sprite scale controls.
@@ -2685,50 +2765,21 @@ export const useUIStore = create<UIState>()(
         if (version <= 29 && persisted.chibiProfessorMariEnabled === undefined) {
           persisted.chibiProfessorMariEnabled = true;
         }
-        // v30 -> v31: persist Chat Summary popover source and display controls.
-        if (version <= 30) {
-          persisted.summaryPopoverSettings = normalizeSummaryPopoverSettings(persisted.summaryPopoverSettings);
-        }
         persisted.summaryPopoverSettings = normalizeSummaryPopoverSettings(persisted.summaryPopoverSettings);
         // v31 -> v32: add native chat/game background blur.
         if (version <= 31 && persisted.chatBackgroundBlur === undefined) {
           persisted.chatBackgroundBlur = 0;
         }
-        // v32 -> v33: make tracker character thought placement an explicit user preference.
-        if (version <= 32) {
-          persisted.trackerPanelThoughtBubbleDisplay = normalizeTrackerThoughtBubbleDisplay(
-            persisted.trackerPanelThoughtBubbleDisplay,
-          );
-        }
         persisted.trackerPanelThoughtBubbleDisplay = normalizeTrackerThoughtBubbleDisplay(
           persisted.trackerPanelThoughtBubbleDisplay,
         );
-        // v33 -> v34: replace arbitrary tracker desktop widths with curated size profiles.
-        if (version <= 33) {
-          persisted.trackerPanelSizeProfile = normalizeTrackerPanelSizeProfile(
-            persisted.trackerPanelSizeProfile,
-            persisted.trackerPanelWidth,
-          );
-        }
         persisted.trackerPanelSizeProfile = normalizeTrackerPanelSizeProfile(
           persisted.trackerPanelSizeProfile,
           persisted.trackerPanelWidth,
         );
-        // v34 -> v35: tracker-only temperature display unit.
-        if (version <= 34) {
-          persisted.trackerTemperatureUnit = normalizeTrackerTemperatureUnit(persisted.trackerTemperatureUnit);
-        }
         persisted.trackerTemperatureUnit = normalizeTrackerTemperatureUnit(persisted.trackerTemperatureUnit);
-        // v35 -> v36: optional always-visible docked tracker thoughts.
-        if (version <= 35 && persisted.trackerPanelDockedThoughtsAlwaysVisible === undefined) {
-          persisted.trackerPanelDockedThoughtsAlwaysVisible = false;
-        }
         if (persisted.trackerPanelDockedThoughtsAlwaysVisible === undefined) {
           persisted.trackerPanelDockedThoughtsAlwaysVisible = false;
-        }
-        // v36 -> v37: user-selectable straight or typographic quote formatting.
-        if (version <= 36) {
-          persisted.quoteFormat = normalizeQuoteFormat(persisted.quoteFormat);
         }
         persisted.quoteFormat = normalizeQuoteFormat(persisted.quoteFormat);
         // v37 -> v38: customizable image style profiles.
@@ -2804,12 +2855,6 @@ export const useUIStore = create<UIState>()(
         persisted.ttsLineVolume = Math.max(0, Math.min(100, Math.round(persisted.ttsLineVolume)));
         // v69 -> v70: remember scene prompt setup choices.
         persisted.scenePromptPreferences = normalizeScenePromptPreferences(persisted.scenePromptPreferences);
-        // v42 -> v44: reconcile parallel v43 UI preference additions.
-        if (version <= 43) {
-          persisted.trackerPanelBackgroundColor = normalizeTrackerPanelBackgroundColor(
-            persisted.trackerPanelBackgroundColor,
-          );
-        }
         persisted.trackerPanelBackgroundColor = normalizeTrackerPanelBackgroundColor(
           persisted.trackerPanelBackgroundColor,
         );
@@ -2998,9 +3043,28 @@ export const useUIStore = create<UIState>()(
           persisted.echoChamberSizeByChatId = {};
         }
         persisted.echoChamberSizeByChatId = normalizeEchoChamberSizes(persisted.echoChamberSizeByChatId);
+        // v92 -> v93: remember the Echo Chamber corner independently for each chat.
+        if (version <= 92) {
+          persisted.echoChamberSideByChatId = {};
+        }
+        persisted.echoChamberSideByChatId = normalizeEchoChamberSides(persisted.echoChamberSideByChatId);
         // v87 -> v88: enable Narrator avatar cycling by default for older stores.
         if (version <= 87 && persisted.roleplayNarratorAvatarCycling === undefined) {
           persisted.roleplayNarratorAvatarCycling = true;
+        }
+        // v88 -> v89: add the manual ambient-effects preference. The system
+        // reduced-motion preference is evaluated live and is not persisted.
+        if (version <= 88 && persisted.reduceAmbientEffects === undefined) {
+          persisted.reduceAmbientEffects = false;
+        }
+        // v89 -> v90: give Noodle timeline images their own provider-compatible canvas.
+        if (version <= 89) {
+          if (persisted.imageNoodleWidth === undefined) persisted.imageNoodleWidth = 1024;
+          if (persisted.imageNoodleHeight === undefined) persisted.imageNoodleHeight = 1536;
+        }
+        // v90 -> v91: make the Home navigation assistant an explicit, default-on preference.
+        if (version <= 90 && persisted.professorMariNavigationEnabled === undefined) {
+          persisted.professorMariNavigationEnabled = true;
         }
         // v84 -> v85: keep the historical blank-line behavior for /continue by default.
         if (version <= 84 && persisted.continueAddsNewline === undefined) {
@@ -3008,7 +3072,9 @@ export const useUIStore = create<UIState>()(
         }
         persisted.appAccentRgbMode = persisted.appAccentRgbMode === true;
         persisted.customCursorEnabled = persisted.customCursorEnabled !== false;
+        persisted.reduceAmbientEffects = persisted.reduceAmbientEffects === true;
         persisted.professorMariSuggestionsEnabled = persisted.professorMariSuggestionsEnabled !== false;
+        persisted.professorMariNavigationEnabled = persisted.professorMariNavigationEnabled !== false;
         persisted.includeReasoningInExports = persisted.includeReasoningInExports === true;
         persisted.roleplayReducedPaintEffects = persisted.roleplayReducedPaintEffects === true;
         persisted.roleplayNarratorAvatarCycling = persisted.roleplayNarratorAvatarCycling !== false;
@@ -3079,6 +3145,9 @@ export const useUIStore = create<UIState>()(
         appAccentPulseMode: state.appAccentPulseMode,
         appAccentRgbMode: state.appAccentRgbMode,
         customCursorEnabled: state.customCursorEnabled,
+        reduceAmbientEffects: state.reduceAmbientEffects,
+        mariPanelSortMode: state.mariPanelSortMode,
+        mariEditViewMode: state.mariEditViewMode,
         chatBackground: state.chatBackground,
         defaultRoleplayBackground: state.defaultRoleplayBackground,
         chatBackgroundBlur: state.chatBackgroundBlur,
@@ -3101,6 +3170,8 @@ export const useUIStore = create<UIState>()(
         imageBackgroundHeight: state.imageBackgroundHeight,
         imageIllustrationWidth: state.imageIllustrationWidth,
         imageIllustrationHeight: state.imageIllustrationHeight,
+        imageNoodleWidth: state.imageNoodleWidth,
+        imageNoodleHeight: state.imageNoodleHeight,
         imageGameWidth: state.imageGameWidth,
         imageGameHeight: state.imageGameHeight,
         imagePortraitWidth: state.imagePortraitWidth,
@@ -3134,6 +3205,7 @@ export const useUIStore = create<UIState>()(
         ttsLineVolume: state.ttsLineVolume,
         chibiProfessorMariEnabled: state.chibiProfessorMariEnabled,
         professorMariSuggestionsEnabled: state.professorMariSuggestionsEnabled,
+        professorMariNavigationEnabled: state.professorMariNavigationEnabled,
         achievementsEnabled: state.achievementsEnabled,
         musicPlayerEnabled: state.musicPlayerEnabled,
         musicPlayerSource: state.musicPlayerSource,
@@ -3169,14 +3241,17 @@ export const useUIStore = create<UIState>()(
         enterToSendRP: state.enterToSendRP,
         enterToSendConvo: state.enterToSendConvo,
         enterToSendGame: state.enterToSendGame,
+        enterToSendProfessorMari: state.enterToSendProfessorMari,
         weatherEffects: state.weatherEffects,
         hasMigratedCustomThemesToServer: state.hasMigratedCustomThemesToServer,
         activeCustomTheme: state.activeCustomTheme,
         customThemes: state.customThemes,
         hasCompletedOnboarding: state.hasCompletedOnboarding,
+        gameTutorialDisabled: state.gameTutorialDisabled,
         linkApiBannerDismissed: state.linkApiBannerDismissed,
         echoChamberOpen: state.echoChamberOpen,
         echoChamberSide: state.echoChamberSide,
+        echoChamberSideByChatId: state.echoChamberSideByChatId,
         echoChamberSizeByChatId: state.echoChamberSizeByChatId,
         userStatusManual: state.userStatusManual,
         userStatus: state.userStatus,

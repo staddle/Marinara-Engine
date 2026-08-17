@@ -3,6 +3,7 @@ import { Bell, BellRing, Loader2, Play, Trash2, Upload, Volume2 } from "lucide-r
 import { useTranslation, useTranslation as useUiTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { useUIStore } from "../../../stores/ui.store";
+import { ANDROID_BRIDGE_READY_EVENT } from "../../../lib/android-bridge";
 import {
   getLocalNotificationPermission,
   getNativeNotificationPermission,
@@ -122,7 +123,7 @@ export function ConversationSoundSetting() {
   const generationMobileNotifications = useUIStore((s) => s.generationMobileNotifications);
   const setGenerationMobileNotifications = useUIStore((s) => s.setGenerationMobileNotifications);
   const [browserPermission, setBrowserPermission] = useState<LocalNotificationPermission>("default");
-  const nativeNotificationsAvailable = hasNativeNotificationBridge();
+  const [nativeNotificationsAvailable, setNativeNotificationsAvailable] = useState(hasNativeNotificationBridge);
   const [nativePermission, setNativePermission] = useState<NativeNotificationPermission>(() =>
     getNativeNotificationPermission(),
   );
@@ -143,6 +144,16 @@ export function ConversationSoundSetting() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  useEffect(() => {
+    const refreshBridge = () => {
+      setNativeNotificationsAvailable(hasNativeNotificationBridge());
+      setNativePermission(getNativeNotificationPermission());
+    };
+    window.addEventListener(ANDROID_BRIDGE_READY_EVENT, refreshBridge);
+    refreshBridge();
+    return () => window.removeEventListener(ANDROID_BRIDGE_READY_EVENT, refreshBridge);
   }, []);
 
   useEffect(() => {

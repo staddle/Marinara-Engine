@@ -1,7 +1,20 @@
 // ──────────────────────────────────────────────
 // Storage: Chats
 // ──────────────────────────────────────────────
-import { eq, desc, and, gt, inArray, isNull, isNotNull } from "../../db/file-query.js";
+import {
+  eq,
+  ne,
+  desc,
+  and,
+  gt,
+  lt,
+  or,
+  inArray,
+  isNull,
+  isNotNull,
+  jsonFlagsNotTrue,
+  stringIsNonBlank,
+} from "../../db/file-query.js";
 import type { DB } from "../../db/connection.js";
 import {
   chats,
@@ -77,6 +90,13 @@ async function withPatchQueue<T>(
 
 export async function withChatMetadataPatchQueue<T>(chatId: string, operation: () => Promise<T>): Promise<T> {
   return withPatchQueue(metadataPatchQueues, chatId, operation);
+}
+
+export async function withMessageExtraPatchQueue<T>(
+  messageId: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  return withPatchQueue(messageExtraPatchQueues, messageId, operation);
 }
 
 function parseMetadata(raw: unknown): MetadataPatch {
@@ -195,6 +215,7 @@ function freshSwipeMessageExtra(value: unknown): Record<string, unknown> {
     "hiddenFromAICharacterIds",
     "hiddenFromUser",
     "isConversationStart",
+    "conversationStartForCharacterIds",
     "reactions",
     "personaSnapshot",
   ]) {
@@ -210,16 +231,30 @@ function isUsableTimestamp(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0 && !Number.isNaN(Date.parse(value));
 }
 
-function parseMessageCursor(before?: string): { createdAt: string; rowid: number } | null {
+export function parseMessageCursor(before?: string): { createdAt: string; id: string } | null {
   if (!before) return null;
   const separatorIndex = before.indexOf("|");
   if (separatorIndex <= 0 || separatorIndex === before.length - 1) return null;
-  const rowid = Number(before.slice(separatorIndex + 1));
-  if (!Number.isSafeInteger(rowid) || rowid < 1) return null;
+  const createdAt = before.slice(0, separatorIndex);
+  if (!isUsableTimestamp(createdAt)) return null;
+  let id: string;
+  try {
+    id = decodeURIComponent(before.slice(separatorIndex + 1));
+  } catch {
+    return null;
+  }
+  if (!id.trim() || id.length > 512) return null;
   return {
-    createdAt: before.slice(0, separatorIndex),
-    rowid,
+    createdAt,
+    id,
   };
+}
+
+export class InvalidMessageCursorError extends Error {
+  constructor() {
+    super("Invalid message cursor");
+    this.name = "InvalidMessageCursorError";
+  }
 }
 
 async function invalidateMemoryChunksFrom(db: DB, chatId: string, createdAt: string) {
@@ -458,10 +493,86 @@ export function createChatsStorage(db: DB) {
     if (!hasSharedLocalFile && existsSync(galleryDir)) rmSync(galleryDir, { recursive: true, force: true });
   }
 
+  async function removeChatDatabaseRecords(database: DB, chatId: string): Promise<string[]> {
+    await database.delete(agentRuns).where(eq(agentRuns.chatId, chatId));
+    await database.delete(agentMemory).where(eq(agentMemory.chatId, chatId));
+    await database.delete(gameCheckpoints).where(eq(gameCheckpoints.chatId, chatId));
+    await database.delete(gameStateSnapshots).where(eq(gameStateSnapshots.chatId, chatId));
+    await database.delete(spatialContextSnapshots).where(eq(spatialContextSnapshots.chatId, chatId));
+    await database.delete(gameEngineState).where(eq(gameEngineState.chatId, chatId));
+    await database.delete(conversationCallMessages).where(eq(conversationCallMessages.chatId, chatId));
+    await database.delete(conversationCallSessions).where(eq(conversationCallSessions.chatId, chatId));
+    const storyboards = await database
+      .select({ id: gameTurnStoryboards.id })
+      .from(gameTurnStoryboards)
+      .where(eq(gameTurnStoryboards.chatId, chatId));
+    for (const storyboard of storyboards) {
+      await database
+        .delete(gameTurnStoryboardKeyframes)
+        .where(eq(gameTurnStoryboardKeyframes.storyboardId, storyboard.id));
+    }
+    await database.delete(gameTurnStoryboards).where(eq(gameTurnStoryboards.chatId, chatId));
+    await database.delete(gameSceneVideos).where(eq(gameSceneVideos.chatId, chatId));
+    const galleryFiles = await database
+      .select({ filePath: chatImages.filePath })
+      .from(chatImages)
+      .where(eq(chatImages.chatId, chatId));
+    await database.delete(chatImages).where(eq(chatImages.chatId, chatId));
+    await database.delete(chats).where(eq(chats.id, chatId));
+    return galleryFiles.map((image) => image.filePath);
+  }
+
+  async function cleanupDeletedChatFiles(chatId: string, galleryFilePaths: string[]): Promise<void> {
+    for (const filePath of galleryFilePaths) {
+      try {
+        await unlinkGalleryFileIfUnreferenced({ db, filePath });
+      } catch (error) {
+        logger.warn(error, "Failed to remove gallery file after deleting chat %s", chatId);
+      }
+    }
+
+    const localPathPrefix = `${chatId}/`;
+    const hasSharedLocalFile = (
+      await Promise.all(
+        galleryFilePaths
+          .filter((filePath) => filePath.replace(/\\/g, "/").startsWith(localPathPrefix))
+          .map(async (filePath) => {
+            try {
+              return await galleryFileHasReferences(db, filePath);
+            } catch (error) {
+              logger.warn(error, "Failed to check gallery references after deleting chat %s", chatId);
+              return true;
+            }
+          }),
+      )
+    ).some(Boolean);
+    const directories = [
+      ...(hasSharedLocalFile ? [] : [join(GALLERY_DIR, chatId)]),
+      join(GAME_SCENE_VIDEOS_DIR, chatId),
+    ];
+    for (const directory of directories) {
+      if (!existsSync(directory)) continue;
+      try {
+        rmSync(directory, { recursive: true, force: true });
+      } catch (error) {
+        logger.warn(error, "Failed to remove files after deleting chat %s", chatId);
+      }
+    }
+  }
+
   return {
     async list() {
       await ensureChatLastMessageAtBackfilled();
       return db.select().from(chats).orderBy(desc(chats.updatedAt));
+    },
+
+    async listRecent(limit: number, offset = 0) {
+      return db
+        .select()
+        .from(chats)
+        .orderBy(desc(chats.updatedAt), desc(chats.id))
+        .offset(Math.max(0, Math.floor(offset)))
+        .limit(Math.max(1, Math.min(100, Math.floor(limit))));
     },
 
     async getById(id: string) {
@@ -757,31 +868,29 @@ export function createChatsStorage(db: DB) {
     },
 
     async remove(id: string) {
-      // Clean up agent data referencing this chat
-      await db.delete(agentRuns).where(eq(agentRuns.chatId, id));
-      await db.delete(agentMemory).where(eq(agentMemory.chatId, id));
-      await db.delete(gameCheckpoints).where(eq(gameCheckpoints.chatId, id));
-      await db.delete(gameStateSnapshots).where(eq(gameStateSnapshots.chatId, id));
-      await db.delete(spatialContextSnapshots).where(eq(spatialContextSnapshots.chatId, id));
-      await db.delete(gameEngineState).where(eq(gameEngineState.chatId, id));
-      await db.delete(conversationCallMessages).where(eq(conversationCallMessages.chatId, id));
-      await db.delete(conversationCallSessions).where(eq(conversationCallSessions.chatId, id));
-      const storyboards = await db
-        .select({ id: gameTurnStoryboards.id })
-        .from(gameTurnStoryboards)
-        .where(eq(gameTurnStoryboards.chatId, id));
-      for (const storyboard of storyboards) {
-        await db.delete(gameTurnStoryboardKeyframes).where(eq(gameTurnStoryboardKeyframes.storyboardId, storyboard.id));
-      }
-      await db.delete(gameTurnStoryboards).where(eq(gameTurnStoryboards.chatId, id));
-      await db.delete(gameSceneVideos).where(eq(gameSceneVideos.chatId, id));
+      const galleryFilePaths = await db.transaction((tx) => removeChatDatabaseRecords(tx, id));
+      await cleanupDeletedChatFiles(id, galleryFilePaths);
+    },
 
-      // Clean up gallery images (DB records + files on disk)
-      await cleanupChatGallery(id);
-      const videoDir = join(GAME_SCENE_VIDEOS_DIR, id);
-      if (existsSync(videoDir)) rmSync(videoDir, { recursive: true, force: true });
-
-      await db.delete(chats).where(eq(chats.id, id));
+    /** Atomically remove a marked Roleplay DM thread only while it is still empty. */
+    async removeEmptyRoleplayDmChat(id: string): Promise<boolean> {
+      const galleryFilePaths = await db.transaction(async (tx) => {
+        const rows = await tx.select().from(chats).where(eq(chats.id, id)).limit(1);
+        const chat = rows[0];
+        if (!chat) return null;
+        const metadata = parseMetadata(chat.metadata);
+        if (metadata.roleplayDmThread !== true && typeof metadata.dmOriginChatId !== "string") return null;
+        const existingMessages = await tx
+          .select({ id: messages.id })
+          .from(messages)
+          .where(eq(messages.chatId, id))
+          .limit(1);
+        if (existingMessages.length > 0) return null;
+        return removeChatDatabaseRecords(tx, id);
+      });
+      if (!galleryFilePaths) return false;
+      await cleanupDeletedChatFiles(id, galleryFilePaths);
+      return true;
     },
 
     /** Delete all chats in a group (all branches). */
@@ -842,8 +951,7 @@ export function createChatsStorage(db: DB) {
     },
 
     async countMessages(chatId: string): Promise<number> {
-      const rows = await db.select({ id: messages.id }).from(messages).where(eq(messages.chatId, chatId));
-      return rows.length;
+      return db.count(messages, eq(messages.chatId, chatId));
     },
 
     async hasGameDeletePayload(chatId: string): Promise<boolean> {
@@ -867,25 +975,60 @@ export function createChatsStorage(db: DB) {
     /** Paginated: returns the latest `limit` messages (optionally before a cursor). */
     async listMessagesPaginated(chatId: string, limit: number, before?: string) {
       const cursor = parseMessageCursor(before);
-      const allRows = await db
+      if (before && !cursor) throw new InvalidMessageCursorError();
+      return db.transaction(async (tx) => {
+        const chatCondition = eq(messages.chatId, chatId);
+        const cursorBoundary = cursor
+          ? or(
+              lt(messages.createdAt, cursor.createdAt),
+              and(eq(messages.createdAt, cursor.createdAt), lt(messages.id, cursor.id)),
+            )
+          : undefined;
+        if (
+          cursor &&
+          tx.count(
+            messages,
+            and(chatCondition, eq(messages.createdAt, cursor.createdAt), eq(messages.id, cursor.id)),
+          ) !== 1
+        ) {
+          throw new InvalidMessageCursorError();
+        }
+        const pageCondition = cursorBoundary ? and(chatCondition, cursorBoundary) : chatCondition;
+        const upperRowid = cursorBoundary ? tx.count(messages, pageCondition) : tx.count(messages, chatCondition);
+        const rowsDescending = await tx
+          .select()
+          .from(messages)
+          .where(pageCondition)
+          .orderBy(desc(messages.createdAt), desc(messages.id))
+          .limit(Math.max(1, Math.floor(limit)));
+        const reversed = rowsDescending.reverse().map((message, index) => ({
+          ...message,
+          rowid: upperRowid - rowsDescending.length + index + 1,
+        }));
+        const countMap = await countSwipesByMessageId(
+          tx,
+          reversed.map((m) => m.id),
+        );
+        return reversed.map((m) => ({ ...m, swipeCount: countMap.get(m.id) ?? 0 }));
+      });
+    },
+
+    /** Bounded message snapshots for surfaces that do not need cursors or swipe metadata. */
+    async listMessagePreviews(chatId: string, limit: number) {
+      const rows = await db
         .select()
         .from(messages)
-        .where(eq(messages.chatId, chatId))
-        .orderBy(messages.createdAt, messages.id);
-      let candidates = allRows.map((m, index) => ({ ...m, rowid: index + 1 }));
-      if (cursor) {
-        candidates = candidates.filter(
-          (m) => m.createdAt < cursor.createdAt || (m.createdAt === cursor.createdAt && m.rowid < cursor.rowid),
-        );
-      } else if (before) {
-        candidates = candidates.filter((m) => m.createdAt < before);
-      }
-      const reversed = candidates.slice(-limit);
-      const countMap = await countSwipesByMessageId(
-        db,
-        reversed.map((m) => m.id),
-      );
-      return reversed.map((m) => ({ ...m, swipeCount: countMap.get(m.id) ?? 0 }));
+        .where(
+          and(
+            eq(messages.chatId, chatId),
+            ne(messages.role, "system"),
+            stringIsNonBlank(messages.content),
+            jsonFlagsNotTrue(messages.extra, ["hiddenFromUser", "commandOnly"]),
+          ),
+        )
+        .orderBy(desc(messages.createdAt), desc(messages.id))
+        .limit(Math.max(1, Math.floor(limit)));
+      return rows.reverse();
     },
 
     async getMessage(id: string) {
@@ -1040,7 +1183,25 @@ export function createChatsStorage(db: DB) {
     async updateMessageContent(id: string, content: string) {
       return withPatchQueue(messageExtraPatchQueues, id, async () => {
         const existing = await this.getMessage(id);
-        await db.update(messages).set({ content }).where(eq(messages.id, id));
+
+        // Conversation-mode prompt history prefers `conversationCommandContent` (the raw
+        // reply before command stripping) over `content`, so a rewrite of the visible text
+        // must also drop the stale raw copy or the edit never reaches the model. Command-only
+        // anchors keep theirs: their `content` is empty by design and the raw copy is the
+        // message's only text. Written directly rather than via updateMessageExtra, which
+        // shares this queue key and would deadlock.
+        const existingExtra = parseExtraRecord(existing?.extra);
+        const clearCommandContent =
+          typeof existingExtra.conversationCommandContent === "string" &&
+          existingExtra.conversationCommandContent.trim() !== "" &&
+          existingExtra.commandOnly !== true &&
+          content !== (existing?.content ?? "");
+
+        const messagePatch: Record<string, unknown> = { content };
+        if (clearCommandContent) {
+          messagePatch.extra = JSON.stringify({ ...existingExtra, conversationCommandContent: null });
+        }
+        await db.update(messages).set(messagePatch).where(eq(messages.id, id));
         if (existing) {
           await invalidateMemoryChunksFrom(db, existing.chatId, existing.createdAt);
         }
@@ -1050,7 +1211,20 @@ export function createChatsStorage(db: DB) {
           const swipes = await this.getSwipes(id);
           const activeSwipe = swipes.find((s: any) => s.index === msg.activeSwipeIndex);
           if (activeSwipe) {
-            await db.update(messageSwipes).set({ content }).where(eq(messageSwipes.id, activeSwipe.id));
+            const swipePatch: Record<string, unknown> = { content };
+            if (clearCommandContent) {
+              const swipeExtra = parseExtraRecord(activeSwipe.extra);
+              // Clear only a raw copy this swipe itself carries, and never a
+              // command-only carrier's.
+              if (
+                typeof swipeExtra.conversationCommandContent === "string" &&
+                swipeExtra.conversationCommandContent.trim() !== "" &&
+                swipeExtra.commandOnly !== true
+              ) {
+                swipePatch.extra = JSON.stringify({ ...swipeExtra, conversationCommandContent: null });
+              }
+            }
+            await db.update(messageSwipes).set(swipePatch).where(eq(messageSwipes.id, activeSwipe.id));
           }
         }
         return msg;
@@ -1107,6 +1281,31 @@ export function createChatsStorage(db: DB) {
         }
 
         return this.getMessage(id);
+      });
+    },
+
+    /** Atomically claim a marker in one swipe's extra data. */
+    async claimMessageExtraForSwipe(id: string, swipeIndex: number, key: string, value: unknown) {
+      return withMessageExtraPatchQueue(id, async () => {
+        const msg = await this.getMessage(id);
+        if (!msg) return false;
+        const swipes = await this.getSwipes(id);
+        const targetSwipe = swipes.find((swipe: any) => swipe.index === swipeIndex);
+        if (!targetSwipe) return false;
+        const swipeExtra = parseExtraRecord(targetSwipe.extra);
+        if (swipeExtra[key] && typeof swipeExtra[key] === "object") return false;
+        await db
+          .update(messageSwipes)
+          .set({ extra: JSON.stringify({ ...swipeExtra, [key]: value }) })
+          .where(eq(messageSwipes.id, targetSwipe.id));
+        if (msg.activeSwipeIndex === swipeIndex) {
+          const messageExtra = parseExtraRecord(msg.extra);
+          await db
+            .update(messages)
+            .set({ extra: JSON.stringify({ ...messageExtra, [key]: value }) })
+            .where(eq(messages.id, id));
+        }
+        return true;
       });
     },
 
@@ -1286,12 +1485,13 @@ export function createChatsStorage(db: DB) {
       return withPatchQueue(messageExtraPatchQueues, messageId, async () => {
         const existing = await this.getSwipes(messageId);
         const nextIndex = existing.length;
+        const msg = await this.getMessage(messageId);
+        const retainedExtra = msg ? freshSwipeMessageExtra(msg.extra) : {};
 
         // Backfill: save current message extra onto the currently-active swipe
         // so its thinking/generationInfo isn't lost when we switch away
         // (skip when silent — greeting swipes don't need backfill)
-        const msg = silent ? null : await this.getMessage(messageId);
-        if (msg) {
+        if (!silent && msg) {
           const msgExtra = parseExtraRecord(msg.extra);
           const activeSwipe = existing.find((s: any) => s.index === msg.activeSwipeIndex);
           if (activeSwipe) {
@@ -1308,17 +1508,16 @@ export function createChatsStorage(db: DB) {
           messageId,
           index: nextIndex,
           content,
-          extra: JSON.stringify({}),
+          extra: JSON.stringify(retainedExtra),
           createdAt: now(),
         });
 
         // When silent, only insert the swipe row without switching the active index.
         if (!silent) {
           // Set active swipe to the new one and reset message extra for the fresh swipe.
-          const clearedExtra = msg ? freshSwipeMessageExtra(msg.extra) : {};
           await db
             .update(messages)
-            .set({ activeSwipeIndex: nextIndex, content, extra: JSON.stringify(clearedExtra) })
+            .set({ activeSwipeIndex: nextIndex, content, extra: JSON.stringify(retainedExtra) })
             .where(eq(messages.id, messageId));
           if (msg) {
             await invalidateMemoryChunksFrom(db, msg.chatId, msg.createdAt);

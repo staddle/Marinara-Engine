@@ -323,6 +323,10 @@ export interface ChatMetadata {
   gameImageDynamicPromptEnabled?: boolean;
   /** Per-chat source overrides for knowledge agents. */
   knowledgeAgentSources?: Partial<Record<"knowledge-retrieval" | "knowledge-router", KnowledgeAgentSourceSettings>>;
+  /** Per-chat image settings overrides for custom image agents, keyed by agent type. */
+  customAgentImageSettings?: Partial<
+    Record<string, { imageConnectionId?: string | null; styleProfileId?: string | null }>
+  >;
   /** Narrative Director mode used when Push Story is armed. */
   narrativeDirectorMode?: "natural" | "random";
   /** Whether Narrative Director maintains a hidden Secret Plot arc for this roleplay chat. */
@@ -760,6 +764,8 @@ export interface MessageExtra {
   reactions?: MessageReaction[] | null;
   /** When true, this message marks the "new start" of the conversation — all earlier messages are excluded from context */
   isConversationStart?: boolean;
+  /** Character IDs whose individual Roleplay context begins at this message. */
+  conversationStartForCharacterIds?: string[];
   /** Model's reasoning/thinking content (if available) */
   thinking?: string | null;
   /** Original assistant message before a post-processing rewrite, retained for version comparison. */
@@ -841,6 +847,8 @@ export interface GenerationInfo {
   temperature: number | null;
   tokensPrompt: number | null;
   tokensCompletion: number | null;
+  /** Provider-reported hidden reasoning-token usage, when available. */
+  tokensReasoning?: number | null;
   tokensCachedPrompt?: number | null;
   tokensCacheWritePrompt?: number | null;
   durationMs: number | null;

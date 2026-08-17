@@ -27,6 +27,7 @@ import {
   RotateCcw,
   FolderOpen,
   FileUp,
+  Download,
   CheckCircle2,
   ChevronDown,
 } from "lucide-react";
@@ -44,11 +45,11 @@ import {
   type SpatialMapGroundingMode,
   type SpatialMapDraftSize,
   type GameCombatStyle,
+  type Persona,
+  type AvatarCrop,
 } from "@marinara-engine/shared";
 import { getCharacterTitle } from "../../lib/character-display";
 import { api } from "../../lib/api-client";
-import type { AvatarCrop } from "@marinara-engine/shared";
-import { normalizeAvatarCrop } from "@marinara-engine/shared";
 import { cn, getAvatarCropStyle } from "../../lib/utils";
 import {
   GenerationParametersFields,
@@ -78,7 +79,12 @@ import { useLorebooks } from "../../hooks/use-lorebooks";
 import { useCapabilityAgentRegistry } from "../../hooks/use-capability-packages";
 import { useGameAssetStore } from "../../stores/game-asset.store";
 import { useUIStore } from "../../stores/ui.store";
-import { parseGameSetupShareFileJson, resolveGameSetupImport } from "../../lib/game-setup-share";
+import {
+  buildGameSetupShareFile,
+  parseGameSetupShareFileJson,
+  resolveGameSetupImport,
+} from "../../lib/game-setup-share";
+import { downloadJsonFile, sanitizeExportFilenamePart } from "../../lib/download-json";
 import { useTranslation as useUiTranslation } from "react-i18next";
 import { CapabilityElement } from "../capabilities/CapabilityElement";
 
@@ -116,6 +122,7 @@ interface GameSetupWizardProps {
       | {
           mode: "ai";
           size: SpatialMapDraftSize;
+          targetLocationCount: number;
           groundingMode: SpatialMapGroundingMode;
           sourceLorebookIds: string[];
           instructions?: string;
@@ -135,16 +142,13 @@ interface GameSetupWizardProps {
   initialPartyCharacterIds?: string[];
 }
 
-interface PersonaDisplayInfo {
-  name: string;
-  comment?: string | null;
-}
-
 interface WizardConnection {
   id: string;
   name: string;
   model?: string;
   provider?: string;
+  imageService?: string | null;
+  videoService?: string | null;
   defaultParameters?: string | null;
   isDefault?: boolean | string;
 }
@@ -180,8 +184,8 @@ function CharacterAvatar({
   );
 }
 
-function getPersonaTitle(persona: PersonaDisplayInfo): string | null {
-  const title = persona.comment?.trim();
+function getPersonaTitle(persona: Persona): string | null {
+  const title = persona.comment.trim();
   return title ? title : null;
 }
 
@@ -214,13 +218,27 @@ const PREFERENCE_SUGGESTIONS = [
 
 const SPATIAL_MAP_DRAFT_SIZE_OPTIONS: Array<{
   value: SpatialMapDraftSize;
+  targetLocationCount: number;
   label: string;
   detail: string;
 }> = [
-  { value: "small", label: "Small", detail: "About 8 places" },
-  { value: "medium", label: "Medium", detail: "About 16 places" },
-  { value: "large", label: "Large", detail: "About 28 places" },
+  { value: "small", targetLocationCount: 8, label: "Small", detail: "About 8 places" },
+  { value: "medium", targetLocationCount: 16, label: "Medium", detail: "About 16 places" },
+  { value: "large", targetLocationCount: 28, label: "Large", detail: "About 28 places" },
 ];
+const SPATIAL_CUSTOM_TARGET_LOCATION_LIMIT = 40;
+
+function spatialMapDraftSizeForTargetLocationCount(targetLocationCount: number): SpatialMapDraftSize {
+  if (targetLocationCount <= 8) return "small";
+  if (targetLocationCount <= 16) return "medium";
+  return "large";
+}
+
+function normalizeSpatialMapTargetLocationCount(value: string): number | null {
+  const parsed = Number(value);
+  if (!value.trim() || !Number.isInteger(parsed) || !Number.isFinite(parsed)) return null;
+  return Math.max(1, Math.min(SPATIAL_CUSTOM_TARGET_LOCATION_LIMIT, parsed));
+}
 
 const GAME_SETUP_FIELD_LABEL = "mb-1.5 block text-xs font-medium text-[var(--foreground)]";
 const GAME_SETUP_INPUT_CLASS =
@@ -476,6 +494,7 @@ export function GameSetupWizard({
   const [rating, setRating] = useState<"sfw" | "nsfw">("sfw");
   const [useLocalScene, setUseLocalScene] = useState(true);
   const [enableSpriteGeneration, setEnableSpriteGeneration] = useState(false);
+  const [gameImageDynamicPromptEnabled, setGameImageDynamicPromptEnabled] = useState(false);
   const [enableAgents, setEnableAgents] = useState(false);
   const [enableSpotifyDj, setEnableSpotifyDj] = useState(false);
   const [gameSpotifySourceType, setGameSpotifySourceType] = useState<GameSpotifySourceType>("liked");
@@ -509,6 +528,8 @@ export function GameSetupWizard({
   const [spatialTemplatePickerOpen, setSpatialTemplatePickerOpen] = useState(false);
   const [spatialTemplateSelection, setSpatialTemplateSelection] = useState<CapabilitySetupSelection | null>(null);
   const [spatialMapDraftSize, setSpatialMapDraftSize] = useState<SpatialMapDraftSize>("medium");
+  const [spatialMapTargetLocationCount, setSpatialMapTargetLocationCount] = useState(16);
+  const [spatialMapTargetLocationCountInput, setSpatialMapTargetLocationCountInput] = useState("16");
   const [spatialMapGroundingMode, setSpatialMapGroundingMode] = useState<SpatialMapGroundingMode>("setup");
   const [spatialMapInstructions, setSpatialMapInstructions] = useState("");
   const [expandedLearnedOptions, setExpandedLearnedOptions] = useState<Record<LearnedOptionGroup, boolean>>({
@@ -639,20 +660,7 @@ export function GameSetupWizard({
         : selectedPromptPreset?.gamePrompt?.trim() || DEFAULT_GAME_SYSTEM_PROMPT,
     [gamePresentation, selectedPromptPreset?.gamePrompt],
   );
-  const personas = useMemo(
-    () =>
-      ((personasList as Array<{
-        id: string;
-        name: string;
-        avatarPath?: string | null;
-        avatarCrop?: AvatarCrop | string | null;
-        comment?: string;
-      }>) ?? []).map((persona) => ({
-        ...persona,
-        avatarCrop: normalizeAvatarCrop(persona.avatarCrop),
-      })),
-    [personasList],
-  );
+  const personas = useMemo(() => personasList ?? [], [personasList]);
   const characterFolders = useMemo(
     () =>
       ((characterGroupsList ?? []) as CharacterGroup[]).map((group) => ({
@@ -883,7 +891,18 @@ export function GameSetupWizard({
     setPromptPresetId(presetId);
   }, []);
 
-  const canStart = !!gmConnectionId;
+  const spatialMapTargetLocationCountValid =
+    normalizeSpatialMapTargetLocationCount(spatialMapTargetLocationCountInput) !== null;
+  const canStart =
+    !!gmConnectionId &&
+    (!enableAgents || !hierarchicalMapsInstalled || !draftSpatialMap || spatialMapTargetLocationCountValid);
+  const canStartMessage = !gmConnectionId
+    ? localizeUi("ui.game.gamesetupwizard.selectAConnectionOnTheFirstStepBeforeStarting")
+    : !spatialMapTargetLocationCountValid && enableAgents && hierarchicalMapsInstalled && draftSpatialMap
+      ? localizeUi("ui.game.gamesetupwizard.chooseAnyWholeNumberFrom1ToValue1Places", {
+          value1: SPATIAL_CUSTOM_TARGET_LOCATION_LIMIT,
+        })
+      : null;
   const normalizedLanguage = normalizeGameLanguage(language);
   const illustratorEnabled = enableAgents && illustratorInstalled && enableSpriteGeneration;
   const musicDjEnabled = enableAgents && musicDjInstalled && enableSpotifyDj;
@@ -1007,6 +1026,7 @@ export function GameSetupWizard({
           Boolean(config.spatialMapInstructions?.trim()),
       );
       setEnableSpriteGeneration(visualGenerationEnabled);
+      setGameImageDynamicPromptEnabled(config.gameImageDynamicPromptEnabled === true);
       setImageConnectionId(config.imageConnectionId ?? null);
       setVideoConnectionId(config.videoConnectionId ?? null);
       setActiveLorebookIds(config.activeLorebookIds ?? []);
@@ -1041,6 +1061,8 @@ export function GameSetupWizard({
       setSpatialTemplateSelection(null);
       setSpatialTemplatePickerOpen(false);
       setSpatialMapDraftSize("medium");
+      setSpatialMapTargetLocationCount(16);
+      setSpatialMapTargetLocationCountInput("16");
       setSpatialMapGroundingMode("setup");
       setSpatialMapInstructions(importedSpatialMapInstructions);
 
@@ -1062,8 +1084,7 @@ export function GameSetupWizard({
     }
   };
 
-  const handleComplete = () => {
-    if (isLoading || !canStart) return;
+  const buildSetupConfig = (): GameSetupConfig => {
     const trimmedGameSystemPrompt = gameSystemPromptDraft.trim();
     const customGameSystemPrompt =
       customGamePromptEnabled &&
@@ -1072,6 +1093,115 @@ export function GameSetupWizard({
         ? trimmedGameSystemPrompt
         : null;
     const trimmedGameSpecialInstructions = gameSpecialInstructions.trim();
+
+    return {
+      genre: genres.join(", ") || "Fantasy",
+      setting: setting || `A ${(genres[0] ?? "fantasy").toLowerCase()} world`,
+      tone: tones.join(", ") || "Heroic",
+      difficulty,
+      combatStyle,
+      spatialMapInstructions:
+        enableAgents && hierarchicalMapsInstalled && draftSpatialMap
+          ? spatialMapInstructions.trim() || undefined
+          : undefined,
+      gameWorldMapMode:
+        enableAgents && hierarchicalMapsInstalled && (draftSpatialMap || manualSpatialMap || templateSpatialMap)
+          ? "hierarchical"
+          : "standard",
+      rating,
+      gmMode,
+      gmCharacterId: gmMode === "character" && gmCharacterId ? gmCharacterId : undefined,
+      partyCharacterIds,
+      playerGoals: playerGoals || "Have an adventure",
+      personaId: personaId ?? undefined,
+      sceneConnectionId: sceneModelValue && sceneModelValue !== "local" ? sceneModelValue : undefined,
+      enableAgents: enableAgents || undefined,
+      enableSpriteGeneration: illustratorEnabled,
+      gameImageDynamicPromptEnabled: illustratorEnabled && gameImageDynamicPromptEnabled,
+      imageConnectionId: illustratorEnabled && imageConnectionId ? imageConnectionId : undefined,
+      videoConnectionId: illustratorEnabled && videoConnectionId ? videoConnectionId : undefined,
+      ...(importedArtStyleSettingsRef.current ?? {}),
+      activeLorebookIds: activeLorebookIds.length > 0 ? activeLorebookIds : undefined,
+      enableCustomWidgets,
+      customHudWidgets:
+        enableCustomWidgets && manualWidgetSetupEnabled ? normalizeGameHudWidgets(customHudWidgets) : undefined,
+      enableSpotifyDj: musicDjEnabled || undefined,
+      spotifySourceType: musicDjEnabled ? gameSpotifySourceType : undefined,
+      spotifyPlaylistId:
+        musicDjEnabled && gameSpotifySourceType === "playlist" ? gameSpotifyPlaylistId.trim() || undefined : undefined,
+      spotifyPlaylistName:
+        musicDjEnabled && gameSpotifySourceType === "playlist" ? gameSpotifyPlaylistName.trim() || undefined : undefined,
+      spotifyArtist:
+        musicDjEnabled && gameSpotifySourceType === "artist" ? gameSpotifyArtist.trim() || undefined : undefined,
+      enableLorebookKeeper: lorebookKeeperEnabled || undefined,
+      language: normalizedLanguage || undefined,
+      generationParameters: customizeParameters
+        ? { ...(importedGenerationParametersRef.current ?? {}), ...generationParameters }
+        : undefined,
+      promptPresetId,
+      gameGmPromptTemplateId: gamePresentation === "anime" ? ANIME_GAME_PROMPT_TEMPLATE_ID : null,
+      gameSystemPrompt: customGameSystemPrompt,
+      gameSpecialInstructions: trimmedGameSpecialInstructions || null,
+    };
+  };
+
+  const buildSetupShareLabels = (): GameInitialSetupLabels => ({
+    characterNames: Object.fromEntries(
+      characters
+        .filter((character) =>
+          [...partyCharacterIds, ...(gmCharacterId ? [gmCharacterId] : [])].includes(character.id),
+        )
+        .map((character) => [character.id, character.name]),
+    ),
+    lorebookNames: Object.fromEntries(
+      lorebooks
+        .filter((lorebook) => activeLorebookIds.includes(lorebook.id))
+        .map((lorebook) => [lorebook.id, lorebook.name]),
+    ),
+    promptPresetNames: selectedPromptPreset ? { [selectedPromptPreset.id]: selectedPromptPreset.name } : undefined,
+    personaName: personas.find((persona) => persona.id === personaId)?.name ?? null,
+  });
+
+  const snapshotConnection = (id: string | null | undefined, service: "image" | "video" | null = null) => {
+    if (!id) return null;
+    const connection = connections.find((candidate) => candidate.id === id);
+    if (!connection) return null;
+    return {
+      name: connection.name,
+      provider: connection.provider ?? null,
+      model: connection.model ?? null,
+      service: service === "image" ? connection.imageService : service === "video" ? connection.videoService : null,
+    };
+  };
+
+  const handleExportSetup = () => {
+    const config = buildSetupConfig();
+    const exportName = gameName.trim() || "game";
+    downloadJsonFile(
+      buildGameSetupShareFile({
+        gameName: exportName,
+        config,
+        effectiveGenerationParameters: config.generationParameters,
+        preferences,
+        fallbackGmConnectionId: gmConnectionId,
+        labels: buildSetupShareLabels(),
+        connections: {
+          gm: snapshotConnection(gmConnectionId),
+          scene:
+            sceneModelValue === "local"
+              ? { name: "Local scene helper", provider: "local" }
+              : snapshotConnection(sceneModelValue),
+          image: snapshotConnection(config.imageConnectionId, "image"),
+          video: snapshotConnection(config.videoConnectionId, "video"),
+        },
+      }),
+      `${sanitizeExportFilenamePart(exportName, "game")}.marinara-game-setup.json`,
+    );
+    toast.success(localizeUi("ui.game.gamesetupsummary.reusableGameModeSetupDownloaded"));
+  };
+
+  const handleComplete = () => {
+    if (isLoading || !canStart) return;
     if (startMuted) {
       useGameAssetStore.getState().setAudioMuted(true);
     }
@@ -1093,85 +1223,18 @@ export function GameSetupWizard({
       },
     );
     onComplete(
-      {
-        genre: genres.join(", ") || "Fantasy",
-        setting: setting || `A ${(genres[0] ?? "fantasy").toLowerCase()} world`,
-        tone: tones.join(", ") || "Heroic",
-        difficulty,
-        combatStyle,
-        spatialMapInstructions:
-          enableAgents && hierarchicalMapsInstalled && draftSpatialMap
-            ? spatialMapInstructions.trim() || undefined
-            : undefined,
-        gameWorldMapMode:
-          enableAgents && hierarchicalMapsInstalled && (draftSpatialMap || manualSpatialMap || templateSpatialMap)
-            ? "hierarchical"
-            : "standard",
-        rating,
-        gmMode,
-        gmCharacterId: gmMode === "character" && gmCharacterId ? gmCharacterId : undefined,
-        partyCharacterIds,
-        playerGoals: playerGoals || "Have an adventure",
-        personaId: personaId ?? undefined,
-        sceneConnectionId: sceneModelValue && sceneModelValue !== "local" ? sceneModelValue : undefined,
-        enableAgents: enableAgents || undefined,
-        enableSpriteGeneration: illustratorEnabled || undefined,
-        imageConnectionId: illustratorEnabled && imageConnectionId ? imageConnectionId : undefined,
-        videoConnectionId: illustratorEnabled && videoConnectionId ? videoConnectionId : undefined,
-        ...(importedArtStyleSettingsRef.current ?? {}),
-        activeLorebookIds: activeLorebookIds.length > 0 ? activeLorebookIds : undefined,
-        enableCustomWidgets,
-        customHudWidgets:
-          enableCustomWidgets && manualWidgetSetupEnabled ? normalizeGameHudWidgets(customHudWidgets) : undefined,
-        enableSpotifyDj: musicDjEnabled || undefined,
-        spotifySourceType: musicDjEnabled ? gameSpotifySourceType : undefined,
-        spotifyPlaylistId:
-          musicDjEnabled && gameSpotifySourceType === "playlist"
-            ? gameSpotifyPlaylistId.trim() || undefined
-            : undefined,
-        spotifyPlaylistName:
-          musicDjEnabled && gameSpotifySourceType === "playlist"
-            ? gameSpotifyPlaylistName.trim() || undefined
-            : undefined,
-        spotifyArtist:
-          musicDjEnabled && gameSpotifySourceType === "artist" ? gameSpotifyArtist.trim() || undefined : undefined,
-        enableLorebookKeeper: lorebookKeeperEnabled || undefined,
-        language: normalizedLanguage || undefined,
-        generationParameters: customizeParameters
-          ? { ...(importedGenerationParametersRef.current ?? {}), ...generationParameters }
-          : undefined,
-        promptPresetId,
-        gameGmPromptTemplateId: gamePresentation === "anime" ? ANIME_GAME_PROMPT_TEMPLATE_ID : null,
-        gameSystemPrompt: customGameSystemPrompt,
-        gameSpecialInstructions: trimmedGameSpecialInstructions || null,
-      },
+      buildSetupConfig(),
       preferences,
       {
         gmConnectionId: gmConnectionId ?? undefined,
-        shareLabels: {
-          characterNames: Object.fromEntries(
-            characters
-              .filter((character) =>
-                [...partyCharacterIds, ...(gmCharacterId ? [gmCharacterId] : [])].includes(character.id),
-              )
-              .map((character) => [character.id, character.name]),
-          ),
-          lorebookNames: Object.fromEntries(
-            lorebooks
-              .filter((lorebook) => activeLorebookIds.includes(lorebook.id))
-              .map((lorebook) => [lorebook.id, lorebook.name]),
-          ),
-          promptPresetNames: selectedPromptPreset
-            ? { [selectedPromptPreset.id]: selectedPromptPreset.name }
-            : undefined,
-          personaName: personas.find((persona) => persona.id === personaId)?.name ?? null,
-        },
+        shareLabels: buildSetupShareLabels(),
       },
       gameName.trim() || undefined,
       enableAgents && hierarchicalMapsInstalled && draftSpatialMap
         ? {
             mode: "ai" as const,
             size: spatialMapDraftSize,
+            targetLocationCount: spatialMapTargetLocationCount,
             groundingMode: spatialMapGroundingMode,
             sourceLorebookIds: spatialMapGroundingMode === "setup" ? [] : activeLorebookIds,
             instructions: spatialMapInstructions.trim() || undefined,
@@ -2227,6 +2290,38 @@ export function GameSetupWizard({
                         <p className="mt-1 text-[0.55rem] text-amber-700 dark:text-amber-400/80">{localizeUi("ui.game.gamesetupwizard.noImageGenerationConnectionsFoundAddOneInSettings")}</p>
                       )}
                       <p className="mt-1 text-[0.55rem] text-[var(--muted-foreground)]">{localizeUi("ui.game.gamesetupwizard.powersAutomaticPortraitsBackgroundsAndSceneIllustrations")}</p>
+                      <button
+                        type="button"
+                        aria-pressed={gameImageDynamicPromptEnabled}
+                        onClick={() => setGameImageDynamicPromptEnabled((enabled) => !enabled)}
+                        className="mt-3 flex w-full items-center justify-between gap-3 border-t border-[var(--border)] pt-3 text-left"
+                      >
+                        <span className="min-w-0">
+                          <span className="block text-[0.625rem] font-medium text-[var(--foreground)]">
+                            {localizeUi(
+                              "ui.chat.chatsettingsdrawer.dynamicLlmPromptGenerationForGmModeAssets",
+                            )}
+                          </span>
+                          <span className="mt-0.5 block text-[0.55rem] leading-snug text-[var(--muted-foreground)]">
+                            {localizeUi("ui.chat.chatsettingsdrawer.askThePromptModelToRewriteGameNpcPortrait")}
+                          </span>
+                        </span>
+                        <span
+                          className={cn(
+                            "h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors",
+                            gameImageDynamicPromptEnabled
+                              ? "bg-[var(--primary)]"
+                              : "bg-[var(--muted-foreground)]/50",
+                          )}
+                        >
+                          <span
+                            className={cn(
+                              "block h-4 w-4 rounded-full bg-white transition-transform",
+                              gameImageDynamicPromptEnabled && "translate-x-3.5",
+                            )}
+                          />
+                        </span>
+                      </button>
                       <div className="mt-3 border-t border-[var(--border)] pt-3">
                         <label className="mb-1 flex items-center gap-1 text-[0.625rem] font-medium text-[var(--muted-foreground)]">
                           <Film size={11} />{localizeUi("ui.game.gamesetupwizard.videoGenerationConnection")}</label>
@@ -2643,11 +2738,15 @@ export function GameSetupWizard({
                         <button
                           key={option.value}
                           type="button"
-                          aria-pressed={spatialMapDraftSize === option.value}
-                          onClick={() => setSpatialMapDraftSize(option.value)}
+                          aria-pressed={spatialMapTargetLocationCount === option.targetLocationCount}
+                          onClick={() => {
+                            setSpatialMapDraftSize(option.value);
+                            setSpatialMapTargetLocationCount(option.targetLocationCount);
+                            setSpatialMapTargetLocationCountInput(String(option.targetLocationCount));
+                          }}
                           className={cn(
                             "min-h-12 rounded-lg px-2 py-2 text-left transition-colors",
-                            spatialMapDraftSize === option.value
+                            spatialMapTargetLocationCount === option.targetLocationCount
                               ? "bg-[var(--primary)]/12 text-[var(--foreground)] ring-1 ring-[var(--primary)]/35"
                               : "bg-[var(--secondary)] text-[var(--muted-foreground)] ring-1 ring-[var(--border)] hover:text-[var(--foreground)]",
                           )}
@@ -2657,6 +2756,58 @@ export function GameSetupWizard({
                         </button>
                       ))}
                     </div>
+                    <label
+                      className="mt-3 block text-[0.625rem] font-medium text-[var(--foreground)]"
+                      htmlFor="game-setup-spatial-map-target-count"
+                    >
+                      {localizeUi("ui.game.gamesetupwizard.customPlaceTarget")}
+                      <input
+                        id="game-setup-spatial-map-target-count"
+                        type="number"
+                        min={1}
+                        max={SPATIAL_CUSTOM_TARGET_LOCATION_LIMIT}
+                        step={1}
+                        value={spatialMapTargetLocationCountInput}
+                        aria-invalid={!spatialMapTargetLocationCountValid}
+                        aria-describedby="game-setup-spatial-map-target-count-help"
+                        onChange={(event) => {
+                          const raw = event.target.value;
+                          setSpatialMapTargetLocationCountInput(raw);
+                          const normalized = normalizeSpatialMapTargetLocationCount(raw);
+                          if (normalized !== null) {
+                            setSpatialMapTargetLocationCount(normalized);
+                            setSpatialMapDraftSize(spatialMapDraftSizeForTargetLocationCount(normalized));
+                          }
+                        }}
+                        onBlur={() => {
+                          const normalized = normalizeSpatialMapTargetLocationCount(spatialMapTargetLocationCountInput);
+                          if (normalized !== null) {
+                            setSpatialMapTargetLocationCount(normalized);
+                            setSpatialMapTargetLocationCountInput(String(normalized));
+                            setSpatialMapDraftSize(spatialMapDraftSizeForTargetLocationCount(normalized));
+                          }
+                        }}
+                        className={cn(
+                          "mt-1 min-h-11 w-full rounded-lg bg-[var(--secondary)] px-3 text-xs text-[var(--foreground)] outline-none ring-1 transition-all",
+                          spatialMapTargetLocationCountValid
+                            ? "ring-[var(--border)] focus:ring-[var(--primary)]/40"
+                            : "ring-[var(--destructive)] focus:ring-[var(--destructive)]",
+                        )}
+                      />
+                      <span
+                        id="game-setup-spatial-map-target-count-help"
+                        className={cn(
+                          "mt-1 block text-[0.5625rem] leading-relaxed",
+                          spatialMapTargetLocationCountValid
+                            ? "text-[var(--muted-foreground)]"
+                            : "text-[var(--destructive)]",
+                        )}
+                      >
+                        {localizeUi("ui.game.gamesetupwizard.chooseAnyWholeNumberFrom1ToValue1Places", {
+                          value1: SPATIAL_CUSTOM_TARGET_LOCATION_LIMIT,
+                        })}
+                      </span>
+                    </label>
                   </fieldset>
 
                   <fieldset>
@@ -2979,8 +3130,8 @@ export function GameSetupWizard({
                 ))}
               </div>
 
-              {step === steps.length - 1 && !canStart && (
-                <p className="mb-3 text-center text-[0.6875rem] text-[var(--destructive)]">{localizeUi("ui.game.gamesetupwizard.selectAConnectionOnTheFirstStepBeforeStarting")}</p>
+              {step === steps.length - 1 && canStartMessage && (
+                <p className="mb-3 text-center text-[0.6875rem] text-[var(--destructive)]">{canStartMessage}</p>
               )}
 
               <div className="flex items-center justify-between">
@@ -3003,27 +3154,38 @@ export function GameSetupWizard({
                   >{localizeUi("onboarding.actions.next")}<ArrowRight size={14} />
                   </button>
                 ) : (
-                  <button
-                    type="button"
-                    onClick={handleComplete}
-                    disabled={isLoading || !canStart}
-                    className={GAME_SETUP_PRIMARY_BUTTON_CLASS}
-                    title={!canStart ?localizeUi("ui.game.gamesetupwizard.selectAConnectionOnTheFirstStep") : undefined}
-                  >
-                    {isLoading ? (
-                      <>
-                        <Loader2 size={14} className="animate-spin" />
-                        {isDraftingMap
-                          ?localizeUi("ui.game.gamesetupwizard.draftingMap")
-                          : isLinkingSharedWorld
-                            ? localizeUi("ui.game.gamesetupwizard.linkingWorld")
-                            : localizeUi("ui.game.gamesetupwizard.generatingWorld")}
-                      </>
-                    ) : (
-                      <>
-                        <Wand2 size={14} />{localizeUi("ui.game.gamesurfacecomponent.startGame")}</>
-                    )}
-                  </button>
+                  <div className="flex flex-wrap items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={handleExportSetup}
+                      disabled={isLoading}
+                      className={cn(GAME_SETUP_GHOST_BUTTON_CLASS, "disabled:cursor-wait disabled:opacity-40")}
+                    >
+                      <Download size={14} />
+                      {localizeUi("ui.game.gamesetupsummary.downloadSetup")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleComplete}
+                      disabled={isLoading || !canStart}
+                      className={GAME_SETUP_PRIMARY_BUTTON_CLASS}
+                      title={canStartMessage ?? undefined}
+                    >
+                      {isLoading ? (
+                        <>
+                          <Loader2 size={14} className="animate-spin" />
+                          {isDraftingMap
+                            ?localizeUi("ui.game.gamesetupwizard.draftingMap")
+                            : isLinkingSharedWorld
+                              ? localizeUi("ui.game.gamesetupwizard.linkingWorld")
+                              : localizeUi("ui.game.gamesetupwizard.generatingWorld")}
+                        </>
+                      ) : (
+                        <>
+                          <Wand2 size={14} />{localizeUi("ui.game.gamesurfacecomponent.startGame")}</>
+                      )}
+                    </button>
+                  </div>
                 )}
               </div>
             </div>

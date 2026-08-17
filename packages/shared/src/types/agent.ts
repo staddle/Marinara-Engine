@@ -34,36 +34,40 @@ export function normalizeAgentPhaseForType(
   return normalizeAgentPhaseValue(configuredPhase, fallback);
 }
 
+/** Ordered vocabulary of result types that agents can produce. */
+export const AGENT_RESULT_TYPE_VALUES = [
+  "game_state_update",
+  "text_rewrite",
+  "sprite_change",
+  "echo_message",
+  "quest_update",
+  "image_prompt",
+  "context_injection",
+  "continuity_check",
+  "director_event",
+  "lorebook_update",
+  "character_card_update",
+  "background_change",
+  "character_tracker_update",
+  "persona_stats_update",
+  "custom_tracker_update",
+  "spotify_control",
+  "youtube_control",
+  "local_music_control",
+  "haptic_command",
+  "cyoa_choices",
+  "secret_plot",
+  "game_master_narration",
+  "party_action",
+  "game_map_update",
+  "game_state_transition",
+  "prompt_patch",
+  "frontend_theme_update",
+  "about_me_update",
+] as const;
+
 /** The result type an agent can produce. */
-export type AgentResultType =
-  | "game_state_update"
-  | "text_rewrite"
-  | "sprite_change"
-  | "echo_message"
-  | "quest_update"
-  | "image_prompt"
-  | "context_injection"
-  | "continuity_check"
-  | "director_event"
-  | "lorebook_update"
-  | "character_card_update"
-  | "background_change"
-  | "character_tracker_update"
-  | "persona_stats_update"
-  | "custom_tracker_update"
-  | "spotify_control"
-  | "youtube_control"
-  | "local_music_control"
-  | "haptic_command"
-  | "cyoa_choices"
-  | "secret_plot"
-  | "game_master_narration"
-  | "party_action"
-  | "game_map_update"
-  | "game_state_transition"
-  | "prompt_patch"
-  | "frontend_theme_update"
-  | "about_me_update";
+export type AgentResultType = (typeof AGENT_RESULT_TYPE_VALUES)[number];
 
 /** Configuration for a single agent. */
 export interface AgentConfig {
@@ -300,7 +304,8 @@ export interface AgentCallDebugEvent {
   agentName: string;
   phase: string;
   model: string;
-  temperature: number;
+  /** Effective sampling value sent to the provider; omitted when connection/model policy suppresses it. */
+  temperature?: number;
   maxTokens: number;
   messageCount: number;
   messages?: AgentCallDebugMessage[];
@@ -310,7 +315,10 @@ export interface AgentCallDebugEvent {
   completionTokens?: number;
   reasoningTokens?: number;
   totalTokens?: number;
+  /** Duration of this provider request. */
   durationMs?: number;
+  /** Cumulative elapsed time for a multi-round agent run. */
+  elapsedMs?: number;
   finishReason?: string | null;
   response?: string;
   responsePreview?: string;

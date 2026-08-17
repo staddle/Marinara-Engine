@@ -207,6 +207,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
   const [temperatureInput, setTemperatureInput] = useState(String(config.temperature));
   const [topPInput, setTopPInput] = useState(String(config.topP));
   const [topKInput, setTopKInput] = useState(String(config.topK));
+  const [maxParallelJobsInput, setMaxParallelJobsInput] = useState(String(config.maxParallelJobs));
   const [embeddingBatchSizeInput, setEmbeddingBatchSizeInput] = useState(String(config.embeddingBatchSize));
   const modalScrollRef = useRef<HTMLDivElement>(null);
   const previousScrollLayoutRef = useRef({ showSetupProgress: false, showRuntimeSettings: false });
@@ -279,6 +280,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
     setTemperatureInput(String(config.temperature));
     setTopPInput(String(config.topP));
     setTopKInput(String(config.topK));
+    setMaxParallelJobsInput(String(config.maxParallelJobs));
     setEmbeddingBatchSizeInput(String(config.embeddingBatchSize));
   }, [
     config.contextSize,
@@ -286,6 +288,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
     config.temperature,
     config.topP,
     config.topK,
+    config.maxParallelJobs,
     config.embeddingBatchSize,
   ]);
 
@@ -428,6 +431,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
     const parsedTemperature = Number.parseFloat(temperatureInput);
     const parsedTopP = Number.parseFloat(topPInput);
     const parsedTopK = Number.parseInt(topKInput, 10);
+    const parsedMaxParallelJobs = Number.parseInt(maxParallelJobsInput, 10);
 
     if (
       !Number.isFinite(parsedContextSize) ||
@@ -442,7 +446,10 @@ export function ModelDownloadModal({ open, onClose }: Props) {
       parsedTopP > 1 ||
       !Number.isFinite(parsedTopK) ||
       parsedTopK < 0 ||
-      parsedTopK > 500
+      parsedTopK > 500 ||
+      !Number.isFinite(parsedMaxParallelJobs) ||
+      parsedMaxParallelJobs < 1 ||
+      parsedMaxParallelJobs > 16
     ) {
       return;
     }
@@ -453,6 +460,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
       temperature: parsedTemperature,
       topP: parsedTopP,
       topK: parsedTopK,
+      maxParallelJobs: parsedMaxParallelJobs,
     });
   };
 
@@ -461,6 +469,7 @@ export function ModelDownloadModal({ open, onClose }: Props) {
   const parsedTemperature = Number.parseFloat(temperatureInput);
   const parsedTopP = Number.parseFloat(topPInput);
   const parsedTopK = Number.parseInt(topKInput, 10);
+  const parsedMaxParallelJobs = Number.parseInt(maxParallelJobsInput, 10);
   const parsedEmbeddingBatchSize = Number.parseInt(embeddingBatchSizeInput, 10);
   const embeddingBatchSizeValid =
     Number.isFinite(parsedEmbeddingBatchSize) && parsedEmbeddingBatchSize >= 128 && parsedEmbeddingBatchSize <= 32768;
@@ -478,13 +487,17 @@ export function ModelDownloadModal({ open, onClose }: Props) {
     parsedTopP <= 1 &&
     Number.isFinite(parsedTopK) &&
     parsedTopK >= 0 &&
-    parsedTopK <= 500;
+    parsedTopK <= 500 &&
+    Number.isFinite(parsedMaxParallelJobs) &&
+    parsedMaxParallelJobs >= 1 &&
+    parsedMaxParallelJobs <= 16;
   const generationSettingsDirty =
     contextSizeInput !== String(config.contextSize) ||
     maxTokensInput !== String(config.maxTokens) ||
     temperatureInput !== String(config.temperature) ||
     topPInput !== String(config.topP) ||
-    topKInput !== String(config.topK);
+    topKInput !== String(config.topK) ||
+    maxParallelJobsInput !== String(config.maxParallelJobs);
 
   const handleCancelSetup = () => {
     void cancelDownload();
@@ -847,6 +860,19 @@ export function ModelDownloadModal({ open, onClose }: Props) {
                       onChange={(event) => setTopKInput(event.target.value.replace(/[^\d]/g, ""))}
                       inputMode="numeric"
                       placeholder="64"
+                      className="rounded-xl border border-[var(--border)] bg-[var(--card)]/80 px-3 py-2 text-sm text-[var(--foreground)] outline-none transition-colors focus:border-[var(--marinara-chat-chrome-input-border-focus)] focus:ring-1 focus:ring-[var(--marinara-chat-chrome-focus-ring)]"
+                    />
+                  </label>
+
+                  <label className="flex flex-col gap-1.5">
+                    <span className="text-[0.6875rem] font-medium uppercase tracking-wider text-[var(--muted-foreground)]/60">{localizeUi("ui.connections.connectioneditor.maxParallelAgentJobs")}</span>
+                    <input
+                      value={maxParallelJobsInput}
+                      onChange={(event) => setMaxParallelJobsInput(event.target.value.replace(/[^\d]/g, ""))}
+                      inputMode="numeric"
+                      min={1}
+                      max={16}
+                      placeholder="2"
                       className="rounded-xl border border-[var(--border)] bg-[var(--card)]/80 px-3 py-2 text-sm text-[var(--foreground)] outline-none transition-colors focus:border-[var(--marinara-chat-chrome-input-border-focus)] focus:ring-1 focus:ring-[var(--marinara-chat-chrome-focus-ring)]"
                     />
                   </label>

@@ -298,10 +298,46 @@ export interface CapabilityChatMetadataUpdate {
   updatedAt: string;
 }
 
+/** Read-only snapshot of the latest committed World State for a chat. */
+export interface CapabilityGameStateRecord {
+  snapshotId: string;
+  chatId: string;
+  messageId: string;
+  swipeIndex: number;
+  date: string | null;
+  time: string | null;
+  location: string | null;
+  weather: string | null;
+  temperature: string | null;
+  presentCharacterIds: string[];
+}
+
+export type CapabilityRoleplayEventAudience = "public" | "user-only" | { characterIds: string[] };
+
+export interface CapabilityRoleplayEventInput {
+  id: string;
+  chatId: string;
+  messageId: string;
+  swipeIndex: number;
+  sourcePackageId: string;
+  eventType: string;
+  subjectCharacterIds: string[];
+  audience: CapabilityRoleplayEventAudience;
+  text: string;
+  data: unknown;
+  createdAt: string;
+  idempotencyKey: string;
+}
+
+export interface CapabilityRoleplayEventRecord extends CapabilityRoleplayEventInput {}
+
 export interface CapabilityPersistenceSession {
   getChat(chatId: string): Promise<CapabilityChatRecord | null>;
   listChats(): Promise<CapabilityChatRecord[]>;
   listMessages(chatId: string): Promise<CapabilityMessageRecord[]>;
+  /** Read-only. Optional so packages feature-detect and degrade on older Engines. */
+  getGameState?(chatId: string): Promise<CapabilityGameStateRecord | null>;
+  appendRoleplayEvent?(input: CapabilityRoleplayEventInput): Promise<CapabilityRoleplayEventRecord | null>;
   listExistingLorebookEntryIds(entryIds: string[]): Promise<string[]>;
   createMessageWithSwipe(input: CapabilityCreateMessageWithSwipeInput): Promise<CapabilityMessageRecord>;
   markGameStateSnapshotCommitted(chatId: string, snapshotId: string): Promise<void>;

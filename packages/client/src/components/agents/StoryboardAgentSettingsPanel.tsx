@@ -198,6 +198,42 @@ function ToggleRow({
   );
 }
 
+function PromptStage({
+  number,
+  title,
+  description,
+  children,
+}: {
+  number: 2 | 3 | 4;
+  title: string;
+  description: string;
+  children: ReactNode;
+}) {
+  const headingId = `storyboard-prompt-stage-${number}`;
+  return (
+    <section
+      data-storyboard-prompt-stage={number}
+      aria-labelledby={headingId}
+      className="min-w-0 max-w-full space-y-3 border-t border-[var(--border)] pt-4"
+    >
+      <div className="flex items-start gap-2.5">
+        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--primary)]/12 text-[0.6875rem] font-semibold text-[var(--primary)] ring-1 ring-[var(--primary)]/25">
+          {number}
+        </span>
+        <div className="min-w-0">
+          <h4 id={headingId} className="text-sm font-semibold text-[var(--foreground)]">
+            {title}
+          </h4>
+          <p className="mt-0.5 max-w-[70ch] text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+            {description}
+          </p>
+        </div>
+      </div>
+      {children}
+    </section>
+  );
+}
+
 function StoryboardScopeSection({
   id,
   title,
@@ -267,21 +303,61 @@ export function StoryboardAgentSettingsPanel({
     onChange({ ...settings, ...patch });
     onDirty();
   };
+  const promptGuideStages = [
+    {
+      number: 1,
+      title: localizeUi("ui.agents.storyboard.promptStage1Title"),
+      description: localizeUi("ui.agents.storyboard.promptStage1Description"),
+    },
+    {
+      number: 2,
+      title: localizeUi("ui.agents.storyboard.promptStage2Title"),
+      description: localizeUi("ui.agents.storyboard.promptStage2Description"),
+    },
+    {
+      number: 3,
+      title: localizeUi("ui.agents.storyboard.promptStage3Title"),
+      description: localizeUi("ui.agents.storyboard.promptStage3Description"),
+    },
+    {
+      number: 4,
+      title: localizeUi("ui.agents.storyboard.promptStage4Title"),
+      description: localizeUi("ui.agents.storyboard.promptStage4Description"),
+    },
+  ] as const;
 
   return (
     <div className="min-w-0 max-w-full space-y-4 overflow-hidden [&_button]:max-w-full [&_input]:min-w-0 [&_input]:max-w-full [&_label]:min-w-0 [&_section]:min-w-0 [&_select]:min-w-0 [&_select]:max-w-full [&_textarea]:min-w-0 [&_textarea]:max-w-full">
-      <div className="rounded-xl border border-[var(--primary)]/25 bg-[var(--primary)]/8 p-3">
+      <div
+        data-storyboard-prompt-guide
+        className="rounded-xl border border-[var(--primary)]/25 bg-[var(--primary)]/8 p-3"
+      >
         <div className="flex items-start gap-2">
           <PanelsTopLeft size="0.875rem" className="mt-0.5 shrink-0 text-[var(--primary)]" />
           <div>
             <p className="text-xs font-semibold text-[var(--foreground)]">
-              {localizeUi("ui.agents.storyboard.promptChainTitle")}
+              {localizeUi("ui.agents.storyboard.promptGuideTitle")}
             </p>
             <p className="mt-1 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
-              {localizeUi("ui.agents.storyboard.promptChainDescription")}
+              {localizeUi("ui.agents.storyboard.promptGuideDescription")}
             </p>
           </div>
         </div>
+        <ol className="mt-3 grid gap-x-4 gap-y-3 sm:grid-cols-2">
+          {promptGuideStages.map(({ number, title, description }) => (
+            <li key={number} className="flex min-w-0 items-start gap-2.5">
+              <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--background)] text-[0.6875rem] font-semibold text-[var(--primary)] ring-1 ring-[var(--primary)]/25">
+                {number}
+              </span>
+              <span className="min-w-0">
+                <span className="block text-[0.6875rem] font-semibold text-[var(--foreground)]">{title}</span>
+                <span className="mt-0.5 block text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+                  {description}
+                </span>
+              </span>
+            </li>
+          ))}
+        </ol>
         <p className="mt-2 border-t border-[var(--primary)]/15 pt-2 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
           {localizeUi("ui.agents.storyboard.agentDefaultsDescription")}
         </p>
@@ -419,15 +495,19 @@ export function StoryboardAgentSettingsPanel({
 
         <div className="space-y-0.5">
           <h4 className="text-sm font-semibold text-[var(--foreground)]">
-            {localizeUi("ui.agents.storyboard.sharedProviderFormatters")}
+            {localizeUi("ui.agents.storyboard.sharedProductionPrompts")}
           </h4>
-          <p className="text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
-            {localizeUi("ui.agents.storyboard.sharedProviderFormattersDescription")}
+          <p className="max-w-[70ch] text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+            {localizeUi("ui.agents.storyboard.sharedProductionPromptsDescription")}
           </p>
         </div>
 
-        <div className="grid gap-3 md:grid-cols-2">
-          <label className="space-y-1.5">
+        <PromptStage
+          number={2}
+          title={localizeUi("ui.agents.storyboard.promptStage2Title")}
+          description={localizeUi("ui.agents.storyboard.promptStage2Description")}
+        >
+          <label className="block max-w-sm space-y-1.5">
             <span className="text-[0.6875rem] font-medium">
               {localizeUi("ui.agents.storyboard.defaultImagePrompt")}
             </span>
@@ -443,7 +523,69 @@ export function StoryboardAgentSettingsPanel({
               ))}
             </select>
           </label>
-          <label className="space-y-1.5">
+
+          <TemplateCollectionEditor
+            title={localizeUi("ui.agents.storyboard.imagePrompts")}
+            description={localizeUi("ui.agents.storyboard.imagePromptsDescription")}
+            templates={settings.illustrationTemplates}
+            defaults={defaults.illustrationTemplates}
+            prefix="storyboard-image"
+            onChange={(templates) => {
+              const selected = preserveTemplateSelection(templates, settings.illustrationTemplateId);
+              update({ illustrationTemplates: templates, illustrationTemplateId: selected });
+            }}
+          />
+        </PromptStage>
+
+        <PromptStage
+          number={3}
+          title={localizeUi("ui.agents.storyboard.promptStage3Title")}
+          description={localizeUi("ui.agents.storyboard.promptStage3Description")}
+        >
+          <ToggleRow
+            label={localizeUi("ui.agents.storyboard.enableImageAwareShotPlanning")}
+            description={localizeUi("ui.agents.storyboard.enableImageAwareShotPlanningDescription")}
+            checked={settings.imageAwareShotPlanningEnabled}
+            onChange={(checked) => update({ imageAwareShotPlanningEnabled: checked })}
+          />
+
+          <label className="block max-w-sm space-y-1.5">
+            <span className="text-[0.6875rem] font-medium">
+              {localizeUi("ui.agents.storyboard.defaultShotPlannerPrompt")}
+            </span>
+            <select
+              value={settings.animationRefinementTemplateId ?? ""}
+              onChange={(event) => update({ animationRefinementTemplateId: event.target.value || null })}
+              className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)]"
+            >
+              {settings.animationRefinementTemplates.map((template) => (
+                <option key={template.id} value={template.id}>
+                  {template.name}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <TemplateCollectionEditor
+            title={localizeUi("ui.agents.storyboard.shotPlannerPrompts")}
+            description={localizeUi("ui.agents.storyboard.shotPlannerPromptsDescription")}
+            templates={settings.animationRefinementTemplates}
+            defaults={defaults.animationRefinementTemplates}
+            prefix="storyboard-shot-planner"
+            required
+            onChange={(templates) => {
+              const selected = preserveTemplateSelection(templates, settings.animationRefinementTemplateId);
+              update({ animationRefinementTemplates: templates, animationRefinementTemplateId: selected });
+            }}
+          />
+        </PromptStage>
+
+        <PromptStage
+          number={4}
+          title={localizeUi("ui.agents.storyboard.promptStage4Title")}
+          description={localizeUi("ui.agents.storyboard.promptStage4Description")}
+        >
+          <label className="block max-w-sm space-y-1.5">
             <span className="text-[0.6875rem] font-medium">
               {localizeUi("ui.agents.storyboard.defaultVideoPrompt")}
             </span>
@@ -459,20 +601,7 @@ export function StoryboardAgentSettingsPanel({
               ))}
             </select>
           </label>
-        </div>
 
-        <div className="grid gap-3 xl:grid-cols-2">
-          <TemplateCollectionEditor
-            title={localizeUi("ui.agents.storyboard.imagePrompts")}
-            description={localizeUi("ui.agents.storyboard.imagePromptsDescription")}
-            templates={settings.illustrationTemplates}
-            defaults={defaults.illustrationTemplates}
-            prefix="storyboard-image"
-            onChange={(templates) => {
-              const selected = preserveTemplateSelection(templates, settings.illustrationTemplateId);
-              update({ illustrationTemplates: templates, illustrationTemplateId: selected });
-            }}
-          />
           <TemplateCollectionEditor
             title={localizeUi("ui.agents.storyboard.videoPrompts")}
             description={localizeUi("ui.agents.storyboard.videoPromptsDescription")}
@@ -484,7 +613,7 @@ export function StoryboardAgentSettingsPanel({
               update({ videoTemplates: templates, videoTemplateId: selected });
             }}
           />
-        </div>
+        </PromptStage>
       </StoryboardScopeSection>
 
       <StoryboardScopeSection

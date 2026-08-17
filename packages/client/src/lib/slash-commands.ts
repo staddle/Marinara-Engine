@@ -8,6 +8,8 @@ import { useConversationGamesStore } from "../stores/conversation-games.store";
 import { useGalleryStore } from "../stores/gallery.store";
 import { toast } from "sonner";
 import { startSceneWithPromptPreferences } from "./scene-generation";
+import { isMessageHidden } from "./message-visibility";
+export { isMessageHidden } from "./message-visibility";
 import {
   SUPPORTED_MACROS,
   buildGuidedGenerationInstructionMessage,
@@ -196,16 +198,22 @@ export interface SlashCommandResult {
   feedback?: string;
 }
 
+async function translateSlash(key: string, options?: Record<string, unknown>): Promise<string> {
+  const { translate } = await import("../localization/i18n");
+  return translate(key, options);
+}
+
 // ── Dice roller ────────────────
 
 function parseDice(notation: string): { count: number; sides: number; modifier: number } | null {
-  const match = notation.match(/^(\d+)?d(\d+)([+-]\d+)?$/i);
+  const match = notation.trim().match(/^(\d+)?d(\d+)([+-]\d+)?$/i);
   if (!match) return null;
-  return {
-    count: parseInt(match[1] || "1", 10),
-    sides: parseInt(match[2]!, 10),
-    modifier: match[3] ? parseInt(match[3], 10) : 0,
-  };
+  const count = parseInt(match[1] || "1", 10);
+  const sides = parseInt(match[2]!, 10);
+  // Same caps the server dice route enforces. Without them "/roll 99999999d6"
+  // spins the render thread, and "0d6" rolls nothing at all.
+  if (count < 1 || count > 100 || sides < 1 || sides > 1000) return null;
+  return { count, sides, modifier: match[3] ? parseInt(match[3], 10) : 0 };
 }
 
 function rollDice(count: number, sides: number): number[] {
@@ -529,15 +537,17 @@ function parseMessageIndices(input: string): number[] | null {
 
     // Range: N-M
     if (segment.includes("-")) {
-      const [left, right] = segment.split("-", 2);
-      const start = Number.parseInt(left!.trim(), 10);
-      const end = Number.parseInt(right!.trim(), 10);
+      const range = segment.match(/^(\d+)\s*-\s*(\d+)$/u);
+      if (!range) return null;
+      const start = Number.parseInt(range[1]!, 10);
+      const end = Number.parseInt(range[2]!, 10);
       if (!Number.isFinite(start) || !Number.isFinite(end) || start < 1 || end < 1) return null;
       const lo = Math.min(start, end);
       const hi = Math.max(start, end);
       for (let i = lo; i <= hi; i++) indices.add(i);
     } else {
       // Single number
+      if (!/^\d+$/u.test(segment)) return null;
       const n = Number.parseInt(segment, 10);
       if (!Number.isFinite(n) || n < 1) return null;
       indices.add(n);
@@ -547,15 +557,52 @@ function parseMessageIndices(input: string): number[] | null {
   return indices.size > 0 ? Array.from(indices).sort((a, b) => a - b) : null;
 }
 
-/** Safely read a boolean from a message's extra field. */
-function isMessageHidden(msg: { extra?: unknown }): boolean {
-  if (!msg.extra) return false;
+type TargetedHideParseResult =
+  | { kind: "global"; indices: number[] }
+  | { kind: "targeted"; character: { id: string; name: string }; indices: number[] }
+  | { kind: "error"; reason: "usage" | "roleplay_only" | "unknown" | "ambiguous"; targetName?: string };
+
+export function parseTargetedHideArguments(
+  input: string,
+  mode: SlashCommandContext["mode"],
+  characters: Array<{ id: string; name: string }> = [],
+): TargetedHideParseResult {
+  const globalIndices = parseMessageIndices(input);
+  if (globalIndices) return { kind: "global", indices: globalIndices };
+
+  const trimmed = input.trim();
+  const quoted = parseLeadingQuotedSegment(trimmed);
+  const unquoted = trimmed.match(/^(\S+)\s+(.+)$/u);
+  const targetName = (quoted?.value ?? unquoted?.[1] ?? "").trim();
+  const indexExpression = (quoted?.rest ?? unquoted?.[2] ?? "").trim();
+  const indices = parseMessageIndices(indexExpression);
+  if (!targetName || !indices) return { kind: "error", reason: "usage" };
+  if (mode !== "roleplay") return { kind: "error", reason: "roleplay_only" };
+
+  const normalizedTarget = normalizeLookup(targetName);
+  const exact = characters.filter((character) => normalizeLookup(character.name) === normalizedTarget);
+  const candidates =
+    exact.length > 0
+      ? exact
+      : characters.filter((character) => normalizeLookup(character.name).includes(normalizedTarget));
+  if (candidates.length === 0) return { kind: "error", reason: "unknown", targetName };
+  if (candidates.length > 1) return { kind: "error", reason: "ambiguous", targetName };
+  return { kind: "targeted", character: candidates[0]!, indices };
+}
+
+function readHiddenFromAICharacterIds(extra: unknown): string[] {
+  let parsed: Record<string, unknown> = {};
   try {
-    const ex = typeof msg.extra === "string" ? JSON.parse(msg.extra) : msg.extra;
-    return (ex as Record<string, unknown>).hiddenFromAI === true;
+    parsed =
+      typeof extra === "string"
+        ? (JSON.parse(extra) as Record<string, unknown>)
+        : ((extra ?? {}) as Record<string, unknown>);
   } catch {
-    return false;
+    parsed = {};
   }
+  const value = parsed.hiddenFromAICharacterIds;
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(value.filter((id): id is string => typeof id === "string" && !!id.trim())));
 }
 
 // ── Command definitions ────────────────
@@ -1223,37 +1270,66 @@ const COMMANDS: SlashCommand[] = [
   {
     name: "hide",
     description: "Hide messages from AI context (won't be sent to the LLM on future turns)",
-    usage: "/hide <indices>  (e.g. /hide 5, /hide 3-8, /hide 2-5,9,12)",
+    usage: "/hide [character] <indices>  (e.g. /hide 3-8, /hide Maukie 34-40)",
     local: true,
     async execute(args, ctx) {
-      const indices = parseMessageIndices(args);
-      if (!indices) {
+      const parsed = parseTargetedHideArguments(args, ctx.mode, ctx.characters);
+      if (parsed.kind === "error") {
+        const feedback =
+          parsed.reason === "roleplay_only"
+            ? await translateSlash("ui.chat.slash.hideTargetRoleplayOnly")
+            : parsed.reason === "unknown"
+              ? await translateSlash("ui.chat.slash.hideTargetUnknown", { name: parsed.targetName })
+              : parsed.reason === "ambiguous"
+                ? await translateSlash("ui.chat.slash.hideTargetAmbiguous", { name: parsed.targetName })
+                : await translateSlash("ui.chat.slash.hideUsage");
         return {
           handled: true,
-          feedback: "Usage: /hide <indices> — e.g. /hide 5, /hide 3-8, /hide 2-5,9,12",
+          feedback,
         };
       }
 
       const messages: Array<{ id: string; extra?: unknown }> = await api.get(`/chats/${ctx.chatId}/messages`);
       const total = messages.length;
-      const max = indices[indices.length - 1]!;
+      const max = parsed.indices[parsed.indices.length - 1]!;
       if (max > total) {
         return {
           handled: true,
-          feedback: `Message ${max} doesn't exist. This chat has ${total} messages.`,
+          feedback: await translateSlash("ui.chat.slash.messageOutOfRange", { index: max, total }),
         };
       }
 
-      // Only send IDs for messages that aren't already hidden
-      const targetIds = indices
+      if (parsed.kind === "targeted") {
+        const targets = parsed.indices
+          .map((index) => messages[index - 1]!)
+          .filter(
+            (message) =>
+              !isMessageHidden(message) &&
+              !readHiddenFromAICharacterIds(message.extra).includes(parsed.character.id),
+          );
+        await Promise.all(
+          targets.map((message) =>
+            api.patch(`/chats/${ctx.chatId}/messages/${message.id}/extra`, {
+              hiddenFromAICharacterIds: [...readHiddenFromAICharacterIds(message.extra), parsed.character.id],
+            }),
+          ),
+        );
+        ctx.invalidate();
+        toast.success(
+          await translateSlash("ui.chat.slash.hiddenFromCharacter", {
+            count: targets.length,
+            name: parsed.character.name,
+          }),
+        );
+        return { handled: true };
+      }
+
+      // Existing index-only syntax remains a global hide.
+      const targetIds = parsed.indices
         .filter((idx) => !isMessageHidden(messages[idx - 1]!))
         .map((idx) => messages[idx - 1]!.id);
-
       if (targetIds.length > 0) {
-        await api.patch(`/chats/${ctx.chatId}/messages/bulk-hidden`, {
-          messageIds: targetIds,
-          hidden: true,
-        });
+        await api.patch(`/chats/${ctx.chatId}/messages/bulk-hidden`, { messageIds: targetIds, hidden: true });
       }
 
       ctx.invalidate();
@@ -1314,9 +1390,7 @@ const COMMANDS: SlashCommand[] = [
   },
 ];
 
-function buildConversationGameSlashCommands(
-  games: readonly ConversationGameSlashContribution[] = [],
-): SlashCommand[] {
+function buildConversationGameSlashCommands(games: readonly ConversationGameSlashContribution[] = []): SlashCommand[] {
   const reserved = new Set(
     COMMANDS.flatMap((command) => [command.name, ...(command.aliases ?? [])]).map((name) => name.toLowerCase()),
   );

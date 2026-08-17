@@ -5,7 +5,7 @@ import {
   useCharacters,
   usePersonas,
   useUpdateCharacter,
-  useUpdatePersona,
+  useUpdatePersonaTrackerCard,
 } from "../../../hooks/use-characters";
 import { useChat } from "../../../hooks/use-chats";
 import { useChatStore } from "../../../stores/chat.store";
@@ -121,7 +121,7 @@ export function TrackerCardColorSettings() {
   const { currentGameState, gameStateLoadStatus, retryGameState } = useTrackerGameState(activeChatId);
   const { data: personasData } = usePersonas(!!activeChatId);
   const { data: charactersData } = useCharacters(!!activeChatId);
-  const updatePersona = useUpdatePersona();
+  const updatePersonaTrackerCard = useUpdatePersonaTrackerCard();
   const updateCharacter = useUpdateCharacter();
   const [selectedTargetKey, setSelectedTargetKey] = useState("");
   const [draftConfig, setDraftConfig] = useState<TrackerCardColorConfig | null>(null);
@@ -296,7 +296,7 @@ export function TrackerCardColorSettings() {
   const persistTargetConfig = useCallback(
     async (target: TrackerCardColorTarget, config: TrackerCardColorConfig) => {
       if (target.kind === "persona") {
-        const updatedPersona = await updatePersona.mutateAsync({
+        const updatedPersona = await updatePersonaTrackerCard.mutateAsync({
           id: target.id,
           trackerCardPaint: config,
         });
@@ -312,7 +312,7 @@ export function TrackerCardColorSettings() {
       const extensions = getCharacterExtensions(updatedCharacterData);
       return parseTrackerCardColorConfig(extensions.trackerCardColors);
     },
-    [updateCharacter, updatePersona],
+    [updateCharacter, updatePersonaTrackerCard],
   );
 
   const handleChange = (nextConfig: TrackerCardColorConfig) => {

@@ -20,7 +20,6 @@ export {
 
 export { runEnemyPhase } from "./ai.js";
 
-export { TERRAIN_DATA } from "./types.js";
 export { deriveMovement, elementMultiplier, DIFFICULTY_DAMAGE_MULT } from "./math.js";
 export { CLASS_PROFILES, deriveClass, normalizeClass, type ClassProfile } from "./classes.js";
 export { gridDimensions } from "./grid-gen.js";

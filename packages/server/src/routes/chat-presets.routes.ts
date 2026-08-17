@@ -12,6 +12,7 @@ import {
   type ExportEnvelope,
 } from "@marinara-engine/shared";
 import { createChatPresetsStorage } from "../services/storage/chat-presets.storage.js";
+import { createChatsStorage } from "../services/storage/chats.storage.js";
 
 function toSafeExportName(name: string, fallback: string) {
   const sanitized = name
@@ -23,12 +24,13 @@ function toSafeExportName(name: string, fallback: string) {
 
 interface ChatSettingsProfileExportPayload {
   name: string;
-  mode: ChatMode;
+  mode: ChatMode | "visual_novel";
   settings: ChatPresetSettings;
 }
 
 export async function chatPresetsRoutes(app: FastifyInstance) {
   const storage = createChatPresetsStorage(app.db);
+  const chatsStorage = createChatsStorage(app.db);
 
   // Make sure system defaults exist before serving any request.
   await storage.ensureDefaults();
@@ -99,6 +101,14 @@ export async function chatPresetsRoutes(app: FastifyInstance) {
 
   /** Apply a profile's settings to an existing chat (replaces profile-controlled settings). */
   app.post<{ Params: { id: string; chatId: string } }>("/:id/apply/:chatId", async (req, reply) => {
+    const [preset, chat] = await Promise.all([
+      storage.getById(req.params.id),
+      chatsStorage.getById(req.params.chatId),
+    ]);
+    if (!preset || !chat) return reply.status(404).send({ error: "Settings profile or chat not found" });
+    if (preset.mode !== chat.mode) {
+      return reply.status(409).send({ error: "Settings profile mode does not match chat mode" });
+    }
     const body = (req.body ?? {}) as { connectionId?: unknown };
     const connectionId =
       typeof body.connectionId === "string" ? body.connectionId : body.connectionId === null ? null : undefined;
@@ -156,7 +166,7 @@ export async function chatPresetsRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: "Invalid settings profile file" });
     }
     const data = body.data;
-    const modeParsed = chatModeSchema.safeParse(data.mode);
+    const modeParsed = chatModeSchema.safeParse(data.mode === "visual_novel" ? "roleplay" : data.mode);
     if (!modeParsed.success) return reply.status(400).send({ error: "Invalid chat mode in envelope" });
     if (typeof data.name !== "string" || !data.name.trim()) {
       return reply.status(400).send({ error: "Profile name is required" });

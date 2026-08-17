@@ -463,9 +463,9 @@ export function LorebookEditor() {
     () => Array.from(new Set(characters.flatMap((character) => character.tags))).sort((a, b) => a.localeCompare(b)),
     [characters],
   );
-  const personas = useMemo(() => {
-    if (!rawPersonas) return [] as Array<{ id: string; name: string; comment?: string | null }>;
-    return (rawPersonas as Array<{ id: string; name: string; comment?: string | null }>).map((p) => ({
+  const personas = useMemo<Array<{ id: string; name: string; comment?: string | null }>>(() => {
+    if (!rawPersonas) return [];
+    return rawPersonas.map((p) => ({
       id: p.id,
       name: p.name || "Unknown",
       comment: p.comment ?? null,
@@ -489,6 +489,8 @@ export function LorebookEditor() {
   );
   const [expandedEntryId, setExpandedEntryId] = useState<string | null>(null);
   const [lorebookDirty, setLorebookDirty] = useState(false);
+  const formRevisionRef = useRef(0);
+  const saveInFlightRef = useRef<Promise<boolean> | null>(null);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const setEditorDirty = useUIStore((s) => s.setEditorDirty);
   useEffect(() => {
@@ -796,7 +798,10 @@ export function LorebookEditor() {
   const previewMatchCount = previewMatches.size;
 
   // ── Handlers ──
-  const markLorebookDirty = useCallback(() => setLorebookDirty(true), []);
+  const markLorebookDirty = useCallback(() => {
+    formRevisionRef.current += 1;
+    setLorebookDirty(true);
+  }, []);
 
   const handleAddTags = useCallback(() => {
     const nextTags = appendNewTags(formTags, newTag);
@@ -1464,37 +1469,47 @@ export function LorebookEditor() {
     });
   }, [lorebookId, createFolder, localizeUi]);
 
-  const handleSaveLorebook = useCallback(async () => {
-    if (!lorebookId) return;
+  const handleSaveLorebook = useCallback((): Promise<boolean> => {
+    if (!lorebookId) return Promise.resolve(false);
+    if (saveInFlightRef.current) return saveInFlightRef.current;
+    const formRevision = formRevisionRef.current;
     setSaving(true);
-    try {
-      await updateLorebook.mutateAsync({
-        id: lorebookId,
-        name: formName,
-        description: formDescription,
-        category: formCategory,
-        enabled: formEnabled,
-        isGlobal: formIsGlobal,
-        scanDepth: formScanDepth,
-        tokenBudget: formTokenBudget,
-        entryLimit: formEntryLimit,
-        recursiveScanning: formRecursive,
-        maxRecursionDepth: formMaxRecursionDepth,
-        excludeFromVectorization: formExcludeFromVectorization,
-        vectorQueryDepth: formVectorQueryDepth,
-        vectorScoreThreshold: formVectorScoreThreshold,
-        vectorMaxResults: formVectorMaxResults,
-        characterIds: formIsGlobal ? [] : formCharacterIds,
-        personaIds: formIsGlobal ? [] : formPersonaIds,
-        tags: formTags,
-      });
-      setLorebookDirty(false);
-      toast.success(localizeUi("ui.lorebooks.lorebookeditor.lorebookSaved"));
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message :localizeUi("ui.lorebooks.lorebookeditor.failedToSaveLorebook"));
-    } finally {
-      setSaving(false);
-    }
+    const savePromise = (async () => {
+      try {
+        await updateLorebook.mutateAsync({
+          id: lorebookId,
+          name: formName,
+          description: formDescription,
+          category: formCategory,
+          enabled: formEnabled,
+          isGlobal: formIsGlobal,
+          scanDepth: formScanDepth,
+          tokenBudget: formTokenBudget,
+          entryLimit: formEntryLimit,
+          recursiveScanning: formRecursive,
+          maxRecursionDepth: formMaxRecursionDepth,
+          excludeFromVectorization: formExcludeFromVectorization,
+          vectorQueryDepth: formVectorQueryDepth,
+          vectorScoreThreshold: formVectorScoreThreshold,
+          vectorMaxResults: formVectorMaxResults,
+          characterIds: formIsGlobal ? [] : formCharacterIds,
+          personaIds: formIsGlobal ? [] : formPersonaIds,
+          tags: formTags,
+        });
+        if (formRevisionRef.current !== formRevision) return false;
+        setLorebookDirty(false);
+        toast.success(localizeUi("ui.lorebooks.lorebookeditor.lorebookSaved"));
+        return true;
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message :localizeUi("ui.lorebooks.lorebookeditor.failedToSaveLorebook"));
+        return false;
+      } finally {
+        setSaving(false);
+        saveInFlightRef.current = null;
+      }
+    })();
+    saveInFlightRef.current = savePromise;
+    return savePromise;
   }, [
     lorebookId,
     formName,
@@ -1534,12 +1549,13 @@ export function LorebookEditor() {
   }, [lorebookId, createEntry]);
 
   const handleClose = useCallback(() => {
+    if (saving) return;
     if (lorebookDirty) {
       setShowUnsavedWarning(true);
     } else {
       closeDetail();
     }
-  }, [lorebookDirty, closeDetail]);
+  }, [lorebookDirty, saving, closeDetail]);
 
   // If the editor is opened with a `lorebookId` that no longer resolves on
   // the server (a stale pointer carried over from another Marinara
@@ -1841,22 +1857,25 @@ export function LorebookEditor() {
               setLorebookDirty(false);
               closeDetail();
             }}
-            className="rounded-lg px-3 py-1 text-[0.6875rem] font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)]"
+            disabled={saving}
+            className="rounded-lg px-3 py-1 text-[0.6875rem] font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] disabled:opacity-50"
           >{localizeUi("ui.lorebooks.lorebookeditor.discardClose")}</button>
           <button
             onClick={async () => {
-              await handleSaveLorebook();
+              const saved = await handleSaveLorebook();
+              if (!saved) return;
               setShowUnsavedWarning(false);
               closeDetail();
             }}
-            className="mari-editor-action mari-editor-action--primary mari-editor-action--compact px-3 py-1 text-[0.6875rem]"
+            disabled={saving}
+            className="mari-editor-action mari-editor-action--primary mari-editor-action--compact px-3 py-1 text-[0.6875rem] disabled:opacity-50"
           >{localizeUi("ui.lorebooks.lorebookeditor.saveClose")}</button>
         </div>
       )}
 
       {/* Header */}
       <div className="mari-editor-header">
-        <button onClick={handleClose} className="mari-editor-action inline-flex">
+        <button onClick={handleClose} disabled={saving} className="mari-editor-action inline-flex disabled:opacity-50">
           <ArrowLeft size="1rem" />
         </button>
         <div className="mari-editor-icon-tile">
@@ -2281,6 +2300,8 @@ export function LorebookEditor() {
                   vectorQueryDepth={formVectorQueryDepth}
                   vectorScoreThreshold={formVectorScoreThreshold}
                   vectorMaxResults={formVectorMaxResults}
+                  hasUnsavedChanges={lorebookDirty}
+                  onBeforeVectorize={handleSaveLorebook}
                   onVectorQueryDepthChange={(value) => {
                     setFormVectorQueryDepth(value);
                     markLorebookDirty();
@@ -2760,6 +2781,8 @@ function VectorizeSection({
   vectorQueryDepth,
   vectorScoreThreshold,
   vectorMaxResults,
+  hasUnsavedChanges,
+  onBeforeVectorize,
   onVectorQueryDepthChange,
   onVectorScoreThresholdChange,
   onVectorMaxResultsChange,
@@ -2770,6 +2793,8 @@ function VectorizeSection({
   vectorQueryDepth: number;
   vectorScoreThreshold: number;
   vectorMaxResults: number;
+  hasUnsavedChanges: boolean;
+  onBeforeVectorize: () => Promise<boolean>;
   onVectorQueryDepthChange: (value: number) => void;
   onVectorScoreThresholdChange: (value: number) => void;
   onVectorMaxResultsChange: (value: number) => void;
@@ -2803,6 +2828,7 @@ function VectorizeSection({
   );
   const [selectedConnectionId, setSelectedConnectionId] = useState<string>("");
   const [vectorizingMode, setVectorizingMode] = useState<"missing" | "all" | null>(null);
+  const vectorizeInFlightRef = useRef(false);
   const [clearingVectors, setClearingVectors] = useState(false);
   const [result, setResult] = useState<{ success: boolean; message: string } | null>(null);
   const excludedCount = excludeFromVectorization
@@ -2867,40 +2893,49 @@ function VectorizeSection({
   const handleVectorize = async (mode: "missing" | "all") => {
     if (!selectedConnectionId) return;
     if (mode === "missing" && missingCount === 0) return;
-    const conn = embeddingConnections.find((c) => c.id === selectedConnectionId);
-    if (mode === "all" && storedVectorCount > 0) {
-      const confirmed = await showConfirmDialog({
-        title:localizeUi("ui.lorebooks.vectorizesection.reVectorizeAllEntries"),
-        message: localizeUi("ui.lorebooks.vectorizesection.reVectorizeAllEntriesWithConnection", {
-          count: vectorizableEntryCount,
-          connection: conn?.name ?? localizeUi("ui.lorebooks.vectorizesection.theSelectedConnection"),
-        }),
-        confirmLabel:localizeUi("ui.lorebooks.vectorizesection.reVectorizeAll"),
-        cancelLabel: "Cancel",
-        tone: "default",
-      });
-      if (!confirmed) return;
-    }
-
-    setVectorizingMode(mode);
-    setResult(null);
+    if (vectorizeInFlightRef.current) return;
+    vectorizeInFlightRef.current = true;
     try {
-      const res = await api.post(`/lorebooks/${lorebookId}/vectorize`, {
-        connectionId: selectedConnectionId,
-        model: conn?.embeddingModel ?? "",
-        onlyMissing: mode === "missing",
-      });
-      const data = res as { vectorized: number; total?: number; skipped?: number };
-      await queryClient.invalidateQueries({ queryKey: lorebookKeys.entries(lorebookId) });
-      setResult({
-        success: true,
-        message:
-          mode === "all" ? `Re-vectorized ${data.vectorized} entries` : `Vectorized ${data.vectorized} missing entries`,
-      });
-    } catch (err) {
-      setResult({ success: false, message: err instanceof Error ? err.message : "Vectorization failed" });
+      const conn = embeddingConnections.find((c) => c.id === selectedConnectionId);
+      if (mode === "all" && storedVectorCount > 0) {
+        const confirmed = await showConfirmDialog({
+          title:localizeUi("ui.lorebooks.vectorizesection.reVectorizeAllEntries"),
+          message: localizeUi("ui.lorebooks.vectorizesection.reVectorizeAllEntriesWithConnection", {
+            count: vectorizableEntryCount,
+            connection: conn?.name ?? localizeUi("ui.lorebooks.vectorizesection.theSelectedConnection"),
+          }),
+          confirmLabel:localizeUi("ui.lorebooks.vectorizesection.reVectorizeAll"),
+          cancelLabel: "Cancel",
+          tone: "default",
+        });
+        if (!confirmed) return;
+      }
+      if (hasUnsavedChanges && !(await onBeforeVectorize())) return;
+
+      setVectorizingMode(mode);
+      setResult(null);
+      try {
+        const res = await api.post(`/lorebooks/${lorebookId}/vectorize`, {
+          connectionId: selectedConnectionId,
+          model: conn?.embeddingModel ?? "",
+          onlyMissing: mode === "missing",
+        });
+        const data = res as { vectorized: number; total?: number; skipped?: number };
+        await queryClient.invalidateQueries({ queryKey: lorebookKeys.entries(lorebookId) });
+        setResult({
+          success: true,
+          message:
+            mode === "all"
+              ? `Re-vectorized ${data.vectorized} entries`
+              : `Vectorized ${data.vectorized} missing entries`,
+        });
+      } catch (err) {
+        setResult({ success: false, message: err instanceof Error ? err.message : "Vectorization failed" });
+      } finally {
+        setVectorizingMode(null);
+      }
     } finally {
-      setVectorizingMode(null);
+      vectorizeInFlightRef.current = false;
     }
   };
 

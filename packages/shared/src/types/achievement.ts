@@ -6,6 +6,7 @@ export type AchievementIconKey =
   | "heart"
   | "credits"
   | "mari"
+  | "mari-drag"
   | "conversation"
   | "roleplay"
   | "game"
@@ -25,7 +26,11 @@ export type AchievementMetric =
 
 export interface AchievementDefinition {
   id: string;
+  /** Stable UI catalog key. `title` remains the canonical fallback for older clients and partial locales. */
+  titleKey: string;
   title: string;
+  /** Stable UI catalog key. Ranked descriptions receive `target` for interpolation/pluralization. */
+  descriptionKey: string;
   description: string;
   category: AchievementCategory;
   icon: AchievementIconKey;
@@ -65,5 +70,6 @@ export type AchievementEvent =
   | "kofi_clicked"
   | "credits_viewed"
   | "prof_mari_message_sent"
+  | "prof_mari_dragged"
   | "chat_created"
   | "library_changed";

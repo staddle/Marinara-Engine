@@ -4,14 +4,34 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import AdmZip from "adm-zip";
-import type { Chat, ChatMode, Message } from "../../packages/shared/src/types/chat.js";
+import type { Chat, ChatMode, ChatSummaryEntry, Message } from "../../packages/shared/src/types/chat.js";
 import { chatModeSchema } from "../../packages/shared/src/schemas/chat.schema.js";
+import {
+  appendChatSummaryEntryToMetadata,
+  combineChatSummaryEntryHistory,
+  compileChatSummaryEntries,
+  createChatSummaryEntry,
+} from "../../packages/shared/src/utils/chat-summary-entries.js";
 import playwrightConfig from "../../playwright.config.js";
 import { resolveDevSharedBuildScript } from "../dev-shared-build.mjs";
 import { validatePullRequestTriage } from "../validate-pr-triage.mjs";
-import { characterCardVersions, characterGroups, characters, chatPresets, chats, messages } from "../../packages/server/src/db/schema/index.js";
+import {
+  characterCardVersions,
+  characterGroups,
+  characters,
+  chatPresets,
+  chats,
+  lorebookCharacterLinks,
+  lorebooks,
+  messages,
+} from "../../packages/server/src/db/schema/index.js";
 import { eq } from "../../packages/server/src/db/file-query.js";
 import { parseBuildMeta, resolveBuildBranch } from "../../packages/server/src/config/build-info.js";
+import { createSerializedMutationQueue } from "../../packages/client/src/lib/serialized-mutation-queue.js";
+import { estimateGameSessionHistoryTokens } from "../../packages/client/src/lib/game-session-history.js";
+import { validateCharacterGalleryReferences } from "../../packages/server/src/routes/characters.routes.js";
+import { AGENT_SUITE_TRACKER_SLICES } from "../../packages/client/src/lib/agent-suite-tracker-slices.js";
+import type { GameState } from "../../packages/shared/src/types/game-state.js";
 
 const REPOSITORY_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 import {
@@ -32,8 +52,13 @@ import { buildLorebookDuplicateInput } from "../../packages/client/src/lib/loreb
 import { appendLorebookActivationKeys } from "../../packages/client/src/lib/lorebook-keys.js";
 import { arePresetChoiceSelectionsComplete } from "../../packages/client/src/lib/preset-choice-selection.js";
 import {
+  MARINARA_UNIVERSAL_PRESET_ARTWORK,
+  resolvePresetArtwork,
+} from "../../packages/client/src/lib/preset-artwork.js";
+import {
   getSlashCompletions,
   matchSlashCommand,
+  parseTargetedHideArguments,
   shouldExecuteQuickPostAsCommand,
 } from "../../packages/client/src/lib/slash-commands.js";
 import { getAvatarCropStyle } from "../../packages/client/src/lib/utils.js";
@@ -56,7 +81,18 @@ import {
   resolveTrackerPanelDesktopWidth,
 } from "../../packages/client/src/lib/tracker-panel-layout.js";
 import { getApiErrorMessage } from "../../packages/client/src/lib/api-client.js";
-import { scrollProfessorMariTranscriptToBottom } from "../../packages/client/src/lib/professor-mari-transcript-scroll.js";
+import {
+  getPersonalExtensionTraffic,
+  recordPersonalExtensionRequest,
+} from "../../packages/client/src/lib/personal-extension-traffic.js";
+import {
+  isProfessorMariTranscriptNearBottom,
+  scrollProfessorMariTranscriptToBottom,
+} from "../../packages/client/src/lib/professor-mari-transcript-scroll.js";
+import {
+  formatCompactTokenCount,
+  resolveProfessorMariContextBudget,
+} from "../../packages/client/src/lib/professor-mari-context-budget.js";
 import { parseCustomParametersDraft } from "../../packages/client/src/lib/generation-custom-parameters.js";
 import { parseGenerationParameterDraft } from "../../packages/client/src/lib/generation-parameter-draft.js";
 import {
@@ -85,7 +121,6 @@ import {
 } from "../../packages/shared/src/utils/managed-generation-parameters.js";
 import { isAgentManifestAvailableInChatMode } from "../../packages/shared/src/constants/chat-mode-agent-policy.js";
 import { CHAT_SETTINGS_SURFACES } from "../../packages/client/src/components/chat/chat-settings-surfaces.js";
-import { mergeNoodleCustomEmojiMap } from "../../packages/client/src/lib/noodle-custom-emojis.js";
 import {
   isBundledGameAssetFolderPath,
   isBundledGameAssetPath,
@@ -131,11 +166,15 @@ import {
   searchStandardEmojiShortcodes,
 } from "../../packages/client/src/lib/emoji-shortcodes.js";
 import { persistGeneratedImageToEntityGalleries } from "../../packages/server/src/services/image/generated-image-entity-gallery.js";
-import { resolveIllustratorImageSize } from "../../packages/server/src/services/image/image-generation-settings.js";
+import {
+  parseImageGenerationUserSettings,
+  resolveIllustratorImageSize,
+} from "../../packages/server/src/services/image/image-generation-settings.js";
 import { generateIllustratorImageVariants } from "../../packages/server/src/services/image/illustrator-image-variants.js";
 import { fetchBotBrowserJson } from "../../packages/server/src/services/bot-browser/fetch-json.js";
 import { isAllowedResponseContentType, validateOutboundUrl } from "../../packages/server/src/utils/security.js";
 import { seedDefaultBackgrounds } from "../../packages/server/src/db/seed-backgrounds.js";
+import { normalizeBackgroundMeta } from "../../packages/server/src/routes/backgrounds.routes.js";
 import {
   DEFAULT_CHAT_GENERATION_TIMEOUT_MS,
   DEFAULT_GAME_DYNAMIC_IMAGE_PROMPT_TIMEOUT_MS,
@@ -157,8 +196,10 @@ import {
   formatLorebookWriteApprovalText,
   parseLorebookWriteApprovalText,
 } from "../../packages/server/src/routes/generate/agent-write-approval.js";
+import { mergeLorebookKeeperUpdateContent } from "../../packages/server/src/routes/generate/lorebook-keeper-utils.js";
 import { runImageGenerationRequest } from "../../packages/server/src/services/image/image-generation-queue.js";
 import {
+  buildSwarmUiGenerationBody,
   buildOpenRouterImagesRequest,
   detectNovelAiSubjectCount,
   openRouterImagesUrl,
@@ -166,12 +207,15 @@ import {
   resolveNovelAiDefaults,
   resolveNovelAiRequestSize,
   resolveNovelAiSize,
+  parseSwarmUiImageReference,
   usesOpenRouterImagesApi,
 } from "../../packages/server/src/services/image/image-generation.js";
 import {
   buildComfyUiLoraWorkflowReplacements,
   COMFYUI_PLACEHOLDER_REFERENCE_BASE64,
+  DEFAULT_COMFYUI_DEFAULTS,
   DEFAULT_NOVELAI_DEFAULTS,
+  imageSourceToDefaultsService,
   normalizeComfyUiLoraSettings,
 } from "../../packages/shared/src/constants/image-generation-defaults.js";
 import type { ImageGenerationDefaultsProfile } from "../../packages/shared/src/types/image-generation-defaults.js";
@@ -189,10 +233,12 @@ import { ttsConfigSchema } from "../../packages/shared/src/types/tts.js";
 import { createAgentsStorage } from "../../packages/server/src/services/storage/agents.storage.js";
 import { createCustomToolsStorage } from "../../packages/server/src/services/storage/custom-tools.storage.js";
 import { createCharactersStorage } from "../../packages/server/src/services/storage/characters.storage.js";
+import { characterOverrideDb } from "../../packages/server/src/services/professor-mari/workspace-edit-render.js";
 import { createLorebooksStorage } from "../../packages/server/src/services/storage/lorebooks.storage.js";
 import { createNoodleStorage } from "../../packages/server/src/services/storage/noodle.storage.js";
 import { createChatPresetsStorage } from "../../packages/server/src/services/storage/chat-presets.storage.js";
 import { buildGoogleModelsPageUrl } from "../../packages/server/src/routes/connections.routes.js";
+import { normalizeGoogleGenerativeLanguageBaseUrl } from "../../packages/server/src/services/llm/providers/google.provider.js";
 import {
   buildReferencedCharacterContext,
   MAX_REFERENCED_CHARACTERS,
@@ -245,17 +291,32 @@ import {
   ATLAS_CLOUD_IMAGE_MODELS,
   ATLAS_CLOUD_VIDEO_MODELS,
   IMAGE_GENERATION_SOURCES,
+  VIDEO_GENERATION_SOURCES,
   ZAI_IMAGE_MODELS,
   inferImageSource,
   inferVideoSource,
 } from "../../packages/shared/src/constants/model-lists.js";
 import { resolveSceneVideoPrompt } from "../../packages/server/src/services/video/scene-video-prompt-review.js";
 import {
+  buildSwarmUiVideoGenerationBody,
+  parseSwarmUiVideoReference,
+} from "../../packages/server/src/services/video/video-generation.js";
+import {
   buildLorebookEntryCreateRow,
   buildPersonaCreateRow,
   MariDbService,
   normalizeCharacterActionData,
 } from "../../packages/server/src/services/mari-db/mari-db.service.js";
+import {
+  HomeWidgetCatalogConflictError,
+  readHomeWidgetCatalog,
+  replaceHomeWidgetCatalog,
+} from "../../packages/server/src/services/home-widget-catalog.service.js";
+import {
+  isAppDataActionName,
+  isMutatingWorkspaceCommand,
+  PROFESSOR_MARI_APP_DATA_ACTIONS,
+} from "../../packages/server/src/services/professor-mari/workspace-agent.service.js";
 import {
   checkAutonomousMessaging,
   clearChatActivity,
@@ -289,6 +350,455 @@ import {
   filterAndSortBackgrounds,
   getNextBackgroundFolderName,
 } from "../../packages/client/src/lib/background-library.js";
+import { resolveProfessorMariNavigation } from "../../packages/client/src/lib/professor-mari-navigation.js";
+import { resolveCapabilityPackageDisplay } from "../../packages/client/src/lib/capability-package-localization.js";
+import { resolveFeatureAgentPackage } from "../../packages/client/src/lib/feature-agent-package.js";
+import { mergeEmbeddedCharacterCardFields } from "../../packages/client/src/lib/character-import.js";
+import { formatSupportDiagnostics, resolveClientOs } from "../../packages/client/src/lib/support-diagnostics.js";
+import { normalizeHydratedMessage } from "../../packages/client/src/lib/message-hydration.js";
+import { HOME_CHAT_MODE_ACCENTS } from "../../packages/client/src/lib/home-chat-mode-style.js";
+import {
+  homeCustomWidgetCatalogSchema,
+  type BuiltInAgentManifest,
+  type CapabilityPackageManifest,
+  type CharacterData,
+  type InstalledCapabilityPackage,
+} from "../../packages/shared/src/index.js";
+
+const installedFeaturePackage = {
+  id: "chess",
+  manifest: { contributions: { slots: ["conversation-surface"] } },
+} as InstalledCapabilityPackage;
+assert.equal(
+  resolveFeatureAgentPackage({ id: "chess", packageId: "chess" } as BuiltInAgentManifest, [installedFeaturePackage]),
+  installedFeaturePackage,
+  "Feature agents must resolve their installed package through the registry-owned package ID",
+);
+assert.equal(
+  resolveFeatureAgentPackage({ id: "chess" } as BuiltInAgentManifest, [installedFeaturePackage]),
+  null,
+  "Unowned feature manifests must not borrow an unrelated installed package",
+);
+const contributedFeaturePackage = {
+  id: "world-maps",
+  manifest: { contributions: { agentDetail: { agentIds: ["hierarchical-maps"] } } },
+} as InstalledCapabilityPackage;
+assert.equal(
+  resolveFeatureAgentPackage({ id: "chess", packageId: "chess" } as BuiltInAgentManifest, [
+    {
+      id: "legacy-chess-detail",
+      manifest: { contributions: { agentDetail: { agentIds: ["chess"] } } },
+    } as InstalledCapabilityPackage,
+    installedFeaturePackage,
+  ]),
+  installedFeaturePackage,
+  "The registry-owned Feature package must win when a legacy contribution appears first",
+);
+assert.equal(
+  resolveFeatureAgentPackage({ id: "hierarchical-maps" } as BuiltInAgentManifest, [contributedFeaturePackage]),
+  contributedFeaturePackage,
+  "Feature detail contributions must remain a compatible ownership fallback",
+);
+
+const existingCharacterCard = {
+  name: "Old name",
+  description: "Old description",
+  personality: "Keep this personality",
+  scenario: "Old scenario",
+  first_mes: "Old greeting",
+  mes_example: "Old example",
+  creator_notes: "Old notes",
+  system_prompt: "Old system prompt",
+  post_history_instructions: "Old reminder",
+  tags: ["old-tag"],
+  creator: "Old creator",
+  character_version: "1.0",
+  alternate_greetings: ["Old alternate"],
+  extensions: {
+    talkativeness: 0.5,
+    fav: true,
+    world: "Old world",
+    depth_prompt: { prompt: "Keep depth", depth: 4, role: "system" },
+    backstory: "Old backstory",
+    appearance: "Old appearance",
+    nameColor: "#123456",
+  },
+  character_book: null,
+} satisfies CharacterData;
+const replacedCharacterCard = mergeEmbeddedCharacterCardFields(existingCharacterCard, {
+  spec: "chara_card_v3",
+  data: {
+    name: "Updated name",
+    description: "Updated description",
+    scenario: "",
+    tags: ["updated-tag"],
+    extensions: { backstory: "Updated backstory", appearance: "Updated appearance" },
+  },
+});
+assert.ok(replacedCharacterCard, "Embedded character metadata must be recognized during avatar replacement");
+assert.equal(replacedCharacterCard.name, "Updated name");
+assert.equal(replacedCharacterCard.description, "Updated description");
+assert.equal(replacedCharacterCard.scenario, "", "Explicitly cleared card fields must stay cleared");
+assert.deepEqual(replacedCharacterCard.tags, ["updated-tag"]);
+assert.equal(replacedCharacterCard.extensions.backstory, "Updated backstory");
+assert.equal(replacedCharacterCard.extensions.appearance, "Updated appearance");
+assert.equal(replacedCharacterCard.personality, "Keep this personality", "Missing card fields must remain untouched");
+assert.equal(replacedCharacterCard.extensions.nameColor, "#123456", "Local display extensions must be preserved");
+const characterRoutesSource = readFileSync(
+  join(REPOSITORY_ROOT, "packages/server/src/routes/characters.routes.ts"),
+  "utf8",
+);
+const ownedGalleryUpdate = {
+  extensions: { characterSheetImageId: "owned-image", useCharacterSheetAsReference: true },
+};
+assert.equal(
+  await validateCharacterGalleryReferences("character-a", ownedGalleryUpdate, async () => ({
+    characterId: "character-a",
+  })),
+  ownedGalleryUpdate,
+  "A character-owned gallery reference must remain unchanged",
+);
+const foreignGalleryUpdate = await validateCharacterGalleryReferences(
+  "character-a",
+  { extensions: { characterSheetImageId: "foreign-image", useCharacterSheetAsReference: true } },
+  async () => ({ characterId: "character-b" }),
+);
+assert.deepEqual(
+  foreignGalleryUpdate.extensions,
+  { characterSheetImageId: null, useCharacterSheetAsReference: false },
+  "A foreign gallery reference must be cleared before character data is persisted",
+);
+assert.match(
+  characterRoutesSource,
+  /app\.post<\{ Params: \{ id: string \} \}>\("\/:id\/avatar"[\s\S]{0,2400}enqueueUpdate\(characterUpdateQueues, id, async \(\) => \{\s*const validatedData = await validateCharacterGalleryReferences/u,
+  "Embedded card updates must serialize writes and validate character-owned gallery references",
+);
+
+assert.equal(
+  resolveClientOs(
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_6) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36",
+    "MacIntel",
+  ),
+  "macOS 15.6",
+);
+const copiedSupportDiagnostics = formatSupportDiagnostics({
+  version: "2.4.2",
+  build: "2.4.2+abcdef123456",
+  commit: "abcdef123456",
+  os: "macOS 15.6",
+  browser: "Marinara test shell",
+  gpu: "Test GPU",
+  connectionName: "Sol",
+  connectionProvider: "openai",
+  model: "gpt-5.6-sol",
+});
+for (const expectedLine of [
+  "Version: 2.4.2",
+  "Build: 2.4.2+abcdef123456",
+  "Commit: abcdef123456",
+  "OS: macOS 15.6",
+  "Browser / app shell: Marinara test shell",
+  "GPU: Test GPU",
+  "Active connection: Sol",
+  "Connection provider: openai",
+  "LLM model: gpt-5.6-sol",
+]) {
+  assert.ok(copiedSupportDiagnostics.includes(expectedLine), `Support diagnostics must include ${expectedLine}`);
+}
+const professorMariWorkspaceSource = readFileSync(
+  join(REPOSITORY_ROOT, "packages/server/src/services/professor-mari/workspace-agent.service.ts"),
+  "utf8",
+);
+assert.match(
+  professorMariWorkspaceSource,
+  /description is a brief identity overview[\s\S]{0,220}backstory is[^\n]+history[\s\S]{0,180}appearance is physical features/u,
+  "Professor Mari's workspace prompt must teach smaller models the distinct character-card field meanings",
+);
+assert.match(
+  professorMariWorkspaceSource,
+  /updates are patches[\s\S]{0,400}read the entity back[\s\S]{0,300}requested value[\s\S]{0,220}Claim completion only/u,
+  "Professor Mari must preserve unrelated fields and verify requested character edits before claiming completion",
+);
+const professorMariSeedSource = readFileSync(join(REPOSITORY_ROOT, "packages/server/src/db/seed-mari.ts"), "utf8");
+assert.match(
+  professorMariSeedSource,
+  /Keep card fields distinct:[\s\S]{0,600}fetch the character again/u,
+  "The seeded Professor Mari command guide must retain the same targeted character-field safeguards",
+);
+
+assert.deepEqual(resolveProfessorMariNavigation("Where are the characters?"), {
+  kind: "panel",
+  panel: "characters",
+});
+assert.deepEqual(resolveProfessorMariNavigation("CHARS"), { kind: "panel", panel: "characters" });
+assert.deepEqual(resolveProfessorMariNavigation("Persona?"), { kind: "panel", panel: "personas" });
+for (const query of ["Chats", "conversations", "convo", "roleplay", "GAME"]) {
+  assert.deepEqual(resolveProfessorMariNavigation(query), { kind: "chats" });
+}
+assert.deepEqual(resolveProfessorMariNavigation("Can I talk to Professor Mari?"), { kind: "professor" });
+assert.deepEqual(resolveProfessorMariNavigation("Where do I disable Professor Mari navigation?"), {
+  kind: "settings",
+  tab: "general",
+  controlId: "professor-mari-navigation",
+});
+assert.deepEqual(resolveProfessorMariNavigation("change my theme"), { kind: "settings", tab: "appearance" });
+assert.deepEqual(resolveProfessorMariNavigation("image generation settings"), {
+  kind: "settings",
+  tab: "generations",
+});
+assert.deepEqual(resolveProfessorMariNavigation("open Discord"), { kind: "window", window: "discord" });
+assert.deepEqual(resolveProfessorMariNavigation("customize my home widgets"), {
+  kind: "window",
+  window: "widgets",
+});
+const professorMariNamedResources = [
+  { kind: "character" as const, id: "character-maukie", name: "Maukie" },
+  { kind: "persona" as const, id: "persona-echo", name: "Echo" },
+  { kind: "character" as const, id: "character-echo", name: "Echo" },
+  { kind: "preset" as const, id: "preset-cinema", name: "Cinematic RP" },
+  { kind: "lorebook" as const, id: "lorebook-snezhnaya", name: "Snezhnaya Archives" },
+  { kind: "agent" as const, id: "illustrator", name: "Illustrator", aliases: ["image agent"] },
+];
+assert.deepEqual(resolveProfessorMariNavigation("Maukie", [], professorMariNamedResources), {
+  kind: "resource",
+  resource: "character",
+  id: "character-maukie",
+});
+assert.deepEqual(resolveProfessorMariNavigation("Where is Maukie?", [], professorMariNamedResources), {
+  kind: "resource",
+  resource: "character",
+  id: "character-maukie",
+});
+assert.deepEqual(resolveProfessorMariNavigation("Mauk", [], professorMariNamedResources), {
+  kind: "resource",
+  resource: "character",
+  id: "character-maukie",
+});
+assert.deepEqual(resolveProfessorMariNavigation("edit the Echo persona", [], professorMariNamedResources), {
+  kind: "resource",
+  resource: "persona",
+  id: "persona-echo",
+});
+// An ambiguous name resolves to the first matching resource in supply order.
+assert.deepEqual(resolveProfessorMariNavigation("Echo", [], professorMariNamedResources), {
+  kind: "resource",
+  resource: "persona",
+  id: "persona-echo",
+});
+assert.deepEqual(resolveProfessorMariNavigation("open Cinematic RP preset", [], professorMariNamedResources), {
+  kind: "resource",
+  resource: "preset",
+  id: "preset-cinema",
+});
+assert.deepEqual(resolveProfessorMariNavigation("Snezhnaya Archives lorebook", [], professorMariNamedResources), {
+  kind: "resource",
+  resource: "lorebook",
+  id: "lorebook-snezhnaya",
+});
+assert.deepEqual(resolveProfessorMariNavigation("Illustrator", [], professorMariNamedResources), {
+  kind: "resource",
+  resource: "agent",
+  id: "illustrator",
+});
+assert.deepEqual(
+  resolveProfessorMariNavigation("Where did Noodle go?", [
+    { id: "official.noodle", label: "Noodle", aliases: ["NoodleR"] },
+  ]),
+  { kind: "package", packageId: "official.noodle" },
+);
+assert.equal(resolveProfessorMariNavigation("Where did Noodle go?"), null);
+assert.equal(resolveProfessorMariNavigation("quantum spaghetti cupboard"), null);
+assert.deepEqual(
+  resolveProfessorMariNavigation(
+    "Midnight at Zapolyarny",
+    [],
+    [],
+    [{ id: "chat-midnight", name: "Midnight at Zapolyarny" }],
+  ),
+  { kind: "chat", chatId: "chat-midnight" },
+);
+assert.deepEqual(resolveProfessorMariNavigation("CHAT", [], [], [{ id: "chat-generic", name: "Chat" }]), {
+  kind: "chats",
+});
+for (const name of ["Conversation", "Roleplay", "Game"]) {
+  assert.deepEqual(resolveProfessorMariNavigation(name, [], [], [{ id: `chat-${name}`, name }]), {
+    kind: "chat",
+    chatId: `chat-${name}`,
+  });
+}
+
+const localizedPackageManifest = {
+  name: "Noodle",
+  description: "Canonical description",
+  contributions: { homeBrowserTab: { label: "Noodle", ariaLabel: "Open Noodle" } },
+  localizations: {
+    pl: {
+      name: "Kluska",
+      description: "Polski opis",
+      homeBrowserTab: { label: "Kluska", ariaLabel: "Otwórz Kluskę" },
+    },
+  },
+} as CapabilityPackageManifest;
+assert.deepEqual(resolveCapabilityPackageDisplay(localizedPackageManifest, "pl-PL"), {
+  name: "Kluska",
+  description: "Polski opis",
+  homeBrowserTab: { label: "Kluska", ariaLabel: "Otwórz Kluskę" },
+});
+assert.deepEqual(resolveCapabilityPackageDisplay(localizedPackageManifest, "de-DE"), {
+  name: "Noodle",
+  description: "Canonical description",
+  homeBrowserTab: { label: "Noodle", ariaLabel: "Open Noodle" },
+});
+const regionalLocalizedPackageManifest = {
+  ...localizedPackageManifest,
+  localizations: {
+    pt_BR: {
+      name: "Macarrão",
+      description: "Descrição em português",
+      homeBrowserTab: { label: "Macarrão", ariaLabel: "Abrir Macarrão" },
+    },
+  },
+} as CapabilityPackageManifest;
+assert.equal(resolveCapabilityPackageDisplay(regionalLocalizedPackageManifest, "pt-BR").name, "Macarrão");
+assert.equal(homeCustomWidgetCatalogSchema.parse({ widgets: [] }).revision, 0);
+assert.throws(() =>
+  homeCustomWidgetCatalogSchema.parse({
+    widgets: [
+      {
+        id: "bad-timestamp",
+        title: "Bad timestamp",
+        description: "Widget timestamps must use the ISO format emitted by the writer.",
+        accent: "cyan",
+        icon: "sparkles",
+        createdAt: "yesterday",
+        updatedAt: "today",
+      },
+    ],
+  }),
+);
+assert.equal(
+  isMutatingWorkspaceCommand({
+    id: "widget-preview",
+    name: "app_data",
+    arguments: { action: "home_widget.create", apply: false },
+  }),
+  false,
+);
+assert.equal(
+  isMutatingWorkspaceCommand({
+    id: "widget-save",
+    name: "app_data",
+    arguments: { action: "home_widget.create", apply: true },
+  }),
+  true,
+);
+
+// F6: the direct-JSON compatibility recovery parser (isAppDataActionName) must recognize the
+// instruction.* family, or a small/custom model's bare {"action":"instruction.get",...} is dropped
+// instead of normalized to app_data. Pin the regex directly (isMutatingWorkspaceCommand bypasses
+// the recovery path, so it can't catch a regression at that anchor).
+assert.equal(isAppDataActionName("instruction.get"), true, "the recovery parser recognizes instruction.get");
+assert.equal(isAppDataActionName("instruction.list"), true, "the recovery parser recognizes instruction.list");
+assert.equal(
+  isAppDataActionName("instructions.remember"),
+  true,
+  "the recovery parser tolerates the lenient plural instructions.*",
+);
+assert.equal(
+  isAppDataActionName("post_history_instructions"),
+  false,
+  "a field name that merely contains 'instructions' is not an action (anchored match)",
+);
+// And read/write classification (suffix-based) is correct for the new family.
+assert.equal(
+  isMutatingWorkspaceCommand({ id: "i-get", name: "app_data", arguments: { action: "instruction.get" } }),
+  false,
+  "instruction.get classifies as a read",
+);
+assert.equal(
+  isMutatingWorkspaceCommand({ id: "i-list", name: "app_data", arguments: { action: "instruction.list" } }),
+  false,
+  "instruction.list classifies as a read",
+);
+for (const action of ["instruction.remember", "instruction.update", "instruction.forget"]) {
+  assert.equal(
+    isMutatingWorkspaceCommand({ id: `i-${action}`, name: "app_data", arguments: { action, apply: true } }),
+    true,
+    `${action} classifies as a mutation`,
+  );
+}
+
+assert.deepEqual(
+  normalizeHydratedMessage({
+    id: "legacy-reactions",
+    chatId: "chat-legacy",
+    role: "assistant",
+    content: { reactions: [{ emoji: "💖", count: 1 }] },
+    createdAt: "2026-08-09T00:00:00.000Z",
+  } as unknown as Message),
+  {
+    id: "legacy-reactions",
+    chatId: "chat-legacy",
+    role: "assistant",
+    content: "",
+    extra: {
+      displayText: null,
+      isGenerated: true,
+      tokenCount: null,
+      generationInfo: null,
+      reactions: [{ emoji: "💖", count: 1 }],
+    },
+    createdAt: "2026-08-09T00:00:00.000Z",
+    activeSwipeIndex: 0,
+  },
+);
+assert.throws(() =>
+  homeCustomWidgetCatalogSchema.parse({
+    widgets: [
+      {
+        id: "unsafe-widget",
+        title: "Unsafe",
+        description: "No executable fields are allowed.",
+        accent: "cyan",
+        icon: "sparkles",
+        html: "<script>alert(1)</script>",
+        createdAt: "2026-08-09T00:00:00.000Z",
+        updatedAt: "2026-08-09T00:00:00.000Z",
+      },
+    ],
+  }),
+);
+assert.throws(
+  () =>
+    homeCustomWidgetCatalogSchema.parse({
+      widgets: [
+        {
+          id: "duplicate-widget",
+          title: "One",
+          description: "First widget",
+          accent: "cyan",
+          icon: "note",
+          createdAt: "2026-08-09T00:00:00.000Z",
+          updatedAt: "2026-08-09T00:00:00.000Z",
+        },
+        {
+          id: "duplicate-widget",
+          title: "Two",
+          description: "Second widget",
+          accent: "pink",
+          icon: "heart",
+          createdAt: "2026-08-09T00:00:00.000Z",
+          updatedAt: "2026-08-09T00:00:00.000Z",
+        },
+      ],
+    }),
+  /Widget IDs must be unique/u,
+);
+assert.deepEqual(HOME_CHAT_MODE_ACCENTS, {
+  conversation: "oklch(0.79 0.16 205)",
+  roleplay: "oklch(0.76 0.19 52)",
+  game: "oklch(0.73 0.21 345)",
+});
 
 const backgroundOrganization = normalizeBackgroundLibraryOrganization({
   folders: [
@@ -320,10 +830,7 @@ assert.equal(resolveSpriteTransition("full-body", "none"), "crossfade");
 assert.equal(resolveSpriteTransition("full-body", "shake"), "shake");
 assert.equal(resolveSpriteTransition("expressions", "none"), "none");
 assert.deepEqual(
-  resolveSpriteExpressionState([
-    { extra: { spriteExpressions: { "character-a": "happy" } } },
-    { extra: {} },
-  ]),
+  resolveSpriteExpressionState([{ extra: { spriteExpressions: { "character-a": "happy" } } }, { extra: {} }]),
   { "character-a": "happy" },
 );
 assert.deepEqual(
@@ -452,7 +959,10 @@ assert.deepEqual(validBuildMeta, { commit: "abcdef123456", branch: "staging" });
 assert.equal(parseBuildMeta('{"commit":"abcdef123456","branch":42}'), null);
 assert.equal(parseBuildMeta(undefined), null);
 assert.equal(resolveBuildBranch(undefined, validBuildMeta?.branch, "main"), "staging");
-assert.equal(resolveBuildBranch(undefined, parseBuildMeta(undefined)?.branch, "refs/heads/feature/test"), "feature/test");
+assert.equal(
+  resolveBuildBranch(undefined, parseBuildMeta(undefined)?.branch, "refs/heads/feature/test"),
+  "feature/test",
+);
 const lorebookEnglishLocale = JSON.parse(
   readFileSync(join(REPOSITORY_ROOT, "packages/client/src/localization/locales/en.json"), "utf8"),
 ) as Record<string, unknown>;
@@ -478,7 +988,10 @@ assert.match(
   /캐릭터 정의 전, 캐릭터 정의 후/u,
 );
 const updatesRouteSource = readFileSync(join(REPOSITORY_ROOT, "packages/server/src/routes/updates.routes.ts"), "utf8");
-assert.match(updatesRouteSource, /gitInstall \? await getCurrentBranch\(root\)\.catch\(\(\) => null\) : getBuildBranch\(\)/u);
+assert.match(
+  updatesRouteSource,
+  /gitInstall \? await getCurrentBranch\(root\)\.catch\(\(\) => null\) : getBuildBranch\(\)/u,
+);
 assert.match(updatesRouteSource, /const currentChannel = await getUpdateChannelForCheckout\(root, currentBranch\)/u);
 for (const dockerfile of ["Dockerfile", "Dockerfile.lite"]) {
   const dockerSource = readFileSync(join(REPOSITORY_ROOT, dockerfile), "utf8");
@@ -579,6 +1092,11 @@ assert.deepEqual(resolveIllustratorImageSize({ width: 540, height: 960 }, "lands
 assert.deepEqual(resolveIllustratorImageSize({ width: 960, height: 540 }, "portrait"), {
   width: 540,
   height: 960,
+});
+assert.deepEqual(parseImageGenerationUserSettings(null).noodle, { width: 1024, height: 1536 });
+assert.deepEqual(parseImageGenerationUserSettings('{"imageNoodleWidth":1536,"imageNoodleHeight":1024}').noodle, {
+  width: 1536,
+  height: 1024,
 });
 
 const minimalProfessorMariPersona = buildPersonaCreateRow(
@@ -755,6 +1273,48 @@ try {
     1,
     "Default settings profile repair must be idempotent",
   );
+  await db.insert(chatPresets).values({
+    id: "legacy-branch-profile",
+    name: "Legacy branch profile",
+    mode: "roleplay",
+    isDefault: "false",
+    isActive: "false",
+    settings: JSON.stringify({
+      metadata: {
+        enableAgents: false,
+        branchName: "Foreign branch",
+        branchParentChatId: "foreign-chat",
+        branchParentMessageId: "foreign-message",
+        branchMessageId: "foreign-copy",
+      },
+    }),
+    createdAt: "2026-08-10T09:00:00.000Z",
+    updatedAt: "2026-08-10T09:00:00.000Z",
+  });
+  await db.insert(chats).values({
+    id: "legacy-profile-target-chat",
+    name: "Legacy profile target",
+    mode: "roleplay",
+    characterIds: "[]",
+    metadata: JSON.stringify({ enableAgents: true }),
+    sortOrder: 0,
+    createdAt: "2026-08-10T09:00:00.000Z",
+    updatedAt: "2026-08-10T09:00:00.000Z",
+  });
+  const legacyProfileTarget = await chatPresetStorage.applyToChat(
+    "legacy-branch-profile",
+    "legacy-profile-target-chat",
+  );
+  assert.ok(legacyProfileTarget, "A same-mode legacy profile must remain applicable");
+  const legacyProfileTargetMetadata = JSON.parse(legacyProfileTarget.metadata) as Record<string, unknown>;
+  assert.equal(legacyProfileTargetMetadata.enableAgents, false);
+  for (const key of ["branchName", "branchParentChatId", "branchParentMessageId", "branchMessageId"]) {
+    assert.equal(
+      Object.hasOwn(legacyProfileTargetMetadata, key),
+      false,
+      `Legacy profile application must strip ${key}`,
+    );
+  }
   const storageTrimFixture = await characterStorage.create({
     ...characterDataSchema.parse({ name: "Storage trim fixture" }),
     name: "  Storage trim fixture  ",
@@ -828,6 +1388,75 @@ try {
     (await lorebookStorage.listPage({ limit: 100, offset: 0, search: "Susie's private memories" })).items.length,
     0,
     "Hidden embedded lorebooks must not appear in general library searches",
+  );
+
+  const removedOwner = await characterStorage.create(characterDataSchema.parse({ name: "Removed owner" }));
+  const removedOwnerLorebook = await lorebookStorage.create(
+    createLorebookSchema.parse({
+      name: "Formerly private notes",
+      characterIds: [removedOwner.id],
+      hiddenFromLibrary: true,
+    }),
+  );
+  await characterStorage.remove(removedOwner.id);
+  assert.equal(
+    (
+      await db
+        .select()
+        .from(lorebookCharacterLinks)
+        .where(eq(lorebookCharacterLinks.lorebookId, removedOwnerLorebook.id))
+    ).length,
+    0,
+    "Deleting a Character must remove its lorebook ownership link",
+  );
+  const retainedOrphan = (await db.select().from(lorebooks).where(eq(lorebooks.id, removedOwnerLorebook.id)))[0];
+  assert.ok(retainedOrphan, "An orphaned lorebook must remain available for recovery and management");
+  assert.equal(retainedOrphan.enabled, "false");
+  assert.equal(retainedOrphan.hiddenFromLibrary, "false");
+
+  const legacyOwner = await characterStorage.create(characterDataSchema.parse({ name: "Legacy owner" }));
+  const legacyLorebook = await lorebookStorage.create(
+    createLorebookSchema.parse({ name: "Legacy notes", characterIds: [legacyOwner.id], hiddenFromLibrary: true }),
+  );
+  await db.delete(lorebookCharacterLinks).where(eq(lorebookCharacterLinks.lorebookId, legacyLorebook.id));
+  await characterStorage.remove(legacyOwner.id);
+  const retainedLegacyOrphan = (await db.select().from(lorebooks).where(eq(lorebooks.id, legacyLorebook.id)))[0];
+  assert.equal(retainedLegacyOrphan.characterId, null, "Deleting a Character must clear legacy direct ownership");
+  assert.equal(retainedLegacyOrphan.enabled, "false", "Legacy orphaned lorebooks must be deactivated");
+  assert.equal(retainedLegacyOrphan.hiddenFromLibrary, "false", "Legacy orphaned lorebooks must be manageable");
+
+  const unlinkedOwner = await characterStorage.create(characterDataSchema.parse({ name: "Unlinked owner" }));
+  const unlinkedLorebook = await lorebookStorage.create(
+    createLorebookSchema.parse({ name: "Unlinked notes", characterIds: [unlinkedOwner.id], hiddenFromLibrary: true }),
+  );
+  const unlinked = await lorebookStorage.update(unlinkedLorebook.id, { characterIds: [] });
+  assert.equal(unlinked?.enabled, false, "Unlinking the final owner must deactivate the lorebook");
+  assert.equal(unlinked?.hiddenFromLibrary, false, "An unlinked lorebook must return to the manageable library");
+
+  const concurrentCharacterOwner = await characterStorage.create(
+    characterDataSchema.parse({ name: "Concurrent owner" }),
+  );
+  const concurrentPersonaOwner = await characterStorage.createPersona("Concurrent persona", "Regression fixture");
+  const concurrentlyUnlinkedLorebook = await lorebookStorage.create(
+    createLorebookSchema.parse({
+      name: "Concurrently unlinked notes",
+      characterIds: [concurrentCharacterOwner.id],
+      personaIds: [concurrentPersonaOwner.id],
+      hiddenFromLibrary: true,
+    }),
+  );
+  await Promise.all([
+    lorebookStorage.update(concurrentlyUnlinkedLorebook.id, { characterIds: [] }),
+    lorebookStorage.update(concurrentlyUnlinkedLorebook.id, { personaIds: [] }),
+  ]);
+  const concurrentlyUnlinked = await lorebookStorage.getById(concurrentlyUnlinkedLorebook.id);
+  assert.deepEqual(concurrentlyUnlinked?.characterIds, [], "Concurrent unlinking must not restore a Character owner");
+  assert.deepEqual(concurrentlyUnlinked?.personaIds, [], "Concurrent unlinking must not restore a Persona owner");
+  assert.equal(concurrentlyUnlinked?.enabled, false, "Concurrent final-owner unlinking must deactivate the lorebook");
+  assert.equal(
+    concurrentlyUnlinked?.hiddenFromLibrary,
+    false,
+    "Concurrent final-owner unlinking must leave the lorebook manageable",
   );
 
   const referencedContext = await buildReferencedCharacterContext({
@@ -1223,22 +1852,789 @@ try {
 
   const mariDb = new MariDbService(db);
   const professorMariLorebookId = "professor-mari-lorebook-create-regression";
+  const professorMariFullEntryContent = `The entry starts here. ${"Full lorebook body segment. ".repeat(20)}The entry ends here.`;
   const professorMariLorebookResult = await mariDb.executeAction({
     action: "lorebook.create",
     lorebookId: professorMariLorebookId,
     data: {
       name: "Professor Mari lorebook regression",
-      entries: [{ name: "Verified entry", content: "Saved with the lorebook.", keys: ["verified"] }],
+      entries: [{ name: "Verified entry", content: professorMariFullEntryContent, keys: ["verified"] }],
     },
     apply: true,
   });
   assert.equal(professorMariLorebookResult.ok, true, "Professor Mari must create lorebooks after visibility was added");
   const professorMariLorebook = await lorebookStorage.getById(professorMariLorebookId);
   assert.equal(professorMariLorebook?.hiddenFromLibrary, false);
-  assert.equal((await lorebookStorage.listEntries(professorMariLorebookId)).length, 1);
+  const professorMariEntries = await lorebookStorage.listEntries(professorMariLorebookId);
+  assert.equal(professorMariEntries.length, 1);
+  const professorMariEntryId = professorMariEntries[0]?.id;
+  assert.ok(professorMariEntryId);
+  assert.ok(PROFESSOR_MARI_APP_DATA_ACTIONS.includes("lorebook.getEntry"));
+  const professorMariEntryIndex = await mariDb.executeAction({
+    action: "lorebook.entries",
+    lorebookId: professorMariLorebookId,
+  });
+  assert.equal(
+    (professorMariEntryIndex.output as Array<{ content: string }>)[0]?.content.endsWith("…"),
+    true,
+    "the lorebook entry index should remain compact",
+  );
+  const professorMariFullEntry = await mariDb.executeAction({
+    action: "lorebook.getEntry",
+    entryId: professorMariEntryId,
+  });
+  assert.equal(professorMariFullEntry.ok, true);
+  assert.equal(
+    (professorMariFullEntry.output as { content?: string }).content,
+    professorMariFullEntryContent,
+    "Professor Mari's full-entry reader must preserve the complete lorebook body",
+  );
   await lorebookStorage.remove(professorMariLorebookId);
   assert.equal(await lorebookStorage.getById(professorMariLorebookId), null);
   assert.equal((await lorebookStorage.listEntries(professorMariLorebookId)).length, 0);
+
+  // #4791 — Professor Mari's lorebook.create + updateEntry now persist the keyword-matching and
+  // selective fields that were previously hardcoded, so her authoring + fidelity pass can set them.
+  const professorMariParamLorebookId = "professor-mari-param-lorebook-regression";
+  const professorMariParamCreate = await mariDb.executeAction({
+    action: "lorebook.create",
+    lorebookId: professorMariParamLorebookId,
+    data: {
+      name: "Professor Mari parameterized entries",
+      entries: [
+        {
+          name: "Vlad",
+          content: "The immortal count.",
+          keys: ["Vlad"],
+          secondaryKeys: ["count", "castle"],
+          selective: true,
+          selectiveLogic: "and_all",
+          matchWholeWords: true,
+          caseSensitive: true,
+          // Embedded entries must also receive the full user-editable settings, not just the
+          // keyword-matching subset the builder handles.
+          probability: 25,
+          sticky: 6,
+          groupWeight: 8,
+          excludeRecursion: true,
+          characterFilterMode: "include",
+          characterFilterIds: ["char-embedded"],
+        },
+      ],
+    },
+    apply: true,
+  });
+  assert.equal(professorMariParamCreate.ok, true);
+  const professorMariParamEntry = (await lorebookStorage.listEntries(professorMariParamLorebookId))[0];
+  assert.ok(professorMariParamEntry);
+  assert.equal(professorMariParamEntry.selective, true, "create must persist selective");
+  assert.equal(professorMariParamEntry.selectiveLogic, "and_all", "create must persist selectiveLogic");
+  assert.equal(professorMariParamEntry.matchWholeWords, true, "create must persist matchWholeWords");
+  assert.equal(professorMariParamEntry.caseSensitive, true, "create must persist caseSensitive");
+  assert.equal(professorMariParamEntry.useRegex, false, "unset useRegex stays default");
+  assert.equal(professorMariParamEntry.probability, 25, "create must persist an embedded entry's probability");
+  assert.equal(professorMariParamEntry.sticky, 6, "create must persist an embedded entry's timing field");
+  assert.equal(professorMariParamEntry.groupWeight, 8, "create must persist an embedded entry's groupWeight");
+  assert.equal(professorMariParamEntry.excludeRecursion, true, "create must persist an embedded entry's recursion flag");
+  assert.equal(professorMariParamEntry.characterFilterMode, "include", "create must persist an embedded entry's filter mode");
+  assert.deepEqual(
+    professorMariParamEntry.characterFilterIds,
+    ["char-embedded"],
+    "create must persist an embedded entry's filter ids",
+  );
+
+  // updateEntry (the fidelity-pass path, via assignLorebookEntryActionFields) patches the same fields.
+  const professorMariEntryUpdate = await mariDb.executeAction({
+    action: "lorebook.updateEntry",
+    entryId: professorMariParamEntry.id,
+    patch: { matchWholeWords: false, selectiveLogic: "not", useRegex: true },
+    apply: true,
+  });
+  assert.equal(professorMariEntryUpdate.ok, true);
+  const professorMariUpdatedEntry = (await lorebookStorage.listEntries(professorMariParamLorebookId))[0];
+  assert.ok(professorMariUpdatedEntry);
+  assert.equal(professorMariUpdatedEntry.matchWholeWords, false, "updateEntry must clear matchWholeWords");
+  assert.equal(professorMariUpdatedEntry.selectiveLogic, "not", "updateEntry must patch selectiveLogic");
+  assert.equal(professorMariUpdatedEntry.useRegex, true, "updateEntry must set useRegex");
+
+  // An invalid selectiveLogic is ignored; a valid sibling field in the same patch still applies.
+  const professorMariBadLogicUpdate = await mariDb.executeAction({
+    action: "lorebook.updateEntry",
+    entryId: professorMariParamEntry.id,
+    patch: { content: "Updated body.", selectiveLogic: "nonsense" },
+    apply: true,
+  });
+  assert.equal(professorMariBadLogicUpdate.ok, true);
+  const professorMariAfterBadLogic = (await lorebookStorage.listEntries(professorMariParamLorebookId))[0];
+  assert.ok(professorMariAfterBadLogic);
+  assert.equal(professorMariAfterBadLogic.content, "Updated body.", "valid sibling field still applies");
+  assert.equal(professorMariAfterBadLogic.selectiveLogic, "not", "invalid selectiveLogic is ignored");
+
+  // #4791 follow-up: the remaining user-editable entry settings (activation chance, timing,
+  // recursion, grouping, scan depth, lock, filters) are now patchable via updateEntry too, and
+  // probability is clamped to 0-100.
+  const professorMariSettingsUpdate = await mariDb.executeAction({
+    action: "lorebook.updateEntry",
+    entryId: professorMariParamEntry.id,
+    patch: {
+      probability: 150,
+      sticky: 3,
+      cooldown: 2,
+      delay: 1,
+      groupWeight: 5,
+      scanDepth: 4,
+      preventRecursion: false,
+      excludeRecursion: true,
+      delayUntilRecursion: true,
+      excludeFromVectorization: true,
+      locked: true,
+      characterFilterIds: ["char-1", "char-2"],
+    },
+    apply: true,
+  });
+  assert.equal(professorMariSettingsUpdate.ok, true, `settings updateEntry must succeed: ${JSON.stringify(professorMariSettingsUpdate)}`);
+  const professorMariSettingsEntry = (await lorebookStorage.listEntries(professorMariParamLorebookId))[0];
+  assert.ok(professorMariSettingsEntry);
+  assert.equal(professorMariSettingsEntry.probability, 100, "probability is clamped to 0-100");
+  assert.equal(professorMariSettingsEntry.sticky, 3, "updateEntry sets sticky");
+  assert.equal(professorMariSettingsEntry.cooldown, 2, "updateEntry sets cooldown");
+  assert.equal(professorMariSettingsEntry.delay, 1, "updateEntry sets delay");
+  assert.equal(professorMariSettingsEntry.groupWeight, 5, "updateEntry sets groupWeight");
+  assert.equal(professorMariSettingsEntry.scanDepth, 4, "updateEntry sets scanDepth");
+  assert.equal(professorMariSettingsEntry.preventRecursion, false, "updateEntry clears preventRecursion");
+  assert.equal(professorMariSettingsEntry.excludeRecursion, true, "updateEntry sets excludeRecursion");
+  assert.equal(professorMariSettingsEntry.delayUntilRecursion, true, "updateEntry sets delayUntilRecursion");
+  assert.equal(professorMariSettingsEntry.excludeFromVectorization, true, "updateEntry sets excludeFromVectorization");
+  assert.equal(professorMariSettingsEntry.locked, true, "updateEntry sets locked");
+  assert.deepEqual(
+    professorMariSettingsEntry.characterFilterIds,
+    ["char-1", "char-2"],
+    "updateEntry sets characterFilterIds",
+  );
+
+  // #4791 follow-up (hardening): nullable numbers clear on explicit null, ephemeral honors its int>=0
+  // bound, filter modes are enum-validated (and case-normalized), and unknown matching sources drop.
+  const professorMariHardeningUpdate = await mariDb.executeAction({
+    action: "lorebook.updateEntry",
+    entryId: professorMariParamEntry.id,
+    patch: {
+      sticky: null,
+      ephemeral: -5,
+      characterFilterMode: "Include",
+      characterTagFilterMode: "bogus",
+      additionalMatchingSources: ["character_description", "not_a_source"],
+    },
+    apply: true,
+  });
+  assert.equal(
+    professorMariHardeningUpdate.ok,
+    true,
+    `hardening updateEntry must succeed: ${JSON.stringify(professorMariHardeningUpdate)}`,
+  );
+  const professorMariHardenedEntry = (await lorebookStorage.listEntries(professorMariParamLorebookId))[0];
+  assert.ok(professorMariHardenedEntry);
+  assert.equal(professorMariHardenedEntry.sticky, null, "explicit null clears a nullable numeric field");
+  assert.equal(professorMariHardenedEntry.ephemeral, 0, "ephemeral clamps a negative to its 0 minimum");
+  assert.equal(professorMariHardenedEntry.characterFilterMode, "include", "a filter mode is normalized and validated");
+  assert.equal(
+    professorMariHardenedEntry.characterTagFilterMode,
+    "any",
+    "an invalid filter mode is dropped, leaving the default",
+  );
+  assert.deepEqual(
+    professorMariHardenedEntry.additionalMatchingSources,
+    ["character_description"],
+    "unknown additionalMatchingSources values are filtered out",
+  );
+
+  // folderId must reference an existing folder in the entry's own lorebook: a bad id is rejected
+  // (unlike the pre-fix path, which stored a dangling reference), and an explicit null clears it.
+  const professorMariBadFolder = await mariDb.executeAction({
+    action: "lorebook.updateEntry",
+    entryId: professorMariParamEntry.id,
+    patch: { folderId: "no-such-folder" },
+    apply: true,
+  });
+  assert.equal(
+    professorMariBadFolder.ok,
+    false,
+    "updateEntry rejects a folderId that is not a folder in the entry's lorebook",
+  );
+  const professorMariClearFolder = await mariDb.executeAction({
+    action: "lorebook.updateEntry",
+    entryId: professorMariParamEntry.id,
+    patch: { folderId: null },
+    apply: true,
+  });
+  assert.equal(professorMariClearFolder.ok, true, "updateEntry accepts a folder-only null clear");
+  const professorMariClearedEntry = (await lorebookStorage.listEntries(professorMariParamLorebookId))[0];
+  assert.equal(professorMariClearedEntry.folderId, null, "explicit null clears folderId");
+
+  // lorebook.addEntry (app_data action) shares the same whitelist + builders; confirm the create path
+  // also persists the new fields when they arrive as top-level keys (exercising the addentry allowlist).
+  const professorMariAddEntry = await mariDb.executeAction({
+    action: "lorebook.addEntry",
+    lorebookId: professorMariParamLorebookId,
+    data: { name: "Regex entry", content: "Pattern-matched lore.", keys: ["\\bLycan\\b"], useRegex: true },
+    probability: 20,
+    excludeRecursion: true,
+    sticky: 7,
+    characterFilterIds: ["char-9"],
+    apply: true,
+  });
+  assert.equal(professorMariAddEntry.ok, true);
+  const professorMariAddedEntry = (await lorebookStorage.listEntries(professorMariParamLorebookId)).find(
+    (entry) => entry.name === "Regex entry",
+  );
+  assert.ok(professorMariAddedEntry);
+  assert.equal(professorMariAddedEntry.useRegex, true, "addEntry must persist useRegex");
+  assert.equal(professorMariAddedEntry.probability, 20, "addEntry persists a top-level allowlisted number");
+  assert.equal(professorMariAddedEntry.excludeRecursion, true, "addEntry persists a top-level allowlisted boolean");
+  assert.equal(professorMariAddedEntry.sticky, 7, "addEntry persists a top-level allowlisted timing field");
+  assert.deepEqual(
+    professorMariAddedEntry.characterFilterIds,
+    ["char-9"],
+    "addEntry persists a top-level allowlisted list field",
+  );
+  await lorebookStorage.remove(professorMariParamLorebookId);
+
+  // #4924: lorebook.deleteEntry removes exactly ONE entry (scoped), so Mari never needs a raw
+  // `mari db delete --where` that can mass-delete unrelated rows.
+  const professorMariDeleteLorebookId = "professor-mari-delete-entry-regression";
+  try {
+    const professorMariDeleteCreate = await mariDb.executeAction({
+      action: "lorebook.create",
+      lorebookId: professorMariDeleteLorebookId,
+      data: {
+        name: "Delete-entry regression",
+        entries: [
+          { name: "Keep me", content: "This entry must survive." },
+          { name: "Remove me", content: "This entry gets deleted." },
+        ],
+      },
+      apply: true,
+    });
+    assert.equal(professorMariDeleteCreate.ok, true);
+    const professorMariDeleteEntries = await lorebookStorage.listEntries(professorMariDeleteLorebookId);
+    assert.equal(professorMariDeleteEntries.length, 2, "both entries were created");
+    const professorMariEntryToDelete = professorMariDeleteEntries.find((entry) => entry.name === "Remove me");
+    const professorMariEntryToKeep = professorMariDeleteEntries.find((entry) => entry.name === "Keep me");
+    assert.ok(professorMariEntryToDelete && professorMariEntryToKeep, "both named entries are present before delete");
+
+    // Deleting a non-existent entry is rejected, not a silent no-op.
+    const professorMariDeleteMissing = await mariDb.executeAction({
+      action: "lorebook.deleteEntry",
+      entryId: "no-such-entry-id",
+      apply: true,
+    });
+    assert.equal(professorMariDeleteMissing.ok, false, "deleting a missing entry is rejected");
+
+    const professorMariDeleteResult = await mariDb.executeAction({
+      action: "lorebook.deleteEntry",
+      entryId: professorMariEntryToDelete.id,
+      apply: true,
+    });
+    assert.equal(
+      professorMariDeleteResult.ok,
+      true,
+      `lorebook.deleteEntry must succeed: ${JSON.stringify(professorMariDeleteResult)}`,
+    );
+    const professorMariAfterDelete = await lorebookStorage.listEntries(professorMariDeleteLorebookId);
+    assert.equal(professorMariAfterDelete.length, 1, "exactly one entry was removed (scoped, not a mass delete)");
+    assert.equal(professorMariAfterDelete[0]?.id, professorMariEntryToKeep.id, "the untargeted entry survives");
+  } finally {
+    await lorebookStorage.remove(professorMariDeleteLorebookId);
+  }
+
+  // #4927: a Mari lorebook entry mutation resyncs an embedded character's data.character_book on
+  // both apply and Restore. The generic mari-db mutation path used to skip
+  // syncCharacterBookFromLorebook, so add/update/delete of an embedded lorebook's entries left the
+  // character's derived copy stale.
+  const embeddedSyncLorebook = await lorebookStorage.create({ name: "Embedded sync book" });
+  const embeddedSyncCharacter = await characterStorage.create(
+    characterDataSchema.parse({
+      name: "Embedded sync host",
+      character_book: { name: "Embedded sync book", entries: [] },
+      extensions: { importMetadata: { embeddedLorebook: { lorebookId: embeddedSyncLorebook.id } } },
+    }),
+  );
+  assert.ok(embeddedSyncCharacter, "embedded host character created");
+  let embeddedReparentTargetId: string | null = null;
+  let embeddedLinkDecoyId: string | null = null;
+  try {
+    await lorebookStorage.update(embeddedSyncLorebook.id, { characterId: embeddedSyncCharacter.id });
+    const embeddedSyncEntry = await lorebookStorage.createEntry({
+      lorebookId: embeddedSyncLorebook.id,
+      name: "Embedded entry",
+      content: "original content",
+      keys: ["embed"],
+    });
+    const readEmbeddedBookContent = async () => {
+      const row = await characterStorage.getById(embeddedSyncCharacter.id);
+      const data = JSON.parse(String(row?.data ?? "{}")) as {
+        character_book?: { entries?: Array<{ content?: string }> };
+      };
+      return (data.character_book?.entries ?? []).map((entry) => entry.content ?? "");
+    };
+
+    const beforeEmbeddedSync = new Set(mariDb.getPendingApprovals().map((approval) => approval.id));
+    const embeddedSyncUpdate = await mariDb.executeAction({
+      action: "lorebook.updateEntry",
+      entryId: embeddedSyncEntry.id,
+      patch: { content: "edited content" },
+      apply: true,
+    });
+    assert.equal(embeddedSyncUpdate.ok, true);
+    assert.ok(
+      (await readEmbeddedBookContent()).includes("edited content"),
+      "applying a Mari entry edit resyncs the embedded character_book",
+    );
+
+    const embeddedSyncApproval = mariDb.getPendingApprovals().find((approval) => !beforeEmbeddedSync.has(approval.id));
+    assert.ok(embeddedSyncApproval, "the entry edit produced a reviewable approval");
+    const embeddedSyncRestore = await mariDb.restoreAppliedReview(embeddedSyncApproval.id);
+    assert.ok(
+      embeddedSyncRestore && "history" in embeddedSyncRestore,
+      `restoring the entry edit must succeed (not null / state_changed): ${JSON.stringify(embeddedSyncRestore)}`,
+    );
+    assert.ok(
+      (await readEmbeddedBookContent()).includes("original content"),
+      "restoring the edit resyncs the embedded character_book back",
+    );
+
+    // #4927 (reparent): moving an entry to a DIFFERENT lorebook must resync the entry's FORMER
+    // lorebook too, not just the destination. syncAffectedCharacterBooks collects both sides of a
+    // lorebook_entries change, so the embedded book the entry LEFT rebuilds without it. (The old
+    // `after ?? before` collection synced only the destination and left this book stale.)
+    const embeddedReparentTarget = await lorebookStorage.create({ name: "Reparent target book" });
+    embeddedReparentTargetId = embeddedReparentTarget.id;
+    const embeddedReparent = await mariDb.executeCli({
+      argv: [
+        "db",
+        "patch",
+        "lorebook_entries",
+        embeddedSyncEntry.id,
+        "--json",
+        JSON.stringify({ lorebookId: embeddedReparentTarget.id }),
+        "--apply",
+      ],
+    });
+    assert.equal(
+      embeddedReparent.ok,
+      true,
+      `reparenting an entry to another lorebook must succeed: ${JSON.stringify(embeddedReparent)}`,
+    );
+    assert.deepEqual(
+      await readEmbeddedBookContent(),
+      [],
+      "reparenting an entry OUT of the embedded lorebook resyncs the former lorebook (the moved entry no longer appears)",
+    );
+
+    // #4932: whole-lorebook deletion must resolve the actual embedding character before the
+    // generic cascade removes its links. Keep a different linked character first to prove the
+    // hydrated lorebook's derived characterId is not treated as the embedded owner.
+    const embeddedLinkDecoy = await characterStorage.create(characterDataSchema.parse({ name: "A linked decoy" }));
+    assert.ok(embeddedLinkDecoy);
+    embeddedLinkDecoyId = embeddedLinkDecoy.id;
+    await lorebookStorage.update(embeddedSyncLorebook.id, {
+      characterIds: [embeddedLinkDecoy.id, embeddedSyncCharacter.id],
+    });
+    const pendingBeforeDelete = new Set(mariDb.getPendingApprovals().map((approval) => approval.id));
+    const embeddedWholeDelete = await mariDb.executeCli({
+      argv: ["db", "delete", "lorebooks", embeddedSyncLorebook.id, "--cascade", "--apply"],
+    });
+    assert.equal(
+      embeddedWholeDelete.ok,
+      true,
+      `deleting an embedded lorebook through mari-db must succeed: ${JSON.stringify(embeddedWholeDelete)}`,
+    );
+    const deletedHost = await characterStorage.getById(embeddedSyncCharacter.id);
+    const deletedHostData = JSON.parse(String(deletedHost?.data ?? "{}")) as {
+      character_book?: unknown;
+      extensions?: { importMetadata?: { embeddedLorebook?: unknown } };
+    };
+    assert.equal(deletedHostData.character_book, null, "whole-lorebook delete clears the embedded character book");
+    assert.equal(
+      deletedHostData.extensions?.importMetadata?.embeddedLorebook,
+      undefined,
+      "whole-lorebook delete clears the embedded lorebook pointer",
+    );
+    const wholeDeleteApproval = mariDb
+      .getPendingApprovals()
+      .find((approval) => !pendingBeforeDelete.has(approval.id));
+    assert.ok(wholeDeleteApproval, "whole-lorebook delete produced a reviewable approval");
+    const restoredWholeDelete = await mariDb.restoreAppliedReview(wholeDeleteApproval.id);
+    assert.ok(restoredWholeDelete && "history" in restoredWholeDelete, "whole-lorebook Restore must succeed");
+    const restoredHost = await characterStorage.getById(embeddedSyncCharacter.id);
+    const restoredHostData = JSON.parse(String(restoredHost?.data ?? "{}")) as {
+      character_book?: { entries?: unknown[] };
+      extensions?: { importMetadata?: { embeddedLorebook?: { lorebookId?: string } } };
+    };
+    assert.deepEqual(
+      restoredHostData.character_book?.entries,
+      [],
+      "Restore re-embeds even an empty character book",
+    );
+    assert.equal(
+      restoredHostData.extensions?.importMetadata?.embeddedLorebook?.lorebookId,
+      embeddedSyncLorebook.id,
+      "Restore reinstates the embedded lorebook pointer on the actual host",
+    );
+  } finally {
+    await lorebookStorage.remove(embeddedSyncLorebook.id);
+    await characterStorage.remove(embeddedSyncCharacter.id);
+    if (embeddedReparentTargetId) await lorebookStorage.remove(embeddedReparentTargetId);
+    if (embeddedLinkDecoyId) await characterStorage.remove(embeddedLinkDecoyId);
+  }
+
+  // #4931: rejectRows reverts a dependency-closed SUBSET of a pending review's lorebook entries,
+  // keeping the rest applied, and shrinks (or resolves) the pending card. Guards the audited undo
+  // path: a stale tuple and a non-lorebook_entries row are both refused without reverting anything.
+  const rejectLorebookId = "professor-mari-reject-rows-regression";
+  try {
+    const rejectApprovalsBefore = new Set(mariDb.getPendingApprovals().map((approval) => approval.id));
+    const rejectCreate = await mariDb.executeAction({
+      action: "lorebook.create",
+      lorebookId: rejectLorebookId,
+      data: {
+        name: "Reject-rows regression",
+        entries: [
+          { name: "Entry A", content: "keep A" },
+          { name: "Entry B", content: "reject B" },
+          { name: "Entry C", content: "keep C" },
+        ],
+      },
+      apply: true,
+    });
+    assert.equal(rejectCreate.ok, true, `reject-rows create must succeed: ${JSON.stringify(rejectCreate)}`);
+
+    const rejectEntries = await lorebookStorage.listEntries(rejectLorebookId);
+    assert.equal(rejectEntries.length, 3, "three entries created before reject");
+    const entryB = rejectEntries.find((entry) => entry.name === "Entry B");
+    assert.ok(entryB, "Entry B present before reject");
+
+    const rejectApproval = mariDb.getPendingApprovals().find((approval) => !rejectApprovalsBefore.has(approval.id));
+    assert.ok(rejectApproval, "lorebook create produced a reviewable approval");
+    const entryBIndex = rejectApproval.diffPreview.findIndex(
+      (change) => change.table === "lorebook_entries" && change.id === entryB.id,
+    );
+    assert.ok(entryBIndex >= 0, "Entry B appears in the approval diff preview");
+    const lorebookRowIndex = rejectApproval.diffPreview.findIndex((change) => change.table === "lorebooks");
+    assert.ok(lorebookRowIndex >= 0, "the lorebook row appears in the approval diff preview");
+
+    // A stale/mismatched identity tuple is refused, not misapplied to the wrong row.
+    const rejectStale = await mariDb.rejectRows(rejectApproval.id, [
+      { index: entryBIndex, table: "lorebook_entries", id: entryB.id, action: "delete" },
+    ]);
+    assert.ok(
+      rejectStale && "outcome" in rejectStale && rejectStale.outcome === "invalid_selection",
+      "a mismatched action tuple is refused as invalid_selection",
+    );
+
+    // Rejecting the parent lorebook row (not a lorebook_entries change) is refused in v1.
+    const rejectLorebookRow = await mariDb.rejectRows(rejectApproval.id, [
+      { index: lorebookRowIndex, table: "lorebooks", id: rejectLorebookId, action: "insert" },
+    ]);
+    assert.ok(
+      rejectLorebookRow && "outcome" in rejectLorebookRow && rejectLorebookRow.outcome === "invalid_selection",
+      "rejecting a non-lorebook_entries row is refused",
+    );
+    assert.equal(
+      (await lorebookStorage.listEntries(rejectLorebookId)).length,
+      3,
+      "a refused reject reverts nothing",
+    );
+
+    // Reject only Entry B: it is removed, A and C stay, the lorebook stays, the card shrinks.
+    const rejectB = await mariDb.rejectRows(rejectApproval.id, [
+      { index: entryBIndex, table: "lorebook_entries", id: entryB.id, action: "insert" },
+    ]);
+    assert.ok(rejectB && "history" in rejectB, `rejecting Entry B must succeed: ${JSON.stringify(rejectB)}`);
+    assert.equal(rejectB.completed, false, "the review still has rows after a partial reject");
+    assert.equal(rejectB.rejected, 1, "exactly one row was rejected");
+    assert.deepEqual(
+      (await lorebookStorage.listEntries(rejectLorebookId)).map((entry) => entry.name).sort(),
+      ["Entry A", "Entry C"],
+      "only Entry B was reverted; A and C remain",
+    );
+    const shrunkApproval = mariDb.getPendingApprovals().find((approval) => approval.id === rejectApproval.id);
+    assert.ok(shrunkApproval, "the partially-rejected review is still pending");
+    assert.ok(
+      !shrunkApproval.diffPreview.some((change) => change.table === "lorebook_entries" && change.id === entryB.id),
+      "the rejected row is gone from the shrunken diff preview",
+    );
+    // The approvals list renders the mirrored affectedRows count, so a partial reject must recompute
+    // it (not leave it at the pre-reject total). With < 50 changes it equals the preview length.
+    assert.equal(
+      shrunkApproval.affectedRows,
+      shrunkApproval.diffPreview.length,
+      "the mirrored affectedRows count matches the shrunken plan",
+    );
+
+    // Reject the remaining entries (re-derived from the shrunken preview, since indices shifted).
+    // The un-rejectable lorebooks row remains, so the review stays pending rather than resolving.
+    const remainingEntryRows = shrunkApproval.diffPreview
+      .map((change, index) => ({ change, index }))
+      .filter((row) => row.change.table === "lorebook_entries")
+      .map((row) => ({ index: row.index, table: row.change.table, id: row.change.id, action: row.change.action }));
+    const rejectRest = await mariDb.rejectRows(rejectApproval.id, remainingEntryRows);
+    assert.ok(rejectRest && "history" in rejectRest, "rejecting the remaining entries must succeed");
+    assert.equal(rejectRest.completed, false, "the un-rejectable lorebook row keeps the review pending");
+    assert.equal(
+      (await lorebookStorage.listEntries(rejectLorebookId)).length,
+      0,
+      "all entries reverted; the empty lorebook shell survives for Keep/Restore",
+    );
+  } finally {
+    await lorebookStorage.remove(rejectLorebookId);
+  }
+
+  // #4931 (reject guard): a lorebook_entries DELETE cannot be rejected on its own when its parent
+  // lorebook is gone (deleted in the same review, or otherwise) — re-inserting the entry would dangle,
+  // and post-restore validate() would only catch that AFTER restoreChanges committed. rejectRows
+  // refuses it up front with invalid_selection, reverting nothing.
+  const rejectDanglingLorebook = await lorebookStorage.create({ name: "Reject-dangling parent" });
+  let rejectDanglingRemoved = false;
+  try {
+    const danglingEntry = await lorebookStorage.createEntry({
+      lorebookId: rejectDanglingLorebook.id,
+      name: "Doomed entry",
+      content: "about to be orphaned",
+      keys: ["doomed"],
+    });
+    const danglingApprovalsBefore = new Set(mariDb.getPendingApprovals().map((approval) => approval.id));
+    const danglingDelete = await mariDb.executeAction({
+      action: "lorebook.deleteEntry",
+      entryId: danglingEntry.id,
+      apply: true,
+    });
+    assert.equal(danglingDelete.ok, true, `deleting the entry must succeed: ${JSON.stringify(danglingDelete)}`);
+    const danglingApproval = mariDb.getPendingApprovals().find((approval) => !danglingApprovalsBefore.has(approval.id));
+    assert.ok(danglingApproval, "the entry delete produced a reviewable approval");
+    // The parent lorebook is gone by review time (simulating a separate top-level lorebook delete).
+    await lorebookStorage.remove(rejectDanglingLorebook.id);
+    rejectDanglingRemoved = true;
+    const danglingIndex = danglingApproval.diffPreview.findIndex(
+      (change) => change.table === "lorebook_entries" && change.id === danglingEntry.id,
+    );
+    assert.ok(danglingIndex >= 0, "the deleted entry appears in the diff preview");
+    const rejectDangling = await mariDb.rejectRows(danglingApproval.id, [
+      { index: danglingIndex, table: "lorebook_entries", id: danglingEntry.id, action: "delete" },
+    ]);
+    assert.ok(
+      rejectDangling && "outcome" in rejectDangling && rejectDangling.outcome === "invalid_selection",
+      `rejecting an entry whose parent lorebook is gone must be refused, not 500: ${JSON.stringify(rejectDangling)}`,
+    );
+    assert.ok(
+      mariDb.getPendingApprovals().some((approval) => approval.id === danglingApproval.id),
+      "the refused reject reverts nothing and leaves the review pending",
+    );
+    // The refusal must revert nothing: the entry stays deleted (a faulty path that re-inserts it AND
+    // returns invalid_selection would otherwise pass the checks above).
+    const danglingAfter = await lorebookStorage.listEntries(rejectDanglingLorebook.id);
+    assert.ok(
+      !danglingAfter.some((entry) => entry.id === danglingEntry.id),
+      "the refused reject did not re-insert the orphaned entry",
+    );
+    // The whole-plan Restore path has no pre-check, so the in-transaction parent check is the safety
+    // net (also closing the reject TOCTOU): restoring the review while the parent lorebook is gone
+    // rolls back to state_changed rather than committing a dangling entry.
+    const restoreDangling = await mariDb.restoreAppliedReview(danglingApproval.id);
+    assert.ok(
+      restoreDangling && "outcome" in restoreDangling && restoreDangling.outcome === "state_changed",
+      `restoring an entry delete whose parent lorebook is gone must roll back to state_changed: ${JSON.stringify(restoreDangling)}`,
+    );
+    assert.ok(
+      !(await lorebookStorage.listEntries(rejectDanglingLorebook.id)).some((entry) => entry.id === danglingEntry.id),
+      "the rolled-back restore did not re-insert the orphaned entry",
+    );
+  } finally {
+    if (!rejectDanglingRemoved) await lorebookStorage.remove(rejectDanglingLorebook.id);
+  }
+
+  // #4931 (reject guard, update branch): rejecting a lorebook_entries UPDATE reverts the entry to its
+  // pre-edit lorebookId. If that former parent lorebook was deleted concurrently, the revert would
+  // write a dangling reference. The in-transaction parent check now covers every non-insert entry
+  // change (not just deletes), so the reject rolls back to state_changed instead of committing bad
+  // data that only post-commit validate() would catch.
+  const reparentSourceLorebook = await lorebookStorage.create({ name: "Reparent-reject source" });
+  const reparentTargetLorebook = await lorebookStorage.create({ name: "Reparent-reject target" });
+  let reparentSourceRemoved = false;
+  try {
+    const reparentEntry = await lorebookStorage.createEntry({
+      lorebookId: reparentSourceLorebook.id,
+      name: "Reparented entry",
+      content: "moved between lorebooks",
+      keys: ["reparent-reject"],
+    });
+    const reparentApprovalsBefore = new Set(mariDb.getPendingApprovals().map((approval) => approval.id));
+    const reparentPatch = await mariDb.executeCli({
+      argv: [
+        "db",
+        "patch",
+        "lorebook_entries",
+        reparentEntry.id,
+        "--json",
+        JSON.stringify({ lorebookId: reparentTargetLorebook.id }),
+        "--apply",
+      ],
+    });
+    assert.equal(reparentPatch.ok, true, `reparenting the entry must succeed: ${JSON.stringify(reparentPatch)}`);
+    const reparentApproval = mariDb.getPendingApprovals().find((approval) => !reparentApprovalsBefore.has(approval.id));
+    assert.ok(reparentApproval, "the reparent produced a reviewable approval");
+    const reparentIndex = reparentApproval.diffPreview.findIndex(
+      (change) => change.table === "lorebook_entries" && change.id === reparentEntry.id && change.action === "update",
+    );
+    assert.ok(reparentIndex >= 0, "the reparent appears as an update in the diff preview");
+    // The FORMER parent lorebook is deleted before review (a separate top-level delete). Reverting the
+    // reparent would point the entry back at it, so the in-tx check must roll the reject back.
+    await lorebookStorage.remove(reparentSourceLorebook.id);
+    reparentSourceRemoved = true;
+    const rejectReparent = await mariDb.rejectRows(reparentApproval.id, [
+      { index: reparentIndex, table: "lorebook_entries", id: reparentEntry.id, action: "update" },
+    ]);
+    assert.ok(
+      rejectReparent && "outcome" in rejectReparent && rejectReparent.outcome === "state_changed",
+      `rejecting a reparent whose former lorebook is gone must roll back to state_changed, not 500: ${JSON.stringify(rejectReparent)}`,
+    );
+    assert.ok(
+      mariDb.getPendingApprovals().some((approval) => approval.id === reparentApproval.id),
+      "the rolled-back reject left the review pending",
+    );
+    // The entry stays in its CURRENT (target) lorebook — the revert to the deleted source rolled back.
+    assert.ok(
+      (await lorebookStorage.listEntries(reparentTargetLorebook.id)).some((entry) => entry.id === reparentEntry.id),
+      "the entry remains in the target lorebook after the rolled-back reject",
+    );
+  } finally {
+    if (!reparentSourceRemoved) await lorebookStorage.remove(reparentSourceLorebook.id);
+    await lorebookStorage.remove(reparentTargetLorebook.id);
+  }
+
+  // #4931 (reject serialization): keepAppliedReview / restoreAppliedReview / rejectRows each read
+  // pending.get(id), revert across await points, then rewrite the pending record + durable sidecar.
+  // Two concurrent requests for the SAME review (two devices, or a double-submit that slips the
+  // client busy guard) must not clobber each other. Without the per-review lock, both rejectRows
+  // calls read the same record, both revert their row, and the last writer leaves a PHANTOM entry in
+  // the pending card that was already reverted from the DB. Invariant: the pending card's entry rows
+  // always match the entries actually present in the DB.
+  const raceLorebookId = "professor-mari-reject-race-regression";
+  try {
+    const raceApprovalsBefore = new Set(mariDb.getPendingApprovals().map((approval) => approval.id));
+    const raceCreate = await mariDb.executeAction({
+      action: "lorebook.create",
+      lorebookId: raceLorebookId,
+      data: {
+        name: "Reject-race regression",
+        entries: [
+          { name: "Race A", content: "row A" },
+          { name: "Race B", content: "row B" },
+        ],
+      },
+      apply: true,
+    });
+    assert.equal(raceCreate.ok, true, `reject-race create must succeed: ${JSON.stringify(raceCreate)}`);
+    const raceEntries = await lorebookStorage.listEntries(raceLorebookId);
+    assert.equal(raceEntries.length, 2, "two entries created before the concurrent reject");
+    const raceApproval = mariDb.getPendingApprovals().find((approval) => !raceApprovalsBefore.has(approval.id));
+    assert.ok(raceApproval, "the create produced a reviewable approval");
+    const raceSelectionFor = (entryName: string) => {
+      const entry = raceEntries.find((candidate) => candidate.name === entryName);
+      assert.ok(entry, `${entryName} present before reject`);
+      const index = raceApproval.diffPreview.findIndex(
+        (change) => change.table === "lorebook_entries" && change.id === entry.id,
+      );
+      assert.ok(index >= 0, `${entryName} appears in the diff preview`);
+      return { index, table: "lorebook_entries", id: entry.id, action: raceApproval.diffPreview[index].action };
+    };
+    // Fire both rejects at once. They interleave at restoreChanges' await; the per-review lock must
+    // serialize the read-modify-write so neither overwrites the other's shrunken plan.
+    const [resA, resB] = await Promise.all([
+      mariDb.rejectRows(raceApproval.id, [raceSelectionFor("Race A")]),
+      mariDb.rejectRows(raceApproval.id, [raceSelectionFor("Race B")]),
+    ]);
+    assert.ok(resA && "history" in resA, "the first concurrent reject must succeed");
+    assert.ok(resB && "history" in resB, "the second concurrent reject must succeed");
+    // Core invariant: the pending card's entry rows exactly match the entries still in the DB. A
+    // clobbering lost-update would leave a phantom entry row in the card that was already reverted.
+    const raceCard = mariDb.getPendingApprovals().find((approval) => approval.id === raceApproval.id);
+    const pendingEntryIds = (raceCard?.diffPreview ?? [])
+      .filter((change) => change.table === "lorebook_entries")
+      .map((change) => change.id)
+      .sort();
+    const liveEntryIds = (await lorebookStorage.listEntries(raceLorebookId)).map((entry) => entry.id).sort();
+    assert.deepEqual(
+      pendingEntryIds,
+      liveEntryIds,
+      "the pending card's entry rows match the DB after concurrent rejects (no phantom row from a lost update)",
+    );
+    assert.deepEqual(liveEntryIds, [], "both concurrent rejects must remove both selected entries");
+  } finally {
+    await lorebookStorage.remove(raceLorebookId);
+  }
+
+  // Prompt rendering cannot address changes that the capped diff preview never exposed.
+  const previewLimitLorebookId = "professor-mari-preview-limit-regression";
+  try {
+    const created = await mariDb.executeAction({
+      action: "lorebook.create",
+      lorebookId: previewLimitLorebookId,
+      data: {
+        name: "Preview limit",
+        entries: Array.from({ length: 51 }, (_, index) => ({
+          name: `Row ${index}`,
+          content: `row ${index}`,
+        })),
+      },
+      apply: true,
+    });
+    const reviewId = created.approval?.id;
+    assert.ok(reviewId);
+    assert.ok(mariDb.getPendingChangeRaw(reviewId, 49), "the final visible preview change can render");
+    assert.equal(mariDb.getPendingChangeRaw(reviewId, 50), null, "a hidden change cannot render");
+    await mariDb.keepAppliedReview(reviewId);
+  } finally {
+    await lorebookStorage.remove(previewLimitLorebookId);
+  }
+
+  // #4931: the synthetic prompt-render DB proxy substitutes the target character's row (so the
+  // assembler reads a before/after snapshot instead of the live row) while passing every other read
+  // through untouched. Validated through the exact storage path the assembler uses (getById).
+  const proxyTargetCharacter = await characterStorage.create(
+    characterDataSchema.parse({ name: "Proxy target", description: "live description" }),
+  );
+  const proxyOtherCharacter = await characterStorage.create(characterDataSchema.parse({ name: "Proxy other" }));
+  try {
+    const liveTarget = await characterStorage.getById(proxyTargetCharacter.id);
+    assert.ok(liveTarget, "proxy target character exists");
+    const snapshot = {
+      ...liveTarget,
+      data: JSON.stringify({ ...JSON.parse(String(liveTarget.data)), name: "Snapshot name" }),
+    };
+    const overrideDb = characterOverrideDb(db, proxyTargetCharacter.id, snapshot);
+    const seenTarget = await createCharactersStorage(overrideDb).getById(proxyTargetCharacter.id);
+    assert.equal(
+      JSON.parse(String(seenTarget?.data)).name,
+      "Snapshot name",
+      "the proxy substitutes the target character row with the snapshot",
+    );
+    const seenOther = await createCharactersStorage(overrideDb).getById(proxyOtherCharacter.id);
+    assert.equal(seenOther?.id, proxyOtherCharacter.id, "the proxy passes other character reads through untouched");
+    assert.equal(
+      JSON.parse(String(seenOther?.data)).name,
+      "Proxy other",
+      "a non-target character keeps its live data through the proxy",
+    );
+    const removeDb = characterOverrideDb(db, proxyTargetCharacter.id, null);
+    assert.equal(
+      await createCharactersStorage(removeDb).getById(proxyTargetCharacter.id),
+      null,
+      "a null substitute drops the target row (before-side of an insert)",
+    );
+  } finally {
+    await characterStorage.remove(proxyTargetCharacter.id);
+    await characterStorage.remove(proxyOtherCharacter.id);
+  }
 
   const professorMariCliLorebookId = "professor-mari-cli-lorebook-create-regression";
   const professorMariCliLorebookResult = await mariDb.executeCli({
@@ -1282,6 +2678,97 @@ try {
       vectorMaxResults: 10,
     },
   );
+  // #4798 — the CLI add-entry / update-entry paths now expose the keyword-matching + selective
+  // fields that were previously hardcoded on the CLI. add-entry delegates to buildLorebookEntryCreateRow.
+  const professorMariCliAddEntry = await mariDb.executeCli({
+    argv: [
+      "lorebooks",
+      "add-entry",
+      professorMariCliLorebookId,
+      "--name",
+      "Regex CLI entry",
+      "--keys",
+      "Lycan",
+      "--secondary-keys",
+      "moon,howl",
+      "--selective",
+      "--selective-logic",
+      "and_all",
+      "--match-whole-words",
+      "--use-regex",
+      "--apply",
+    ],
+  });
+  assert.equal(
+    professorMariCliAddEntry.ok,
+    true,
+    `CLI add-entry must succeed: ${JSON.stringify(professorMariCliAddEntry)}`,
+  );
+  const professorMariCliEntry = (await lorebookStorage.listEntries(professorMariCliLorebookId)).find(
+    (entry) => entry.name === "Regex CLI entry",
+  );
+  assert.ok(professorMariCliEntry);
+  assert.equal(professorMariCliEntry.selective, true, "CLI add-entry must persist --selective");
+  assert.equal(professorMariCliEntry.selectiveLogic, "and_all", "CLI add-entry must persist --selective-logic");
+  assert.equal(professorMariCliEntry.matchWholeWords, true, "CLI add-entry must persist --match-whole-words");
+  assert.equal(professorMariCliEntry.useRegex, true, "CLI add-entry must persist --use-regex");
+  assert.deepEqual(
+    professorMariCliEntry.secondaryKeys,
+    ["moon", "howl"],
+    "CLI add-entry must persist --secondary-keys",
+  );
+  assert.equal(professorMariCliEntry.caseSensitive, false, "unset --case-sensitive stays default");
+
+  const professorMariCliUpdateEntry = await mariDb.executeCli({
+    argv: [
+      "lorebooks",
+      "update-entry",
+      professorMariCliEntry.id,
+      "--no-match-whole-words",
+      "--no-selective",
+      "--selective-logic",
+      "not",
+      "--apply",
+    ],
+  });
+  assert.equal(
+    professorMariCliUpdateEntry.ok,
+    true,
+    `CLI update-entry must succeed: ${JSON.stringify(professorMariCliUpdateEntry)}`,
+  );
+  const professorMariCliUpdatedEntry = (await lorebookStorage.listEntries(professorMariCliLorebookId)).find(
+    (entry) => entry.id === professorMariCliEntry.id,
+  );
+  assert.ok(professorMariCliUpdatedEntry);
+  assert.equal(
+    professorMariCliUpdatedEntry.matchWholeWords,
+    false,
+    "CLI update-entry --no-match-whole-words clears it",
+  );
+  assert.equal(professorMariCliUpdatedEntry.selective, false, "CLI update-entry --no-selective clears it");
+  assert.equal(professorMariCliUpdatedEntry.selectiveLogic, "not", "CLI update-entry patches --selective-logic");
+
+  // An invalid --selective-logic is rejected with a clear error on both CLI subcommands.
+  const professorMariCliBadUpdateLogic = await mariDb.executeCli({
+    argv: ["lorebooks", "update-entry", professorMariCliEntry.id, "--selective-logic", "bogus", "--apply"],
+  });
+  assert.equal(professorMariCliBadUpdateLogic.ok, false, "CLI update-entry rejects an invalid --selective-logic");
+  assert.match(String(professorMariCliBadUpdateLogic.error), /selective-logic must be one of/u);
+  const professorMariCliBadAddLogic = await mariDb.executeCli({
+    argv: [
+      "lorebooks",
+      "add-entry",
+      professorMariCliLorebookId,
+      "--name",
+      "Bad logic",
+      "--selective-logic",
+      "bogus",
+      "--apply",
+    ],
+  });
+  assert.equal(professorMariCliBadAddLogic.ok, false, "CLI add-entry rejects an invalid --selective-logic");
+  assert.match(String(professorMariCliBadAddLogic.error), /selective-logic must be one of/u);
+
   await lorebookStorage.remove(professorMariCliLorebookId);
   assert.equal(await lorebookStorage.getById(professorMariCliLorebookId), null);
   const rangedChatId = "professor-mari-range-regression";
@@ -1509,6 +2996,184 @@ try {
     "character.update must preserve every omitted Character Card field through the real merge and persistence path",
   );
 
+  // #4767: a heavy single-item read must bound its own size — eliding whole
+  // oversized fields (identity preserved) with a structured signal, and staying
+  // re-readable field by field — instead of getting sliced mid-JSON at the
+  // workspace output cap with no way to recover the lost content.
+  const heavyCharacterId = "heavy-card-4767";
+  const heavyGreeting = "G".repeat(40_000);
+  const heavyCreate = await mariDb.executeAction({
+    action: "character.create",
+    id: heavyCharacterId,
+    data: {
+      name: "Heavy Card",
+      description: "A compact identity that must survive the bounding.",
+      alternateGreetings: [heavyGreeting],
+    },
+  });
+  assert.equal(heavyCreate.ok, true, "#4767 heavy-card fixture must be created");
+
+  const heavyRead = await mariDb.executeAction({ action: "character.get", id: heavyCharacterId });
+  assert.equal(heavyRead.ok, true);
+  const heavyData = (heavyRead.output as { data: Record<string, unknown> }).data;
+  assert.equal(heavyData.name, "Heavy Card", "#4767 bounding must preserve the character name");
+  assert.equal(
+    heavyData.description,
+    "A compact identity that must survive the bounding.",
+    "#4767 bounding must preserve the description",
+  );
+  assert.equal(heavyRead.truncation?.truncated, true, "#4767 a heavy read must report structured truncation");
+  // The oversized greetings array is elided as a unit (one placeholder, not one
+  // per element), naming the array path for drill-down.
+  const greetingElision = (heavyRead.truncation?.fields ?? []).find(
+    (entry) => entry.path === "data.alternate_greetings",
+  );
+  assert.ok(greetingElision, "#4767 must elide the oversized greetings array and name its field path");
+  assert.ok(
+    greetingElision.fullLength >= 40_000,
+    "#4767 truncation metadata must report the elided value's true (serialized) length",
+  );
+  assert.ok(
+    !JSON.stringify(heavyData.alternate_greetings).includes("GGGGGGGGGG"),
+    "#4767 the oversized greetings must be elided in the overview, not inlined",
+  );
+  assert.ok(
+    JSON.stringify(heavyRead.output, null, 2).length < 30_000,
+    "#4767 the bounded overview must fit well under the 32k workspace output cap",
+  );
+
+  // The complete value must reassemble across field= windows — nothing is lost.
+  // Element-level drill-down still resolves even though elision was array-level.
+  const firstWindow = await mariDb.executeAction({
+    action: "character.get",
+    id: heavyCharacterId,
+    field: "data.alternate_greetings[0]",
+    offset: 0,
+    limit: 20_000,
+  });
+  const secondWindow = await mariDb.executeAction({
+    action: "character.get",
+    id: heavyCharacterId,
+    field: "data.alternate_greetings[0]",
+    offset: 20_000,
+    limit: 20_000,
+  });
+  assert.equal(firstWindow.truncation?.field?.total, 40_000, "#4767 a field read must report the true total length");
+  assert.equal(
+    String(firstWindow.output) + String(secondWindow.output),
+    heavyGreeting,
+    "#4767 field= windows must reassemble the complete original value with nothing lost",
+  );
+
+  // The guaranteed bound: a card whose bulk is MANY short strings (a huge tags
+  // array) must NOT inflate past the cap by turning each short value into a
+  // longer placeholder — the whole array is elided as one unit. This is the
+  // regression for the review's major finding.
+  const manyTagsId = "many-tags-4767";
+  const manyTagsCreate = await mariDb.executeAction({
+    action: "character.create",
+    id: manyTagsId,
+    data: {
+      name: "Tag Storm",
+      description: "Short identity.",
+      tags: Array.from({ length: 4000 }, (_, i) => `tag-${i}`),
+    },
+  });
+  assert.equal(manyTagsCreate.ok, true, "#4767 tag-storm fixture must be created");
+  const tagsRead = await mariDb.executeAction({ action: "character.get", id: manyTagsId });
+  assert.equal(tagsRead.ok, true);
+  assert.equal(
+    (tagsRead.output as { data: Record<string, unknown> }).data.name,
+    "Tag Storm",
+    "#4767 name survives a tag storm",
+  );
+  assert.ok(
+    JSON.stringify(tagsRead.output, null, 2).length < 30_000,
+    "#4767 a many-short-strings card must be bounded, never inflated past the cap",
+  );
+
+  // Description-dominated card: description is elided (last-resort) but the name
+  // still survives and the description remains recoverable via field=.
+  const descHeavyId = "desc-heavy-4767";
+  const heavyDescription = "D".repeat(40_000);
+  const descHeavyCreate = await mariDb.executeAction({
+    action: "character.create",
+    id: descHeavyId,
+    data: { name: "Wordy", description: heavyDescription },
+  });
+  assert.equal(descHeavyCreate.ok, true, "#4767 description-heavy fixture must be created");
+  const descRead = await mariDb.executeAction({ action: "character.get", id: descHeavyId });
+  assert.equal(descRead.ok, true);
+  assert.equal(
+    (descRead.output as { data: Record<string, unknown> }).data.name,
+    "Wordy",
+    "#4767 name survives even when description is the bulk",
+  );
+  assert.ok(
+    (descRead.truncation?.fields ?? []).some((f) => f.path === "data.description"),
+    "#4767 a description-dominated card elides the description (recoverable), not the identity",
+  );
+  const descWindow = await mariDb.executeAction({
+    action: "character.get",
+    id: descHeavyId,
+    field: "data.description",
+    offset: 0,
+    limit: 20_000,
+  });
+  assert.equal(
+    descWindow.truncation?.field?.total,
+    40_000,
+    "#4767 the elided description must be fully recoverable via field=",
+  );
+
+  // A field= path that does not resolve returns the overview WITH a not-found signal.
+  const missingField = await mariDb.executeAction({
+    action: "character.get",
+    id: heavyCharacterId,
+    field: "data.no_such_field",
+  });
+  assert.equal(
+    missingField.truncation?.unresolvedField,
+    "data.no_such_field",
+    "#4767 an unresolved field= must be flagged, not silently swallowed",
+  );
+
+  // Same path on a SMALL row that needs no elision: still flags the miss, and
+  // reports no elided fields (so the note must not promise a field list).
+  const smallMissingField = await mariDb.executeAction({
+    action: "character.get",
+    id: characterId,
+    field: "data.no_such_field",
+  });
+  assert.equal(
+    smallMissingField.truncation?.unresolvedField,
+    "data.no_such_field",
+    "#4767 a small-row unresolved field= must still be flagged",
+  );
+  assert.equal(
+    (smallMissingField.truncation?.fields ?? []).length,
+    0,
+    "#4767 a small-row unresolved field= reports no elided fields",
+  );
+
+  // A path reaching an inherited/prototype key must resolve to nothing, not the
+  // Object constructor (which would crash the field window). Own-property only.
+  const prototypeField = await mariDb.executeAction({
+    action: "character.get",
+    id: heavyCharacterId,
+    field: "constructor",
+  });
+  assert.equal(prototypeField.ok, true, "#4767 a prototype-key field= must not crash the read");
+  assert.equal(
+    prototypeField.truncation?.unresolvedField,
+    "constructor",
+    "#4767 an inherited key must resolve as unresolved, not the constructor",
+  );
+
+  // A small read is untouched: no truncation metadata, behavior identical to before.
+  const smallRead = await mariDb.executeAction({ action: "character.get", id: characterId });
+  assert.equal(smallRead.truncation, undefined, "#4767 a small read must not be bounded or flagged");
+
   const characterFolderTimestamp = "2026-08-04T12:00:00.000Z";
   await db.insert(characterGroups).values({
     id: "character-folder-source",
@@ -1634,7 +3299,10 @@ try {
       }),
     ),
   );
-  assert.ok(concurrentFolderMoves.every((result) => result.ok), "Concurrent folder moves must both succeed");
+  assert.ok(
+    concurrentFolderMoves.every((result) => result.ok),
+    "Concurrent folder moves must both succeed",
+  );
   const concurrentTargetFolder = (await db.select().from(characterGroups)).find(
     (folder) => folder.id === "character-folder-concurrent-target",
   );
@@ -1642,6 +3310,193 @@ try {
     JSON.parse(concurrentTargetFolder?.characterIds ?? "[]").sort(),
     [characterId, concurrentCharacterId].sort(),
     "Serialized folder moves must preserve both memberships",
+  );
+
+  const widgetPreview = await mariDb.executeAction({
+    action: "home_widget.create",
+    data: {
+      title: "Tonight's menu",
+      description: "A tiny reminder to choose a chat mood before cooking.",
+      accent: "orange",
+      icon: "note",
+    },
+    apply: false,
+  });
+  assert.equal(widgetPreview.ok, true);
+  assert.equal(widgetPreview.mode, "dry-run", "Professor Mari must preview a custom widget before confirmation");
+  assert.deepEqual((await mariDb.executeAction({ action: "home_widget.list" })).output, []);
+
+  const approvalsBeforeWidgetCreate = new Set(mariDb.getPendingApprovals().map((approval) => approval.id));
+  const widgetCreate = await mariDb.executeAction({
+    action: "home_widget.create",
+    data: {
+      title: "Tonight's menu",
+      description: "A tiny reminder to choose a chat mood before cooking.",
+      accent: "orange",
+      icon: "note",
+    },
+    apply: true,
+  });
+  assert.equal(widgetCreate.ok, true);
+  const widgetList = await mariDb.executeAction({ action: "home_widget.list" });
+  const createdWidget = (widgetList.output as Array<{ id: string; title: string }>)[0];
+  assert.equal(createdWidget?.title, "Tonight's menu");
+  assert.equal((await mariDb.executeAction({ action: "home_widget.get", widgetId: createdWidget.id })).ok, true);
+  const catalogBeforeConcurrentWrites = await readHomeWidgetCatalog(db);
+  const concurrentCatalogWrites = await Promise.allSettled([
+    replaceHomeWidgetCatalog(db, catalogBeforeConcurrentWrites.revision, catalogBeforeConcurrentWrites.widgets),
+    replaceHomeWidgetCatalog(db, catalogBeforeConcurrentWrites.revision, catalogBeforeConcurrentWrites.widgets),
+  ]);
+  assert.equal(
+    concurrentCatalogWrites.filter((result) => result.status === "fulfilled").length,
+    1,
+    "Only one write may commit for a Home widget catalog revision",
+  );
+  const rejectedCatalogWrite = concurrentCatalogWrites.find((result) => result.status === "rejected");
+  assert.equal(
+    rejectedCatalogWrite?.status === "rejected" &&
+      rejectedCatalogWrite.reason instanceof HomeWidgetCatalogConflictError,
+    true,
+  );
+  const widgetApproval = mariDb.getPendingApprovals().find((approval) => !approvalsBeforeWidgetCreate.has(approval.id));
+  assert.ok(widgetApproval, "Applying a Home widget change must create a review approval");
+  await assert.rejects(
+    mariDb.restoreAppliedReview(widgetApproval.id),
+    HomeWidgetCatalogConflictError,
+    "A conflicting Home widget restore must fail safely",
+  );
+  assert.equal(
+    mariDb.getPendingApprovals().some((approval) => approval.id === widgetApproval.id),
+    true,
+    "A failed Home widget restore must remain available to retry or keep",
+  );
+
+  // #4813 (PR 1): every Professor Mari `*.create` now applies through the same Keep/Restore
+  // review as edits and deletes — so a creation Mari made without being asked stays undoable in
+  // chat — and a create may never overwrite an existing row.
+  const pendingReviewIds = () => new Set(mariDb.getPendingApprovals().map((approval) => approval.id));
+  const newestReviewSince = (baseline: Set<string>) =>
+    mariDb.getPendingApprovals().find((approval) => !baseline.has(approval.id));
+
+  // (1) A create routes through review and is applied-but-undoable.
+  const beforeReviewableCreate = pendingReviewIds();
+  const reviewableCharacter = await mariDb.executeAction({
+    action: "character.create",
+    characterId: "mari-reviewable-character",
+    data: { name: "Reviewable Character" },
+    apply: true,
+  });
+  assert.equal(reviewableCharacter.ok, true);
+  assert.equal(
+    reviewableCharacter.approval?.status,
+    "pending",
+    "character.create must apply through the Keep/Restore review, not silently",
+  );
+  const reviewableApproval = newestReviewSince(beforeReviewableCreate);
+  assert.ok(reviewableApproval, "character.create must register a pending review");
+  assert.equal(
+    (await mariDb.executeAction({ action: "character.get", id: "mari-reviewable-character" })).ok,
+    true,
+    "the row is applied immediately (apply-with-undo), so it is readable while the review is pending",
+  );
+
+  // (2) Restore removes the created row and clears the review.
+  await mariDb.restoreAppliedReview(reviewableApproval.id);
+  assert.equal(
+    (await mariDb.executeAction({ action: "character.get", id: "mari-reviewable-character" })).ok,
+    false,
+    "Restoring a create must delete the row Mari added",
+  );
+  assert.equal(
+    mariDb.getPendingApprovals().some((approval) => approval.id === reviewableApproval.id),
+    false,
+    "a restored review leaves the pending list",
+  );
+
+  // (3) Keep persists the created row and clears the review.
+  const beforeKeptCreate = pendingReviewIds();
+  await mariDb.executeAction({
+    action: "character.create",
+    characterId: "mari-kept-character",
+    data: { name: "Kept Character" },
+    apply: true,
+  });
+  const keptApproval = newestReviewSince(beforeKeptCreate);
+  assert.ok(keptApproval);
+  await mariDb.keepAppliedReview(keptApproval.id);
+  assert.equal(
+    (await mariDb.executeAction({ action: "character.get", id: "mari-kept-character" })).ok,
+    true,
+    "Keeping a create leaves the row in place",
+  );
+  assert.equal(
+    mariDb.getPendingApprovals().some((approval) => approval.id === keptApproval.id),
+    false,
+    "a kept review leaves the pending list",
+  );
+
+  // (4) A create may not overwrite an existing row (the planInsert clobber guard).
+  const beforeClobber = pendingReviewIds();
+  const clobberAttempt = await mariDb.executeAction({
+    action: "character.create",
+    characterId: "mari-kept-character",
+    data: { name: "Impostor" },
+    apply: true,
+  });
+  assert.equal(clobberAttempt.ok, false, "creating over an existing id must be refused, not overwrite it");
+  assert.match(String(clobberAttempt.error ?? ""), /already exists/iu);
+  assert.equal(newestReviewSince(beforeClobber), undefined, "a refused create must not leave a dangling review");
+  assert.equal(
+    (await mariDb.executeAction({ action: "character.get", id: "mari-kept-character" })).ok,
+    true,
+    "the pre-existing row survives a refused create",
+  );
+
+  // (5) A multi-row create (lorebook + entry) restores every row in FK-safe order.
+  const beforeReviewableLorebook = pendingReviewIds();
+  await mariDb.executeAction({
+    action: "lorebook.create",
+    lorebookId: "mari-reviewable-lorebook",
+    data: {
+      name: "Reviewable Lorebook",
+      entries: [{ name: "Reviewable entry", content: "Reviewable entry content", keys: ["review"] }],
+    },
+    apply: true,
+  });
+  const reviewableLorebookApproval = newestReviewSince(beforeReviewableLorebook);
+  assert.ok(reviewableLorebookApproval, "lorebook.create must register a pending review");
+  assert.equal((await lorebookStorage.listEntries("mari-reviewable-lorebook")).length, 1);
+  await mariDb.restoreAppliedReview(reviewableLorebookApproval.id);
+  assert.ok(
+    !(await lorebookStorage.getById("mari-reviewable-lorebook")),
+    "Restoring a lorebook create removes the lorebook itself",
+  );
+  assert.equal(
+    (await lorebookStorage.listEntries("mari-reviewable-lorebook")).length,
+    0,
+    "Restoring a lorebook create also removes its entries",
+  );
+
+  // (6) A non-activating theme.create routes through review too, and Restore removes it.
+  const beforeReviewableTheme = pendingReviewIds();
+  const reviewableTheme = await mariDb.executeAction({
+    action: "theme.create",
+    themeId: "mari-reviewable-theme",
+    data: { name: "Reviewable Theme", css: "body { color: inherit; }" },
+    apply: true,
+  });
+  assert.equal(
+    reviewableTheme.approval?.status,
+    "pending",
+    "a non-activating theme.create must also route through review",
+  );
+  const reviewableThemeApproval = newestReviewSince(beforeReviewableTheme);
+  assert.ok(reviewableThemeApproval);
+  await mariDb.restoreAppliedReview(reviewableThemeApproval.id);
+  assert.equal(
+    (await mariDb.executeAction({ action: "theme.get", id: "mari-reviewable-theme" })).ok,
+    false,
+    "Restoring a theme create removes the theme",
   );
 
   for (const approval of mariDb.getPendingApprovals()) {
@@ -1660,10 +3515,32 @@ const googleModelsPageUrl = buildGoogleModelsPageUrl(
   "next page/token",
 );
 assert.equal(
+  normalizeGoogleGenerativeLanguageBaseUrl("https://generativelanguage.googleapis.com/v1"),
+  "https://generativelanguage.googleapis.com/v1beta",
+  "Legacy Gemini v1 connection URLs must use the supported v1beta endpoint",
+);
+assert.equal(
+  normalizeGoogleGenerativeLanguageBaseUrl("https://generativelanguage.googleapis.com"),
+  "https://generativelanguage.googleapis.com/v1beta",
+);
+assert.equal(
+  normalizeGoogleGenerativeLanguageBaseUrl("https://generativelanguage.googleapis.com/v1beta"),
+  "https://generativelanguage.googleapis.com/v1beta",
+);
+assert.equal(
+  normalizeGoogleGenerativeLanguageBaseUrl("https://generativelanguage.googleapis.com/v1?key=legacy#models"),
+  "https://generativelanguage.googleapis.com/v1beta",
+  "Gemini base URL query and fragment text must not become part of appended model paths",
+);
+assert.equal(
   googleModelsPageUrl,
   "https://gemini-proxy.example.test/v1beta/models?pageSize=1000&pageToken=next%20page%2Ftoken",
 );
-assert.equal(new URL(googleModelsPageUrl).searchParams.has("key"), false, "Gemini API keys must stay out of model URLs");
+assert.equal(
+  new URL(googleModelsPageUrl).searchParams.has("key"),
+  false,
+  "Gemini API keys must stay out of model URLs",
+);
 
 const professorMariAboutMeCommands = parseCharacterCommands(
   '[update_character: name="Luna", about_me="fate dealer. tea hoarder. 🔮"]\n' +
@@ -1679,6 +3556,25 @@ assert.deepEqual(professorMariAboutMeCommands[1], {
   name: "Alex Storm",
   aboutMe: "",
 });
+const strictCharacterNumberCommands = parseCharacterCommands(
+  '[create_character: name="Decimal", talkativeness=0.5]\n' +
+    '[create_character: name="Not Decimal", talkativeness=0x5]',
+).commands;
+assert.equal(strictCharacterNumberCommands[0]?.type, "create_character");
+assert.equal(
+  strictCharacterNumberCommands[0]?.type === "create_character"
+    ? strictCharacterNumberCommands[0].talkativeness
+    : undefined,
+  0.5,
+);
+assert.equal(strictCharacterNumberCommands[1]?.type, "create_character");
+assert.equal(
+  strictCharacterNumberCommands[1]?.type === "create_character"
+    ? strictCharacterNumberCommands[1].talkativeness
+    : undefined,
+  undefined,
+  "Non-decimal separators must not be accepted as character numeric parameters",
+);
 
 const generatedLorebookEntry = buildLorebookEntryCreateRow(
   {
@@ -1695,6 +3591,50 @@ assert.equal(generatedLorebookEntry.lorebookId, "lorebook-generated");
 assert.equal(generatedLorebookEntry.content, "A city made from black glass.");
 assert.deepEqual(generatedLorebookEntry.keys, ["Glass City", "black glass"]);
 assert.deepEqual(generatedLorebookEntry.secondaryKeys, ["rain"]);
+// #4791 — unset keyword-matching/selective fields fall back to the stored defaults.
+assert.equal(generatedLorebookEntry.selective, "false");
+assert.equal(generatedLorebookEntry.selectiveLogic, "and");
+assert.equal(generatedLorebookEntry.matchWholeWords, "false");
+assert.equal(generatedLorebookEntry.caseSensitive, "false");
+assert.equal(generatedLorebookEntry.useRegex, "false");
+// #4791 — Professor Mari can now set them explicitly (previously hardcoded and ignored).
+const parameterizedLorebookEntry = buildLorebookEntryCreateRow(
+  {
+    name: "Vlad",
+    content: "The immortal count.",
+    keys: ["Vlad"],
+    secondaryKeys: ["count", "castle"],
+    selective: true,
+    selectiveLogic: "and_all",
+    matchWholeWords: true,
+    caseSensitive: true,
+    useRegex: false,
+  },
+  "lorebook-generated",
+  "entry-parameterized",
+  "2026-07-16T00:00:00.000Z",
+);
+assert.equal(parameterizedLorebookEntry.selective, "true");
+assert.equal(parameterizedLorebookEntry.selectiveLogic, "and_all");
+assert.equal(parameterizedLorebookEntry.matchWholeWords, "true");
+assert.equal(parameterizedLorebookEntry.caseSensitive, "true");
+assert.equal(parameterizedLorebookEntry.useRegex, "false");
+// An invalid selectiveLogic is rejected and falls back to the stored default.
+const invalidLogicLorebookEntry = buildLorebookEntryCreateRow(
+  { name: "Bad logic", content: "x", selectiveLogic: "nonsense" },
+  "lorebook-generated",
+  "entry-bad-logic",
+  "2026-07-16T00:00:00.000Z",
+);
+assert.equal(invalidLogicLorebookEntry.selectiveLogic, "and");
+// #4796 review — "or" is an accepted legacy selectiveLogic value (behaves like "and").
+const orLogicLorebookEntry = buildLorebookEntryCreateRow(
+  { name: "Or logic", content: "x", selectiveLogic: "or" },
+  "lorebook-generated",
+  "entry-or-logic",
+  "2026-07-16T00:00:00.000Z",
+);
+assert.equal(orLogicLorebookEntry.selectiveLogic, "or");
 
 // Issue #4135 — Markdown headings inside Lorebook Keeper content are content,
 // not approval-entry delimiters.
@@ -1762,6 +3702,25 @@ assert.deepEqual(generatedLorebookEntry.secondaryKeys, ["rain"]);
     "An inline delimiter mention must not switch legacy approval text into explicit mode",
   );
 }
+
+assert.equal(
+  mergeLorebookKeeperUpdateContent({
+    existingContent: "Old timeline that must be replaced.",
+    replacementContent: "Corrected timeline.",
+    newFacts: [],
+  }),
+  "Corrected timeline.",
+  "Lorebook Keeper updates must replace an existing body instead of stacking another copy",
+);
+assert.equal(
+  mergeLorebookKeeperUpdateContent({
+    existingContent: "Stable scene state.",
+    replacementContent: "",
+    newFacts: ["A new clue appeared."],
+  }),
+  "Stable scene state.\n\n- A new clue appeared.",
+  "Fact-only Lorebook Keeper updates must preserve the current body",
+);
 
 const completeProfessorMariPersona = buildPersonaCreateRow(
   {
@@ -1922,10 +3881,7 @@ assert.deepEqual(
   [{ id: "chroma", name: "Chroma" }],
 );
 assert.equal(buildZaiImageUrl("https://api.z.ai/api/paas/v4"), "https://api.z.ai/api/paas/v4/images/generations");
-assert.throws(
-  () => buildZaiImageUrl("https://api.z.ai/api/coding/paas/v4"),
-  /general API URL/u,
-);
+assert.throws(() => buildZaiImageUrl("https://api.z.ai/api/coding/paas/v4"), /general API URL/u);
 assert.equal(resolveZaiImageSize("glm-image", 1600, 900), "1728x960");
 assert.equal(resolveZaiImageSize("cogview-4-250304", 900, 1600), "768x1344");
 assert.deepEqual(buildZaiImageRequest({ model: "glm-image", prompt: "canal", width: 1600, height: 900 }), {
@@ -1936,6 +3892,102 @@ assert.deepEqual(buildZaiImageRequest({ model: "glm-image", prompt: "canal", wid
 assert.equal(parseZaiImageUrl({ data: [{ url: "https://cdn.example/zai.png" }] }), "https://cdn.example/zai.png");
 assert.equal(inferImageSource("", "https://api.z.ai/api/paas/v4"), "zai");
 assert.ok(IMAGE_GENERATION_SOURCES.some((source) => source.id === "zai"));
+assert.equal(inferImageSource("flux-model", "https://api.arliai.com/v1"), "arli");
+assert.ok(IMAGE_GENERATION_SOURCES.some((source) => source.id === "arli"));
+assert.equal(imageSourceToDefaultsService("arli"), "automatic1111");
+assert.equal(inferImageSource("", "http://127.0.0.1:7801"), "swarmui");
+assert.ok(IMAGE_GENERATION_SOURCES.some((source) => source.id === "swarmui"));
+assert.equal(imageSourceToDefaultsService("swarmui"), "comfyui");
+const swarmUiBody = buildSwarmUiGenerationBody(
+  {
+    prompt: "a blue fox",
+    negativePrompt: "blurry",
+    width: 832,
+    height: 1216,
+    model: "  sdxl/model.safetensors  ",
+    comfyWorkflow: JSON.stringify({
+      "1": {
+        class_type: "CLIPTextEncode",
+        inputs: { text: "%prompt%", seed: "%seed%", model: "%model%" },
+      },
+    }),
+    imageDefaults: {
+      version: 1,
+      service: "comfyui",
+      seed: 42,
+      comfyui: { ...DEFAULT_COMFYUI_DEFAULTS, loras: [] },
+    },
+  },
+  "session-123",
+);
+assert.equal(swarmUiBody.session_id, "session-123");
+assert.equal(swarmUiBody.model, "sdxl/model.safetensors");
+assert.deepEqual(JSON.parse(String(swarmUiBody.comfyworkflowraw)), {
+  "1": {
+    class_type: "CLIPTextEncode",
+    inputs: { text: "a blue fox", seed: 42, model: "sdxl/model.safetensors" },
+  },
+});
+assert.equal(parseSwarmUiImageReference({ images: ["View/local/raw/output.png"] }), "View/local/raw/output.png");
+assert.throws(() => parseSwarmUiImageReference({ error: "queue unavailable" }), /queue unavailable/u);
+assert.equal(inferVideoSource("", "http://127.0.0.1:7801"), "swarmui");
+assert.ok(VIDEO_GENERATION_SOURCES.some((source) => source.id === "swarmui"));
+const swarmUiVideoBody = buildSwarmUiVideoGenerationBody(
+  {
+    prompt: "a blue fox waves",
+    durationSeconds: 5,
+    aspectRatio: "9:16",
+    resolution: "720p",
+    model: "wan-video.safetensors",
+    referenceImage: { base64: "data:image/png;base64,cG5n", mimeType: "image/png" },
+    comfyWorkflow: JSON.stringify({
+      "1": {
+        class_type: "VideoNode",
+        inputs: {
+          prompt: "%prompt%",
+          width: "%width%",
+          height: "%height%",
+          frames: "%length%",
+          fps: "%fps%",
+          image: "%reference_image%",
+        },
+      },
+    }),
+    fps: 16,
+  },
+  "video-session",
+  42,
+);
+assert.equal(swarmUiVideoBody.session_id, "video-session");
+assert.equal(swarmUiVideoBody.width, 720);
+assert.equal(swarmUiVideoBody.height, 1280);
+assert.deepEqual(JSON.parse(String(swarmUiVideoBody.comfyworkflowraw)), {
+  "1": {
+    class_type: "VideoNode",
+    inputs: {
+      prompt: "a blue fox waves",
+      width: 720,
+      height: 1280,
+      frames: 80,
+      fps: 16,
+      image: "cG5n",
+    },
+  },
+});
+assert.equal(parseSwarmUiVideoReference({ images: ["View/local/raw/output.mp4"] }), "View/local/raw/output.mp4");
+assert.throws(
+  () =>
+    buildSwarmUiVideoGenerationBody(
+      {
+        prompt: "video",
+        durationSeconds: 5,
+        aspectRatio: "16:9",
+        comfyWorkflow: '{"image":"%reference_image_name%"}',
+      },
+      "video-session",
+    ),
+  /must use %reference_image%/u,
+);
 assert.deepEqual(
   ZAI_IMAGE_MODELS.map((model) => model.id),
   ["glm-image", "cogview-4-250304"],
@@ -2017,14 +4069,16 @@ assert.ok(ATLAS_CLOUD_VIDEO_MODELS.some((model) => model.id === "google/veo3.1/t
 
 const profileImportAssetRoot = mkdtempSync(join(tmpdir(), "marinara-profile-import-atomic-"));
 try {
+  const liveAvatar = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x6c, 0x69, 0x76, 0x65]);
+  const importedAvatar = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x6e, 0x65, 0x77]);
   const liveAvatarPath = join(profileImportAssetRoot, "avatars", "character.png");
   mkdirSync(join(profileImportAssetRoot, "avatars"), { recursive: true });
-  writeFileSync(liveAvatarPath, "live-avatar");
+  writeFileSync(liveAvatarPath, liveAvatar);
   await assert.rejects(
     stageProfileImportAssets(
       profileImportAssetRoot,
       [
-        { path: "avatars/character.png", expectedSize: 15, read: () => Buffer.from("imported-avatar") },
+        { path: "avatars/character.png", expectedSize: importedAvatar.length, read: () => importedAvatar },
         {
           path: "gallery/corrupt.png",
           expectedSize: 8,
@@ -2037,17 +4091,17 @@ try {
     ),
     /simulated corrupt archive member/u,
   );
-  assert.equal(readFileSync(liveAvatarPath, "utf8"), "live-avatar");
+  assert.deepEqual(readFileSync(liveAvatarPath), liveAvatar);
 
   const stagedProfileAssets = await stageProfileImportAssets(
     profileImportAssetRoot,
-    [{ path: "avatars/character.png", expectedSize: 15, read: () => Buffer.from("imported-avatar") }],
+    [{ path: "avatars/character.png", expectedSize: importedAvatar.length, read: () => importedAvatar }],
     1024,
   );
   await promoteStagedProfileAssets(stagedProfileAssets);
-  assert.equal(readFileSync(liveAvatarPath, "utf8"), "imported-avatar");
+  assert.deepEqual(readFileSync(liveAvatarPath), importedAvatar);
   await rollbackPromotedProfileAssets(stagedProfileAssets);
-  assert.equal(readFileSync(liveAvatarPath, "utf8"), "live-avatar");
+  assert.deepEqual(readFileSync(liveAvatarPath), liveAvatar);
   await cleanupStagedProfileAssets(stagedProfileAssets);
 } finally {
   rmSync(profileImportAssetRoot, { recursive: true, force: true });
@@ -2262,6 +4316,46 @@ const termuxLauncher = readFileSync(new URL("../../start-termux.sh", import.meta
 assert.doesNotMatch(termuxLauncher, /run_pnpm install --force/u);
 assert.match(termuxLauncher, /run_pnpm store prune/u);
 assert.match(termuxLauncher, /TERMUX_REBUILD_REQUIRED/u);
+assert.match(termuxLauncher, /--max-old-space-size=2048/u);
+assert.match(
+  termuxLauncher,
+  /has_explicit_node_heap_limit\(\)[\s\S]*NODE_OPTIONS_VALUE[\s\S]*const heapOption = \/\^--max[\s\S]*if ! has_explicit_node_heap_limit; then[\s\S]*NODE_OPTIONS="\$\{NODE_OPTIONS:\+\$\{NODE_OPTIONS\} \}--max-old-space-size=2048"/u,
+  "Termux must parse complete heap-option tokens before applying its safe default",
+);
+for (const buildEntry of [
+  "packages/shared/dist/constants/defaults.js",
+  "packages/server/dist/index.js",
+  "packages/client/dist/index.html",
+]) {
+  assert.ok(
+    termuxLauncher.includes(`if [ ! -f "${buildEntry}" ]; then`),
+    `Termux must rebuild when ${buildEntry} is missing`,
+  );
+}
+
+const trafficExtensionId = "open-issues-extension-traffic";
+const trafficNow = 180_000;
+for (const requestedAt of [59_000, 119_000, 179_000]) {
+  for (let request = 0; request < 61; request += 1) {
+    recordPersonalExtensionRequest(trafficExtensionId, 2, requestedAt + request);
+  }
+}
+assert.deepEqual(getPersonalExtensionTraffic(trafficExtensionId, trafficNow), {
+  requests: 183,
+  bytes: 366,
+  requestsLastMinute: 61,
+  sustainedHighRate: true,
+});
+const personalExtensionInjectorSource = readFileSync(
+  new URL("../../packages/client/src/components/layout/PersonalExtensionInjector.tsx", import.meta.url),
+  "utf8",
+);
+assert.match(personalExtensionInjectorSource, /fetch: \(input, init\) => fetchForPersonalExtension/u);
+const personalExtensionSettingsSource = readFileSync(
+  new URL("../../packages/client/src/components/panels/settings/PersonalExtensionsSettings.tsx", import.meta.url),
+  "utf8",
+);
+assert.match(personalExtensionSettingsSource, /settings\.personalExtensions\.traffic\.summary/u);
 
 const sharedPackageJson = JSON.parse(
   readFileSync(new URL("../../packages/shared/package.json", import.meta.url), "utf8"),
@@ -2334,6 +4428,21 @@ const conversationGenerationSource = readFileSync(
   new URL("../../packages/server/src/routes/generate.routes.ts", import.meta.url),
   "utf8",
 );
+assert.match(
+  conversationGenerationSource,
+  /const selectorConnection = \(await connections\.getDefaultForAgents\(\)\) \?\? conn/u,
+  "Smart group responder selection must prefer the default Agent connection and fall back to the chat connection",
+);
+assert.match(
+  conversationGenerationSource,
+  /resolveStoredMaxTokens\(selectorConnection\.defaultParameters, DEFAULT_AGENT_MAX_TOKENS\)/u,
+  "Smart group responder selection must respect the Agent connection token default instead of a 512-token cap",
+);
+assert.match(
+  conversationGenerationSource,
+  /resolveStoredChatOptions\([\s\S]{0,180}selectorConnection\.defaultParameters/u,
+  "Smart group responder selection must inherit the Agent connection generation parameters",
+);
 const foregroundAutonomousSource = readFileSync(
   new URL("../../packages/client/src/hooks/use-autonomous-messaging.ts", import.meta.url),
   "utf8",
@@ -2358,15 +4467,89 @@ const professorMariHomeSource = readFileSync(
   new URL("../../packages/client/src/components/chat/HomeProfessorMariChat.tsx", import.meta.url),
   "utf8",
 );
+const lorebookHooksSource = readFileSync(
+  new URL("../../packages/client/src/hooks/use-lorebooks.ts", import.meta.url),
+  "utf8",
+);
+const professorMariContextBudget = resolveProfessorMariContextBudget(
+  [
+    {
+      role: "assistant",
+      extra: { generationInfo: { tokensPrompt: 12_000, tokensCompletion: 345 } },
+    },
+  ] as Message[],
+  128_000,
+);
+assert.deepEqual(professorMariContextBudget, {
+  usedTokens: 12_345,
+  maxTokens: 128_000,
+  percentage: (12_345 / 128_000) * 100,
+});
+assert.equal(formatCompactTokenCount(professorMariContextBudget!.usedTokens), "12.3k");
+assert.equal(
+  resolveProfessorMariContextBudget(
+    [
+      { role: "assistant", extra: { generationInfo: { usage: { promptTokens: 8_000, completionTokens: 192 } } } },
+    ] as Message[],
+    32_000,
+  )?.usedTokens,
+  8_192,
+  "legacy Professor Mari usage metadata should keep the context indicator available",
+);
+assert.equal(resolveProfessorMariContextBudget([], 128_000), null);
 assert.match(professorMariHomeSource, /chatHistorySelectionMode/u);
+assert.match(
+  professorMariHomeSource,
+  /enterToSendProfessorMari/u,
+  "Professor Mari must read her persisted Send on Enter preference",
+);
+assert.equal(
+  professorMariHomeSource.match(
+    /event\.key === "Enter" &&\s*!event\.shiftKey &&\s*\(enterToSend \|\| event\.metaKey \|\| event\.ctrlKey\)/gu,
+  )?.length,
+  2,
+  "Both Professor Mari composers must preserve Shift+Enter and require the configured send shortcut",
+);
 assert.match(professorMariHomeSource, /toggleProfessorChatSelection/u);
 assert.match(professorMariHomeSource, /handleBulkDeleteProfessorChats/u);
-const professorMariTranscript = { scrollHeight: 720, scrollTop: 0 };
+assert.match(
+  professorMariHomeSource,
+  /const handleEditMessage = useCallback\([\s\S]{0,180}if \(!chatId \|\| isBusy\) return;/u,
+  "Professor Mari's first edit after generation must not be rejected by a stale busy ref",
+);
+assert.match(
+  professorMariHomeSource,
+  /catch \(error\) \{\s*if \(isProfessorMariAbortError\(error\)\) return;\s*setDraft\(text\)/u,
+  "Stopping Professor Mari must not restore an already-submitted prompt to the composer",
+);
+assert.match(
+  lorebookHooksSource,
+  /useDeleteLorebook\(\)[\s\S]{0,900}invalidateQueries\(\{ queryKey: \["chats"\] \}\)/u,
+  "Deleting a lorebook must refresh cached chat metadata so it leaves active context immediately",
+);
+assert.match(
+  professorMariHomeSource,
+  /handleDeleteProfessorChat[\s\S]{0,500}showConfirmDialog/u,
+  "Deleting one Professor Mari chat must use the app confirmation dialog",
+);
+assert.match(
+  professorMariHomeSource,
+  /isError && tool\.output\?\.trim\(\)[\s\S]{0,200}<pre/u,
+  "Failed workspace tools must reveal their provider output in the transcript",
+);
+const professorMariTranscript = { clientHeight: 240, scrollHeight: 720, scrollTop: 0 };
 scrollProfessorMariTranscriptToBottom(professorMariTranscript);
 assert.equal(
   professorMariTranscript.scrollTop,
   professorMariTranscript.scrollHeight,
   "Professor Mari transcript scrolling must align a mounted pane with its newest message",
+);
+assert.equal(isProfessorMariTranscriptNearBottom(professorMariTranscript), true);
+professorMariTranscript.scrollTop = 200;
+assert.equal(
+  isProfessorMariTranscriptNearBottom(professorMariTranscript),
+  false,
+  "Professor Mari streaming must stop following output after the reader scrolls away from the bottom",
 );
 assert.match(
   professorMariHomeSource,
@@ -2377,6 +4560,26 @@ assert.match(
   professorMariHomeSource,
   /messageLoadAbortRef\.current !== controller[\s\S]{0,80}activeChatIdRef\.current !== id/u,
   "Professor Mari message loads must discard stale requests and inactive chat results",
+);
+assert.match(
+  professorMariHomeSource,
+  /options\.shouldApply\?\.\(\) === false[\s\S]{0,160}setMessages/u,
+  "Professor Mari message loads must recheck an operation guard before applying a response",
+);
+assert.match(
+  professorMariHomeSource,
+  /loadMessages\(completedChatId, \{[\s\S]{0,160}workspaceRunIdRef\.current === runId[\s\S]{0,100}activeChatIdRef\.current === completedChatId/u,
+  "Professor Mari background refreshes must not overwrite state after a newer operation starts",
+);
+assert.match(
+  professorMariHomeSource,
+  /const refreshWorkspaceStatus = useCallback\(\s*async \(shouldApply\?: \(\) => boolean\)[\s\S]{0,500}if \(shouldApply\?\.\(\) === false\) return status;[\s\S]{0,80}setWorkspaceStatus\(status\)/u,
+  "Professor Mari workspace status loads must recheck an operation guard before applying a response",
+);
+assert.match(
+  professorMariHomeSource,
+  /refreshWorkspaceStatus\([\s\S]{0,140}workspaceRunIdRef\.current === runId[\s\S]{0,100}activeChatIdRef\.current === completedChatId/u,
+  "Professor Mari post-run status refreshes must not overwrite state after a newer operation starts",
 );
 assert.match(
   professorMariHomeSource,
@@ -2392,13 +4595,123 @@ const roleplaySurfaceSource = readFileSync(
   new URL("../../packages/client/src/components/chat/ChatRoleplaySurface.tsx", import.meta.url),
   "utf8",
 );
+const chatToolbarControlsSource = readFileSync(
+  new URL("../../packages/client/src/components/chat/ChatToolbarControls.tsx", import.meta.url),
+  "utf8",
+);
+const chatFloatingUiEventsSource = readFileSync(
+  new URL("../../packages/client/src/lib/chat-floating-ui-events.ts", import.meta.url),
+  "utf8",
+);
+const appShellSource = readFileSync(
+  new URL("../../packages/client/src/components/layout/AppShell.tsx", import.meta.url),
+  "utf8",
+);
+const featureAgentDetailHostSource = readFileSync(
+  new URL("../../packages/client/src/components/agents/FeatureAgentDetailHost.tsx", import.meta.url),
+  "utf8",
+);
+const guidedPresetEditorSource = readFileSync(
+  new URL("../../packages/client/src/components/presets/PresetEditor.tsx", import.meta.url),
+  "utf8",
+);
+const presetPanelSource = readFileSync(
+  new URL("../../packages/client/src/components/panels/PresetsPanel.tsx", import.meta.url),
+  "utf8",
+);
 const chatMessageSource = readFileSync(
   new URL("../../packages/client/src/components/chat/ChatMessage.tsx", import.meta.url),
+  "utf8",
+);
+const assignedSweepChatAreaSource = readFileSync(
+  new URL("../../packages/client/src/components/chat/ChatArea.tsx", import.meta.url),
+  "utf8",
+);
+const appRecoverySource = readFileSync(new URL("../../packages/client/src/App.tsx", import.meta.url), "utf8");
+const chatRowPeekSource = readFileSync(
+  new URL("../../packages/client/src/components/layout/ChatRowPeek.tsx", import.meta.url),
+  "utf8",
+);
+assert.match(assignedSweepChatAreaSource, /export const ChatArea = memo\(function ChatArea/u);
+assert.doesNotMatch(assignedSweepChatAreaSource, /updateMessage(?:Extra)?\.mutate/u);
+assert.match(chatMessageSource, /mari-chrome-accent-progress mari-accent-animated mb-1\.5 h-0\.5/u);
+assert.match(
+  chatMessageSource,
+  /function ConversationStartMarkers[\s\S]*className=\{cn\("w-full", panel \? "mb-1 px-1" : "mb-0\.5 px-2"\)\}/u,
+  "Roleplay New Start dividers must span user and assistant message bodies",
+);
+assert.match(chatMessageSource, /pointer-events-auto relative z-30 flex h-11 w-11/u);
+assert.match(chatRowPeekSource, /mari-chrome-accent-text-muted mari-accent-animated text-\[0\.6875rem\]/u);
+assert.match(assignedSweepChatAreaSource, /mari-chrome-accent-text-muted mari-accent-animated max-w-sm text-xs/u);
+assert.match(
+  appRecoverySource,
+  /<pre className="mari-chrome-accent-text-muted mari-accent-animated[^"]*">\s*\{errorMessage\}/u,
+);
+const macroTextareaSource = readFileSync(
+  new URL("../../packages/client/src/components/ui/MacroTextarea.tsx", import.meta.url),
+  "utf8",
+);
+const roleplayHudSource = readFileSync(
+  new URL("../../packages/client/src/components/chat/RoleplayHUD.tsx", import.meta.url),
   "utf8",
 );
 const narratorUiStoreSource = readFileSync(
   new URL("../../packages/client/src/stores/ui.store.ts", import.meta.url),
   "utf8",
+);
+assert.match(
+  appShellSource,
+  /onOpenChatSummarySettings:[\s\S]{0,180}onOpenActivePromptPresetEditor:/u,
+  "Feature detail capability props must expose both guided onboarding navigation callbacks",
+);
+assert.match(
+  appShellSource,
+  /resolveFeatureAgentPackage\(selectedFeatureAgent, installedCapabilities\.data \?\? \[\]\)/u,
+);
+assert.match(featureAgentDetailHostSource, /mari-editor-shell mari-editor-legacy-bridge/u);
+assert.match(featureAgentDetailHostSource, /<header className="mari-editor-header">/u);
+assert.match(featureAgentDetailHostSource, /<Sparkles size="1\.125rem"/u);
+assert.doesNotMatch(featureAgentDetailHostSource, /\bPuzzle\b/u);
+assert.doesNotMatch(featureAgentDetailHostSource, /featureagentdetailhost\.feature"/u);
+assert.match(
+  chatFloatingUiEventsSource,
+  /CHAT_SUMMARY_OPEN_REQUEST_EVENT[\s\S]{0,240}detail:\s*\{\s*chatId\s*\}/u,
+  "Summary requests must carry the target chat ID",
+);
+assert.match(
+  roleplaySurfaceSource,
+  /requestedChatId !== chatId/u,
+  "SummaryButton must filter requests by chat and only open visible instances",
+);
+assert.match(
+  roleplaySurfaceSource,
+  /rect\.width <= 0 \|\| rect\.height <= 0[\s\S]{0,180}setOpen\(true\)/u,
+  "SummaryButton must only open a measurable visible instance",
+);
+assert.match(
+  chatToolbarControlsSource,
+  /pendingSummaryChatIdRef\.current = chatId[\s\S]{0,80}setOpen\(true\)/u,
+  "Compact and mobile Summary requests must queue the target chat and open the overflow menu",
+);
+assert.match(
+  chatToolbarControlsSource,
+  /if \(!open \|\| !chatId\) return;[\s\S]{0,140}requestAnimationFrame\(\(\) => requestChatSummaryOpen\(chatId\)\)/u,
+  "Compact and mobile Summary requests must forward only after the overflow menu mounts",
+);
+assert.match(
+  narratorUiStoreSource,
+  /openPresetDetail: \(id, options\)[\s\S]{0,180}presetDetailInitialTab: options\?\.initialTab \?\? null/u,
+  "Preset navigation must retain an optional initial tab request",
+);
+assert.match(
+  guidedPresetEditorSource,
+  /presetDetailInitialTab[\s\S]{0,260}setActiveTab\(presetDetailInitialTab \?\? "overview"\)/u,
+  "PresetEditor must consume the requested initial tab and retain Overview by default",
+);
+assert.match(
+  presetPanelSource,
+  /openPresetDetail\(preset\.id\)/u,
+  "Ordinary preset-panel navigation must continue using the default Overview tab",
 );
 assert.match(
   roleplaySurfaceSource,
@@ -2412,8 +4725,23 @@ assert.equal(
 );
 assert.match(
   chatMessageSource,
-  /const cycleMergedNarratorAvatars = !isRoleplay \|\| roleplayNarratorAvatarCycling;/u,
-  "Narrator avatar cycling must remain unchanged outside Roleplay and follow the Roleplay preference",
+  /const cycleMergedNarratorAvatars = \(!isRoleplay \|\| roleplayNarratorAvatarCycling\) && !reduceAmbientEffects;/u,
+  "Narrator avatar cycling must follow the Roleplay preference and stop with reduced ambient effects",
+);
+assert.match(
+  macroTextareaSource,
+  /const valueRef = useRef\(value\);[\s\S]{0,500}\}, \[open\]\);/u,
+  "Expanded macro editors must only initialize and focus when opened, not after every parent value update",
+);
+assert.match(
+  chatMessageSource,
+  /aria-label=\{localizeUi\("ui\.chat\.edittextarea\.saveEdit"\)\}[\s\S]{0,180}h-11 w-11/u,
+  "The Roleplay edit Save control must keep a full touch-sized hit target",
+);
+assert.equal(
+  roleplayHudSource.match(/!reduceAmbientEffects && "animate-\[inventory-cycle_0\.4s_ease-out\]"/gu)?.length,
+  2,
+  "Roleplay tracker and inventory widgets must suppress mount animations with reduced ambient effects",
 );
 assert.match(
   chatMessageSource,
@@ -2628,6 +4956,30 @@ assert.match(playwrightServerSource, /resolve\(dataRoot, name\)/u);
 assert.match(playwrightServerSource, /DATA_DIR:\s*dataDir/u);
 
 const appSource = readFileSync(new URL("../../packages/client/src/App.tsx", import.meta.url), "utf8");
+const homeBrowserHubSource = readFileSync(
+  new URL("../../packages/client/src/components/chat/HomeBrowserHub.tsx", import.meta.url),
+  "utf8",
+);
+assert.match(
+  homeBrowserHubSource,
+  /<MessageCircle size="0\.8rem" className="mari-rgb-static-icon text-current" \/>/u,
+  "The Your Guide action icon must inherit the same color as its label",
+);
+const globalStylesSource = readFileSync(
+  new URL("../../packages/client/src/styles/globals.css", import.meta.url),
+  "utf8",
+);
+assert.equal(
+  appSource.match(/document\.addEventListener\("visibilitychange", syncEffectsPausedState\)/gu)?.length,
+  1,
+  "Home effect pausing must keep one central visibility listener",
+);
+assert.match(appSource, /dispatchEvent\(new CustomEvent\("marinara:effects-paused"/u);
+assert.match(homeBrowserHubSource, /window\.removeEventListener\(MARINARA_EFFECTS_PAUSED_EVENT, sync\)/u);
+assert.match(
+  globalStylesSource,
+  /data-marinara-effects-paused="true"[^}]+mari-home-professor-popup__sprite[\s\S]+animation-play-state: paused !important;/u,
+);
 const agentEditorSource = readFileSync(
   new URL("../../packages/client/src/components/agents/AgentEditor.tsx", import.meta.url),
   "utf8",
@@ -2748,6 +5100,7 @@ const backupRoutesSource = readFileSync(
   new URL("../../packages/server/src/routes/backup.routes.ts", import.meta.url),
   "utf8",
 );
+const serverAppSource = readFileSync(new URL("../../packages/server/src/app.ts", import.meta.url), "utf8");
 const gameTypesSource = readFileSync(new URL("../../packages/shared/src/types/game.ts", import.meta.url), "utf8");
 const backupGuideSource = readFileSync(new URL("../../docs/data/backup-and-restore.md", import.meta.url), "utf8");
 const gameAssetBrowserSource = readFileSync(
@@ -2797,9 +5150,13 @@ const localNotificationsSource = readFileSync(
 const notificationSettingsSource = readFileSync(
   new URL("../../packages/client/src/components/panels/settings/SettingControls.tsx", import.meta.url),
   "utf8",
-);
+).replace(/\r\n/gu, "\n");
 const chatGallerySource = readFileSync(
   new URL("../../packages/client/src/components/chat/ChatGallery.tsx", import.meta.url),
+  "utf8",
+);
+const recentChatsSource = readFileSync(
+  new URL("../../packages/client/src/components/chat/RecentChats.tsx", import.meta.url),
   "utf8",
 );
 const galleryHooksSource = readFileSync(
@@ -2842,6 +5199,46 @@ assert.match(
 assert.match(galleryHooksSource, /api\.delete\(`\/gallery\/scene-videos\/\$\{chatId\}\/\$\{videoId\}`\)/u);
 assert.match(chatGallerySource, /handleDeleteVideo\(video\)/u);
 assert.match(chatGallerySource, /ui\.chat\.chatgallery\.deleteSceneVideo/u);
+assert.match(chatGallerySource, /const \[selectingImages, setSelectingImages\] = useState\(false\)/u);
+assert.match(chatGallerySource, /const selectableImageIds = useMemo/u);
+assert.match(chatGallerySource, /handleBatchDownload/u);
+assert.match(chatGallerySource, /handleBatchDelete/u);
+assert.match(chatGallerySource, /ui\.gallery\.batch\.deletePartial/u);
+assert.match(chatGallerySource, /batchOperationPendingRef\.current/u);
+assert.equal(
+  chatGallerySource.match(/disabled=\{selectedImages\.length === 0 \|\| batchOperationPending\}/gu)?.length,
+  2,
+  "both chat Gallery batch actions remain disabled while an operation is pending",
+);
+assert.match(chatGallerySource, /ui\.gallery\.batch\.toggleImageNamed/u);
+assert.match(chatGallerySource, /asset\.id\.startsWith\("chat-gallery:"\)[\s\S]{0,120}: asset\.id/u);
+assert.match(recentChatsSource, /data-narrow-desktop-limit="4"/u);
+assert.match(recentChatsSource, /md:auto-rows-fr md:grid-rows-none/u);
+assert.match(recentChatsSource, /index === 3 && "hidden md:block"/u);
+assert.match(recentChatsSource, /index >= 4 && "hidden"/u);
+assert.match(globalStyles, /@container \(min-width: 36rem\)[\s\S]*data-component="RecentChats"/u);
+for (const editorSource of [characterEditorSource, personaEditorSource]) {
+  assert.match(editorSource, /grid grid-cols-2 gap-2 sm:grid-cols-3 sm:gap-3 md:grid-cols-4/u);
+  assert.match(editorSource, /onClick=\{\(\) => void handleDelete\(lightbox\)\}/u);
+  assert.match(editorSource, /loading="lazy"\s+decoding="async"/u);
+  assert.match(editorSource, /group-\[&:focus-within\]:opacity-100/u);
+}
+assert.match(characterEditorSource, /await remove\.mutateAsync\(image\.id\)/u);
+assert.match(characterEditorSource, /ui\.characters\.charactergallerytab\.failedToDeleteCharacterImage/u);
+assert.doesNotMatch(chatGallerySource, /bg-red-500/u);
+assert.match(chatGallerySource, /ui\.chat\.chatgallery\.deleteGalleryImage[\s\S]{0,180}mari-chrome-accent-surface/u);
+assert.match(
+  chatGallerySource,
+  /handleDeleteVideo\(video\)[\s\S]{0,240}ui\.chat\.chatgallery\.deleteSceneVideo[\s\S]{0,240}mari-chrome-accent-surface/u,
+);
+assert.match(
+  chatGallerySource,
+  /onClick=\{\(\) => handleDelete\(confirmDeleteId\)\}[\s\S]{0,180}mari-chrome-accent-surface/u,
+);
+assert.match(
+  globalStyles,
+  /\.mari-gallery-card \{\s*content-visibility: auto;\s*contain-intrinsic-size: auto 12rem;\s*\}/u,
+);
 assert.match(characterEditorSource, /ui\.characters\.colorstab\.value1AvatarPreview/u);
 assert.match(characterEditorSource, /getAvatarCropStyle/u);
 assert.match(characterEditorSource, /downloadSpriteFile/u);
@@ -2882,14 +5279,28 @@ for (const [name, source] of [
   assert.match(source, /text-foreground\/45/u, `${name} search icon must match GIF search`);
   assert.match(source, /placeholder:text-foreground\/35/u, `${name} search placeholder must match GIF search`);
 }
-assert.match(visualViewportChatBottomSource, /detail\?\.keyboardOpen[\s\S]{0,500}scrollToBottom\("auto"\)/u);
+assert.match(visualViewportChatBottomSource, /const anchor = pendingAnchor \?\? captureAnchor\(\);/u);
+assert.match(
+  visualViewportChatBottomSource,
+  /if \(anchor\.pinnedToBottom\) \{\s*scrollToBottom\("auto"\);/u,
+  "Keyboard opening should keep a composer that was already pinned at the latest message pinned",
+);
+assert.match(
+  visualViewportChatBottomSource,
+  /scrollElement\.scrollTo\(\{ top: Math\.min\(anchor\.scrollTop, maxScrollTop\), behavior: "auto" \}\);/u,
+  "Keyboard opening should restore an intentionally scrolled transcript to its captured position",
+);
 assert.match(characterEditorSource, /if \(uploading \|\| !expression\) return;/u);
 assert.match(personaEditorSource, /if \(uploading \|\| !expression\) return;/u);
 assert.match(characterEditorSource, /className="flex flex-col gap-2 sm:flex-row"/u);
 assert.match(personaEditorSource, /className="flex flex-col gap-2 sm:flex-row"/u);
 assert.match(fileDownloadSource, /MarinaraAndroid/u);
 assert.match(spriteDownloadSource, /saveBlobToDevice/u);
-assert.match(androidMainActivitySource, /public void saveFile\(String base64Data, String mimeType, String filename\)/u);
+assert.match(
+  androidMainActivitySource,
+  /public void saveFile\(String token, String base64Data, String mimeType, String filename\)/u,
+  "Android file saves must require the authenticated top-frame bridge token",
+);
 assert.match(androidMainActivitySource, /MediaStore\.Images\.Media\.getContentUri/u);
 assert.match(
   characterEditorSource,
@@ -2916,6 +5327,31 @@ assert.match(gameSurfaceSource, /h-\[min\(42rem,calc\(100dvh-6rem\)\)\]/u);
 assert.match(gameSetupWizardSource, /ui\.game\.gamesetupwizard\.adjustGameAssetsForThisGame/u);
 assert.match(gameSetupWizardSource, /selectFoldersByDefault/u);
 assert.match(gameSetupWizardSource, /enableAgents: enableAgents \|\| undefined/u);
+assert.match(
+  gameSetupWizardSource,
+  /handleExportSetup[\s\S]{0,700}buildGameSetupShareFile/u,
+  "New Game's final setup step must export the same reusable setup format before starting",
+);
+assert.match(
+  gameSetupWizardSource,
+  /onClick=\{handleExportSetup\}[\s\S]{0,300}ui\.game\.gamesetupsummary\.downloadSetup/u,
+  "New Game's final setup step must expose the setup download action",
+);
+assert.match(
+  gameSetupWizardSource,
+  /id="game-setup-spatial-map-target-count"[\s\S]{0,180}min=\{1\}[\s\S]{0,120}max=\{SPATIAL_CUSTOM_TARGET_LOCATION_LIMIT\}/u,
+  "New Game AI map setup must expose the bounded custom place target from World Maps",
+);
+assert.match(
+  gameSetupWizardSource,
+  /targetLocationCount:\s*spatialMapTargetLocationCount/u,
+  "New Game setup must preserve the selected custom place target in its post-setup map plan",
+);
+assert.match(
+  gameSurfaceSource,
+  /targetLocationCount:\s*plan\.targetLocationCount/u,
+  "Game setup must send the custom place target to World Maps draft generation",
+);
 assert.match(gameTypesSource, /enableAgents\?: boolean;/u);
 assert.match(gameRoutesSource, /enableAgents: z\.boolean\(\)\.optional\(\)/u);
 assert.match(gameRoutesSource, /enableAgents: setupConfig\.enableAgents === true/u);
@@ -2934,7 +5370,7 @@ assert.match(
   gameRoutesSource,
   /if \(!selectedTemplate\?\.promptTemplate\.trim\(\)\) \{[\s\S]*The Storyboard Agent has no/u,
 );
-assert.match(presetsPanelSource, /\{!selectionMode && isSelected && \(/u);
+assert.match(presetsPanelSource, /\{isSelected && \(/u);
 assert.match(
   presetsPanelSource,
   /PanelSection title=\{localizeUi\("ui\.panels\.presetspanel\.prompts"\)\}/u,
@@ -2956,6 +5392,12 @@ assert.equal(
 assert.match(backupRoutesSource, /tolerateSourceChanges: true/u);
 assert.match(backupRoutesSource, /record\.usesDataDescriptor \? 0x0808 : 0x0800/u);
 assert.match(backupRoutesSource, /PROFILE_IMPORT_MEMORY_WARNING_BYTES/u);
+assert.match(backupRoutesSource, /PROFILE_IMPORT_ARCHIVE_LIMIT_BYTES = 2 \* 1024 \* 1024 \* 1024/u);
+assert.match(backupRoutesSource, /PROFILE_ARCHIVE_TOTAL_UNCOMPRESSED_LIMIT_BYTES = 2 \* 1024 \* 1024 \* 1024/u);
+assert.match(backupRoutesSource, /PROFILE_ARCHIVE_CENTRAL_DIRECTORY_LIMIT_BYTES = 8 \* 1024 \* 1024/u);
+assert.match(backupRoutesSource, /PROFILE_ARCHIVE_ENTRY_COUNT_LIMIT = 8_192/u);
+assert.match(serverAppSource, /const clientIndex = resolve\(clientDist, "index\.html"\)/u);
+assert.match(serverAppSource, /if \(existsSync\(clientIndex\)\)/u);
 assert.match(
   backupRoutesSource,
   /if \(automaticBackupRunning\) return;\s*automaticBackupRunning = true;\s*try \{\s*const settings = await loadAutomaticBackupSettings\(\);/u,
@@ -2990,11 +5432,20 @@ assert.match(
   /className="grid min-w-0 grid-cols-2 gap-2"/u,
   "LinkAPI actions must share the available banner width instead of overflowing it",
 );
-assert.match(presetsPanelSource, /MARINARA_UNIVERSAL_PRESET_ARTWORK/u);
-assert.match(
-  presetsPanelSource,
-  /preset\.name === MARINARA_UNIVERSAL_PRESET_NAME && preset\.author === MARINARA_UNIVERSAL_PRESET_AUTHOR/u,
+assert.equal(
+  resolvePresetArtwork({ name: "Marinara's Universal Preset", author: "Marinara" }),
+  MARINARA_UNIVERSAL_PRESET_ARTWORK,
 );
+assert.equal(
+  resolvePresetArtwork({
+    name: "Marinara's Universal Preset",
+    author: "Marinara",
+    imagePath: "/api/prompts/images/file/custom.png",
+  }),
+  "/api/prompts/images/file/custom.png",
+);
+assert.match(presetsPanelSource, /data-preset-image-action/u);
+assert.match(presetsPanelSource, /data-preset-open-action/u);
 assert.equal(
   existsSync(join(REPOSITORY_ROOT, "packages/client/public/illustrations/marinara-universal-preset.webp")),
   true,
@@ -3019,7 +5470,12 @@ assert.match(
 );
 assert.match(
   conversationSelfieRuntimeSource,
-  /resolveIllustratorCharacterReferences\(\{[\s\S]{0,800}persona: null,[\s\S]{0,800}maxReferences: 6/u,
+  /resolveConversationSelfieRequestedNames\(\{[\s\S]{0,400}generationGuide: args\.generationGuide/u,
+  "Conversation group selfies must carry the guided request into reference selection",
+);
+assert.match(
+  conversationSelfieRuntimeSource,
+  /resolveIllustratorCharacterReferences\(\{[\s\S]{0,800}persona: null,[\s\S]{0,200}requestedNames,[\s\S]{0,300}maxReferences: 6/u,
   "Conversation group selfies must keep all depicted character references without attaching the photographer persona",
 );
 assert.match(
@@ -3526,6 +5982,179 @@ assert.match(
   /hadMissingSyncedSettings[\s\S]*pickSyncedSettings\(useUIStore\.getState\(\)\)/u,
   "Incomplete server settings blobs must be rewritten with newly synced preferences",
 );
+
+const gameHistoryMessage = (content: string, extra?: unknown) => ({ content, extra });
+const objectGameHistoryMetadata = [gameHistoryMessage("ignored", { tokenCount: 37 })];
+const jsonGameHistoryMetadata = [gameHistoryMessage("ignored", '{"tokenCount":37}')];
+assert.equal(estimateGameSessionHistoryTokens(objectGameHistoryMetadata), 37);
+assert.equal(
+  estimateGameSessionHistoryTokens(jsonGameHistoryMetadata),
+  estimateGameSessionHistoryTokens(objectGameHistoryMetadata),
+  "JSON-string metadata must use the same valid token count as object metadata",
+);
+
+const latestObjectGameHistoryMarker = [
+  gameHistoryMessage("ignored", { tokenCount: 101 }),
+  gameHistoryMessage("ignored", { tokenCount: 23, isConversationStart: true }),
+  gameHistoryMessage("ignored", { tokenCount: 19 }),
+  gameHistoryMessage("ignored", { tokenCount: 7, isConversationStart: true }),
+];
+const latestJsonGameHistoryMarker = [
+  gameHistoryMessage("ignored", '{"tokenCount":101}'),
+  gameHistoryMessage("ignored", '{"tokenCount":23,"isConversationStart":true}'),
+  gameHistoryMessage("ignored", '{"tokenCount":19}'),
+  gameHistoryMessage("ignored", '{"tokenCount":7,"isConversationStart":true}'),
+];
+assert.equal(estimateGameSessionHistoryTokens(latestObjectGameHistoryMarker), 7);
+assert.equal(
+  estimateGameSessionHistoryTokens(latestJsonGameHistoryMarker),
+  estimateGameSessionHistoryTokens(latestObjectGameHistoryMarker),
+  "the latest JSON-string conversation-start marker must determine session history",
+);
+
+const falseStringObjectGameHistoryMarker = [
+  gameHistoryMessage("ignored", { tokenCount: 23, isConversationStart: true }),
+  gameHistoryMessage("ignored", { tokenCount: 19 }),
+  gameHistoryMessage("ignored", { tokenCount: 7, isConversationStart: "false" }),
+];
+const falseStringJsonGameHistoryMarker = [
+  gameHistoryMessage("ignored", '{"tokenCount":23,"isConversationStart":true}'),
+  gameHistoryMessage("ignored", '{"tokenCount":19}'),
+  gameHistoryMessage("ignored", '{"tokenCount":7,"isConversationStart":"false"}'),
+];
+assert.equal(
+  estimateGameSessionHistoryTokens(falseStringObjectGameHistoryMarker),
+  49,
+  "a string false-valued object marker must not start a Game session",
+);
+assert.equal(
+  estimateGameSessionHistoryTokens(falseStringJsonGameHistoryMarker),
+  49,
+  "a string false-valued JSON marker must not start a Game session",
+);
+
+const fallbackGameHistoryMessages = [
+  gameHistoryMessage("one two", "{not valid JSON"),
+  gameHistoryMessage("three four"),
+];
+assert.equal(
+  estimateGameSessionHistoryTokens(fallbackGameHistoryMessages),
+  14,
+  "malformed and absent metadata must retain the full history with text estimates",
+);
+
+// The UI store needs browser storage while Zustand initializes its persisted state.
+// Supply an isolated in-memory implementation so these checks exercise its real
+// migration and projection functions in this Node-based regression lane.
+const uiStorage = new Map<string, string>();
+Object.defineProperty(globalThis, "localStorage", {
+  configurable: true,
+  value: {
+    getItem: (key: string) => uiStorage.get(key) ?? null,
+    setItem: (key: string, value: string) => uiStorage.set(key, value),
+    removeItem: (key: string) => uiStorage.delete(key),
+  },
+});
+const { pickSyncedSettings, useUIStore } = await import("../../packages/client/src/stores/ui.store.js");
+const migrateUiSettings = useUIStore.persist.getOptions().migrate;
+assert.ok(migrateUiSettings, "The UI store must retain its persisted-state migration");
+
+const representativeTrackerSettings = {
+  trackerPanelCollapsedSections: { world: true, invalid: true },
+  trackerPanelUseExpressionSprites: undefined,
+  trackerPanelSectionOrder: ["quests", "world", "world", "invalid"],
+  summaryPopoverSettings: {
+    sourceMode: "range",
+    contextSize: 11.8,
+    rangeStart: 4.2,
+    rangeEnd: 9.7,
+    hideSummarisedMessages: true,
+    collapseHiddenMessages: false,
+  },
+  trackerPanelThoughtBubbleDisplay: "floating",
+  trackerPanelSizeProfile: "invalid",
+  trackerPanelWidth: 280,
+  trackerTemperatureUnit: "kelvin",
+  trackerPanelDockedThoughtsAlwaysVisible: undefined,
+  quoteFormat: "invalid",
+  trackerPanelBackgroundColor: "  #123456  ",
+};
+const migrateRepresentativeTrackerSettings = async (version: number) =>
+  (await migrateUiSettings(structuredClone(representativeTrackerSettings), version)) as Record<string, unknown>;
+const oldTrackerSettings = await migrateRepresentativeTrackerSettings(0);
+const currentTrackerSettings = await migrateRepresentativeTrackerSettings(92);
+const trackerMigrationProjection = (settings: Record<string, unknown>) => ({
+  trackerPanelCollapsedSections: settings.trackerPanelCollapsedSections,
+  trackerPanelUseExpressionSprites: settings.trackerPanelUseExpressionSprites,
+  trackerPanelSectionOrder: settings.trackerPanelSectionOrder,
+  summaryPopoverSettings: settings.summaryPopoverSettings,
+  trackerPanelThoughtBubbleDisplay: settings.trackerPanelThoughtBubbleDisplay,
+  trackerPanelSizeProfile: settings.trackerPanelSizeProfile,
+  trackerTemperatureUnit: settings.trackerTemperatureUnit,
+  trackerPanelDockedThoughtsAlwaysVisible: settings.trackerPanelDockedThoughtsAlwaysVisible,
+  quoteFormat: settings.quoteFormat,
+  trackerPanelBackgroundColor: settings.trackerPanelBackgroundColor,
+});
+assert.deepEqual(
+  trackerMigrationProjection(oldTrackerSettings),
+  trackerMigrationProjection(currentTrackerSettings),
+  "Old and current persisted tracker settings must share the unconditional canonicalizers",
+);
+assert.deepEqual(trackerMigrationProjection(currentTrackerSettings), {
+  trackerPanelCollapsedSections: { world: true },
+  trackerPanelUseExpressionSprites: false,
+  trackerPanelSectionOrder: ["quests", "world", "persona", "characters", "custom"],
+  summaryPopoverSettings: {
+    sourceMode: "range",
+    contextSize: 12,
+    rangeStart: 4,
+    rangeEnd: 10,
+    hideSummarisedMessages: true,
+    collapseHiddenMessages: false,
+  },
+  trackerPanelThoughtBubbleDisplay: "floating",
+  trackerPanelSizeProfile: "compact",
+  trackerTemperatureUnit: "celsius",
+  trackerPanelDockedThoughtsAlwaysVisible: false,
+  quoteFormat: "straight",
+  trackerPanelBackgroundColor: "#123456",
+});
+assert.match(
+  uiStoreSource,
+  /if \(version <= 37\) \{[\s\S]*IMAGE_STYLE_PROFILES_STORAGE_KEY\] \?\? persisted\.imageStyleProfiles/u,
+  "The image-style legacy-key fallback must remain version-specific",
+);
+const projectionState = {
+  ...useUIStore.getState(),
+  enterToSendGame: false,
+  enterToSendProfessorMari: false,
+  gameTutorialDisabled: true,
+};
+assert.equal(
+  pickSyncedSettings(projectionState).enterToSendGame,
+  false,
+  "Game's Send on Enter preference must be server-synced",
+);
+assert.equal(
+  pickSyncedSettings(projectionState).enterToSendProfessorMari,
+  false,
+  "Professor Mari's Send on Enter preference must be server-synced",
+);
+assert.equal(
+  pickSyncedSettings(projectionState).gameTutorialDisabled,
+  true,
+  "The tutorial dismissal must be server-synced",
+);
+const localProjection = useUIStore.persist.getOptions().partialize(projectionState) as Record<string, unknown>;
+const syncedSettingsMissingFromLocalPersistence = Object.keys(pickSyncedSettings(projectionState)).filter(
+  (key) => !Object.prototype.hasOwnProperty.call(localProjection, key),
+);
+assert.deepEqual(
+  syncedSettingsMissingFromLocalPersistence,
+  [],
+  "Every server-synced setting must also be browser-local persisted",
+);
+assert.equal(localProjection.gameTutorialDisabled, true, "The tutorial dismissal must be browser-local persisted");
 assert.match(chatAreaPromptReviewSource, /MEDIA_PROMPT_PREVIEW_TIMEOUT_MS/);
 assert.match(chatAreaPromptReviewSource, /confirmRoleplayVideoPromptReview/);
 assert.match(chatAreaPromptReviewSource, /confirmConversationSelfiePromptReview/);
@@ -3842,18 +6471,6 @@ assert.deepEqual(parseNoodleAvatarCrop({ zoom: 2, offsetX: -10, offsetY: 5, full
 });
 assert.equal(parseNoodleAvatarCrop({ srcX: 0, srcY: 0, srcWidth: 0, srcHeight: 0 }), null);
 
-const noodleEmojiMap = mergeNoodleCustomEmojiMap(
-  [{ name: "d20lesbian", url: "/global-d20.png" }],
-  [
-    [
-      { customKind: "emoji", customName: "d20lesbian", url: "/persona-d20.png" },
-      { customKind: "sticker", customName: "not-an-emoji", url: "/sticker.png" },
-    ],
-  ],
-);
-assert.equal(noodleEmojiMap.get("d20lesbian"), "/persona-d20.png");
-assert.equal(noodleEmojiMap.has("not-an-emoji"), false);
-
 assert.deepEqual(appendLorebookActivationKeys(["Apples"], " Apple, Appletree, red fruit, Apple, , Apples "), [
   "Apples",
   "Apple",
@@ -3876,6 +6493,28 @@ assert.equal(isGitUpdateApplyAllowed({ updatesApplyEnabled: true, localChannelSw
 assert.equal(shouldExecuteQuickPostAsCommand("/illustrate"), true);
 assert.equal(shouldExecuteQuickPostAsCommand("  /roll 1d20  "), true);
 assert.equal(shouldExecuteQuickPostAsCommand("/not-a-real-command"), false);
+assert.deepEqual(parseTargetedHideArguments("34-40", "roleplay"), {
+  kind: "global",
+  indices: [34, 35, 36, 37, 38, 39, 40],
+});
+assert.deepEqual(
+  parseTargetedHideArguments('"Lady Maria" 12,18-20', "roleplay", [
+    { id: "maria", name: "Lady Maria" },
+    { id: "maukie", name: "Maukie" },
+  ]),
+  {
+    kind: "targeted",
+    character: { id: "maria", name: "Lady Maria" },
+    indices: [12, 18, 19, 20],
+  },
+);
+assert.deepEqual(
+  parseTargetedHideArguments("mau 34", "roleplay", [
+    { id: "maukie", name: "Maukie" },
+    { id: "maurice", name: "Maurice" },
+  ]),
+  { kind: "error", reason: "ambiguous", targetName: "mau" },
+);
 
 const noCapabilityPackages = new Set<string>();
 const illustratorCapabilityPackages = new Set(["illustrator"]);
@@ -4318,6 +6957,16 @@ assert.equal(comfyPlaceholderPng.readUInt32BE(20), 16);
 
 const chatRoutesSource = readFileSync(join(REPOSITORY_ROOT, "packages/server/src/routes/chats.routes.ts"), "utf8");
 assert.match(
+  globalStylesSource,
+  /html\[data-marinara-reduced-effects="true"\] \[class\*="backdrop-blur"\],[\s\S]{0,300}backdrop-filter: none !important;/u,
+  "Reduced ambient effects must flatten shared backdrop blur at every viewport size",
+);
+assert.doesNotMatch(
+  globalStylesSource,
+  /@media \(max-width: 767px\) \{[\s\S]{0,300}data-marinara-reduced-effects="true"[^\n]*backdrop-blur/u,
+  "Desktop users must receive the same reduced-effects backdrop flattening as mobile users",
+);
+assert.match(
   chatRoutesSource,
   /if \(existing\.mode === "conversation" && hasStartedChat\) \{/u,
   "Only Conversation chats should create character membership timeline notices",
@@ -4328,8 +6977,174 @@ const summaryPopoverSource = readFileSync(
 );
 assert.match(
   summaryPopoverSource,
+  /function SummaryEntryEditor[\s\S]*?<MacroTextarea[\s\S]*?textareaRef=\{textareaRef\}/u,
+  "Summary entry editing should expose the shared expanded editor and macro guide",
+);
+assert.match(
+  summaryPopoverSource,
   /summaryEntryIds:\s*selectedEntries\.map\(\(entry\) => entry\.id\)/u,
   "The summary UI must submit every selected entry to the combine endpoint",
+);
+assert.match(
+  chatRoutesSource,
+  /combineChatSummaryEntryHistory\(entries, requestedIds, combinedEntry, now\)/u,
+  "The Chat Summary combine route must retain source history through the tested helper",
+);
+const summaryCombineNow = "2026-08-06T09:00:00.000Z";
+const summaryCombineEntries: ChatSummaryEntry[] = [
+  createChatSummaryEntry({
+    id: "source-a",
+    content: "Source A",
+    title: "Source A",
+    enabled: true,
+    rangeStartIndex: 1,
+    rangeEndIndex: 2,
+    createdAt: "2026-08-01T09:00:00.000Z",
+    updatedAt: "2026-08-01T09:00:00.000Z",
+  }),
+  createChatSummaryEntry({
+    id: "source-b",
+    content: "Source B",
+    title: "Source B",
+    enabled: true,
+    rangeStartIndex: 3,
+    rangeEndIndex: 4,
+    createdAt: "2026-08-02T09:00:00.000Z",
+    updatedAt: "2026-08-02T09:00:00.000Z",
+  }),
+  createChatSummaryEntry({
+    id: "untouched",
+    content: "Untouched",
+    title: "Untouched",
+    enabled: true,
+    rangeStartIndex: 5,
+    rangeEndIndex: 6,
+    createdAt: "2026-08-03T09:00:00.000Z",
+    updatedAt: "2026-08-03T09:00:00.000Z",
+  }),
+];
+const combinedSummaryEntry = createChatSummaryEntry({
+  id: "combined",
+  content: "Combined A and B",
+  title: "Combined",
+  enabled: true,
+  rangeStartIndex: 1,
+  rangeEndIndex: 4,
+  createdAt: summaryCombineEntries[0]!.createdAt,
+  updatedAt: summaryCombineNow,
+});
+const retainedSummaryEntries = combineChatSummaryEntryHistory(
+  summaryCombineEntries,
+  new Set(["source-a", "source-b"]),
+  combinedSummaryEntry,
+  summaryCombineNow,
+);
+assert.deepEqual(
+  retainedSummaryEntries.map((entry) => entry.id),
+  ["combined", "source-a", "source-b", "untouched"],
+  "The combined entry must be inserted at the first selected chronological position",
+);
+for (const sourceId of ["source-a", "source-b"]) {
+  const retainedSource = retainedSummaryEntries.find((entry) => entry.id === sourceId);
+  assert.equal(retainedSource?.enabled, false, `${sourceId} must remain as inactive history`);
+  assert.equal(retainedSource?.updatedAt, summaryCombineNow, `${sourceId} must record when it was combined`);
+}
+assert.equal(retainedSummaryEntries.find((entry) => entry.id === "untouched")?.enabled, true);
+assert.equal(
+  compileChatSummaryEntries(retainedSummaryEntries),
+  "Combined A and B\n\nUntouched",
+  "Compiled Chat Summary output must exclude deactivated source entries",
+);
+const secondCombinedSummaryEntry = createChatSummaryEntry({
+  id: "combined-again",
+  content: "Combined summary of summaries",
+  title: "Combined again",
+  enabled: true,
+  rangeStartIndex: 1,
+  rangeEndIndex: 6,
+  createdAt: summaryCombineEntries[0]!.createdAt,
+  updatedAt: "2026-08-06T10:00:00.000Z",
+});
+const retainedSecondGenerationEntries = combineChatSummaryEntryHistory(
+  retainedSummaryEntries,
+  new Set(["combined", "untouched"]),
+  secondCombinedSummaryEntry,
+  secondCombinedSummaryEntry.updatedAt,
+);
+assert.deepEqual(
+  retainedSecondGenerationEntries.map((entry) => entry.id),
+  ["combined-again", "combined", "source-a", "source-b", "untouched"],
+  "A summary of summaries must retain both generations of source history",
+);
+const appendedSummaryResult = appendChatSummaryEntryToMetadata(
+  { summaryEntries: retainedSummaryEntries },
+  {
+    id: "automatic-after-combine",
+    content: "Newest automatic summary",
+    title: "Newest automatic summary",
+    enabled: true,
+    origin: "automated",
+    rangeStartIndex: 2,
+    rangeEndIndex: 3,
+    createdAt: "2026-08-06T11:00:00.000Z",
+    updatedAt: "2026-08-06T11:00:00.000Z",
+  },
+);
+assert.equal(
+  appendedSummaryResult.entries.at(-1)?.id,
+  "automatic-after-combine",
+  "A newly generated summary must append after the existing user-controlled order even when its source range is earlier",
+);
+const userReorderedSummaryEntries = [
+  appendedSummaryResult.entries.at(-1)!,
+  ...appendedSummaryResult.entries.slice(0, -1),
+];
+assert.equal(
+  compileChatSummaryEntries(userReorderedSummaryEntries),
+  "Newest automatic summary\n\nCombined A and B\n\nUntouched",
+  "Prompt compilation must preserve the summary order chosen by the user",
+);
+for (const sourceId of ["combined", "source-a", "source-b", "untouched"]) {
+  assert.equal(
+    retainedSecondGenerationEntries.find((entry) => entry.id === sourceId)?.enabled,
+    false,
+    `${sourceId} must remain as inactive history after combining summaries again`,
+  );
+}
+assert.match(
+  summaryPopoverSource,
+  /onSuccess: \(data\) => \{\s*setSelectedEntryIds\(new Set\(\)\);\s*setShowInactiveSummaries\(true\)/u,
+  "The Chat Summary popover must reveal retained inactive sources after combining",
+);
+assert.match(
+  summaryPopoverSource,
+  /<[A-Za-z]+\b(?=[^>]*data-summary-entry-root\b)(?=[^>]*onDragOver=\{handleSummaryContainerDragOver\})(?=[^>]*onDrop=\{handleSummaryDrop\})[^>]*>/u,
+  "The summary entry list root must be the desktop drag-and-drop container",
+);
+assert.match(
+  summaryPopoverSource,
+  /<[A-Za-z]+\b(?=[^>]*data-touch-reorder-item=\{reorderable \? "summary-entry" : undefined\})(?=[^>]*data-touch-reorder-index=\{reorderable \? entryIndex : undefined\})(?=[^>]*draggable=\{reorderable && dragReady\})(?=[^>]*onDragStart=\{onDragStart\})[^>]*>/u,
+  "Summary entries must expose a shared desktop and touch reorder surface (the same row is a touch-reorder item, carries its persisted reorder index, and is desktop-draggable)",
+);
+assert.match(
+  summaryPopoverSource,
+  /startSummaryEntryTouchDrag\(event, entry\.id/u,
+  "Summary entries must support touch drag-and-drop on mobile",
+);
+assert.match(
+  readFileSync(join(REPOSITORY_ROOT, "packages/client/src/lib/touch-reorder.ts"), "utf8"),
+  /candidateIndex = readReorderIndex\(candidate\)[\s\S]{0,260}lastIndex = readReorderIndex/u,
+  "Touch reorder gaps must use persisted row indexes when filtered entries are not rendered",
+);
+assert.match(
+  summaryPopoverSource,
+  /<div className="flex items-center gap-0\.5">[\s\S]{0,900}onMoveUp[\s\S]{0,900}onMoveDown/u,
+  "Summary entries must keep keyboard reorder controls available on narrow viewports",
+);
+assert.match(
+  chatRoutesSource,
+  /body\.operation === "reorder"[\s\S]{0,1800}body\.entryIds\.map/u,
+  "Summary reorder requests must persist the complete user-selected entry order",
 );
 assert.match(
   summaryPopoverSource,
@@ -4338,8 +7153,8 @@ assert.match(
 );
 assert.match(
   summaryPopoverSource,
-  /currentChatSummaryPrompt[\s\S]{0,900}\{activeSummaryPrompt\}[\s\S]{0,1500}<textarea/u,
-  "The active Chat Summary prompt must remain visible above its template editor",
+  /!templateEditorOpen[\s\S]{0,500}\{activeSummaryPrompt\}[\s\S]{0,500}templateEditorOpen/u,
+  "The active Chat Summary prompt must remain visible until its template editor opens",
 );
 assert.doesNotMatch(
   summaryPopoverSource,
@@ -4462,7 +7277,7 @@ assert.match(
 );
 assert.match(
   chatRoutesSource,
-  /requestedSummaryEntryIds[\s\S]{0,6500}nextEntries\.splice\(Math\.max\(0, firstIndex\), 0, combinedEntry\)/u,
+  /requestedSummaryEntryIds[\s\S]{0,6500}combineChatSummaryEntryHistory\(entries, requestedIds, combinedEntry, now\)/u,
   "Combined summaries must replace their selected entries at the first selected chronological position",
 );
 assert.match(
@@ -4491,6 +7306,8 @@ assert.match(
 );
 
 const windowsLauncherSource = readFileSync(join(REPOSITORY_ROOT, "start.bat"), "utf8");
+assert.match(windowsLauncherSource, /node --version >nul 2>&1/u);
+assert.doesNotMatch(windowsLauncherSource, /where node >nul 2>&1/u);
 for (const workspace of ["shared", "server", "client"]) {
   assert.match(windowsLauncherSource, new RegExp(`--filter @marinara-engine/${workspace} run clean`, "u"));
 }
@@ -4697,8 +7514,8 @@ assert.equal(
     side: "left",
     gap: 8,
   }),
-  128,
-  "The Tracker should shrink to the narrower left chat gutter",
+  420,
+  "The Tracker may overlap the chat instead of crushing its controls into a narrow gutter",
 );
 assert.equal(
   resolveTrackerPanelDesktopWidth({
@@ -4710,8 +7527,8 @@ assert.equal(
     side: "right",
     gap: 8,
   }),
-  128,
-  "The Tracker should use the matching right chat gutter",
+  340,
+  "The right-side Tracker should preserve its selected width when the main viewport can hold it",
 );
 assert.equal(resolveTrackerPanelContentScale(340, 340), 1);
 assert.equal(resolveTrackerPanelContentScale(340, 255), 0.75);
@@ -4719,6 +7536,11 @@ assert.equal(
   resolveTrackerPanelContentScale(420, 128),
   0.65,
   "Severely constrained Tracker contents should reflow before their text becomes unreadably small",
+);
+assert.match(
+  appShellSource,
+  /handleTrackerPanelWindowClosed[\s\S]{0,500}trackerPanelWindowTargetRef\.current\?\.popup !== closedTarget\.popup[\s\S]{0,300}setTrackerPanelOpen\(false, activeChatId\)/u,
+  "Closing a detached Tracker window must close the Tracker instead of silently docking it",
 );
 const backgroundSeedRoot = mkdtempSync(join(tmpdir(), "marinara-default-background-"));
 const backgroundSeedDir = join(backgroundSeedRoot, "backgrounds");
@@ -4739,6 +7561,14 @@ try {
 } finally {
   rmSync(backgroundSeedRoot, { recursive: true, force: true });
 }
+const reservedBackgroundMeta = normalizeBackgroundMeta(
+  JSON.parse('{"__proto__":{"tags":["kept"]},"normal.png":{"tags":["normal",7]}}'),
+);
+assert.equal(Object.getPrototypeOf(reservedBackgroundMeta), null);
+assert.deepEqual(reservedBackgroundMeta.__proto__?.tags, ["kept"]);
+assert.deepEqual(reservedBackgroundMeta["normal.png"]?.tags, ["normal"]);
+reservedBackgroundMeta.__proto__ = { tags: ["updated"] };
+assert.equal(({} as { tags?: string[] }).tags, undefined, "Background metadata must not mutate Object.prototype");
 
 // Issue #3993 — ComfyUI model fetch must list the DiffusionModels (UNETLoader)
 // folder and keep missing loader metadata distinguishable from an empty list.
@@ -4952,6 +7782,27 @@ try {
     /src\.id === "zai"[\s\S]{0,180}!ZAI_IMAGE_MODELS\.some[\s\S]{0,180}setLocalModel\("glm-image"\)/u,
     "Switching to Z.AI must replace a model that Z.AI does not support",
   );
+  assert.match(
+    connectionEditorSource,
+    /const swarmUiWorkflowError =\s*\(selectedImageService === "swarmui" \|\| selectedVideoProvider === "swarmui"\)[\s\S]{0,180}%reference_image_name/u,
+    "SwarmUI workflow validation must reject backend-local reference-image filenames before save",
+  );
+  assert.match(connectionEditorSource, /if \(swarmUiWorkflowError\) \{[\s\S]{0,180}throw new Error/u);
+  assert.match(
+    connectionEditorSource,
+    /type="button"[\s\S]{0,180}novelAiStylePlateInputRef\.current\?\.click\(\)[\s\S]{0,1000}type="file"/u,
+    "NovelAI style-plate selection must use an explicit non-submitting button instead of label navigation",
+  );
+  assert.match(
+    connectionEditorSource,
+    /localImageDefaultsRef\.current = sanitized;[\s\S]{0,100}setLocalImageDefaults\(sanitized\)/u,
+    "NovelAI defaults must update a synchronous save snapshot before React paints the next render",
+  );
+  assert.match(
+    connectionEditorSource,
+    /selectedImageDefaultsService && localImageDefaultsRef\.current[\s\S]{0,140}sanitizeImageGenerationProfile\(localImageDefaultsRef\.current/u,
+    "Connection save must persist the latest image defaults snapshot",
+  );
 
   const backgroundAutonomousSource = readFileSync(
     join(REPOSITORY_ROOT, "packages/client/src/hooks/use-background-autonomous.ts"),
@@ -5150,6 +8001,12 @@ try {
   )?.[0];
   assert.ok(testImageHandler, "The connection test-image handler must remain available");
   assert.match(testImageHandler, /width: 1024,\s*height: 1024,/u);
+  assert.match(testImageHandler, /debugMode: readDebugMode\(req\.body\)/u);
+  assert.match(
+    connectionsRouteSource,
+    /signal: AbortSignal\.timeout\(SWARMUI_CONTROL_REQUEST_TIMEOUT_MS\)/u,
+    "SwarmUI control requests must have a bounded timeout",
+  );
 
   assert.doesNotMatch(
     agentEditorSource,
@@ -5195,10 +8052,7 @@ try {
   const sidebarPanelSources = new Map(
     ["Characters", "Personas", "Lorebooks", "Agents", "Presets", "Connections"].map((panelName) => [
       panelName,
-      readFileSync(
-        join(REPOSITORY_ROOT, `packages/client/src/components/panels/${panelName}Panel.tsx`),
-        "utf8",
-      ),
+      readFileSync(join(REPOSITORY_ROOT, `packages/client/src/components/panels/${panelName}Panel.tsx`), "utf8"),
     ]),
   );
 
@@ -5220,12 +8074,11 @@ try {
     );
     const hiddenActionOverlayCount = source.match(/pointer-events-none[^"\n]*opacity-0/gu)?.length ?? 0;
     const focusVisibleOverlayCount =
-      source.match(
-        /pointer-events-none[^"\n]*\[@media\(pointer:fine\)\]:group-focus-within(?:\/member)?:opacity-100/gu,
-      )?.length ?? 0;
+      source.match(/pointer-events-none[^"\n]*\[@media\(pointer:fine\)\]:group-focus-within(?:\/member)?:opacity-100/gu)
+        ?.length ?? 0;
     const focusInteractiveOverlayCount =
       source.match(
-        /pointer-events-none[^"\n]*\[@media\(pointer:fine\)\]:group-focus-within(?:\/member)?:\[&_button\]:pointer-events-auto/gu,
+        /pointer-events-none[^"\n]*\[@media\(pointer:fine\)\]:group-focus-within(?:\/member)?:(?:\[&_button\]:)?pointer-events-auto/gu,
       )?.length ?? 0;
     assert.equal(
       focusVisibleOverlayCount,
@@ -5251,7 +8104,7 @@ try {
   }
   assert.match(
     charactersPanelSource,
-    /max-md:pr-20 \[@media\(pointer:coarse\)\]:pr-24/u,
+    /pr-0 max-md:pr-32 \[@media\(pointer:coarse\)\]:pr-32/u,
     "Character rows must match their coarse-pointer padding to the desktop-width action toolbar",
   );
   assert.match(
@@ -5506,6 +8359,311 @@ try {
     reExported.includes(deflateSync(Buffer.from(base64Card, "ascii"))),
     false,
     "Export must strip stale zTXt chara chunks instead of shipping outdated data",
+  );
+}
+
+{
+  // #4704: the background-autonomous poller's server-side candidate filter
+  // must mirror the legacy client filter exactly (conversation mode with
+  // autonomousMessages enabled, excluding the Professor Mari home assistant;
+  // bad or missing metadata disqualifies).
+  const { isBackgroundAutonomousCandidate } =
+    await import("../../packages/server/src/services/conversation/autonomous-candidates.js");
+  const meta = (extra: Record<string, unknown>) => JSON.stringify({ autonomousMessages: true, ...extra });
+  assert.equal(isBackgroundAutonomousCandidate({ mode: "conversation", metadata: meta({}) }), true);
+  assert.equal(
+    isBackgroundAutonomousCandidate({ mode: "conversation", metadata: { autonomousMessages: true } }),
+    true,
+    "object metadata accepted",
+  );
+  assert.equal(
+    isBackgroundAutonomousCandidate({ mode: "roleplay", metadata: meta({}) }),
+    false,
+    "non-conversation excluded",
+  );
+  assert.equal(
+    isBackgroundAutonomousCandidate({ mode: "conversation", metadata: meta({ internalAssistant: "professor-mari" }) }),
+    false,
+    "Professor Mari home chat excluded",
+  );
+  assert.equal(
+    isBackgroundAutonomousCandidate({ mode: "conversation", metadata: JSON.stringify({ autonomousMessages: false }) }),
+    false,
+    "autonomous disabled excluded",
+  );
+  assert.equal(
+    isBackgroundAutonomousCandidate({ mode: "conversation", metadata: "{not json" }),
+    false,
+    "unparseable metadata excluded",
+  );
+  assert.equal(isBackgroundAutonomousCandidate({ mode: "conversation" }), false, "missing metadata excluded");
+
+  // The candidates route excludes EMPTIED Roleplay DM threads (the legacy poll
+  // ran the DM cleanup as a GET /chats side effect); the marker expression must
+  // stay in sync with cleanupEmptyRoleplayDmChats.
+  const { hasRoleplayDmThreadMarkers } =
+    await import("../../packages/server/src/services/conversation/autonomous-candidates.js");
+  assert.equal(hasRoleplayDmThreadMarkers({ roleplayDmThread: true }), true);
+  assert.equal(hasRoleplayDmThreadMarkers({ dmOriginChatId: "chat-1" }), true);
+  assert.equal(hasRoleplayDmThreadMarkers({ roleplayDmThread: false }), false);
+  assert.equal(hasRoleplayDmThreadMarkers({ dmOriginChatId: 42 }), false, "non-string origin id is not a marker");
+  assert.equal(hasRoleplayDmThreadMarkers({}), false);
+}
+
+{
+  // #4721: the chat transcript's infinite query keys ONLY by chat id — its
+  // pageSize lives in the option closures, so ANY second observer with a
+  // different pageSize hijacks the transcript's queryFn/getNextPageParam
+  // (last observer wins in React Query). The Chat Settings drawer's
+  // secret-plot reader did exactly that with a hardcoded 100: while the
+  // drawer was open, transcript refetches ignored the user's
+  // messages-per-page and "Load More" vanished on a mis-evaluated
+  // hasNextPage. Read-only newest-N windows must go through the peek hook,
+  // which keys by limit.
+  const drawerSource = readFileSync(
+    join(REPOSITORY_ROOT, "packages/client/src/components/chat/ChatSettingsDrawer.tsx"),
+    "utf8",
+  );
+  assert.doesNotMatch(
+    drawerSource,
+    /useChatMessages\(/u,
+    "Chat Settings must not observe the shared chatKeys.messages infinite query (#4721)",
+  );
+  assert.match(
+    drawerSource,
+    /useChatMessagePeek\(\s*chat\.id,\s*100,/u,
+    "The secret-plot reader must fetch its newest-100 window through the limit-keyed peek hook",
+  );
+  const imageSettingUpdateSource =
+    /const updateCustomAgentImageSetting = useCallback\([\s\S]*?\n  const updateCustomAgentImageConnection/u.exec(
+      drawerSource,
+    )?.[0] ?? "";
+  assert.match(
+    imageSettingUpdateSource,
+    /setCustomAgentImageSettingsDraft\(\(current\) => \(\{[\s\S]*current\?\.chatId === chat\.id \? current\.patch : \{\}[\s\S]*\[agentId\]: hasAgentSettings \? agentSettings : null/u,
+    "Rapid custom-agent connection and style changes must merge into one visible local draft",
+  );
+  assert.match(
+    imageSettingUpdateSource,
+    /if \(removingAgentImageSettingsRef\.current\.has\(agentId\)\) return;/u,
+    "Selector changes for an agent being removed must not enqueue another full-map write",
+  );
+  const toggleAgentSource =
+    /const toggleAgent = async[\s\S]*?\n  const removeAgentFromMenu/u.exec(drawerSource)?.[0] ?? "";
+  assert.match(
+    toggleAgentSource,
+    /await flushPendingCustomAgentImageSettings\(\)[\s\S]*await customAgentImageSettingsWriteQueueRef\.current\.waitForIdle\(\)[\s\S]*const latestImageSettings = readLatestCustomAgentImageSettings\(\)[\s\S]*delete next\[agentId\]/u,
+    "Removing an agent must drain queued image writes before deleting that agent's override",
+  );
+  assert.match(
+    toggleAgentSource,
+    /removingAgentImageSettingsRef\.current\.add\(agentId\)[\s\S]*customAgentImageSettingsWriteQueueRef\.current\.enqueue\(saveAgentSelection\)[\s\S]*finally \{[\s\S]*removingAgentImageSettingsRef\.current\.delete\(agentId\)/u,
+    "Agent removal must be terminal in the image-settings queue and unblock the selector afterward",
+  );
+
+  const serializedWrites = createSerializedMutationQueue();
+  const writeOrder: string[] = [];
+  let releaseFirstWrite!: () => void;
+  const firstWriteGate = new Promise<void>((resolve) => {
+    releaseFirstWrite = resolve;
+  });
+  const firstWrite = serializedWrites.enqueue(async () => {
+    writeOrder.push("first:start");
+    await firstWriteGate;
+    writeOrder.push("first:end");
+  });
+  const removalWrite = serializedWrites.enqueue(async () => {
+    writeOrder.push("removal");
+  });
+  const removingAgentIds = new Set(["image-agent"]);
+  const blockedSelectorWrite = removingAgentIds.has("image-agent")
+    ? null
+    : serializedWrites.enqueue(async () => {
+        writeOrder.push("stale-selector-write");
+      });
+  assert.equal(blockedSelectorWrite, null, "A selector event during removal must not enqueue a stale map");
+  await Promise.resolve();
+  assert.deepEqual(writeOrder, ["first:start"], "A delayed older metadata write must hold newer writes in order");
+  releaseFirstWrite();
+  await Promise.all([firstWrite, removalWrite, serializedWrites.waitForIdle()]);
+  assert.deepEqual(writeOrder, ["first:start", "first:end", "removal"]);
+  const trackerModelSource = readFileSync(
+    join(REPOSITORY_ROOT, "packages/client/src/features/tracker-panel/hooks/use-tracker-panel-model.ts"),
+    "utf8",
+  );
+  assert.doesNotMatch(
+    trackerModelSource,
+    /useChatMessages\(/u,
+    "The tracker panel must not observe the shared chatKeys.messages infinite query (#4724)",
+  );
+  assert.match(
+    trackerModelSource,
+    /useChatMessagePeek\(\s*activeChatId,\s*20,/u,
+    "The tracker panel must fetch its newest-20 sprite window through the limit-keyed peek hook",
+  );
+  const useChatsSource = readFileSync(join(REPOSITORY_ROOT, "packages/client/src/hooks/use-chats.ts"), "utf8");
+  assert.match(
+    useChatsSource,
+    /queryKey: \[\.\.\.chatKeys\.messagePeek\(chatId \?\? ""\), limit\]/u,
+    "The peek hook's query key must include its limit so different windows never share options",
+  );
+}
+
+{
+  const { parseMessageCursor } = await import("../../packages/server/src/services/storage/chats.storage.js");
+  assert.deepEqual(parseMessageCursor("2026-08-09T12:00:00.000Z|message%7C42"), {
+    createdAt: "2026-08-09T12:00:00.000Z",
+    id: "message|42",
+  });
+  assert.equal(parseMessageCursor("2026-08-09T12:00:00.000Z"), null, "bare timestamps are not cursors");
+  assert.equal(parseMessageCursor("not-a-date|42"), null, "cursor timestamps must be valid");
+  assert.equal(parseMessageCursor("2026-08-09T12:00:00.000Z|%"), null, "cursor ids must be valid URI components");
+}
+
+{
+  // #4937: Agent Suite tracker editing must expose every field owned by the
+  // World State and Persona Stats trackers without replacing adjacent data.
+  const gameState = {
+    id: "state-4937",
+    chatId: "chat-4937",
+    messageId: "message-4937",
+    swipeIndex: 0,
+    date: "August 12",
+    time: "10:00",
+    location: "Lab",
+    weather: "Clear",
+    temperature: "20 C",
+    worldCustomFields: [{ name: "Moon", value: "Full", icon: "moon" }],
+    presentCharacters: [],
+    recentEvents: [],
+    personaStats: [{ name: "Energy", value: 8, max: 10, color: "blue" }],
+    playerStats: {
+      stats: [],
+      attributes: null,
+      skills: { alchemy: 4 },
+      inventory: [{ name: "Vial", description: "Sealed", quantity: 2, location: "on_person" }],
+      activeQuests: [],
+      status: "Focused",
+    },
+    createdAt: "2026-08-12T08:00:00.000Z",
+  } satisfies GameState;
+  assert.deepEqual(
+    (AGENT_SUITE_TRACKER_SLICES["world-state"]!.getValue(gameState) as Record<string, unknown>)
+      .worldCustomFields,
+    gameState.worldCustomFields,
+  );
+  assert.deepEqual(AGENT_SUITE_TRACKER_SLICES["persona-stats"]!.getValue(gameState), {
+    personaStats: gameState.personaStats,
+    inventory: gameState.playerStats.inventory,
+  });
+  assert.deepEqual(
+    AGENT_SUITE_TRACKER_SLICES["persona-stats"]!.buildPatch(gameState, {
+      personaStats: [],
+      inventory: [{ name: "Key", description: "Brass", quantity: 1, location: "stored" }],
+    }),
+    {
+      personaStats: [],
+      playerStats: {
+        ...gameState.playerStats,
+        inventory: [{ name: "Key", description: "Brass", quantity: 1, location: "stored" }],
+      },
+    },
+    "Persona inventory edits must preserve skills, status, and other player stats",
+  );
+  assert.deepEqual(
+    AGENT_SUITE_TRACKER_SLICES["world-state"]!.buildPatch(gameState, { worldCustomFields: "invalid" }),
+    { error: "World custom fields must be a JSON array" },
+  );
+  assert.deepEqual(
+    AGENT_SUITE_TRACKER_SLICES["persona-stats"]!.buildPatch(gameState, { personaStats: [] }),
+    { personaStats: [] },
+    "Dropping inventory from an AI rewrite must leave the saved inventory unchanged",
+  );
+}
+
+{
+  // #4940, #4941, #4942 and the requested UI consistency fixes are thin
+  // integration lanes, so pin their host wiring alongside the behavior checks.
+  const chatAreaSource = readFileSync(
+    join(REPOSITORY_ROOT, "packages/client/src/components/chat/ChatArea.tsx"),
+    "utf8",
+  );
+  const conversationSurfaceSource = readFileSync(
+    join(REPOSITORY_ROOT, "packages/client/src/components/chat/ChatConversationSurface.tsx"),
+    "utf8",
+  );
+  const settingsDrawerSource = readFileSync(
+    join(REPOSITORY_ROOT, "packages/client/src/components/chat/ChatSettingsDrawer.tsx"),
+    "utf8",
+  );
+  const gameMapSource = readFileSync(join(REPOSITORY_ROOT, "packages/client/src/components/game/GameMap.tsx"), "utf8");
+  const generateRouteSource = readFileSync(
+    join(REPOSITORY_ROOT, "packages/server/src/routes/generate.routes.ts"),
+    "utf8",
+  );
+  const turnGameBotRunnerSource = readFileSync(
+    join(REPOSITORY_ROOT, "packages/server/src/services/turn-games/turn-game-bot-runner.service.ts"),
+    "utf8",
+  );
+  const turnGameCommandRuntimeSource = readFileSync(
+    join(REPOSITORY_ROOT, "packages/server/src/services/generation/turn-game-command-runtime.ts"),
+    "utf8",
+  );
+
+  assert.match(
+    chatAreaSource,
+    /<ChatConversationSurface[\s\S]*?onIllustrateWithAgent=\{async \(agentType\)[\s\S]*?forceImageGeneration: true/u,
+    "Conversation Gallery must forward custom image-agent illustration requests",
+  );
+  assert.match(conversationSurfaceSource, /onIllustrateWithAgent=\{onIllustrateWithAgent\}/u);
+
+  assert.match(settingsDrawerSource, /\/generate\/status\/\$\{encodeURIComponent\(chat\.id\)\}/u);
+  assert.match(settingsDrawerSource, /isRoleplayMode && \(activeGeneration \|\| stoppingGeneration\)/u);
+  assert.match(settingsDrawerSource, /await abortGenerationForChat\(chat\.id, controller\)/u);
+  assert.equal(
+    (settingsDrawerSource.match(/packageId=\{ltmPackage\.id\}[\s\S]*?className="(?:mt-2 )?block overflow-hidden rounded-lg"/gu) ?? [])
+      .length,
+    3,
+    "Long-Term Memory must use the same un-nested Agent Settings surface in every chat mode",
+  );
+
+  assert.match(
+    gameMapSource,
+    /GAME_MAP_ACTION_ITEM_CLASS\s*=\s*\n\s*"text-\[var\(--primary\)\]/u,
+    "Minimap zoom controls must inherit the selected accent color",
+  );
+  const turnGameResumeBlock =
+    /\/\/ A normal chat send can claim[\s\S]*?\/\/ Signal completion before the slow illustration tail/u.exec(
+      generateRouteSource,
+    )?.[0] ?? "";
+  assert.match(turnGameResumeBlock, /chatMode === "conversation"/u);
+  assert.match(turnGameResumeBlock, /await runTurnGameBotTurns\(/u);
+  assert.match(
+    turnGameResumeBlock,
+    /if \(abortController\.signal\.aborted \|\| isAbortLikeError\(turnGameErr\)\) return;/u,
+    "Turn-game recovery must propagate cancellation without logging it as a failure",
+  );
+  assert.match(
+    turnGameResumeBlock,
+    /await runTurnGameBotTurns\([\s\S]*?if \(abortController\.signal\.aborted\) return;/u,
+    "Turn-game recovery must re-check cancellation after a bot runner resolves",
+  );
+  assert.match(turnGameResumeBlock, /logger\.warn\(turnGameErr/u);
+  assert.match(
+    generateRouteSource,
+    /logDebugOverride\(requestDebug \|\| isDebugAgentsEnabled\(\), message, \.\.\.args\)/u,
+    "Turn-game prompt logging must honor both UI debug mode and DEBUG_AGENTS",
+  );
+  assert.equal(
+    (generateRouteSource.match(/debugLog: turnGameDebugLog/gu) ?? []).length,
+    3,
+    "Every production turn-game runner path must receive the request-aware debug logger",
+  );
+  assert.match(turnGameCommandRuntimeSource, /debugLog: args\.debugLog/u);
+  assert.match(
+    turnGameBotRunnerSource,
+    /args\.debugLog\?\.\([\s\S]*?JSON\.stringify\(moveMessages, null, 2\)[\s\S]*?provider\.chatComplete\(moveMessages/u,
+    "Turn-game bot moves must log the final provider prompt immediately before submission",
   );
 }
 

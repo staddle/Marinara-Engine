@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type CSSProperties, type ReactNode } from "react";
 import { Plus } from "lucide-react";
 import { useTranslation as useUiTranslation } from "react-i18next";
 import { useApplyChatPreset, useChatPresets } from "../../hooks/use-chat-presets";
@@ -6,9 +6,18 @@ import { useCreateChat } from "../../hooks/use-chats";
 import { useConnections } from "../../hooks/use-connections";
 import { useChatStore } from "../../stores/chat.store";
 import { useUIStore } from "../../stores/ui.store";
+import { cn } from "../../lib/utils";
+import { HOME_CHAT_MODE_ACCENTS } from "../../lib/home-chat-mode-style";
 import { CHAT_MODE_OPTIONS, ChatModeSelectorModal, type ChatLaunchMode } from "./ChatModeSelectorModal";
 
-export function HomeNewChatLauncher() {
+type HomeNewChatLauncherProps = {
+  mode?: ChatLaunchMode;
+  className?: string;
+  children?: ReactNode;
+  ariaLabel?: string;
+};
+
+export function HomeNewChatLauncher({ mode, className, children, ariaLabel }: HomeNewChatLauncherProps = {}) {
   const { t: localizeUi } = useUiTranslation();
   const [selectorOpen, setSelectorOpen] = useState(false);
   const { data: connections } = useConnections();
@@ -59,19 +68,33 @@ export function HomeNewChatLauncher() {
     <>
       <button
         type="button"
-        onClick={() => setSelectorOpen(true)}
-        className="mari-chrome-control mari-chrome-control--small h-8 px-3 py-0 text-xs"
+        onClick={() => (mode ? selectMode(mode) : setSelectorOpen(true))}
+        data-home-chat-mode={mode}
+        style={mode ? ({ "--home-chat-mode-accent": HOME_CHAT_MODE_ACCENTS[mode] } as CSSProperties) : undefined}
+        className={cn(
+          "mari-chrome-control mari-chrome-control--small h-8 px-3 py-0 text-xs",
+          mode &&
+            "hover:!border-[color-mix(in_srgb,var(--home-chat-mode-accent)_66%,var(--border))] hover:!shadow-[0_10px_24px_-16px_var(--home-chat-mode-accent)] focus-visible:!ring-[var(--home-chat-mode-accent)] active:!border-[var(--home-chat-mode-accent)]",
+          className,
+        )}
+        aria-label={ariaLabel}
       >
-        <Plus size="0.75rem" />
-        {localizeUi("home.actions.newChat")}
+        {children ?? (
+          <>
+            <Plus size="0.75rem" />
+            {localizeUi("home.actions.newChat")}
+          </>
+        )}
       </button>
 
-      <ChatModeSelectorModal
-        open={selectorOpen}
-        onClose={() => setSelectorOpen(false)}
-        onSelectMode={selectMode}
-        isPending={createChat.isPending}
-      />
+      {!mode ? (
+        <ChatModeSelectorModal
+          open={selectorOpen}
+          onClose={() => setSelectorOpen(false)}
+          onSelectMode={selectMode}
+          isPending={createChat.isPending}
+        />
+      ) : null}
     </>
   );
 }

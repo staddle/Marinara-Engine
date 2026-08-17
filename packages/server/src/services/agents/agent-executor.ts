@@ -13,10 +13,13 @@ import type {
   PresentCharacter,
   TrackerHiddenFields,
   WrapFormat,
+  GenerationParameterSendMap,
 } from "@marinara-engine/shared";
 import {
+  AGENT_RESULT_TYPE_VALUES,
   characterTrackerLockKey,
   compactQuestProgressForContext,
+  customAgentHasCapability,
   DEFAULT_AGENT_CONTEXT_SIZE,
   DEFAULT_AGENT_MAX_TOKENS,
   DEFAULT_CUSTOM_AGENT_CONTEXT_SOURCES,
@@ -32,6 +35,7 @@ import {
 } from "@marinara-engine/shared";
 import { getAgentCallTimeoutMs, getMaxToolRounds, isDebugAgentsEnabled } from "../../config/runtime-config.js";
 import { logger, logDebugOverride } from "../../lib/logger.js";
+import { repairJsonText } from "../../lib/json-repair.js";
 import { wrapContent } from "../prompt/format-engine.js";
 import { sanitizePromptLeaf } from "../prompt/prompt-escaping.js";
 import { settleAgentJobsWithConcurrencyLimit } from "./agent-concurrency.js";
@@ -44,7 +48,7 @@ const EXPRESSION_AGENT_CONTEXT_CHAR_LIMIT = 1200;
 const EXPRESSION_AGENT_RESPONSE_CHAR_LIMIT = 6000;
 const CHARACTER_LORE_DESCRIPTION_LIMIT = 2000;
 const CHARACTER_LORE_FIELD_LIMIT = 1200;
-const DEFAULT_AGENT_TEMPERATURE = 0.3;
+const DEFAULT_AGENT_TEMPERATURE = 0.7;
 const ILLUSTRATOR_AGENT_CALL_TIMEOUT_MS = 30 * 60_000;
 const AGENT_BATCH_FALLBACK_MAX_CONCURRENT = 4;
 
@@ -75,6 +79,10 @@ export interface AgentExecConfig {
   connectionId: string | null;
   settings: Record<string, unknown>;
   customParameters?: Record<string, unknown>;
+  /** Temperature inherited from the selected connection. */
+  temperature?: number;
+  enabledParameters?: GenerationParameterSendMap;
+  suppressModelParameters?: boolean;
   maxOutputTokens?: number | null;
   enableCaching?: boolean;
   anthropicExtendedCacheTtl?: boolean;
@@ -531,10 +539,39 @@ function normalizeAgentTemperature(value: unknown, fallback = DEFAULT_AGENT_TEMP
   return Math.max(0, Math.min(2, parsed));
 }
 
+function resolveAgentTemperature(config: AgentExecConfig): number | undefined {
+  if (config.suppressModelParameters || config.enabledParameters?.temperature === false) return undefined;
+  return normalizeAgentTemperature(config.temperature);
+}
+
 function agentCustomParameters(config: AgentExecConfig): Record<string, unknown> | undefined {
   return config.customParameters && Object.keys(config.customParameters).length > 0
     ? config.customParameters
     : undefined;
+}
+
+function stableAgentBatchValue(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableAgentBatchValue).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableAgentBatchValue(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "undefined";
+}
+
+function agentBatchRequestSignature(config: AgentExecConfig): string {
+  return stableAgentBatchValue({
+    temperature: resolveAgentTemperature(config),
+    enabledParameters: config.enabledParameters ?? null,
+    suppressModelParameters: config.suppressModelParameters === true,
+    customParameters: agentCustomParameters(config) ?? null,
+    enableCaching: config.enableCaching === true,
+    anthropicExtendedCacheTtl: config.anthropicExtendedCacheTtl === true,
+    cachingAtDepth: config.cachingAtDepth ?? null,
+    maxOutputTokens: config.maxOutputTokens ?? null,
+  });
 }
 
 function combineAbortSignals(signals: AbortSignal[]): AbortSignal {
@@ -627,7 +664,7 @@ function emitAgentDebug(context: AgentContext, event: AgentCallDebugEvent): void
 function agentDebugBase(
   config: AgentExecConfig,
   model: string,
-  temperature: number,
+  temperature: number | undefined,
   maxTokens: number,
 ): Pick<AgentCallDebugEvent, "agentId" | "agentType" | "agentName" | "phase" | "model" | "temperature" | "maxTokens"> {
   return {
@@ -681,8 +718,7 @@ export async function executeAgent(
             ? buildSpotifyAgentMessages(config, template, context)
             : buildStandardAgentMessages(config, template, context);
 
-    // Agents use lower temperature for reliability
-    const temperature = normalizeAgentTemperature(config.settings.temperature);
+    const temperature = resolveAgentTemperature(config);
     const maxTokens = applyAgentMaxTokensCaps(
       provider,
       normalizeAgentMaxTokens(config.settings.maxTokens),
@@ -733,6 +769,8 @@ export async function executeAgent(
       anthropicExtendedCacheTtl: config.anthropicExtendedCacheTtl,
       cachingAtDepth: config.cachingAtDepth,
       customParameters,
+      enabledParameters: config.enabledParameters,
+      suppressModelParameters: config.suppressModelParameters,
       stream: streamResponses,
       onToken: streamResponses
         ? (chunk) => {
@@ -779,6 +817,8 @@ export async function executeAgent(
         anthropicExtendedCacheTtl: config.anthropicExtendedCacheTtl,
         cachingAtDepth: config.cachingAtDepth,
         customParameters,
+        enabledParameters: config.enabledParameters,
+        suppressModelParameters: config.suppressModelParameters,
         stream: streamResponses,
         onToken: streamResponses
           ? (chunk) => {
@@ -826,7 +866,7 @@ export async function executeAgent(
       ...agentDebugBase(
         config,
         model,
-        normalizeAgentTemperature(config.settings.temperature),
+        resolveAgentTemperature(config),
         normalizeAgentMaxTokens(config.settings.maxTokens),
       ),
       messageCount: 0,
@@ -846,7 +886,7 @@ async function executeAgentWithTools(
   initialMessages: ChatMessage[],
   provider: BaseLLMProvider,
   model: string,
-  temperature: number,
+  temperature: number | undefined,
   maxTokens: number,
   toolContext: AgentToolContext,
   streamResponses: boolean,
@@ -864,6 +904,7 @@ async function executeAgentWithTools(
     agentCallSignal(context.signal, config.type === "illustrator" ? "illustrator" : undefined);
 
   for (let round = 0; round < maxToolRounds; round++) {
+    const roundStartedAt = Date.now();
     emitAgentDebug(context, {
       stage: "request",
       ...agentDebugBase(config, model, temperature, maxTokens),
@@ -880,6 +921,8 @@ async function executeAgentWithTools(
       anthropicExtendedCacheTtl: config.anthropicExtendedCacheTtl,
       cachingAtDepth: config.cachingAtDepth,
       customParameters,
+      enabledParameters: config.enabledParameters,
+      suppressModelParameters: config.suppressModelParameters,
       stream: streamResponses,
       tools: toolContext.tools,
       signal: nextCallSignal(),
@@ -892,7 +935,8 @@ async function executeAgentWithTools(
       messageCount: loopMessages.length,
       tools: debugToolNames(toolContext.tools),
       round: round + 1,
-      durationMs: Date.now() - startTime,
+      durationMs: Date.now() - roundStartedAt,
+      elapsedMs: Date.now() - startTime,
       finishReason: result.finishReason,
       ...debugUsage(result.usage),
       ...responseDebugFields(result.content?.trim() ?? ""),
@@ -956,6 +1000,7 @@ async function executeAgentWithTools(
     messages: debugMessages(loopMessages),
     round: maxToolRounds + 1,
   });
+  const finalRoundStartedAt = Date.now();
   const finalResult = await provider.chatComplete(loopMessages, {
     model,
     temperature,
@@ -964,6 +1009,8 @@ async function executeAgentWithTools(
     anthropicExtendedCacheTtl: config.anthropicExtendedCacheTtl,
     cachingAtDepth: config.cachingAtDepth,
     customParameters,
+    enabledParameters: config.enabledParameters,
+    suppressModelParameters: config.suppressModelParameters,
     stream: streamResponses,
     signal: nextCallSignal(),
   });
@@ -974,7 +1021,8 @@ async function executeAgentWithTools(
     ...agentDebugBase(config, model, temperature, maxTokens),
     messageCount: loopMessages.length,
     round: maxToolRounds + 1,
-    durationMs: Date.now() - startTime,
+    durationMs: Date.now() - finalRoundStartedAt,
+    elapsedMs: Date.now() - startTime,
     finishReason: finalResult.finishReason,
     ...debugUsage(finalResult.usage),
     ...responseDebugFields(responseText),
@@ -1010,8 +1058,13 @@ export async function executeAgentBatch(
   context: AgentContext,
   provider: BaseLLMProvider,
   model: string,
+  resolveAgentContext?: (config: AgentExecConfig, context: AgentContext) => AgentContext | Promise<AgentContext>,
+  runWithProviderLimit?: <R>(job: () => Promise<R>) => Promise<R>,
 ): Promise<AgentResult[]> {
   if (configs.length === 0) return [];
+  const runProviderJob = <R>(job: () => Promise<R>) => (runWithProviderLimit ? runWithProviderLimit(job) : job());
+  const executeIndividualAgent = async (config: AgentExecConfig, agentContext: AgentContext) =>
+    runProviderJob(() => executeAgent(config, agentContext, provider, model));
   const isolatedConfigs = configs.filter(shouldRunAgentIndividually);
   if (isolatedConfigs.length === configs.length) {
     logger.info(
@@ -1029,7 +1082,8 @@ export async function executeAgentBatch(
     const isolatedSettled = await settleAgentJobsWithConcurrencyLimit(
       isolatedConfigs,
       AGENT_BATCH_FALLBACK_MAX_CONCURRENT,
-      (config) => executeAgent(config, context, provider, model),
+      async (config) =>
+        executeIndividualAgent(config, resolveAgentContext ? await resolveAgentContext(config, context) : context),
     );
     return isolatedSettled.map((entry, index) =>
       entry.status === "fulfilled"
@@ -1049,9 +1103,13 @@ export async function executeAgentBatch(
     );
     const batchedConfigs = configs.filter((config) => !shouldRunAgentIndividually(config));
     const [batchedResults, isolatedSettled] = await Promise.all([
-      executeAgentBatch(batchedConfigs, context, provider, model),
+      executeAgentBatch(batchedConfigs, context, provider, model, resolveAgentContext, runWithProviderLimit),
       settleAgentJobsWithConcurrencyLimit(isolatedConfigs, AGENT_BATCH_FALLBACK_MAX_CONCURRENT, (config) =>
-        executeAgent(config, context, provider, model),
+        resolveAgentContext
+          ? Promise.resolve(resolveAgentContext(config, context)).then((agentContext) =>
+              executeIndividualAgent(config, agentContext),
+            )
+          : executeIndividualAgent(config, context),
       ),
     ]);
     const isolatedResults = isolatedSettled.map((entry, index) =>
@@ -1067,14 +1125,37 @@ export async function executeAgentBatch(
   }
   if (configs.length === 1) {
     logger.info(`[agent-batch] Only 1 agent (${configs[0]!.type}), running individually`);
-    return [await executeAgent(configs[0]!, context, provider, model)];
+    const agentContext = resolveAgentContext ? await resolveAgentContext(configs[0]!, context) : context;
+    return [await executeIndividualAgent(configs[0]!, agentContext)];
+  }
+
+  const requestOptionGroups = new Map<string, AgentExecConfig[]>();
+  for (const config of configs) {
+    const signature = agentBatchRequestSignature(config);
+    const group = requestOptionGroups.get(signature);
+    if (group) group.push(config);
+    else requestOptionGroups.set(signature, [config]);
+  }
+  if (requestOptionGroups.size > 1) {
+    logger.info(
+      "[agent-batch] Splitting %d agents into %d request-option-compatible batch(es)",
+      configs.length,
+      requestOptionGroups.size,
+    );
+    const groupedResults: AgentResult[] = [];
+    for (const group of requestOptionGroups.values()) {
+      groupedResults.push(
+        ...(await executeAgentBatch(group, context, provider, model, resolveAgentContext, runWithProviderLimit)),
+      );
+    }
+    return groupedResults;
   }
 
   logger.info(`[agent-batch] Batching ${configs.length} agents: [${configs.map((c) => c.type).join(", ")}]`);
 
   const startTime = Date.now();
   const perAgentTokens = configs.map((c) => normalizeAgentMaxTokens(c.settings.maxTokens));
-  const temperature = Math.min(...configs.map((c) => normalizeAgentTemperature(c.settings.temperature)));
+  const temperature = resolveAgentTemperature(configs[0]!);
   const customParameters = agentCustomParameters(configs[0]!);
   const enableCaching = configs[0]!.enableCaching;
   const anthropicExtendedCacheTtl = configs[0]!.anthropicExtendedCacheTtl;
@@ -1145,25 +1226,29 @@ export async function executeAgentBatch(
     // Use streaming (onToken) to keep the connection alive — avoids proxy
     // timeouts (e.g. Cloudflare 524) on large batch responses.
     let responseText = "";
-    const result = await provider.chatComplete(messages, {
-      model,
-      temperature,
-      maxTokens: batchMaxTokens,
-      enableCaching,
-      anthropicExtendedCacheTtl,
-      cachingAtDepth,
-      customParameters,
-      stream: streamResponses,
-      onToken: streamResponses
-        ? (chunk) => {
-            responseText += chunk;
-          }
-        : undefined,
-      signal: agentCallSignal(
-        context.signal,
-        configs.some((config) => config.type === "illustrator") ? "illustrator" : undefined,
-      ),
-    });
+    const result = await runProviderJob(() =>
+      provider.chatComplete(messages, {
+        model,
+        temperature,
+        maxTokens: batchMaxTokens,
+        enableCaching,
+        anthropicExtendedCacheTtl,
+        cachingAtDepth,
+        customParameters,
+        enabledParameters: configs[0]!.enabledParameters,
+        suppressModelParameters: configs[0]!.suppressModelParameters,
+        stream: streamResponses,
+        onToken: streamResponses
+          ? (chunk) => {
+              responseText += chunk;
+            }
+          : undefined,
+        signal: agentCallSignal(
+          context.signal,
+          configs.some((config) => config.type === "illustrator") ? "illustrator" : undefined,
+        ),
+      }),
+    );
 
     // chatComplete also accumulates content, but streaming via onToken is
     // the primary path — use whichever is populated.
@@ -1214,7 +1299,8 @@ export async function executeAgentBatch(
       const retrySettled = await settleAgentJobsWithConcurrencyLimit(
         failed,
         AGENT_BATCH_FALLBACK_MAX_CONCURRENT,
-        (config) => executeAgent(config, context, provider, model),
+        async (config) =>
+          executeIndividualAgent(config, resolveAgentContext ? await resolveAgentContext(config, context) : context),
       );
       const retries: AgentResult[] = [];
       for (let i = 0; i < retrySettled.length; i++) {
@@ -1559,6 +1645,7 @@ function shouldRunAgentIndividually(config: Pick<AgentExecConfig, "type" | "sett
   // must not be merged into unrelated batched agent requests.
   return (
     config.type === "illustrator" ||
+    customAgentHasCapability(config.settings, "trigger_image_generation") ||
     config.type === "lorebook-keeper" ||
     resolveAgentResultType(config) === "text_rewrite" ||
     musicDjUsesJsonOnlyProvider(config) ||
@@ -1743,6 +1830,8 @@ function buildStandardAgentMessages(config: AgentExecConfig, template: string, c
     includeTrackerData: contextSources.trackerData,
     preserveAssistantResponseMarkup: resultType === "text_rewrite",
     outputFormatBlock: buildAgentOutputFormatBlock([config], context, renderedTemplates),
+    includeImagePromptInstructions:
+      config.type === "illustrator" || customAgentHasCapability(config.settings, "trigger_image_generation"),
   });
 }
 
@@ -2212,6 +2301,7 @@ function buildAgentMessages(
     includeTrackerData?: boolean;
     preserveAssistantResponseMarkup?: boolean;
     outputFormatBlock?: string;
+    includeImagePromptInstructions?: boolean;
   } = {},
 ): ChatMessage[] {
   // ── 1. System message — already contains <role>, <lore>, <agents>, and extras ──
@@ -2298,7 +2388,21 @@ function buildAgentMessages(
   // some models, so add a terminal user instruction for that agent type too.
   const outputFormatBlock = options.outputFormatBlock?.trim() ?? "";
   const requiresTerminalUserInstruction =
-    finalParts.length > 0 || contextAgentTypes.includes("echo-chamber") || !!outputFormatBlock;
+    finalParts.length > 0 ||
+    contextAgentTypes.includes("echo-chamber") ||
+    !!outputFormatBlock ||
+    (options.includeImagePromptInstructions === true &&
+      typeof context.memory._imagePromptInstructions === "string" &&
+      context.memory._imagePromptInstructions.trim().length > 0);
+
+  const lateImagePromptInstructions =
+    typeof context.memory._imagePromptInstructions === "string" ? context.memory._imagePromptInstructions.trim() : "";
+  if (options.includeImagePromptInstructions === true && lateImagePromptInstructions) {
+    finalParts.push("\n<image_prompting_instructions>");
+    finalParts.push("Apply these image-backend instructions when writing the provider-ready image prompt. Do not copy the instructions as prompt content.");
+    finalParts.push(lateImagePromptInstructions);
+    finalParts.push("</image_prompting_instructions>");
+  }
 
   if (requiresTerminalUserInstruction) {
     const instruction = "Now return the requested format(s).";
@@ -2544,6 +2648,18 @@ function buildAgentExtras(
     parts.push(`</illustrator_manual_image_request>`);
   }
 
+  // Snapshot button (#4682): the user explicitly asked a custom image agent to
+  // generate now, so tell it not to decline (mirrors the Illustrator block above).
+  // Single-agent batches only — memory is shared, and the directive must not
+  // reach unrelated agents if a caller ever mixes the force flag with a batch.
+  if (agentTypes.length === 1 && context.memory._forceImageGeneration === true) {
+    parts.push(`<manual_image_request>`);
+    parts.push(
+      `The user explicitly requested an image from this agent right now. Set the JSON field "shouldGenerate" to true and provide the best fitting complete image prompt for the current scene.`,
+    );
+    parts.push(`</manual_image_request>`);
+  }
+
   if (agentTypes.includes("illustrator") && context.memory._illustratorBackgroundGenerationEnabled === true) {
     parts.push(`<illustrator_background_generation enabled="true">`);
     parts.push(
@@ -2761,36 +2877,7 @@ const AGENT_RESULT_TYPE_MAP: Record<string, AgentResultType> = {
   "about-me-keeper": "about_me_update",
 };
 
-const AGENT_RESULT_TYPES = new Set<AgentResultType>([
-  "game_state_update",
-  "text_rewrite",
-  "sprite_change",
-  "echo_message",
-  "quest_update",
-  "image_prompt",
-  "context_injection",
-  "continuity_check",
-  "director_event",
-  "lorebook_update",
-  "character_card_update",
-  "background_change",
-  "character_tracker_update",
-  "persona_stats_update",
-  "custom_tracker_update",
-  "spotify_control",
-  "youtube_control",
-  "local_music_control",
-  "haptic_command",
-  "cyoa_choices",
-  "secret_plot",
-  "game_master_narration",
-  "party_action",
-  "game_map_update",
-  "game_state_transition",
-  "prompt_patch",
-  "frontend_theme_update",
-  "about_me_update",
-]);
+const AGENT_RESULT_TYPES = new Set<AgentResultType>(AGENT_RESULT_TYPE_VALUES);
 
 const TEXT_RESULT_TYPES = new Set<AgentResultType>(["context_injection", "director_event"]);
 
@@ -2868,6 +2955,9 @@ function parseAgentResponse(
     try {
       const jsonStr = extractJson(responseText);
       const parsedData: unknown = JSON.parse(jsonStr);
+      if (!parsedData || typeof parsedData !== "object" || Array.isArray(parsedData)) {
+        throw new Error("Structured agent response must be a JSON object");
+      }
       const data = config.type === "cyoa" ? normalizeCyoaChoiceOutput(parsedData) : parsedData;
       return { type: resultType, data };
     } catch {
@@ -2882,113 +2972,15 @@ function parseAgentResponse(
 
 /** Extract JSON from a response that may contain markdown fences. */
 function extractJson(text: string): string {
-  // Try markdown code fences
-  const fenceMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-  if (fenceMatch) text = fenceMatch[1]!.trim();
-  else {
-    // Try to find a bare JSON object or array
-    const jsonMatch = text.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-    if (jsonMatch) text = jsonMatch[1]!;
+  const fenceMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)(?:\n?```|$)/i);
+  if (fenceMatch) {
+    text = fenceMatch[1]!.trim();
+  } else {
+    const objectStart = text.indexOf("{");
+    const arrayStart = text.indexOf("[");
+    const starts = [objectStart, arrayStart].filter((index) => index >= 0);
+    if (starts.length > 0) text = text.slice(Math.min(...starts));
   }
 
-  // Repair common LLM JSON issues
-  text = repairJson(text);
-  return text;
-}
-
-/** Fix common LLM JSON mistakes: trailing commas, comments, ellipsis placeholders. */
-function repairJson(str: string): string {
-  try {
-    JSON.parse(str);
-    return str;
-  } catch {
-    return stripTrailingCommas(stripJsonRepairTokens(str));
-  }
-}
-
-function stripTrailingCommas(str: string): string {
-  let repaired = "";
-  let inString = false;
-  let escaped = false;
-  for (let index = 0; index < str.length; index++) {
-    const char = str[index] ?? "";
-    if (inString) {
-      repaired += char;
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === '"') {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (char === '"') {
-      inString = true;
-      repaired += char;
-      continue;
-    }
-
-    if (char === ",") {
-      let lookahead = index + 1;
-      while (lookahead < str.length && /\s/.test(str[lookahead] ?? "")) lookahead++;
-      const nextSignificant = str[lookahead];
-      if (nextSignificant === "}" || nextSignificant === "]") continue;
-    }
-
-    repaired += char;
-  }
-  return repaired;
-}
-
-function stripJsonRepairTokens(str: string): string {
-  let repaired = "";
-  let inString = false;
-  let escaped = false;
-
-  for (let index = 0; index < str.length; index += 1) {
-    const char = str[index] ?? "";
-    const next = str[index + 1];
-    const nextTwo = str.slice(index, index + 3);
-
-    if (inString) {
-      repaired += char;
-      if (escaped) {
-        escaped = false;
-      } else if (char === "\\") {
-        escaped = true;
-      } else if (char === '"') {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (char === '"') {
-      inString = true;
-      repaired += char;
-      continue;
-    }
-
-    if (char === "/" && next === "/") {
-      while (index + 1 < str.length && str[index + 1] !== "\n") index += 1;
-      continue;
-    }
-
-    if (char === "/" && next === "*") {
-      index += 2;
-      while (index + 1 < str.length && !(str[index] === "*" && str[index + 1] === "/")) index += 1;
-      index += 1;
-      continue;
-    }
-
-    if (nextTwo === "...") {
-      index += 2;
-      continue;
-    }
-
-    repaired += char;
-  }
-
-  return repaired;
+  return repairJsonText(text) ?? text;
 }

@@ -2,6 +2,7 @@ import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { VitePWA } from "vite-plugin-pwa";
+import { execFileSync } from "node:child_process";
 import path from "path";
 
 const ENABLE_SOURCE_MAPS = process.env.VITE_ENABLE_SOURCEMAP === "true";
@@ -9,6 +10,34 @@ const PWA_DISABLED = Boolean(process.env.SKIP_PWA);
 const DEV_SERVER_PORT = Number.parseInt(process.env.VITE_PORT ?? "5173", 10);
 const DEV_SERVER_HOST = process.env.VITE_HOST?.trim() || undefined;
 const DEV_SERVER_OPEN = process.env.VITE_OPEN_BROWSER !== "false" && process.env.AUTO_OPEN_BROWSER !== "false";
+const BUILD_COMMIT_LENGTH = 12;
+
+function normalizeBuildCommit(value: string | undefined) {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed.slice(0, BUILD_COMMIT_LENGTH) : null;
+}
+
+function resolveBuildCommit() {
+  const environmentCommit =
+    normalizeBuildCommit(process.env.MARINARA_GIT_COMMIT) ??
+    normalizeBuildCommit(process.env.GITHUB_SHA) ??
+    normalizeBuildCommit(process.env.BUILD_COMMIT);
+  if (environmentCommit) return environmentCommit;
+
+  try {
+    return normalizeBuildCommit(
+      execFileSync("git", ["rev-parse", `--short=${BUILD_COMMIT_LENGTH}`, "HEAD"], {
+        cwd: path.resolve(__dirname, "../.."),
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      }),
+    );
+  } catch {
+    return null;
+  }
+}
+
+const BUILD_COMMIT = resolveBuildCommit();
 
 function manualChunks(id: string) {
   if (!id.includes("node_modules")) return undefined;
@@ -85,8 +114,17 @@ function pwaStub(): Plugin {
 }
 
 export default defineConfig({
+  define: {
+    __MARINARA_BUILD_COMMIT__: JSON.stringify(BUILD_COMMIT),
+  },
   plugins: [
-    react(),
+    react({
+      babel: {
+        // Keep Babel from auto-compacting large components and printing a noisy
+        // 500 kB deoptimisation warning during local development and UI tests.
+        generatorOpts: process.env.NODE_ENV === "production" ? undefined : { compact: false },
+      },
+    }),
     tailwindcss(),
     bundleBudget(),
     !PWA_DISABLED

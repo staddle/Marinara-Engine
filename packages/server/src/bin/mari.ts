@@ -3,9 +3,31 @@
 // Marinara local CLI
 // ──────────────────────────────────────────────
 import { CSRF_HEADER, CSRF_HEADER_VALUE } from "@marinara-engine/shared";
+import { readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+const HEX_256 = /^[a-f0-9]{64}$/iu;
+const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "[::1]", "::1"]);
 
 function serverUrl() {
   return (process.env.MARI_SERVER_URL || `http://127.0.0.1:${process.env.PORT || "7860"}`).replace(/\/+$/, "");
+}
+
+async function localAndroidSecret(targetHostname: string): Promise<string | null> {
+  if (!LOOPBACK_HOSTNAMES.has(targetHostname)) return null;
+
+  const configured = process.env.MARINARA_ANDROID_SECRET?.trim();
+  if (configured) return HEX_256.test(configured) ? configured : null;
+
+  const secretFile =
+    process.env.MARINARA_ANDROID_SECRET_FILE?.trim() || join(homedir(), ".marinara-engine", "android-secret");
+  try {
+    const stored = (await readFile(secretFile, "utf8")).split(/\r?\n/u, 1)[0]?.trim() ?? "";
+    return HEX_256.test(stored) ? stored : null;
+  } catch {
+    return null;
+  }
 }
 
 function commandText(argv: string[]) {
@@ -65,7 +87,8 @@ function summarizeRow(row: unknown): unknown {
     if (Object.prototype.hasOwnProperty.call(out, key) || key === "data") continue;
     if (typeof value === "string") out[key] = truncate(value);
     else if (Array.isArray(value)) out[key] = `[${value.length} item${value.length === 1 ? "" : "s"}]`;
-    else if (isRecord(value)) out[key] = `{${Object.keys(value).length} key${Object.keys(value).length === 1 ? "" : "s"}}`;
+    else if (isRecord(value))
+      out[key] = `{${Object.keys(value).length} key${Object.keys(value).length === 1 ? "" : "s"}}`;
     else out[key] = value;
   }
   return out;
@@ -120,14 +143,18 @@ async function main() {
   const argv = process.argv.slice(2);
   const jsonl = argv.includes("--jsonl");
   const rawOutput = argv.includes("--raw");
+  const targetServerUrl = serverUrl();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     [CSRF_HEADER]: CSRF_HEADER_VALUE,
   };
   const adminSecret = process.env.MARI_ADMIN_SECRET || process.env.ADMIN_SECRET;
   if (adminSecret) headers["X-Admin-Secret"] = adminSecret;
+  const targetHostname = new URL(targetServerUrl).hostname.toLowerCase();
+  const androidSecret = await localAndroidSecret(targetHostname);
+  if (androidSecret) headers["X-Marinara-Android-Secret"] = androidSecret;
 
-  const response = await fetch(`${serverUrl()}/api/professor-mari/workspace/db/command`, {
+  const response = await fetch(`${targetServerUrl}/api/professor-mari/workspace/db/command`, {
     method: "POST",
     headers,
     body: JSON.stringify({

@@ -167,47 +167,24 @@ export function createChatSummaryEntry(
 }
 
 export function sortChatSummaryEntries(entries: ChatSummaryEntry[]): ChatSummaryEntry[] {
-  return entries
-    .map((entry, index) => ({ entry, index }))
-    .sort((a, b) => {
-      const aRange = a.entry.rangeStartIndex ?? Number.MAX_SAFE_INTEGER;
-      const bRange = b.entry.rangeStartIndex ?? Number.MAX_SAFE_INTEGER;
-      if (aRange !== bRange) return aRange - bRange;
-      const created = Date.parse(a.entry.createdAt) - Date.parse(b.entry.createdAt);
-      if (created !== 0) return created;
-      return a.index - b.index;
-    })
-    .map(({ entry }) => entry);
+  // Array order is persisted user intent. New summaries append to this order,
+  // while combine/reorder operations deliberately place entries within it.
+  return [...entries];
 }
 
 function pruneAutomatedChatSummaryEntries(entries: ChatSummaryEntry[]): ChatSummaryEntry[] {
-  let prunableAutomatedCount = 0;
-  for (const entry of entries) {
-    if (
-      entry.origin === "automated" &&
-      entry.enabled &&
-      !(entry.hiddenMessageIds && entry.hiddenMessageIds.length > 0)
-    ) {
-      prunableAutomatedCount += 1;
-    }
-  }
-  let removable = prunableAutomatedCount - MAX_AUTOMATED_CHAT_SUMMARY_ENTRIES;
-  if (removable <= 0) return entries;
-
-  const pruned: ChatSummaryEntry[] = [];
-  for (const entry of entries) {
-    if (
-      removable > 0 &&
-      entry.origin === "automated" &&
-      entry.enabled &&
-      !(entry.hiddenMessageIds && entry.hiddenMessageIds.length > 0)
-    ) {
-      removable -= 1;
-      continue;
-    }
-    pruned.push(entry);
-  }
-  return pruned;
+  const prunable = entries
+    .filter(
+      (entry) =>
+        entry.origin === "automated" &&
+        entry.enabled &&
+        !(entry.hiddenMessageIds && entry.hiddenMessageIds.length > 0),
+    )
+    .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
+  const removeCount = prunable.length - MAX_AUTOMATED_CHAT_SUMMARY_ENTRIES;
+  if (removeCount <= 0) return entries;
+  const removedIds = new Set(prunable.slice(0, removeCount).map((entry) => entry.id));
+  return entries.filter((entry) => !removedIds.has(entry.id));
 }
 
 export function normalizeChatSummaryEntries(
@@ -245,6 +222,20 @@ export function compileChatSummaryEntries(entries: ChatSummaryEntry[]): string |
     .trim();
   if (!compiled) return null;
   return compiled;
+}
+
+export function combineChatSummaryEntryHistory(
+  entries: ChatSummaryEntry[],
+  sourceEntryIds: ReadonlySet<string>,
+  combinedEntry: ChatSummaryEntry,
+  now: string,
+): ChatSummaryEntry[] {
+  const firstIndex = entries.findIndex((entry) => sourceEntryIds.has(entry.id));
+  const nextEntries = entries.map((entry) =>
+    sourceEntryIds.has(entry.id) ? { ...entry, enabled: false, updatedAt: now } : entry,
+  );
+  nextEntries.splice(Math.max(0, firstIndex), 0, combinedEntry);
+  return normalizeChatSummaryEntries(nextEntries);
 }
 
 export function appendChatSummaryEntryToMetadata(

@@ -48,6 +48,45 @@ try {
     "# Proxy timeout\n\nThis nested internal example must not be searched.",
     "utf8",
   );
+  await mkdir(join(workspaceRoot, "docs", "lang"), { recursive: true });
+  await writeFile(
+    join(workspaceRoot, "docs", "lang", "csharp.md"),
+    [
+      "# Overview",
+      "",
+      "## C#",
+      "",
+      "C# is a modern language.",
+      "",
+      "## Code sample",
+      "",
+      "````",
+      "# not a real heading",
+      "```",
+      "# still not a heading",
+      "````",
+      "",
+      "## Real section",
+      "",
+      "The end.",
+      "",
+      "## Indented fence",
+      "",
+      "```",
+      "    ```",
+      "# hidden heading",
+      "```",
+      "",
+      "## After indent",
+    ].join("\n"),
+    "utf8",
+  );
+  await writeFile(join(workspaceRoot, "docs", "lang", "plain.md"), "Just a paragraph with no headings at all.\n", "utf8");
+  await writeFile(
+    join(workspaceRoot, "docs", "lang", "many.md"),
+    Array.from({ length: 45 }, (_, index) => `## Section ${index + 1}\n\nBody ${index + 1}.`).join("\n\n"),
+    "utf8",
+  );
   await writeFile(join(workspaceRoot, "outside-docs", "secret.md"), "# Internal secret\n", "utf8");
   await symlink(
     join(workspaceRoot, "outside-docs"),
@@ -88,7 +127,53 @@ try {
   await assert.rejects(() => readCanonicalDocumentation(workspaceRoot, "../outside.md"), /must be README\.md/u);
   await assert.rejects(
     () => readCanonicalDocumentation(workspaceRoot, "docs/connections/proxy.md", "Missing heading"),
-    /Heading not found/u,
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /Heading not found/u);
+      // #4791 — a heading miss lists the file's real headings so the caller can self-correct
+      // instead of hitting a dead end.
+      assert.match(err.message, /Available headings:/u);
+      assert.match(err.message, /"Proxy timeout"/u);
+      assert.match(err.message, /"API keys"/u);
+      return true;
+    },
+  );
+
+  // #4796 review — headings inside fenced code blocks are not treated as headings, and a
+  // terminal '#' that belongs to the heading text (e.g. "C#") is preserved for lookup + listing.
+  const csharpSection = await readCanonicalDocumentation(workspaceRoot, "docs/lang/csharp.md", "C#", 1_000);
+  assert.match(csharpSection.content, /C# is a modern language/u);
+  await assert.rejects(
+    () => readCanonicalDocumentation(workspaceRoot, "docs/lang/csharp.md", "Missing"),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /"C#"/u);
+      assert.match(err.message, /"Real section"/u);
+      assert.doesNotMatch(err.message, /not a real heading/u);
+      assert.doesNotMatch(err.message, /still not a heading/u);
+      // A 4-space-indented fence marker is indented code, not a real fence, so it must not
+      // close the block early and expose the "# hidden heading" line inside it.
+      assert.doesNotMatch(err.message, /hidden heading/u);
+      assert.match(err.message, /"After indent"/u);
+      return true;
+    },
+  );
+  // #4796 review — cover the other two missing-heading diagnostic branches.
+  await assert.rejects(
+    () => readCanonicalDocumentation(workspaceRoot, "docs/lang/plain.md", "Whatever"),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /has no headings/u);
+      return true;
+    },
+  );
+  await assert.rejects(
+    () => readCanonicalDocumentation(workspaceRoot, "docs/lang/many.md", "Missing"),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.match(err.message, /\(\+\d+ more\)/u);
+      return true;
+    },
   );
   await assert.rejects(
     () => readCanonicalDocumentation(workspaceRoot, "docs/connections/examples/nested-ignored.md"),

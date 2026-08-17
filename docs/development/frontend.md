@@ -595,10 +595,13 @@ The lightweight Engine ships with an empty runtime agent registry. Packages inst
 | `spotify`                | post_processing | Controls Music DJ playback (Spotify, YouTube, or local music)     |
 | `knowledge-retrieval`    | pre_generation  | Retrieves context from knowledge sources                          |
 | `knowledge-router`       | pre_generation  | Routes relevant lorebook and knowledge entries                    |
+| `long-term-memory`       | feature         | Stores durable memories and recalls relevant context              |
 | `haptic`                 | post_processing | Sends haptic device commands                                      |
 | `cyoa`                   | post_processing | Generates choice prompts                                          |
+| `storyboard`             | post_processing | Plans still or animated Game and Roleplay storyboards             |
 | `conversation-calls`     | feature         | Adds Conversation audio/video calls and related settings          |
 | `hierarchical-maps`      | feature         | Adds Roleplay/Game maps, spatial context, and movement             |
+| `noodle`                 | feature         | Adds the local Noodle and NoodleR social feeds to Home             |
 | `uno`                    | feature         | Adds the Conversation UNO table                                   |
 | `chess`                  | feature         | Adds the Conversation Chess board                                 |
 | `poker`                  | feature         | Adds the Conversation Texas Hold'em table                         |

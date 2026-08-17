@@ -1,9 +1,10 @@
 // ──────────────────────────────────────────────
 // Game: Character Sheet Modal (tabletop-style character sheet)
 // ──────────────────────────────────────────────
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import {
   AlertTriangle,
+  Camera,
   Heart,
   Info,
   Pencil,
@@ -63,6 +64,7 @@ interface GameCharacterSheetProps {
   onClose: () => void;
   onSave?: (gameCard: GameCharacterSheetGameCard | undefined) => Promise<void> | void;
   onRegenerate?: () => Promise<GameCharacterSheetGameCard | undefined> | GameCharacterSheetGameCard | undefined;
+  onAvatarSelect?: (file: File) => Promise<void> | void;
   isRegenerating?: boolean;
 }
 
@@ -295,11 +297,14 @@ export function GameCharacterSheet({
   onClose,
   onSave,
   onRegenerate,
+  onAvatarSelect,
   isRegenerating = false,
 }: GameCharacterSheetProps) {
   const { t: localizeUi } = useUiTranslation();
   const [isEditing, setIsEditing] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isAvatarUploading, setIsAvatarUploading] = useState(false);
+  const avatarInputRef = useRef<HTMLInputElement | null>(null);
   const [draft, setDraft] = useState<GameCardDraft>(() => createDraft(card.gameCard));
 
   useEffect(() => {
@@ -441,6 +446,18 @@ export function GameCharacterSheet({
     }
   };
 
+  const handleAvatarChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file || !onAvatarSelect || isAvatarUploading) return;
+    setIsAvatarUploading(true);
+    try {
+      await onAvatarSelect(file);
+    } finally {
+      setIsAvatarUploading(false);
+    }
+  };
+
   return (
     <div
       data-game-skip-bg-nav="true"
@@ -521,20 +538,40 @@ export function GameCharacterSheet({
 
         <div className="relative border-b border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-highlight-bg)] px-4 py-4 sm:px-5">
           <div className="flex items-center gap-3 sm:gap-4">
-            {card.avatarUrl ? (
-              <span className="relative block h-16 w-16 shrink-0 overflow-hidden rounded-xl border-2 border-[var(--marinara-chat-chrome-panel-border)] shadow-xl sm:h-20 sm:w-20">
+            <button
+              type="button"
+              onClick={() => avatarInputRef.current?.click()}
+              disabled={!onAvatarSelect || isAvatarUploading}
+              className="group/avatar relative block h-16 w-16 shrink-0 overflow-hidden rounded-xl border-2 border-[var(--marinara-chat-chrome-panel-border)] shadow-xl transition-colors hover:border-[var(--marinara-chat-chrome-input-border-focus)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--marinara-chat-chrome-focus-ring)] disabled:cursor-default sm:h-20 sm:w-20"
+              aria-label={localizeUi("ui.game.gamecharactersheet.changePortrait", { name: card.title })}
+              title={localizeUi("ui.game.gamecharactersheet.changePortrait", { name: card.title })}
+            >
+              {card.avatarUrl ? (
                 <img
                   src={card.avatarUrl}
                   alt={card.title}
                   className="h-full w-full object-cover"
                   style={getAvatarCropStyle(card.avatarCrop)}
                 />
-              </span>
-            ) : (
-              <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-xl border-2 border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-highlight-bg)] text-xl font-bold text-[var(--muted-foreground)] sm:h-20 sm:w-20 sm:text-2xl">
-                {card.title[0]}
-              </div>
-            )}
+              ) : (
+                <span className="flex h-full w-full items-center justify-center bg-[var(--marinara-chat-chrome-highlight-bg)] text-xl font-bold text-[var(--muted-foreground)] sm:text-2xl">
+                  {card.title[0]}
+                </span>
+              )}
+              {onAvatarSelect ? (
+                <span className="absolute inset-0 flex items-center justify-center bg-black/55 text-white opacity-0 transition-opacity group-hover/avatar:opacity-100 group-focus-visible/avatar:opacity-100 [@media(pointer:coarse)]:opacity-100">
+                  {isAvatarUploading ? <RefreshCw className="animate-spin" size="1rem" /> : <Camera size="1rem" />}
+                </span>
+              ) : null}
+            </button>
+            <input
+              ref={avatarInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp,image/gif"
+              onChange={(event) => void handleAvatarChange(event)}
+              className="sr-only"
+              tabIndex={-1}
+            />
             <div className="min-w-0 flex-1 pr-20 sm:pr-64">
               <h2
                 className="scrollbar-hide max-w-full touch-pan-x overflow-x-auto whitespace-nowrap text-lg font-bold text-[var(--foreground)] [-webkit-overflow-scrolling:touch] sm:truncate sm:overflow-hidden"

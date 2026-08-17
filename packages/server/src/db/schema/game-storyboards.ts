@@ -40,6 +40,7 @@ export const gameTurnStoryboardKeyframes = fileTable("game_turn_storyboard_keyfr
   mangaPanelPrompt: text("manga_panel_prompt").notNull().default(""),
   imagePrompt: text("image_prompt").notNull().default(""),
   videoPrompt: text("video_prompt").notNull().default(""),
+  animationSuitability: text("animation_suitability").notNull().default(""),
   characters: text("characters").notNull().default("[]"),
   continuityNotes: text("continuity_notes").notNull().default(""),
   cameraMotion: text("camera_motion").notNull().default(""),

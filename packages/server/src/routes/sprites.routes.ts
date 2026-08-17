@@ -4,7 +4,7 @@
 import type { FastifyInstance } from "fastify";
 import AdmZip from "adm-zip";
 import { execFile } from "child_process";
-import { existsSync, mkdirSync, createReadStream, readdirSync, unlinkSync, statSync, readFileSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, unlinkSync, statSync, readFileSync } from "fs";
 import { randomUUID } from "crypto";
 import { writeFile, mkdir, unlink, copyFile, rm, readFile, mkdtemp } from "fs/promises";
 import { tmpdir } from "os";
@@ -45,7 +45,10 @@ async function getSpriteCapabilities() {
   }
 }
 import { generateImage } from "../services/image/image-generation.js";
-import { resolveConnectionImageDefaults } from "../services/image/image-generation-defaults.js";
+import {
+  resolveConnectionImageDefaults,
+  resolveConnectionImageQuality,
+} from "../services/image/image-generation-defaults.js";
 import { loadImageGenerationUserSettings } from "../services/image/image-generation-settings.js";
 import { compileImagePrompt } from "../services/image/image-prompt-compiler.js";
 import { resolveImagePromptReviewSize } from "../services/image/image-prompt-review.js";
@@ -83,7 +86,8 @@ import {
   type ImageGenerationDefaultsProfile,
   type ImageStyleProfileSettings,
 } from "@marinara-engine/shared";
-import { isAllowedImageBuffer } from "../utils/security.js";
+import { assertInsideDir, isAllowedImageBuffer } from "../utils/security.js";
+import { sendValidatedMediaFile, validateImageAssetFile } from "../utils/media-file-security.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -355,15 +359,18 @@ function resolveVideoConnection(connection: VideoGenerationConnection) {
       : inferVideoSource(connection.model || "", connection.baseUrl || ""));
   const rawServiceHint = connection.videoService || source;
   const serviceHint =
-    rawServiceHint === "google_ai_studio"
-      ? inferVideoSource(connection.model || "", connection.baseUrl || "")
-      : rawServiceHint;
+    source === "swarmui"
+      ? "swarmui"
+      : rawServiceHint === "google_ai_studio"
+        ? inferVideoSource(connection.model || "", connection.baseUrl || "")
+        : rawServiceHint;
   const isXaiVideo = source === "xai" || serviceHint === "xai";
   const isGoogleVeoVideo = source === "google_veo" || serviceHint === "google_veo";
   const isOpenRouterVideo = source === "openrouter" || serviceHint === "openrouter";
   const isAtlasVideo = source === "atlas" || serviceHint === "atlas";
   const isSeedanceVideo = source === "seedance" || serviceHint === "seedance";
-  const isComfyUiVideo = source === "comfyui" || serviceHint === "comfyui";
+  const isSwarmUiVideo = source === "swarmui" || serviceHint === "swarmui";
+  const isComfyUiVideo = source === "comfyui" || serviceHint === "comfyui" || isSwarmUiVideo;
   return {
     source,
     serviceHint,
@@ -379,9 +386,11 @@ function resolveVideoConnection(connection: VideoGenerationConnection) {
               ? "https://api.atlascloud.ai/api/v1"
               : isSeedanceVideo
                 ? "https://api.seedance2.ai"
-                : isComfyUiVideo
-                  ? "http://127.0.0.1:8188"
-                  : "https://generativelanguage.googleapis.com/v1beta"),
+                : isSwarmUiVideo
+                  ? "http://127.0.0.1:7801"
+                  : isComfyUiVideo
+                    ? "http://127.0.0.1:8188"
+                    : "https://generativelanguage.googleapis.com/v1beta"),
     model:
       connection.model ||
       (isXaiVideo
@@ -578,12 +587,14 @@ function normalizeSpriteExpression(raw: string): string {
 
 function sanitizeSpriteExportName(raw: unknown, fallback: string): string {
   const value = typeof raw === "string" ? raw.trim() : "";
-  const sanitized = value
-    .replace(/[\\/]/g, "_")
-    .replace(SPRITE_EXPORT_NAME_RE, "_")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/^[.\s_-]+|[.\s_-]+$/g, "");
+  const normalized = value.replace(/[\\/]/g, "_").replace(SPRITE_EXPORT_NAME_RE, "_").replace(/\s+/g, " ").trim();
+  let start = 0;
+  let end = normalized.length;
+  const isUnsafeEdge = (character: string | undefined) =>
+    character === "." || character === "_" || character === "-" || character?.trim() === "";
+  while (start < end && isUnsafeEdge(normalized[start])) start++;
+  while (end > start && isUnsafeEdge(normalized[end - 1])) end--;
+  const sanitized = normalized.slice(start, end);
   return sanitized || fallback;
 }
 
@@ -1644,31 +1655,31 @@ export async function spritesRoutes(app: FastifyInstance) {
     const { characterId, filename } = req.params;
 
     // Prevent path traversal
-    if (filename.includes("..") || filename.includes("/") || characterId.includes("..")) {
+    if (
+      filename.includes("..") ||
+      filename.includes("/") ||
+      filename.includes("\\") ||
+      characterId.includes("..") ||
+      characterId.includes("/") ||
+      characterId.includes("\\")
+    ) {
       return reply.status(400).send({ error: "Invalid path" });
     }
 
-    const filePath = join(SPRITES_ROOT, characterId, filename);
+    const filePath = assertInsideDir(SPRITES_ROOT, join(SPRITES_ROOT, characterId, filename));
     if (!existsSync(filePath)) {
       return reply.status(404).send({ error: "Not found" });
     }
 
-    const ext = extname(filename).toLowerCase();
-    const mimeMap: Record<string, string> = {
-      ".jpg": "image/jpeg",
-      ".jpeg": "image/jpeg",
-      ".png": "image/png",
-      ".gif": "image/gif",
-      ".webp": "image/webp",
-      ".avif": "image/avif",
-      ".svg": "image/svg+xml",
-    };
+    const image = await validateImageAssetFile(filePath, filename, { allowSvg: true });
+    if (!image) return reply.status(404).send({ error: "Not found" });
 
-    const stream = createReadStream(filePath);
-    return reply
-      .header("Content-Type", mimeMap[ext] ?? "application/octet-stream")
-      .header("Cache-Control", "public, max-age=31536000, immutable")
-      .send(stream);
+    if (image.isSvg) reply.header("Content-Security-Policy", "sandbox; default-src 'none'");
+    return sendValidatedMediaFile(reply, image, {
+      method: req.method,
+      rangeHeader: req.headers.range,
+      cacheControl: "public, max-age=31536000, immutable",
+    });
   });
 
   /**
@@ -2137,6 +2148,7 @@ export async function spritesRoutes(app: FastifyInstance) {
                   imageEndpointId: conn.imageEndpointId || undefined,
                   comfyWorkflow: conn.comfyuiWorkflow || undefined,
                   imageDefaults,
+                  quality: resolveConnectionImageQuality(conn),
                   fallback: imageFallback,
                 });
 
@@ -2232,6 +2244,7 @@ export async function spritesRoutes(app: FastifyInstance) {
                   imageEndpointId: conn.imageEndpointId || undefined,
                   comfyWorkflow: conn.comfyuiWorkflow || undefined,
                   imageDefaults,
+                  quality: resolveConnectionImageQuality(conn),
                   fallback: imageFallback,
                 });
 
@@ -2299,6 +2312,7 @@ export async function spritesRoutes(app: FastifyInstance) {
             imageEndpointId: conn.imageEndpointId || undefined,
             comfyWorkflow: conn.comfyuiWorkflow || undefined,
             imageDefaults,
+            quality: resolveConnectionImageQuality(conn),
             fallback: imageFallback,
           });
 

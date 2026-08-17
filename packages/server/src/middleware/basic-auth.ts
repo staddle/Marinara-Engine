@@ -34,11 +34,9 @@
 //     you don't need a password.
 //   • Any IP that matches IP_ALLOWLIST is also exempt — if you've already
 //     vouched for a network, requiring a second factor would be noise.
-//   • Traffic from a trusted Tailscale or Docker bridge interface is also
-//     exempt (see isTrustedInterfaceRequest() in ip-allowlist.ts), but only
-//     when the corresponding bypass flag is enabled (both default to on):
-//     BYPASS_AUTH_TAILSCALE (100.64.0.0/10) or BYPASS_AUTH_DOCKER
-//     (172.16.0.0/12). Set either flag to false to require authentication.
+//   • Direct Tailscale and Docker traffic is detected from the request's local
+//     socket or the container's actual networks. Set the matching BYPASS_AUTH_*
+//     flag to true for the legacy broad-CIDR bypass, or false to require auth.
 //     Docker traffic carrying proxy-forwarding headers requires normal auth
 //     by default. Set REQUIRE_AUTH_FOR_DOCKER_PROXY=false only when every
 //     forwarded client is trusted.

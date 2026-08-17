@@ -15,6 +15,10 @@ export interface CapabilityPromptContextRequest {
   chatMeta: Record<string, unknown>;
   /** Chat mode, so a contributor can bail out of modes it doesn't serve. */
   mode: string;
+  /** Target characters for this generation. Empty means narrator or no resolved target. */
+  targetCharacterIds?: string[];
+  /** Active persona for this generation, when one is selected. */
+  personaId?: string | null;
 }
 
 /** Built-in game systems an experience can declare it replaces. Open set — undeclared stays built-in. */

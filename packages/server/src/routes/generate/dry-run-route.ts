@@ -4,7 +4,6 @@ import {
   isClaudeAdaptiveOnlyNoSamplingModel,
   resolveProviderReasoningEffort,
   resolveMacros,
-  stripMacroComments,
   DEFAULT_CONVERSATION_PROMPT,
   DEFAULT_GAME_SYSTEM_PROMPT,
   normalizeGameStoryboardKeyframeCount,
@@ -41,6 +40,7 @@ import {
   resolvePromptMessageMacros,
   type AssemblerInput,
 } from "../../services/prompt/index.js";
+import { cardPromptText } from "../../services/prompt/card-text.js";
 import { mergeAdjacentMessages } from "../../services/prompt/merger.js";
 import { wrapContent } from "../../services/prompt/format-engine.js";
 import {
@@ -56,6 +56,7 @@ import {
   resolveStoredModelContextLimit,
 } from "../../services/generation/model-access-policy.js";
 import { normalizeChatTopP } from "../../services/generation/generation-parameters.js";
+import { filterPromptMessagesForCharacterAudience } from "../../services/generation/prompt-message-scope.js";
 import { applyAllSegmentEdits } from "../../services/game/segment-edits.js";
 import { applyRegexScriptsToPromptMessages } from "../../services/regex/regex-application.js";
 import { sendSseEvent, startSseReply } from "./sse.js";
@@ -69,6 +70,7 @@ import {
   extractImageAttachmentDataUrls,
   findTrackerContextInsertIndex,
   formatConversationInstructionsForWrap,
+  getMessageConversationStartCharacterIds,
   getMessageHiddenFromAICharacterIds,
   isMessageHiddenFromAI,
   mergeCustomParameters,
@@ -107,12 +109,10 @@ type DryRunPromptMessage = {
   contextKind?: "prompt" | "history" | "injection";
   characterId?: string | null;
   personaSnapshotName?: string | null;
+  hiddenFromAICharacterIds?: string[];
+  conversationStartForCharacterIds?: string[];
   providerMetadata?: Record<string, unknown>;
 };
-
-function cardPromptText(value: unknown): string {
-  return typeof value === "string" ? stripMacroComments(value).trim() : "";
-}
 
 function presetStringField(preset: Record<string, unknown> | null | undefined, field: string): string {
   const value = preset?.[field];
@@ -667,13 +667,14 @@ export async function registerDryRunRoute(app: FastifyInstance) {
 
     const isGoogleProvider = conn.provider === "google" || conn.provider === "google_vertex";
     const excludePastReasoning = chatMeta.excludePastReasoning !== false;
-    let mappedMessages = chatMessages.map((m: any) => {
+    let mappedMessages: DryRunPromptMessage[] = chatMessages.map((m: any) => {
       const extra = parseExtra(m.extra);
       const personaSnapshotName = m.role === "user" ? readPersonaSnapshotName(extra) : null;
       const attachments = extra.attachments as PromptAttachment[] | undefined;
       const images = extractImageAttachmentDataUrls(attachments);
       const files = extractFileAttachmentInputs(attachments);
       const hiddenFromAICharacterIds = getMessageHiddenFromAICharacterIds(m);
+      const conversationStartForCharacterIds = getMessageConversationStartCharacterIds(m);
       const geminiParts =
         !excludePastReasoning && isGoogleProvider && m.role === "assistant" && extra.geminiParts
           ? { providerMetadata: { geminiParts: extra.geminiParts } }
@@ -686,6 +687,7 @@ export async function registerDryRunRoute(app: FastifyInstance) {
         characterId: typeof m.characterId === "string" && m.characterId ? m.characterId : null,
         ...(personaSnapshotName ? { personaSnapshotName } : {}),
         ...(hiddenFromAICharacterIds.length ? { hiddenFromAICharacterIds } : {}),
+        ...(conversationStartForCharacterIds.length ? { conversationStartForCharacterIds } : {}),
         ...(images?.length ? { images } : {}),
         ...(files.length ? { files } : {}),
         ...geminiParts,
@@ -732,10 +734,7 @@ export async function registerDryRunRoute(app: FastifyInstance) {
       !impersonate;
     const audienceCharacterIds = impersonate ? [] : promptTargetCharacterId ? [promptTargetCharacterId] : characterIds;
     if (audienceCharacterIds.length > 0) {
-      const audience = new Set(audienceCharacterIds);
-      mappedMessages = mappedMessages.filter(
-        (message) => !message.hiddenFromAICharacterIds?.some((characterId) => audience.has(characterId)),
-      );
+      mappedMessages = filterPromptMessagesForCharacterAudience(mappedMessages, audienceCharacterIds);
     }
 
     // Persona resolution (same strategy as generation; read-only)
@@ -854,11 +853,10 @@ export async function registerDryRunRoute(app: FastifyInstance) {
     }
     mappedMessages = resolveHistoryMessageMacros(mappedMessages);
     const shouldPrefixGroupHistorySpeakers =
-      chatMeta.groupSpeakerNamesInHistory === true &&
       characterIds.length > 1 &&
-      chatMode !== "conversation" &&
       chatMode !== "game" &&
-      dryRunGroupChatMode === "individual";
+      dryRunGroupChatMode === "individual" &&
+      (chatMode === "conversation" || chatMeta.groupSpeakerNamesInHistory === true);
     if (shouldPrefixGroupHistorySpeakers) {
       const characterNamesById = await resolveCharacterNameMap(allCharacterIds, (id) => chars.getById(id));
       mappedMessages = prefixGroupIndividualHistorySpeakers(mappedMessages, {

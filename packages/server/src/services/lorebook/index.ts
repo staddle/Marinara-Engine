@@ -15,7 +15,6 @@ import type {
 } from "@marinara-engine/shared";
 import { createCharactersStorage } from "../storage/characters.storage.js";
 import { createLorebooksStorage } from "../storage/lorebooks.storage.js";
-import { GAME_LOREBOOK_KEEPER_SOURCE_ID } from "./game-lorebook-scope.js";
 import {
   scanForActivatedEntries,
   lorebookEntryPassesContextFilters,
@@ -239,26 +238,8 @@ function resolveOpeningPinnedScanMessages(messages: ScanMessage[], scanDepth: nu
     .map((item) => item.message);
 }
 
-function resolveLorebookCharacterIds(book: Pick<RelevantLorebook, "characterId" | "characterIds">): string[] {
-  return uniqueStrings([...(book.characterIds ?? []), book.characterId]);
-}
-
-function resolveLorebookPersonaIds(book: Pick<RelevantLorebook, "personaId" | "personaIds">): string[] {
-  return uniqueStrings([...(book.personaIds ?? []), book.personaId]);
-}
-
 function activeLorebookMatchesFilters(book: RelevantLorebook, filters: LorebookFilters): boolean {
-  if (!filters.activeLorebookIds?.includes(book.id)) return false;
-  if (book.sourceAgentId === GAME_LOREBOOK_KEEPER_SOURCE_ID) return true;
-
-  const characterIds = resolveLorebookCharacterIds(book);
-  if (characterIds.length > 0) return characterIds.some((id) => filters.characterIds?.includes(id));
-
-  const personaIds = resolveLorebookPersonaIds(book);
-  if (personaIds.length > 0) return !!filters.personaId && personaIds.includes(filters.personaId);
-
-  if (book.chatId) return book.chatId === filters.chatId;
-  return true;
+  return filters.activeLorebookIds?.includes(book.id) === true;
 }
 
 function pushSourceText(

@@ -1,14 +1,14 @@
 {
   "name": "@marinara-engine/client",
   "private": true,
-  "version": "2.4.1",
+  "version": "2.4.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "node ./scripts/build.mjs",
-    "clean": "node -e \"const fs=require('fs');['dist','tsconfig.tsbuildinfo'].forEach(p=>{try{fs.rmSync(p,{recursive:true,force:true})}catch{}})\"",
+    "clean": "node -e \"const fs=require('fs');['dist','tsconfig.tsbuildinfo','node_modules/.cache/eslint'].forEach(p=>{try{fs.rmSync(p,{recursive:true,force:true})}catch{}})\"",
     "preview": "vite preview",
-    "lint": "eslint ."
+    "lint": "eslint . --cache --cache-strategy content --cache-location node_modules/.cache/eslint/.eslintcache"
   },
   "dependencies": {
     "@dnd-kit/core": "6.3.1",
@@ -16,16 +16,17 @@
     "@marinara-engine/shared": "workspace:*",
     "@tanstack/react-query": "^5.100.9",
     "clsx": "^2.1.1",
-    "dompurify": "^3.4.12",
+    "dompurify": "^3.4.13",
     "framer-motion": "^12.38.0",
     "i18next": "^26.3.6",
     "lucide-react": "^0.513.0",
+    "postcss": "8.5.23",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "react-i18next": "^17.0.10",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.5.0",
-    "workbox-window": "^7.4.0",
+    "workbox-window": "^7.4.1",
     "zustand": "^5.0.12"
   },
   "devDependencies": {
@@ -40,7 +41,7 @@
     "tailwindcss": "^4.2.4",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.59.1",
-    "vite": "^7.3.2",
-    "vite-plugin-pwa": "^1.2.0"
+    "vite": "^7.3.5",
+    "vite-plugin-pwa": "^1.3.0"
   }
 }

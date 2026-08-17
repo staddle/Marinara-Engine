@@ -39,8 +39,9 @@ export function parseTrustedTimestamp(value: unknown): string | null {
     return parsed.toISOString();
   }
 
-  const legacy = raw.match(
-    /^(\d{1,4})[-/](\d{1,2})[-/](\d{1,2})(?:\s*@?\s*|\s+)(\d{1,2})h?\s*(\d{1,2})m?\s*(\d{1,2})s?(?:\s*(\d{1,3})ms?)?$/i,
+  const normalizedLegacy = raw.replace(/\s+/gu, " ");
+  const legacy = normalizedLegacy.match(
+    /^(\d{1,4})[-/](\d{1,2})[-/](\d{1,2}) ?@? ?(\d{1,2})h? ?(\d{1,2})m? ?(\d{1,2})s?(?: ?(\d{1,3})ms?)?$/i,
   );
   if (!legacy) return null;
 

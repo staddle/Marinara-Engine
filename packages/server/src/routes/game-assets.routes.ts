@@ -15,10 +15,11 @@ import {
   renameSync,
   copyFileSync,
   readFileSync,
+  realpathSync,
   rmSync,
   unlinkSync,
 } from "fs";
-import { join, extname, basename, dirname } from "path";
+import { join, extname, basename, dirname, resolve, sep } from "path";
 import { execFile } from "child_process";
 import { platform } from "os";
 import { z } from "zod";
@@ -31,6 +32,7 @@ import { assertInsideDir } from "../utils/security.js";
 import { getSharp } from "../utils/sharp.js";
 import { openFolderInFileManager } from "../lib/open-folder-in-file-manager.js";
 import { parseThumbnailWidth, resolveThumbPath } from "../services/image/image-thumbnail.js";
+import { sendValidatedMediaFile, validateImageAssetFile } from "../utils/media-file-security.js";
 
 const META_PATH = join(GAME_ASSETS_DIR, "meta.json");
 
@@ -484,23 +486,57 @@ export async function gameAssetsRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: "Invalid path" });
     }
 
-    const filePath = join(GAME_ASSETS_DIR, wildcard);
-    if (!existsSync(filePath)) {
+    const safeRelativePath = wildcard
+      .split("/")
+      .map((segment) => basename(segment))
+      .join("/");
+    if (safeRelativePath !== wildcard) {
+      return reply.status(400).send({ error: "Invalid path" });
+    }
+    let filePath: string;
+    try {
+      const canonicalRoot = realpathSync(resolve(GAME_ASSETS_DIR));
+      filePath = realpathSync(resolve(GAME_ASSETS_DIR, safeRelativePath));
+      const rootPrefix = canonicalRoot.endsWith(sep) ? canonicalRoot : `${canonicalRoot}${sep}`;
+      if (!filePath.startsWith(rootPrefix)) throw new Error("Asset path escapes the game-assets directory");
+    } catch {
       return reply.status(404).send({ error: "Asset not found" });
     }
 
     const ext = extname(wildcard).toLowerCase();
     const mime = MIME_MAP[ext] ?? "application/octet-stream";
 
-    // Downscaled variant when asked for one; falls back to the original on any miss.
-    const width = parseThumbnailWidth((req.query as { w?: string }).w);
-    const thumbPath = width ? await resolveThumbPath(filePath, width) : null;
-
-    const stream = createReadStream(thumbPath ?? filePath);
+    if (IMAGE_EXTS.has(ext)) {
+      const image = await validateImageAssetFile(filePath, safeRelativePath, { allowSvg: true });
+      if (!image) return reply.status(404).send({ error: "Asset not found" });
+      // A generated WebP is passive even if the source path is swapped after validation.
+      const width = parseThumbnailWidth((req.query as { w?: string }).w);
+      const thumbPath = width ? await resolveThumbPath(filePath, width) : null;
+      if (thumbPath) {
+        await image.handle.close().catch(() => undefined);
+        return reply
+          .header("Content-Type", "image/webp")
+          .header("Cache-Control", "public, max-age=604800")
+          .send(createReadStream(thumbPath));
+      }
+      if (image.isSvg) reply.header("Content-Security-Policy", "sandbox; default-src 'none'");
+      return sendValidatedMediaFile(reply, image, {
+        method: req.method,
+        rangeHeader: req.headers.range,
+        cacheControl: "public, max-age=604800",
+      });
+    }
+    if (MUSIC_FILE_EXTENSIONS.has(ext)) {
+      return reply
+        .header("Content-Type", mime)
+        .header("Cache-Control", "public, max-age=604800")
+        .sendFile(safeRelativePath, GAME_ASSETS_DIR);
+    }
     return reply
-      .header("Content-Type", thumbPath ? "image/webp" : mime)
-      .header("Cache-Control", "public, max-age=604800")
-      .send(stream);
+      .header("Content-Type", "application/octet-stream")
+      .header("Content-Disposition", `attachment; filename="${basename(safeRelativePath).replace(/["\\]/g, "_")}"`)
+      .header("Cache-Control", "no-store")
+      .send(createReadStream(filePath));
   });
 
   // ── GET /game-assets/local-music-file?path=:encoded ──

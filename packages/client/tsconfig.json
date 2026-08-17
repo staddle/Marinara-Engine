@@ -13,6 +13,7 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
+    "incremental": true,
     "declaration": false,
     "noUnusedLocals": true,
     "noUnusedParameters": true,

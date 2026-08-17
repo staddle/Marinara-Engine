@@ -1,10 +1,5 @@
-import { stripMacroComments } from "@marinara-engine/shared";
 import type { LLMUsage } from "../llm/base-provider.js";
 import { stripGmCommandTags } from "../game/segment-edits.js";
-
-export function cardPromptText(value: unknown): string {
-  return typeof value === "string" ? stripMacroComments(value).trim() : "";
-}
 
 export function bumpCharacterVersion(value: unknown): string {
   const raw = typeof value === "string" ? value.trim() : "";

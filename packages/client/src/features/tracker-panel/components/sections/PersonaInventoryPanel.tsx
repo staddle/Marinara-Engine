@@ -216,6 +216,12 @@ export function PersonaInventoryPanel({
       </div>
     </div>
   );
+  const personaStatusAccessibleName = status
+    ? localizeUi("ui.trackerPanel.inlineedit.value1Value2", {
+        value1: localizeUi("ui.trackerPanel.personainventorypanel.value1Status", { value1: personaName }),
+        value2: status,
+      })
+    : localizeUi("ui.trackerPanel.personainventorypanel.value1Status", { value1: personaName });
   const renderStatusStrip = () => (
     <div className={PERSONA_STATUS_STRIP_CLASS}>
       <HeartPulse
@@ -226,13 +232,10 @@ export function PersonaInventoryPanel({
         value={status}
         onSave={onSaveStatus}
         placeholder={localizeUi("ui.trackerPanel.personainventorypanel.status")}
-        className={cn(
-          "relative z-[1] min-h-5 flex-1 rounded-[2px] px-0.5 py-0 text-[0.6875rem] font-medium leading-[0.875rem] text-[color-mix(in_srgb,var(--tracker-profile-text)_92%,var(--muted-foreground)_8%)] hover:bg-[var(--accent)]/18",
-          trackerPanelSizeProfile === "compact" && "h-5",
-        )}
-        title={localizeUi("ui.trackerPanel.personainventorypanel.value1Status", { value1: personaName })}
-        scrollOnHover={trackerPanelSizeProfile === "compact"}
-        previewLineCount={trackerPanelSizeProfile === "compact" ? undefined : 2}
+        className="relative z-[1] min-h-5 flex-1 rounded-[2px] px-0.5 py-0 text-[0.6875rem] font-medium leading-[0.875rem] text-[color-mix(in_srgb,var(--tracker-profile-text)_92%,var(--muted-foreground)_8%)] hover:bg-[var(--accent)]/18"
+        title={status || localizeUi("ui.trackerPanel.personainventorypanel.status")}
+        ariaLabel={personaStatusAccessibleName}
+        previewLineCount={3}
         showEditHint={false}
         locked={isTrackerFieldLocked(fieldLocks, personaStatusTrackerLockKey())}
         lockMode={lockMode}

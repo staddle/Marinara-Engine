@@ -23,7 +23,7 @@ export type CustomToolTransferConfig = {
 
 export type CustomToolImportReview = {
   name: string;
-  executionType: "webhook";
+  executionType: "webhook" | "script";
   destinationOrigin: string | null;
   requestedEnabled: boolean;
   requestedHiddenContext: boolean;
@@ -148,7 +148,7 @@ export function prepareCustomToolImportEntry(
 ): PreparedCustomToolImport | null {
   const candidate = normalizeCustomToolImportCandidate(entry, resolveTextFile);
   if (!candidate) return null;
-  if (candidate.executionType !== "webhook") {
+  if (candidate.executionType === "static") {
     return { config: candidate, review: null };
   }
 
@@ -160,8 +160,8 @@ export function prepareCustomToolImportEntry(
     },
     review: {
       name: candidate.name,
-      executionType: "webhook",
-      destinationOrigin: getWebhookOrigin(candidate.webhookUrl),
+      executionType: candidate.executionType,
+      destinationOrigin: candidate.executionType === "webhook" ? getWebhookOrigin(candidate.webhookUrl) : null,
       requestedEnabled: candidate.enabled,
       requestedHiddenContext: candidate.includeHiddenContext,
     },

@@ -1,6 +1,6 @@
 # Downloadable Agents Reference
 
-This guide lists all 30 official first-party packages available through **Agents → Download Agents**, grouped by category. Agents do not ship inside a fresh Marinara Engine installation. Their package sources, manifests, artifacts, and machine-readable catalog are published in [Pasta-Devs/Marinara-Agents](https://github.com/Pasta-Devs/Marinara-Agents). For each one, this guide explains what the agent does, when it runs or integrates, which chat modes allow it, and the main settings. For installation and activation, read the [Agents overview](agents-overview.md) first.
+This guide lists all 32 official first-party packages available through **Agents → Download Agents**, grouped by category. Agents do not ship inside a fresh Marinara Engine installation. Their package sources, manifests, artifacts, and machine-readable catalog are published in [Pasta-Devs/Marinara-Agents](https://github.com/Pasta-Devs/Marinara-Agents). For each one, this guide explains what the agent does, when it runs or integrates, which chat modes allow it, and the main settings. For installation and activation, read the [Agents overview](agents-overview.md) first.
 
 ## How to read this reference
 
@@ -150,6 +150,16 @@ Simulates a live audience reacting to your scene, shown as a floating **Echo** w
 - **Phase**: Parallel.
 - **Where it works**: Roleplay.
 - **Key settings**: you pick a style from its named options, such as **AO3 / Wattpad**, **Twitter / Reddit**, **4chan**, **Constructive**, **Hype Squad**, and **Harbingers**. Controls in the widget include **Re-run Echo Chamber** and **Clear messages**.
+
+### Noodle
+
+Adds an optional local social world with the Noodle public timeline and the NoodleR creator-and-fan roleplay feed. It opens in a dedicated Home tab instead of running in the normal chat-agent pipeline.
+
+- **Integration**: Feature package; it contributes the Home tab, local routes, generation and media flows, and background schedulers.
+- **Where it works**: Home, with optional context carried in from Conversation, Roleplay, and Game chats.
+- **Key settings**: install it from **Agents → Download Agents** and restart Marinara Engine when prompted. Inside Noodle, you can configure invited accounts, text and image connections, timeline refreshes, NoodleR Creator profiles, simulated post access, and audience activity.
+- **Data lifecycle**: uninstalling removes the Home tab and stops package routes and schedulers after restart while preserving existing Noodle and NoodleR data for a later reinstall.
+- **Full guide**: [Noodle: The In-App Social Timeline](../noodle/overview.md).
 
 ### Long-Term Memory
 

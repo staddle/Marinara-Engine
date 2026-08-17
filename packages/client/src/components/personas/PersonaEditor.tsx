@@ -3,7 +3,7 @@
 // Replaces the chat area when editing a persona.
 // Sections: Metadata, Card, Convo, Lorebook, Sprites, Gallery, Colors, Stats
 // ──────────────────────────────────────────────
-import { useState, useEffect, useRef, useCallback, type ChangeEvent, type ReactNode } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo, type ChangeEvent, type ReactNode } from "react";
 import { toast } from "sonner";
 import {
   useCreateCharacter,
@@ -65,12 +65,14 @@ import {
   Library,
   MessageCircle,
   Pencil,
+  Check,
 } from "lucide-react";
 import type { AvatarCrop } from "@marinara-engine/shared";
 import { normalizeAvatarCrop } from "@marinara-engine/shared";
 import { cn, generateClientId, getAvatarCropStyle } from "../../lib/utils";
 import { showConfirmDialog, showPromptDialog } from "../../lib/app-dialogs";
 import { formatCardVersionTimestamp, getCardVersionTitle } from "../../lib/card-version-history";
+import { dataImageUrlToFile } from "../../lib/data-image-file";
 import { extractColorsFromImage } from "../../lib/avatar-color-extraction";
 import { HelpTooltip } from "../ui/HelpTooltip";
 import { ColorPicker } from "../ui/ColorPicker";
@@ -79,8 +81,9 @@ import { MacroTextarea } from "../ui/MacroTextarea";
 import { ImageUploadDropzone } from "../ui/ImageUploadDropzone";
 import { CustomEmojiTagButton } from "../ui/CustomEmojiTagButton";
 import { CallClipGenerationModal } from "../ui/CallClipGenerationModal";
-import { api } from "../../lib/api-client";
+import { api, formatFirstApiValidationIssue } from "../../lib/api-client";
 import { downloadSpriteFile } from "../../lib/sprite-download";
+import { downloadUrlToDevice } from "../../lib/file-download";
 import { parseTrackerCardColorConfig, serializeTrackerCardColorConfig } from "../../lib/tracker-card-colors";
 import {
   getStatNameOccurrence,
@@ -120,10 +123,12 @@ import {
   syncRpgHpFromPools,
   type CharacterData,
   type ConvoBehaviorConfig,
+  type Persona,
   type PersonaCardSnapshot,
   type PersonaCardVersion,
   type PersonaStatBar,
   type PersonaStatsConfig,
+  type PersonaUpdateInput,
   type RPGStatPool,
   type RPGStatsConfig,
   type TrackerCardColorConfig,
@@ -132,6 +137,12 @@ import { useQuoteFormatter } from "../../hooks/use-quote-formatter";
 import { LorebookAssignmentSection } from "../lorebooks/LorebookAssignmentSection";
 import { ConvoProfileFields } from "../characters/ConvoProfileFields";
 import { useTranslation, useTranslation as useUiTranslation } from "react-i18next";
+import {
+  mergeAuthoritativePersonaEditorDraft,
+  personaEditorFieldsDifferingFromBaseline,
+  pickPersonaEditorFields,
+  reconcileVersionedPersonaEditorSave,
+} from "./persona-editor-transitions";
 
 // ── Tabs ──
 const TABS = [
@@ -206,50 +217,26 @@ interface PersonaFormData {
   scenario: string;
   backstory: string;
   appearance: string;
+  characterSheetImageId: string | null;
+  useCharacterSheetAsReference: boolean;
   nameColor: string;
   dialogueColor: string;
   boxColor: string;
   trackerCardColors: TrackerCardColorConfig;
-  personaStats: string;
+  /** Status bars + RPG stats, kept decoded in form state; serialized at save/snapshot boundaries. */
+  personaStats: PersonaStatsConfig | null;
   tags: string[];
-  savedStatusOptions: string;
+  /** Saved Conversation mode activity/status options, kept decoded in form state. */
+  savedStatusOptions: string[];
   /** Conversation-mode-only fields. */
   convoDisplayName: string;
   aboutMe: string;
   convoBehavior: ConvoBehaviorConfig | null;
-  /** Avatar crop region (parsed from the persona row's JSON-encoded `avatarCrop`).
+  /** Avatar crop region (hydrated from the decoded Persona; kept decoded in form
+   *  state and serialized back to JSON at save/snapshot boundaries).
    *  May be the current source-relative shape, the legacy zoom+offset shape (held
    *  through until the user re-edits via the cropper), or null when unset. */
   avatarCrop: AvatarCrop | null;
-}
-
-interface PersonaRow {
-  id: string;
-  name: string;
-  comment?: string;
-  phoneticName?: string;
-  creator?: string;
-  personaVersion?: string;
-  creatorNotes?: string;
-  description: string;
-  personality: string;
-  scenario: string;
-  backstory: string;
-  appearance: string;
-  avatarPath: string | null;
-  /** JSON-encoded AvatarCrop, or empty string when unset. */
-  avatarCrop?: string;
-  isActive: string | boolean;
-  nameColor?: string;
-  dialogueColor?: string;
-  boxColor?: string;
-  trackerCardColors?: string;
-  personaStats?: string;
-  tags?: string;
-  savedStatusOptions?: string;
-  convoDisplayName?: string;
-  aboutMe?: string;
-  convoBehavior?: string;
 }
 
 function appendNewTags(existingTags: string[], rawInput: string) {
@@ -276,6 +263,88 @@ function formatPersonaFieldValue<K extends keyof PersonaFormData>(
     return formatQuotes(value) as PersonaFormData[K];
   }
   return value;
+}
+
+// ── Editor save/reconciliation model ──
+
+/** Persona mutations the editor coordinates. Only one may run at a time,
+ *  because each writes or removes the same Persona row. */
+type PersonaMutationKind = "save" | "avatar" | "gallery-avatar" | "delete";
+
+/** The decoded PATCH contract this editor writes: the shared update input plus
+ *  the character-sheet fields the Persona route still handles separately. */
+type PersonaUpdatableFields = PersonaUpdateInput & {
+  characterSheetImageId?: string | null;
+  useCharacterSheetAsReference?: boolean;
+};
+
+/** Every form field must map onto the same-named decoded update field. Indexing
+ *  the update contract here is what turns a form key with no matching update
+ *  field — or an incompatible value type — into a compile error instead of a
+ *  silently dropped save. */
+type PersonaUpdateFieldValues = { [K in keyof PersonaFormData]: PersonaUpdatableFields[K] };
+
+/** Draft values as they would be written. The one semantic transform is a blank
+ *  conversation behavior, which is an explicit clear rather than an empty object. */
+function personaUpdateValues(formData: PersonaFormData): PersonaUpdateFieldValues {
+  return {
+    ...formData,
+    convoBehavior: formData.convoBehavior?.instruction?.trim() ? formData.convoBehavior : null,
+  };
+}
+
+/**
+ * Fields whose decoded write-boundary values differ from the authoritative
+ * baseline. A blank conversation behavior and null are therefore equivalent.
+ */
+function personaFieldsDifferingFromBaseline(
+  draft: PersonaFormData,
+  baseline: PersonaFormData,
+): (keyof PersonaFormData)[] {
+  return personaEditorFieldsDifferingFromBaseline(personaUpdateValues(draft), personaUpdateValues(baseline));
+}
+
+function pickPersonaUpdateFields(
+  formData: PersonaFormData,
+  keys: Iterable<keyof PersonaFormData>,
+): Partial<PersonaUpdatableFields> {
+  // `PersonaUpdateFieldValues` proves each copied value is legal for the decoded
+  // update contract; the pure helper retains that key/value relationship.
+  return pickPersonaEditorFields(personaUpdateValues(formData), keys);
+}
+
+/** The authoritative projected Persona, expressed in the editor's form shape. */
+function personaFormFromPersona(persona: Persona): PersonaFormData {
+  return {
+    name: persona.name,
+    comment: persona.comment ?? "",
+    phoneticName: persona.phoneticName ?? "",
+    creator: persona.creator ?? "",
+    personaVersion: persona.personaVersion ?? "1.0",
+    creatorNotes: persona.creatorNotes ?? "",
+    description: persona.description,
+    personality: persona.personality ?? "",
+    scenario: persona.scenario ?? "",
+    backstory: persona.backstory ?? "",
+    appearance: persona.appearance ?? "",
+    characterSheetImageId: persona.characterSheetImageId ?? null,
+    useCharacterSheetAsReference: persona.useCharacterSheetAsReference === true,
+    nameColor: persona.nameColor ?? "",
+    dialogueColor: persona.dialogueColor ?? "",
+    boxColor: persona.boxColor ?? "",
+    trackerCardColors: parseTrackerCardColorConfig(persona.trackerCardColors),
+    personaStats: persona.personaStats ?? null,
+    tags: persona.tags ?? [],
+    savedStatusOptions: persona.savedStatusOptions ?? [],
+    convoDisplayName: persona.convoDisplayName ?? "",
+    aboutMe: persona.aboutMe ?? "",
+    convoBehavior: persona.convoBehavior ?? null,
+    // Defensive: accept either the current source-relative shape or the legacy
+    // zoom+offset shape (already decoded by the persona projector). Anything
+    // malformed is silently dropped so the editor falls back to defaults instead
+    // of producing NaN transforms or an off-screen overlay.
+    avatarCrop: normalizeAvatarCrop(persona.avatarCrop),
+  };
 }
 
 // ── Gallery Tab ──
@@ -313,15 +382,58 @@ function isPersonaCallVideoClip(clip: CharacterGalleryClip) {
   return clip.source === "conversation-call" || clip.source === "conversation-call-custom";
 }
 
-function PersonaGalleryTab({ personaId, personaName }: { personaId: string; personaName?: string }) {
+function PersonaGalleryTab({
+  personaId,
+  personaName,
+  onCreateCharacterSheet,
+  // Assigning a gallery image replaces the Persona avatar, so the editor owns the
+  // call and lends this tab its live mutation-busy state instead of a local flag.
+  editorBusy,
+  galleryAvatarPending,
+  onSetAvatar,
+}: {
+  personaId: string;
+  personaName?: string;
+  onCreateCharacterSheet: () => void;
+  editorBusy: boolean;
+  galleryAvatarPending: boolean;
+  onSetAvatar: (image: PersonaGalleryImage) => void;
+}) {
   const { t: localizeUi } = useUiTranslation();
   const [mediaTab, setMediaTab] = useState<PersonaGalleryMediaTab>("images");
   const { data: images, isLoading } = usePersonaGalleryImages(personaId);
   const upload = useUploadPersonaGalleryImage(personaId);
   const remove = useDeletePersonaGalleryImage(personaId);
-  const setAvatar = useSetPersonaGalleryImageAsAvatar(personaId);
   const tag = useTagPersonaGalleryImage(personaId);
   const [lightbox, setLightbox] = useState<PersonaGalleryImage | null>(null);
+  const [selectingImages, setSelectingImages] = useState(false);
+  const [selectedImageIds, setSelectedImageIds] = useState<Set<string>>(() => new Set());
+  const selectedImages = useMemo(
+    () => images?.filter((image) => selectedImageIds.has(image.id)) ?? [],
+    [images, selectedImageIds],
+  );
+
+  useEffect(() => {
+    const availableIds = new Set(images?.map((image) => image.id) ?? []);
+    setSelectedImageIds((current) => {
+      const next = new Set([...current].filter((id) => availableIds.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [images]);
+
+  const leaveImageSelection = useCallback(() => {
+    setSelectingImages(false);
+    setSelectedImageIds(new Set());
+  }, []);
+
+  const toggleImageSelection = useCallback((imageId: string) => {
+    setSelectedImageIds((current) => {
+      const next = new Set(current);
+      if (next.has(imageId)) next.delete(imageId);
+      else next.add(imageId);
+      return next;
+    });
+  }, []);
 
   const handleUpload = useCallback(
     (files: File[]) => {
@@ -355,21 +467,62 @@ function PersonaGalleryTab({ personaId, personaName }: { personaId: string; pers
     [lightbox?.id, remove, localizeUi],
   );
 
-  const handleSetAvatar = useCallback(
-    async (image: PersonaGalleryImage) => {
-      try {
-        await setAvatar.mutateAsync(image.id);
-        toast.success(localizeUi("ui.personas.personagallerytab.personaAvatarUpdated"));
-      } catch (error) {
-        toast.error(
-          error instanceof Error
-            ? error.message
-            : localizeUi("ui.personas.personagallerytab.failedToUpdatePersonaAvatar"),
-        );
+  const handleBatchDownload = useCallback(async () => {
+    if (selectedImages.length === 0) return;
+    if (
+      !(await showConfirmDialog({
+        title: localizeUi("ui.gallery.batch.downloadTitle"),
+        message: localizeUi("ui.gallery.batch.downloadMessage", { count: selectedImages.length }),
+        confirmLabel: localizeUi("ui.gallery.batch.download"),
+      }))
+    ) {
+      return;
+    }
+    try {
+      let failedDownloads = 0;
+      for (const [index, image] of selectedImages.entries()) {
+        try {
+          await downloadUrlToDevice(image.url, image.filePath.split("/").pop() || `persona-gallery-${index + 1}.png`);
+        } catch {
+          failedDownloads += 1;
+        }
       }
-    },
-    [setAvatar, localizeUi],
-  );
+      if (failedDownloads > 0) {
+        toast.error(
+          localizeUi("ui.gallery.batch.downloadPartial", {
+            completed: selectedImages.length - failedDownloads,
+            count: selectedImages.length,
+            failed: failedDownloads,
+          }),
+        );
+        return;
+      }
+      toast.success(localizeUi("ui.gallery.batch.downloadStarted", { count: selectedImages.length }));
+    } catch {
+      toast.error(localizeUi("ui.gallery.batch.downloadFailed"));
+    }
+  }, [localizeUi, selectedImages]);
+
+  const handleBatchDelete = useCallback(async () => {
+    if (selectedImages.length === 0) return;
+    if (
+      !(await showConfirmDialog({
+        title: localizeUi("ui.gallery.batch.deleteTitle"),
+        message: localizeUi("ui.gallery.batch.deleteMessage", { count: selectedImages.length }),
+        confirmLabel: localizeUi("ui.gallery.batch.delete"),
+        tone: "destructive",
+      }))
+    ) {
+      return;
+    }
+    try {
+      for (const image of selectedImages) await remove.mutateAsync(image.id);
+      toast.success(localizeUi("ui.gallery.batch.deleted", { count: selectedImages.length }));
+      leaveImageSelection();
+    } catch {
+      toast.error(localizeUi("ui.personas.personagallerytab.failedToDeletePersonaImage"));
+    }
+  }, [leaveImageSelection, localizeUi, remove, selectedImages]);
 
   return (
     <div className="space-y-6">
@@ -409,6 +562,51 @@ function PersonaGalleryTab({ personaId, personaName }: { personaId: string; pers
 
       {mediaTab === "images" ? (
         <>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectingImages) leaveImageSelection();
+                  else setSelectingImages(true);
+                }}
+                className="mari-editor-action inline-flex"
+              >
+                {selectingImages ? <X size="0.875rem" /> : <Check size="0.875rem" />}
+                {localizeUi(selectingImages ? "ui.gallery.batch.cancel" : "ui.gallery.batch.selectImages")}
+              </button>
+              <button
+                type="button"
+                disabled={!images?.length}
+                onClick={() => {
+                  setSelectingImages(true);
+                  setSelectedImageIds(new Set(images?.map((image) => image.id) ?? []));
+                }}
+                className="mari-editor-action inline-flex disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Check size="0.875rem" />
+                {localizeUi("ui.gallery.batch.selectAll")}
+              </button>
+              {selectingImages ? (
+                <span className="text-xs font-semibold text-[var(--muted-foreground)]">
+                  {localizeUi("ui.gallery.batch.selected", { count: selectedImages.length })}
+                </span>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              onClick={onCreateCharacterSheet}
+              className="mari-editor-action mari-editor-action--primary inline-flex max-sm:w-full max-sm:justify-center"
+            >
+              <Wand2 size="0.875rem" />
+              {localizeUi("ui.characters.charactersheet.createWithAi")}
+            </button>
+          </div>
+
+          <p className="rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs leading-relaxed text-[var(--muted-foreground)] ring-1 ring-[var(--border)]">
+            {localizeUi("ui.gallery.batch.hint")}
+          </p>
+
           <ImageUploadDropzone
             label={localizeUi("ui.personas.personagallerytab.uploadPersonaImages")}
             pending={upload.isPending}
@@ -420,62 +618,107 @@ function PersonaGalleryTab({ personaId, personaName }: { personaId: string; pers
           />
 
           {isLoading ? (
-            <div className="grid grid-cols-3 gap-3 md:grid-cols-4">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 sm:gap-3 md:grid-cols-4">
               {Array.from({ length: 4 }).map((_, i) => (
                 <div key={i} className="shimmer aspect-square rounded-xl" />
               ))}
             </div>
           ) : images && images.length > 0 ? (
-            <div className="grid grid-cols-3 gap-3 md:grid-cols-4">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 sm:gap-3 md:grid-cols-4">
               {images.map((image) => (
                 <div
                   key={image.id}
-                  className="group relative overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)] transition-all hover:border-[var(--primary)]/30 hover:shadow-md"
+                  className={cn(
+                    "mari-gallery-card group relative overflow-hidden rounded-xl border bg-[var(--card)] transition-all hover:shadow-md",
+                    selectedImageIds.has(image.id)
+                      ? "border-[var(--primary)] ring-2 ring-[var(--primary)]/45"
+                      : "border-[var(--border)] hover:border-[var(--primary)]/30",
+                  )}
                 >
-                  <CustomEmojiTagButton image={image} onApply={(patch) => tag.mutate({ imageId: image.id, patch })} />
+                  {!selectingImages ? (
+                    <CustomEmojiTagButton image={image} onApply={(patch) => tag.mutate({ imageId: image.id, patch })} />
+                  ) : (
+                    <button
+                      type="button"
+                      aria-pressed={selectedImageIds.has(image.id)}
+                      aria-label={localizeUi("ui.gallery.batch.toggleImage")}
+                      onClick={() => toggleImageSelection(image.id)}
+                      className={cn(
+                        "absolute right-2 top-2 z-10 flex h-7 w-7 items-center justify-center rounded-full border shadow-lg transition-colors",
+                        selectedImageIds.has(image.id)
+                          ? "border-[var(--primary)] bg-[var(--primary)] text-[var(--primary-foreground)]"
+                          : "border-white/65 bg-black/55 text-transparent hover:bg-black/75",
+                      )}
+                    >
+                      <Check size="0.9rem" />
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="block aspect-square w-full bg-[var(--secondary)]"
-                    onClick={() => setLightbox(image)}
+                    onClick={() => (selectingImages ? toggleImageSelection(image.id) : setLightbox(image))}
                   >
                     <img
                       src={image.url}
                       alt={image.prompt || personaName || "Persona image"}
+                      loading="lazy"
+                      decoding="async"
                       className="h-full w-full object-cover"
                     />
                   </button>
-                  <div className="absolute inset-x-0 bottom-0 flex items-center justify-between bg-gradient-to-t from-black/75 via-black/25 to-transparent p-2 opacity-0 transition-opacity group-hover:opacity-100 max-md:opacity-100">
-                    <span className="max-w-[8rem] truncate text-[0.6875rem] font-medium text-white/85">
+                  <div
+                    className={cn(
+                      "absolute inset-x-0 bottom-0 flex items-center justify-between bg-gradient-to-t from-black/75 via-black/25 to-transparent p-2 transition-opacity",
+                      selectingImages && !selectedImageIds.has(image.id)
+                        ? "pointer-events-none opacity-0"
+                        : "opacity-0 group-hover:opacity-100 group-[&:focus-within]:opacity-100 max-md:opacity-100",
+                    )}
+                  >
+                    <span className="max-w-[8rem] truncate text-[0.6875rem] font-medium text-white/85 max-md:hidden">
                       {new Date(image.createdAt).toLocaleDateString()}
                     </span>
-                    <div className="flex gap-1">
+                    <div className="ml-auto flex gap-1">
+                      {!selectingImages ? (
+                        <button
+                          type="button"
+                          onClick={() => onSetAvatar(image)}
+                          disabled={editorBusy}
+                          className="rounded-lg bg-white/15 p-1.5 text-white transition-colors hover:bg-white/25 disabled:opacity-50"
+                          title={localizeUi("ui.personas.personagallerytab.setAsAvatar")}
+                        >
+                          {galleryAvatarPending ? (
+                            <Loader2 size="0.75rem" className="animate-spin" />
+                          ) : (
+                            <User size="0.75rem" />
+                          )}
+                        </button>
+                      ) : null}
+                      {selectingImages ? (
+                        <button
+                          type="button"
+                          onClick={() => void handleBatchDownload()}
+                          className="rounded-lg bg-white/15 p-1.5 text-white transition-colors hover:bg-white/25"
+                          title={localizeUi("ui.gallery.batch.download")}
+                        >
+                          <Download size="0.75rem" />
+                        </button>
+                      ) : (
+                        <a
+                          href={image.url}
+                          download
+                          className="rounded-lg bg-white/15 p-1.5 text-white transition-colors hover:bg-white/25"
+                          title={localizeUi("ui.personas.personagallerytab.download")}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <Download size="0.75rem" />
+                        </a>
+                      )}
                       <button
                         type="button"
-                        onClick={() => void handleSetAvatar(image)}
-                        disabled={setAvatar.isPending}
+                        onClick={() => void (selectingImages ? handleBatchDelete() : handleDelete(image))}
+                        disabled={remove.isPending}
                         className="rounded-lg bg-white/15 p-1.5 text-white transition-colors hover:bg-white/25 disabled:opacity-50"
-                        title={localizeUi("ui.personas.personagallerytab.setAsAvatar")}
-                      >
-                        {setAvatar.isPending ? (
-                          <Loader2 size="0.75rem" className="animate-spin" />
-                        ) : (
-                          <User size="0.75rem" />
-                        )}
-                      </button>
-                      <a
-                        href={image.url}
-                        download
-                        className="rounded-lg bg-white/15 p-1.5 text-white transition-colors hover:bg-white/25"
-                        title={localizeUi("ui.personas.personagallerytab.download")}
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <Download size="0.75rem" />
-                      </a>
-                      <button
-                        type="button"
-                        onClick={() => void handleDelete(image)}
-                        className="rounded-lg bg-[var(--secondary)] p-1.5 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-                        title={localizeUi("lorebook.editor.batch.delete")}
+                        title={localizeUi(selectingImages ? "ui.gallery.batch.delete" : "lorebook.editor.batch.delete")}
                       >
                         <Trash2 size="0.75rem" />
                       </button>
@@ -517,12 +760,12 @@ function PersonaGalleryTab({ personaId, personaName }: { personaId: string; pers
             <div className="absolute right-2 top-2 flex gap-2">
               <button
                 type="button"
-                onClick={() => void handleSetAvatar(lightbox)}
-                disabled={setAvatar.isPending}
+                onClick={() => onSetAvatar(lightbox)}
+                disabled={editorBusy}
                 className="rounded-lg bg-black/60 p-2 text-white transition-colors hover:bg-black/80 disabled:opacity-50"
                 title={localizeUi("ui.personas.personagallerytab.setAsAvatar")}
               >
-                {setAvatar.isPending ? <Loader2 size="0.875rem" className="animate-spin" /> : <User size="0.875rem" />}
+                {galleryAvatarPending ? <Loader2 size="0.875rem" className="animate-spin" /> : <User size="0.875rem" />}
               </button>
               <a
                 href={lightbox.url}
@@ -531,6 +774,15 @@ function PersonaGalleryTab({ personaId, personaName }: { personaId: string; pers
               >
                 <Download size="0.875rem" />
               </a>
+              <button
+                type="button"
+                onClick={() => void handleDelete(lightbox)}
+                className="rounded-lg bg-black/60 p-2 text-white transition-colors hover:bg-black/80"
+                title={localizeUi("lorebook.editor.batch.delete")}
+                aria-label={localizeUi("lorebook.editor.batch.delete")}
+              >
+                <Trash2 size="0.875rem" />
+              </button>
               <button
                 type="button"
                 onClick={() => setLightbox(null)}
@@ -960,22 +1212,8 @@ function PersonaClipCard({
   );
 }
 
-function parsePersonaRpgStats(personaStats: string): RPGStatsConfig | undefined {
-  if (!personaStats.trim()) return undefined;
-
-  try {
-    const parsed = JSON.parse(personaStats) as { rpgStats?: RPGStatsConfig } | null;
-    if (!parsed || typeof parsed !== "object" || !parsed.rpgStats || typeof parsed.rpgStats !== "object") {
-      return undefined;
-    }
-    return parsed.rpgStats;
-  } catch {
-    return undefined;
-  }
-}
-
 function createCharacterDataFromPersona(formData: PersonaFormData): CharacterData {
-  const rpgStats = parsePersonaRpgStats(formData.personaStats);
+  const rpgStats = formData.personaStats?.rpgStats;
 
   return {
     name: formData.name.trim(),
@@ -1022,192 +1260,466 @@ export function PersonaEditor() {
   const updatePersona = useUpdatePersona();
   const uploadCharacterAvatar = useUploadAvatar();
   const uploadAvatar = useUploadPersonaAvatar();
+  const setGalleryImageAsAvatar = useSetPersonaGalleryImageAsAvatar(personaId ?? "");
   const deletePersona = useDeletePersona();
   const duplicatePersona = useDuplicatePersona();
+  const uploadCharacterSheet = useUploadPersonaGalleryImage(personaId ?? "");
   const { data: connectionsList } = useConnections();
 
   const [activeTab, setActiveTab] = useState<TabId>(() => personaInitialTab ?? "metadata");
   useEffect(() => {
     setActiveTab(personaInitialTab ?? "metadata");
   }, [personaId, personaInitialTab]);
-  const [formData, setFormData] = useState<PersonaFormData | null>(null);
+  // ── Editor state machine ──
+  // The draft and the authoritative baseline are each held in a ref *and* in
+  // state, always written together through the commit helpers below. The refs are
+  // what asynchronous save/upload continuations read, so reconciliation never
+  // depends on a render having happened; the state is what re-renders the UI.
+  const [formData, setFormDataState] = useState<PersonaFormData | null>(null);
+  const formDataRef = useRef<PersonaFormData | null>(null);
+  const [baselineForm, setBaselineFormState] = useState<PersonaFormData | null>(null);
+  const baselineFormRef = useRef<PersonaFormData | null>(null);
   const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
-  const [dirty, setDirty] = useState(false);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [avatarGeneratorOpen, setAvatarGeneratorOpen] = useState(false);
+  const [characterSheetGeneratorOpen, setCharacterSheetGeneratorOpen] = useState(false);
   const loadedPersonaIdRef = useRef<string | null>(null);
-  const loadedTrackerCardColorsRef = useRef<string | null>(null);
-  const latestAvatarUploadTokenRef = useRef<string | null>(null);
+  /** Authoritative avatar path last reconciled into the editor. */
+  const authoritativeAvatarPathRef = useRef<string | null>(null);
+  /** Which image the *draft* crop is framed against. Crop ownership is bound to
+   *  avatar identity, so a replacement image never inherits the old framing. */
+  const avatarCropOwnerRef = useRef<string | null>(null);
+  /** Per-field monotonic edit versions. Ordering evidence for reconciling an
+   *  in-flight save only — never the source of truth for dirty. */
+  const fieldVersionsRef = useRef<Map<keyof PersonaFormData, number>>(new Map());
+  /** Identity token invalidated on Persona switch and unmount, so a stale
+   *  completion can still update shared caches but never local editor state. */
+  const editorSessionRef = useRef<string>(generateClientId());
+  /** The single operation mutex: an immediate ref so two clicks in one tick
+   *  cannot both pass, plus render state for the disabled/spinner UI. */
+  const mutationTokenRef = useRef<string | null>(null);
+  const mutationKindRef = useRef<PersonaMutationKind | null>(null);
+  const [mutationKind, setMutationKind] = useState<PersonaMutationKind | null>(null);
   const formatQuotes = useQuoteFormatter();
   const setEditorDirty = useUIStore((s) => s.setEditorDirty);
+  const [showUnsavedWarning, setShowUnsavedWarning] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const commitFormData = useCallback((next: PersonaFormData | null) => {
+    formDataRef.current = next;
+    setFormDataState(next);
+  }, []);
+
+  const commitBaseline = useCallback((next: PersonaFormData | null) => {
+    baselineFormRef.current = next;
+    setBaselineFormState(next);
+  }, []);
+
+  // Dirty is a value comparison against the authoritative baseline, so a field
+  // edited and then reverted stops being dirty and stops being sent.
+  const changedFieldKeys = useMemo(
+    () => (formData && baselineForm ? personaFieldsDifferingFromBaseline(formData, baselineForm) : []),
+    [formData, baselineForm],
+  );
+  const dirty = changedFieldKeys.length > 0;
   useEffect(() => {
     setEditorDirty(dirty);
   }, [dirty, setEditorDirty]);
-  const [saving, setSaving] = useState(false);
-  const [showUnsavedWarning, setShowUnsavedWarning] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const mutationBusy = mutationKind !== null;
+  const saving = mutationKind === "save";
+  const avatarBusy = mutationKind === "avatar" || mutationKind === "gallery-avatar";
+
+  const beginMutation = useCallback((kind: PersonaMutationKind) => {
+    if (mutationTokenRef.current) return null;
+    const token = generateClientId();
+    mutationTokenRef.current = token;
+    mutationKindRef.current = kind;
+    setMutationKind(kind);
+    return token;
+  }, []);
+
+  const finishMutation = useCallback((token: string) => {
+    if (mutationTokenRef.current !== token) return;
+    mutationTokenRef.current = null;
+    mutationKindRef.current = null;
+    setMutationKind(null);
+  }, []);
+
+  /** True while the completion still belongs to the mounted editor session.
+   *  Anything else may touch caches but not local state. */
+  const isCurrentEditorSession = useCallback(
+    (session: string) => editorSessionRef.current === session,
+    [],
+  );
   const imageGenerationAvailable =
     Array.isArray(connectionsList) &&
     (connectionsList as Array<{ provider?: string }>).some((connection) => connection.provider === "image_generation");
 
-  // Find the persona from the list
-  const rawPersona = (allPersonas as PersonaRow[] | undefined)?.find((p) => p.id === personaId);
+  // Find the persona from the decoded list returned by usePersonas.
+  const rawPersona = allPersonas?.find((p) => p.id === personaId);
 
-  // Parse persona into form data when it first loads (or when switching personas).
-  // Important: don't overwrite local unsaved edits if server data refetches (e.g. after avatar upload).
+  /**
+   * Reconcile an authoritative Persona into the editor: untouched fields adopt
+   * server values, local edits survive, and unchanged submitted versions force
+   * canonical response values. The authoritative form becomes the new baseline,
+   * so dirty always means "draft differs from current server truth".
+   */
+  const adoptAuthoritativePersona = useCallback(
+    (
+      persona: Persona,
+      options: {
+        submittedVersions?: ReadonlyMap<keyof PersonaFormData, number>;
+        adoptAvatar?: boolean;
+      } = {},
+    ) => {
+      const authoritative = personaFormFromPersona(persona);
+      const draft = formDataRef.current;
+      const baseline = baselineFormRef.current;
+      let nextDraft = authoritative;
+
+      if (draft && baseline) {
+        nextDraft = options.submittedVersions
+          ? reconcileVersionedPersonaEditorSave({
+              draft,
+              baseline,
+              authoritative,
+              submittedVersions: options.submittedVersions,
+              currentVersions: fieldVersionsRef.current,
+            })
+          : mergeAuthoritativePersonaEditorDraft(draft, baseline, authoritative);
+      }
+
+      if (options.adoptAvatar !== false) {
+        // Crop ownership is bound to avatar identity: when the image behind the
+        // editor changed, a crop framed against the replaced image is discarded
+        // rather than reapplied to a differently framed picture.
+        if (avatarCropOwnerRef.current !== persona.avatarPath) {
+          nextDraft = { ...nextDraft, avatarCrop: authoritative.avatarCrop };
+          fieldVersionsRef.current.delete("avatarCrop");
+          avatarCropOwnerRef.current = persona.avatarPath;
+        }
+        authoritativeAvatarPathRef.current = persona.avatarPath;
+        setAvatarPreview(persona.avatarPath);
+      }
+
+      commitBaseline(authoritative);
+      commitFormData(nextDraft);
+    },
+    [commitBaseline, commitFormData],
+  );
+
+  // Hydrate the form from the shared decoded persona. usePersonas returns projected
+  // Persona values, so structured fields are already decoded here.
+  // A Persona switch resets identity, baseline, draft, versions, and preview. A
+  // same-id refetch merges authoritative changes into untouched fields — including
+  // non-avatar fields changed by the inline editor, Tracker settings, or another
+  // client — while every locally edited field survives.
   useEffect(() => {
     if (!rawPersona) return;
 
-    const isSwitchingPersona = loadedPersonaIdRef.current !== rawPersona.id;
-    if (!isSwitchingPersona && dirty) return;
+    if (loadedPersonaIdRef.current !== rawPersona.id) {
+      const authoritative = personaFormFromPersona(rawPersona);
+      loadedPersonaIdRef.current = rawPersona.id;
+      editorSessionRef.current = generateClientId();
+      mutationTokenRef.current = null;
+      mutationKindRef.current = null;
+      setMutationKind(null);
+      fieldVersionsRef.current.clear();
+      authoritativeAvatarPathRef.current = rawPersona.avatarPath;
+      avatarCropOwnerRef.current = rawPersona.avatarPath;
+      setAvatarPreview(rawPersona.avatarPath);
+      commitBaseline(authoritative);
+      commitFormData(authoritative);
+      return;
+    }
 
-    loadedPersonaIdRef.current = rawPersona.id;
+    // An avatar/gallery replacement owns the preview and crop until it settles;
+    // an interim refetch must not flip the image back and forth underneath it.
+    const avatarOperationActive = mutationKindRef.current === "avatar" || mutationKindRef.current === "gallery-avatar";
+    const baseline = baselineFormRef.current;
+    const avatarUnchanged = authoritativeAvatarPathRef.current === rawPersona.avatarPath;
+    if (
+      baseline &&
+      avatarUnchanged &&
+      personaFieldsDifferingFromBaseline(personaFormFromPersona(rawPersona), baseline).length === 0
+    ) {
+      return;
+    }
+    adoptAuthoritativePersona(rawPersona, { adoptAvatar: !avatarOperationActive });
+  }, [rawPersona, mutationKind, adoptAuthoritativePersona, commitBaseline, commitFormData]);
 
-    // Defensive: accept either the current source-relative shape or the legacy
-    // zoom+offset shape (JSON-encoded on the persona row). Anything malformed
-    // is silently dropped so the editor falls back to defaults instead of
-    // producing NaN transforms or an off-screen overlay.
-    const parsedAvatarCrop = normalizeAvatarCrop(rawPersona.avatarCrop);
-
-    const trackerCardColors = parseTrackerCardColorConfig(rawPersona.trackerCardColors);
-    loadedTrackerCardColorsRef.current = serializeTrackerCardColorConfig(trackerCardColors);
-    setFormData({
-      name: rawPersona.name,
-      comment: rawPersona.comment ?? "",
-      phoneticName: rawPersona.phoneticName ?? "",
-      creator: rawPersona.creator ?? "",
-      personaVersion: rawPersona.personaVersion ?? "1.0",
-      creatorNotes: rawPersona.creatorNotes ?? "",
-      description: rawPersona.description,
-      personality: rawPersona.personality ?? "",
-      scenario: rawPersona.scenario ?? "",
-      backstory: rawPersona.backstory ?? "",
-      appearance: rawPersona.appearance ?? "",
-      nameColor: rawPersona.nameColor ?? "",
-      dialogueColor: rawPersona.dialogueColor ?? "",
-      boxColor: rawPersona.boxColor ?? "",
-      trackerCardColors,
-      personaStats: rawPersona.personaStats ?? "",
-      tags: (() => {
-        try {
-          return rawPersona.tags ? JSON.parse(rawPersona.tags) : [];
-        } catch {
-          return [];
-        }
-      })(),
-      savedStatusOptions: rawPersona.savedStatusOptions ?? "[]",
-      convoDisplayName: rawPersona.convoDisplayName ?? "",
-      aboutMe: rawPersona.aboutMe ?? "",
-      convoBehavior: (() => {
-        if (!rawPersona.convoBehavior?.trim()) return null;
-        try {
-          const parsed = JSON.parse(rawPersona.convoBehavior) as ConvoBehaviorConfig;
-          return parsed && typeof parsed.instruction === "string" ? parsed : null;
-        } catch {
-          return null;
-        }
-      })(),
-      avatarCrop: parsedAvatarCrop,
-    });
-    setAvatarPreview(rawPersona.avatarPath);
-    setDirty(false);
-  }, [rawPersona, dirty]);
+  // Forced teardown (unmount, or a Persona switch that never re-hydrates) drops the
+  // local identity so an in-flight completion can still update shared caches through
+  // the hooks but can no longer write this editor's state.
+  useEffect(() => {
+    return () => {
+      editorSessionRef.current = generateClientId();
+      loadedPersonaIdRef.current = null;
+      mutationTokenRef.current = null;
+      mutationKindRef.current = null;
+    };
+  }, [personaId]);
 
   const updateField = useCallback(
     <K extends keyof PersonaFormData>(key: K, value: PersonaFormData[K]) => {
+      const previous = formDataRef.current;
+      if (!previous) return;
       const nextValue = formatPersonaFieldValue(key, value, formatQuotes);
-      setFormData((prev) => (prev ? { ...prev, [key]: nextValue } : prev));
-      setDirty(true);
+      // Versions record *when* a field was edited, for save-completion ordering.
+      // Whether it is dirty is decided by comparison against the baseline.
+      fieldVersionsRef.current.set(key, (fieldVersionsRef.current.get(key) ?? 0) + 1);
+      commitFormData({ ...previous, [key]: nextValue });
     },
-    [formatQuotes],
+    [commitFormData, formatQuotes],
   );
 
-  const handleSave = async () => {
-    if (!personaId || !formData) return false;
-    setSaving(true);
+  const handleGeneratedCharacterSheet = useCallback(
+    async (dataUrl: string) => {
+      let file: File;
+      try {
+        file = dataImageUrlToFile(dataUrl, `${formData?.name || "persona"}-sheet`);
+      } catch {
+        throw new Error(localizeUi("ui.characters.charactersheet.generatedSaveFailed"));
+      }
+      const uploaded = await uploadCharacterSheet.mutateAsync([file]);
+      const image = uploaded[0];
+      if (!image) throw new Error(localizeUi("ui.characters.charactersheet.generatedSaveFailed"));
+      updateField("characterSheetImageId", image.id);
+      toast.success(localizeUi("ui.characters.charactersheet.created"));
+    },
+    [formData?.name, localizeUi, updateField, uploadCharacterSheet],
+  );
+
+  /** Resolves true when the save landed and no later draft change is still unsaved. */
+  const handleSave = useCallback(async () => {
+    const draft = formDataRef.current;
+    const baseline = baselineFormRef.current;
+    if (!personaId || !draft || !baseline) return false;
+    // Rejected locally: an empty name never reaches the network and the draft is kept.
+    if (!draft.name.trim()) {
+      toast.error(localizeUi("ui.personas.personaeditor.nameIsRequired"));
+      return false;
+    }
+
+    const submittedFields = personaFieldsDifferingFromBaseline(draft, baseline);
+    if (submittedFields.length === 0) return true;
+
+    const saveToken = beginMutation("save");
+    if (!saveToken) return false;
+    const session = editorSessionRef.current;
+    const savedPersonaId = personaId;
+    // Ordering snapshot: which fields went out, and at which edit version. Text
+    // inputs stay editable during the save, so this is what tells a later edit
+    // apart from a field the server may legitimately canonicalize.
+    const submittedVersions = new Map(submittedFields.map((key) => [key, fieldVersionsRef.current.get(key) ?? 0]));
+
     try {
-      const { tags, avatarCrop, convoBehavior, trackerCardColors, ...rest } = formData;
-      const serializedTrackerCardColors = serializeTrackerCardColorConfig(trackerCardColors);
-      const trackerCardColorsChanged = serializedTrackerCardColors !== loadedTrackerCardColorsRef.current;
-      await updatePersona.mutateAsync({
-        id: personaId,
-        ...rest,
-        tags: JSON.stringify(tags),
-        ...(trackerCardColorsChanged ? { trackerCardColors: serializedTrackerCardColors } : {}),
-        // Persist as JSON string; empty string means "no crop" so the row keeps
-        // the legacy default in render sites.
-        avatarCrop: avatarCrop ? JSON.stringify(avatarCrop) : "",
-        // convoBehavior is a JSON-string column; "" means unset.
-        convoBehavior: convoBehavior && convoBehavior.instruction?.trim() ? JSON.stringify(convoBehavior) : "",
+      const authoritativePersona = await updatePersona.mutateAsync({
+        id: savedPersonaId,
+        // Sparse by value: exactly the decoded fields that differ from the baseline.
+        ...pickPersonaUpdateFields(draft, submittedFields),
       });
-      if (trackerCardColorsChanged) loadedTrackerCardColorsRef.current = serializedTrackerCardColors;
-      setDirty(false);
-      return true;
+      if (!isCurrentEditorSession(session)) return false;
+      adoptAuthoritativePersona(authoritativePersona, { submittedVersions });
+      const remaining =
+        formDataRef.current && baselineFormRef.current
+          ? personaFieldsDifferingFromBaseline(formDataRef.current, baselineFormRef.current)
+          : [];
+      return remaining.length === 0;
     } catch (error) {
+      if (!isCurrentEditorSession(session)) return false;
       console.error("[PersonaEditor] Save failed:", error);
-      toast.error(error instanceof Error ? error.message : localizeUi("ui.personas.personaeditor.failedToSavePersona"));
+      toast.error(formatFirstApiValidationIssue(error, localizeUi("ui.personas.personaeditor.failedToSavePersona")));
       return false;
     } finally {
-      setSaving(false);
+      finishMutation(saveToken);
     }
-  };
+  }, [
+    adoptAuthoritativePersona,
+    beginMutation,
+    finishMutation,
+    isCurrentEditorSession,
+    localizeUi,
+    personaId,
+    updatePersona,
+  ]);
 
-  const handleAvatarUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  /**
+   * Replace the Persona avatar from an already-read data URL. The caller owns the
+   * mutex token; this owns the optimistic preview, the crop hand-off, and the
+   * reconciliation of the authoritative Persona the upload route returns.
+   */
+  const replaceAvatar = useCallback(
+    async ({
+      avatar,
+      filename,
+      operationToken,
+      uploadPersonaId,
+      session,
+      previousAvatarPreview,
+      previousAvatarCrop,
+    }: {
+      avatar: string;
+      filename: string;
+      operationToken: string;
+      uploadPersonaId: string;
+      session: string;
+      previousAvatarPreview: string | null;
+      previousAvatarCrop: AvatarCrop | null;
+    }) => {
+      const stillCurrent = () =>
+        isCurrentEditorSession(session) && mutationTokenRef.current === operationToken;
+      if (!stillCurrent()) return false;
+
+      // The pending image is its own crop owner, so the incoming picture is never
+      // framed with the replaced image's crop.
+      avatarCropOwnerRef.current = operationToken;
+      setAvatarPreview(avatar);
+      updateField("avatarCrop", null);
+      const clearedCropVersion = fieldVersionsRef.current.get("avatarCrop");
+
+      try {
+        const authoritativePersona = await uploadAvatar.mutateAsync({ id: uploadPersonaId, avatar, filename });
+        if (!stillCurrent()) return false;
+        // Adopt the authoritative avatar path and the crop the server cleared for
+        // the new image, while every unrelated dirty field stays dirty.
+        adoptAuthoritativePersona(authoritativePersona, { adoptAvatar: true });
+        return true;
+      } catch (error) {
+        // Roll back only when nothing newer superseded this operation.
+        if (stillCurrent() && fieldVersionsRef.current.get("avatarCrop") === clearedCropVersion) {
+          const draft = formDataRef.current;
+          avatarCropOwnerRef.current = authoritativeAvatarPathRef.current;
+          setAvatarPreview(previousAvatarPreview);
+          if (draft) commitFormData({ ...draft, avatarCrop: previousAvatarCrop });
+        }
+        throw error;
+      }
+    },
+    [adoptAuthoritativePersona, commitFormData, isCurrentEditorSession, updateField, uploadAvatar],
+  );
+
+  const handleAvatarUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = "";
     if (!file || !personaId) return;
+    // Reserved before the asynchronous file read starts, not after it resolves:
+    // the editor must already read as busy while the picture is being decoded.
+    const mutationToken = beginMutation("avatar");
+    if (!mutationToken) return;
 
-    const uploadToken = generateClientId();
-    latestAvatarUploadTokenRef.current = uploadToken;
-    const fallbackAvatarPath = rawPersona?.avatarPath ?? null;
-    // Capture the saved crop so we can revert if the upload fails. The new image
-    // almost certainly has different framing/dimensions, so the old normalized
-    // crop coords are meaningless for it — clear immediately on upload start
-    // and let the cropper re-init from default centered max-square.
-    const fallbackAvatarCrop = formData?.avatarCrop ?? null;
+    const uploadPersonaId = personaId;
+    const session = editorSessionRef.current;
+    const fallbackAvatarPreview = avatarPreview;
+    const fallbackAvatarCrop = formDataRef.current?.avatarCrop ?? null;
 
     const reader = new FileReader();
-    reader.onload = async () => {
-      if (latestAvatarUploadTokenRef.current !== uploadToken) return;
-      const dataUrl = reader.result as string;
-      setAvatarPreview(dataUrl);
-      updateField("avatarCrop", null);
-      try {
-        await uploadAvatar.mutateAsync({
-          id: personaId,
-          avatar: dataUrl,
-          filename: `persona-${personaId}-${Date.now()}.${file.name.split(".").pop()}`,
-        });
-      } catch {
-        if (latestAvatarUploadTokenRef.current !== uploadToken) return;
-        setAvatarPreview(fallbackAvatarPath);
-        updateField("avatarCrop", fallbackAvatarCrop);
+    reader.onload = () => {
+      void replaceAvatar({
+        avatar: reader.result as string,
+        filename: `persona-${uploadPersonaId}-${Date.now()}.${file.name.split(".").pop()}`,
+        operationToken: mutationToken,
+        uploadPersonaId,
+        session,
+        previousAvatarPreview: fallbackAvatarPreview,
+        previousAvatarCrop: fallbackAvatarCrop,
+      })
+        .catch((error: unknown) => {
+          if (!isCurrentEditorSession(session)) return;
+          toast.error(
+            formatFirstApiValidationIssue(error, localizeUi("ui.personas.personaeditor.failedToSavePersona")),
+          );
+        })
+        .finally(() => finishMutation(mutationToken));
+    };
+    reader.onerror = () => {
+      if (isCurrentEditorSession(session)) {
+        toast.error(localizeUi("ui.personas.personaeditor.failedToSavePersona"));
       }
+      finishMutation(mutationToken);
     };
     reader.readAsDataURL(file);
-    e.target.value = "";
   };
 
   const handleGeneratedAvatar = useCallback(
     async (avatarDataUrl: string) => {
       if (!personaId) return;
-      const uploadToken = generateClientId();
-      latestAvatarUploadTokenRef.current = uploadToken;
-      setAvatarPreview(avatarDataUrl);
-      // Same rationale as handleAvatarUpload — a freshly generated avatar
-      // shouldn't inherit the prior image's crop coords.
-      updateField("avatarCrop", null);
-      await uploadAvatar.mutateAsync({
-        id: personaId,
-        avatar: avatarDataUrl,
-        filename: `persona-${personaId}-${Date.now()}.png`,
-      });
-      toast.success(localizeUi("ui.personas.personaeditor.personaAvatarGenerated"));
+      const mutationToken = beginMutation("avatar");
+      // The generator modal can outlive the click that opened it, so a write that
+      // started meanwhile is reported instead of silently dropping the picture.
+      if (!mutationToken) throw new Error(localizeUi("ui.personas.personaeditor.failedToSavePersona"));
+      const uploadPersonaId = personaId;
+      const session = editorSessionRef.current;
+      try {
+        const replaced = await replaceAvatar({
+          avatar: avatarDataUrl,
+          filename: `persona-${uploadPersonaId}-${Date.now()}.png`,
+          operationToken: mutationToken,
+          uploadPersonaId,
+          session,
+          previousAvatarPreview: avatarPreview,
+          previousAvatarCrop: formDataRef.current?.avatarCrop ?? null,
+        });
+        if (replaced) toast.success(localizeUi("ui.personas.personaeditor.personaAvatarGenerated"));
+      } finally {
+        finishMutation(mutationToken);
+      }
     },
-    [personaId, updateField, uploadAvatar, localizeUi],
+    [avatarPreview, beginMutation, finishMutation, localizeUi, personaId, replaceAvatar],
+  );
+
+  /** Assigning a gallery image replaces the avatar, so it shares the editor mutex
+   *  and reconciles the same way an upload does. */
+  const handleSetGalleryAvatar = useCallback(
+    (image: PersonaGalleryImage) => {
+      if (!personaId) return;
+      const mutationToken = beginMutation("gallery-avatar");
+      if (!mutationToken) return;
+      const session = editorSessionRef.current;
+      // The assigned image becomes the crop owner; an old dirty crop is dropped
+      // rather than reapplied to the newly assigned picture.
+      avatarCropOwnerRef.current = mutationToken;
+
+      void setGalleryImageAsAvatar
+        .mutateAsync(image.id)
+        .then((authoritativePersona) => {
+          if (!isCurrentEditorSession(session)) return;
+          if (mutationTokenRef.current !== mutationToken) return;
+          adoptAuthoritativePersona(authoritativePersona, { adoptAvatar: true });
+          toast.success(localizeUi("ui.personas.personagallerytab.personaAvatarUpdated"));
+        })
+        .catch((error: unknown) => {
+          if (!isCurrentEditorSession(session)) return;
+          if (mutationTokenRef.current === mutationToken) {
+            avatarCropOwnerRef.current = authoritativeAvatarPathRef.current;
+          }
+          toast.error(
+            formatFirstApiValidationIssue(
+              error,
+              localizeUi("ui.personas.personagallerytab.failedToUpdatePersonaAvatar"),
+            ),
+          );
+        })
+        .finally(() => finishMutation(mutationToken));
+    },
+    [
+      adoptAuthoritativePersona,
+      beginMutation,
+      finishMutation,
+      isCurrentEditorSession,
+      localizeUi,
+      personaId,
+      setGalleryImageAsAvatar,
+    ],
   );
 
   const handleDelete = async () => {
     if (!personaId) return;
+    // Confirmation belongs to the currently loaded Persona epoch, not whichever
+    // Persona happens to occupy this reused editor when the dialog later settles.
+    const deletedPersonaId = personaId;
+    const session = editorSessionRef.current;
     if (
       !(await showConfirmDialog({
         title: localizeUi("ui.personas.personaeditor.deletePersona_0b2415a"),
@@ -1220,8 +1732,27 @@ export function PersonaEditor() {
     ) {
       return;
     }
-    await deletePersona.mutateAsync(personaId);
-    closeDetail();
+
+    // A programmatic navigation can replace the editor while confirmation waits.
+    // Stale confirmations silently do nothing; only the original owner may acquire
+    // Delete's immediate mutex and issue the destructive request.
+    if (!isCurrentEditorSession(session) || loadedPersonaIdRef.current !== deletedPersonaId) return;
+    const deleteToken = beginMutation("delete");
+    if (!deleteToken) return;
+    try {
+      await deletePersona.mutateAsync(deletedPersonaId);
+      if (isCurrentEditorSession(session) && loadedPersonaIdRef.current === deletedPersonaId) closeDetail();
+    } catch (error) {
+      if (!isCurrentEditorSession(session) || loadedPersonaIdRef.current !== deletedPersonaId) return;
+      console.error("[PersonaEditor] Delete failed:", error);
+      toast.error(
+        formatFirstApiValidationIssue(error, localizeUi("ui.personas.personaeditor.failedToDeletePersona")),
+      );
+    } finally {
+      // A failure retains the editor and draft; success closes once above. An old
+      // completion cannot clear a newer session's operation token.
+      finishMutation(deleteToken);
+    }
   };
 
   const getAvatarDataUrl = useCallback(async (src: string) => {
@@ -1290,18 +1821,35 @@ export function PersonaEditor() {
   }, [avatarPreview, createCharacter, formData, getAvatarDataUrl, uploadCharacterAvatar, localizeUi]);
 
   const handleClose = useCallback(() => {
-    if (dirty) {
+    // Read immediate refs so a local Back click cannot race a write or draft update.
+    if (mutationTokenRef.current) return;
+    const draft = formDataRef.current;
+    const baseline = baselineFormRef.current;
+    const dirtyNow =
+      draft !== null && baseline !== null && personaFieldsDifferingFromBaseline(draft, baseline).length > 0;
+    if (dirtyNow) {
       setShowUnsavedWarning(true);
       return;
     }
     closeDetail();
-  }, [dirty, closeDetail]);
+  }, [closeDetail]);
 
-  const forceClose = useCallback(() => {
+  const keepEditing = useCallback(() => {
     setShowUnsavedWarning(false);
-    setDirty(false);
+  }, []);
+
+  const discardAndNavigate = useCallback(() => {
+    // A write may have started after the warning opened; never discard under it.
+    if (mutationTokenRef.current) return;
     closeDetail();
   }, [closeDetail]);
+
+  const handleSaveAndClose = useCallback(async () => {
+    if (mutationTokenRef.current) return;
+    const savedAndClean = await handleSave();
+    // Only close when the save landed and no edit made during it is still unsaved.
+    if (savedAndClean && !mutationTokenRef.current) closeDetail();
+  }, [closeDetail, handleSave]);
 
   if (isLoading || !formData) {
     return (
@@ -1315,7 +1863,7 @@ export function PersonaEditor() {
   }
 
   const headerActionButtonClass = "mari-editor-action inline-flex";
-  const saveDisabled = !dirty || saving;
+  const saveDisabled = !dirty || mutationBusy;
   const saveLabel = saving ? "Saving…" : "Save";
   const saveButtonClass = cn(
     "mari-editor-action mari-editor-action--primary mari-editor-action--save inline-flex",
@@ -1375,7 +1923,8 @@ export function PersonaEditor() {
       <button
         type="button"
         onClick={handleDelete}
-        className="mari-editor-action inline-flex"
+        disabled={mutationBusy}
+        className="mari-editor-action inline-flex disabled:cursor-not-allowed disabled:opacity-50"
         title={localizeUi("ui.personas.personaeditor.deletePersona")}
       >
         <Trash2 size="1rem" />
@@ -1408,6 +1957,16 @@ export function PersonaEditor() {
         onClose={() => setAvatarGeneratorOpen(false)}
         onUseAvatar={handleGeneratedAvatar}
       />
+      <AvatarGenerationModal
+        open={characterSheetGeneratorOpen}
+        mode="character-sheet"
+        title={localizeUi("ui.characters.charactersheet.createTitle")}
+        entityName={formData.name || localizeUi("ui.characters.charactersheet.characterFallback")}
+        defaultAppearance={formData.appearance || formData.description || formData.personality}
+        defaultAvatarUrl={avatarPreview}
+        onClose={() => setCharacterSheetGeneratorOpen(false)}
+        onUseAvatar={handleGeneratedCharacterSheet}
+      />
 
       {/* ── Header ── */}
       <div className="mari-editor-header">
@@ -1415,7 +1974,8 @@ export function PersonaEditor() {
           <button
             type="button"
             onClick={handleClose}
-            className="mari-editor-action inline-flex"
+            disabled={mutationBusy}
+            className="mari-editor-action inline-flex disabled:cursor-not-allowed disabled:opacity-50"
             title={localizeUi("ui.noodle.noodlerframe.back")}
           >
             <ArrowLeft size="1.125rem" />
@@ -1426,8 +1986,11 @@ export function PersonaEditor() {
             className={cn(
               "mari-editor-avatar-tile group relative",
               !avatarPreview && "mari-avatar-placeholder mari-avatar-placeholder--persona",
+              mutationBusy && "pointer-events-none opacity-60",
             )}
-            onClick={() => fileInputRef.current?.click()}
+            onClick={() => {
+              if (!mutationBusy) fileInputRef.current?.click();
+            }}
           >
             {avatarPreview ? (
               <img
@@ -1441,7 +2004,9 @@ export function PersonaEditor() {
             )}
             <EditorAvatarTileActions
               generationAvailable={imageGenerationAvailable}
-              onGenerate={() => setAvatarGeneratorOpen(true)}
+              onGenerate={() => {
+                if (!mutationBusy) setAvatarGeneratorOpen(true);
+              }}
             />
             <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleAvatarUpload} />
           </div>
@@ -1505,26 +2070,25 @@ export function PersonaEditor() {
           </p>
           <button
             type="button"
-            onClick={() => setShowUnsavedWarning(false)}
+            onClick={keepEditing}
             className="rounded-lg px-3 py-1 text-xs font-medium text-[var(--muted-foreground)] transition-all hover:bg-[var(--accent)]"
           >
             {localizeUi("ui.personas.personaeditor.keepEditing")}
           </button>
+          {/* Blocked while a Persona write is in flight: it cannot be cancelled, so
+              "discard" would drop local state while the server still persists it. */}
           <button
             type="button"
-            onClick={forceClose}
-            className="rounded-lg bg-amber-500/15 px-3 py-1 text-xs font-medium text-amber-500 transition-all hover:bg-amber-500/25"
+            onClick={discardAndNavigate}
+            disabled={mutationBusy}
+            className="rounded-lg bg-amber-500/15 px-3 py-1 text-xs font-medium text-amber-500 transition-all hover:bg-amber-500/25 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-amber-500/15"
           >
             {localizeUi("ui.personas.personaeditor.discardClose")}
           </button>
           <button
             type="button"
-            onClick={async () => {
-              if (await handleSave()) {
-                closeDetail();
-              }
-            }}
-            disabled={saving || uploadAvatar.isPending}
+            onClick={() => void handleSaveAndClose()}
+            disabled={mutationBusy}
             className="mari-editor-action mari-editor-action--primary mari-editor-action--compact inline-flex rounded-lg px-3 py-1 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {localizeUi("ui.personas.personaeditor.saveClose")}
@@ -1545,16 +2109,19 @@ export function PersonaEditor() {
                 formData={formData}
                 updateField={updateField}
                 avatarPreview={avatarPreview}
-                onSelectAvatar={() => fileInputRef.current?.click()}
-                onGenerateAvatar={() => setAvatarGeneratorOpen(true)}
+                onSelectAvatar={() => {
+                  if (!mutationBusy) fileInputRef.current?.click();
+                }}
+                onGenerateAvatar={() => {
+                  if (!mutationBusy) setAvatarGeneratorOpen(true);
+                }}
                 imageGenerationAvailable={imageGenerationAvailable}
-                avatarUploading={uploadAvatar.isPending}
+                avatarUploading={avatarBusy}
                 hasUnsavedChanges={dirty}
+                avatarMutationBusy={mutationBusy}
               />
             )}
-            {activeTab === "card" && (
-              <PersonaCardTab formData={formData} updateField={updateField} setDirty={setDirty} />
-            )}
+            {activeTab === "card" && <PersonaCardTab formData={formData} updateField={updateField} />}
             {activeTab === "convo" && (
               // Key by the edited persona so the Convo fields' transient state resets on
               // switch — the editor reuses this instance across personas.
@@ -1577,10 +2144,21 @@ export function PersonaEditor() {
                 personaName={formData.name}
                 defaultAppearance={formData.appearance || formData.description}
                 defaultAvatarUrl={avatarPreview}
+                characterSheetImageId={formData.characterSheetImageId}
+                useCharacterSheetAsReference={formData.useCharacterSheetAsReference}
+                updateField={updateField}
+                onCreateCharacterSheet={() => setCharacterSheetGeneratorOpen(true)}
               />
             )}
             {activeTab === "gallery" && personaId && (
-              <PersonaGalleryTab personaId={personaId} personaName={formData.name} />
+              <PersonaGalleryTab
+                personaId={personaId}
+                personaName={formData.name}
+                onCreateCharacterSheet={() => setCharacterSheetGeneratorOpen(true)}
+                editorBusy={mutationBusy}
+                galleryAvatarPending={mutationKind === "gallery-avatar"}
+                onSetAvatar={handleSetGalleryAvatar}
+              />
             )}
             {activeTab === "stats" && <PersonaStatsTab formData={formData} updateField={updateField} />}
           </div>
@@ -1622,11 +2200,19 @@ function PersonaSpritesTab({
   personaName,
   defaultAppearance,
   defaultAvatarUrl,
+  characterSheetImageId,
+  useCharacterSheetAsReference,
+  updateField,
+  onCreateCharacterSheet,
 }: {
   personaId: string;
   personaName?: string;
   defaultAppearance?: string;
   defaultAvatarUrl?: string | null;
+  characterSheetImageId: string | null;
+  useCharacterSheetAsReference: boolean;
+  updateField: <K extends keyof PersonaFormData>(key: K, value: PersonaFormData[K]) => void;
+  onCreateCharacterSheet: () => void;
 }) {
   const { t: localizeUi } = useUiTranslation();
   type SpriteCategory = "expressions" | "full-body" | "clips";
@@ -1974,6 +2560,17 @@ function PersonaSpritesTab({
     [displayExpression, personaId, uploadSprite, wandCleanupSprite, localizeUi],
   );
 
+  const characterSheetSection = (
+    <PersonaCharacterSheetSection
+      personaId={personaId}
+      personaName={personaName ?? ""}
+      characterSheetImageId={characterSheetImageId}
+      useAsReference={useCharacterSheetAsReference}
+      updateField={updateField}
+      onCreateCharacterSheet={onCreateCharacterSheet}
+    />
+  );
+
   if (category === "clips") {
     return (
       <div className="space-y-6">
@@ -1982,6 +2579,8 @@ function PersonaSpritesTab({
           subtitle={localizeUi("ui.personas.personaspritestab.uploadVnStyleSpritesAndVideoCallClipsFor")}
           helpText={PERSONA_SPRITES_HELP}
         />
+
+        {characterSheetSection}
 
         {categoryTabs}
 
@@ -1997,6 +2596,8 @@ function PersonaSpritesTab({
         subtitle={localizeUi("ui.personas.personaspritestab.uploadVnStyleSpritesForYourPersonaTheseAre")}
         helpText={PERSONA_SPRITES_HELP}
       />
+
+      {characterSheetSection}
 
       {categoryTabs}
 
@@ -2542,10 +3143,6 @@ function PersonaColorsTab({
 
 // ── Persona Stats Tab ──
 
-interface PersonaStatsData extends PersonaStatsConfig {
-  rpgStats?: RPGStatsConfig;
-}
-
 const DEFAULT_RPG_STATS: RPGStatsConfig = {
   enabled: false,
   attributes: [
@@ -2560,7 +3157,7 @@ const DEFAULT_RPG_STATS: RPGStatsConfig = {
   pools: createDefaultRpgStatPools(),
 };
 
-const DEFAULT_PERSONA_STATS: PersonaStatsData = {
+const DEFAULT_PERSONA_STATS: PersonaStatsConfig = {
   enabled: false,
   bars: [
     { name: "Satiety", value: 100, max: 100, color: "#f59e0b" },
@@ -2589,18 +3186,12 @@ function PersonaStatsTab({
   updateField: <K extends keyof PersonaFormData>(key: K, value: PersonaFormData[K]) => void;
 }) {
   const { t: localizeUi } = useUiTranslation();
-  const parsed: PersonaStatsData = formData.personaStats
-    ? (() => {
-        try {
-          return JSON.parse(formData.personaStats) as PersonaStatsData;
-        } catch {
-          return DEFAULT_PERSONA_STATS;
-        }
-      })()
-    : DEFAULT_PERSONA_STATS;
+  // Form state keeps personaStats decoded (hydrated from the projected Persona);
+  // serialization happens only at the save/snapshot boundaries.
+  const parsed = formData.personaStats ?? DEFAULT_PERSONA_STATS;
 
-  const save = (next: PersonaStatsData) => {
-    updateField("personaStats", JSON.stringify(next));
+  const save = (next: PersonaStatsConfig) => {
+    updateField("personaStats", next);
   };
 
   const updateStatIcons = (statIcons: NonNullable<TrackerCardColorConfig["statIcons"]>) => {
@@ -2919,6 +3510,10 @@ function PersonaMetadataTab({
   imageGenerationAvailable,
   avatarUploading,
   hasUnsavedChanges,
+  // The editor's live save/avatar/gallery mutex. Replacing or reframing the avatar
+  // while one of those is running would race the image the server is about to
+  // return, so both entry points and the cropper follow the same busy state.
+  avatarMutationBusy,
 }: {
   personaId: string | null;
   formData: PersonaFormData;
@@ -2929,6 +3524,7 @@ function PersonaMetadataTab({
   imageGenerationAvailable: boolean;
   avatarUploading: boolean;
   hasUnsavedChanges: boolean;
+  avatarMutationBusy: boolean;
 }) {
   const { t: localizeUi } = useUiTranslation();
   const { t } = useTranslation();
@@ -2965,13 +3561,15 @@ function PersonaMetadataTab({
           {t("editor.avatar.label")}
           <HelpTooltip text={t("editor.avatar.persona.help")} />
         </span>
-        <AvatarReplaceActions
-          hasAvatar={Boolean(avatarPreview)}
-          uploading={avatarUploading}
-          generationAvailable={imageGenerationAvailable}
-          onUpload={onSelectAvatar}
-          onGenerate={onGenerateAvatar}
-        />
+        <fieldset disabled={avatarMutationBusy} className="min-w-0 border-0 p-0 disabled:opacity-60">
+          <AvatarReplaceActions
+            hasAvatar={Boolean(avatarPreview)}
+            uploading={avatarUploading}
+            generationAvailable={imageGenerationAvailable}
+            onUpload={onSelectAvatar}
+            onGenerate={onGenerateAvatar}
+          />
+        </fieldset>
       </div>
 
       {personaId && (
@@ -2998,12 +3596,20 @@ function PersonaMetadataTab({
       )}
 
       {avatarPreview && (
-        <AvatarCropWidget
-          src={avatarPreview}
-          alt={formData.name}
-          crop={formData.avatarCrop}
-          onChange={(next) => updateField("avatarCrop", next)}
-        />
+        <fieldset
+          disabled={avatarMutationBusy}
+          className="min-w-0 border-0 p-0 disabled:pointer-events-none disabled:opacity-60"
+        >
+          <AvatarCropWidget
+            src={avatarPreview}
+            alt={formData.name}
+            crop={formData.avatarCrop}
+            onChange={(next) => {
+              if (avatarMutationBusy) return;
+              updateField("avatarCrop", next);
+            }}
+          />
+        </fieldset>
       )}
 
       <div className="grid gap-4 sm:grid-cols-2">
@@ -3163,6 +3769,133 @@ function PersonaMetadataTab({
   );
 }
 
+function PersonaCharacterSheetSection({
+  personaId,
+  personaName,
+  characterSheetImageId,
+  useAsReference,
+  updateField,
+  onCreateCharacterSheet,
+}: {
+  personaId: string;
+  personaName: string;
+  characterSheetImageId: string | null;
+  useAsReference: boolean;
+  updateField: <K extends keyof PersonaFormData>(key: K, value: PersonaFormData[K]) => void;
+  onCreateCharacterSheet: () => void;
+}) {
+  const { t: localizeUi } = useUiTranslation();
+  const { data: images, isLoading } = usePersonaGalleryImages(personaId);
+  const upload = useUploadPersonaGalleryImage(personaId);
+  const selectedImage = images?.find((image) => image.id === characterSheetImageId) ?? null;
+  const selectionMissing = Boolean(characterSheetImageId && !isLoading && !selectedImage);
+
+  const handleUpload = useCallback(
+    async (files: File[]) => {
+      const file = files[0];
+      if (!file) return;
+      try {
+        const uploaded = await upload.mutateAsync([file]);
+        const image = uploaded[0];
+        if (image) updateField("characterSheetImageId", image.id);
+      } catch (error) {
+        toast.error(error instanceof Error ? error.message : localizeUi("ui.characters.charactersheet.uploadFailed"));
+      }
+    },
+    [localizeUi, updateField, upload],
+  );
+
+  const clearSelection = useCallback(() => {
+    updateField("characterSheetImageId", null);
+    updateField("useCharacterSheetAsReference", false);
+  }, [updateField]);
+
+  return (
+    <section className="space-y-6 border-t border-[var(--border)] pt-5">
+      <SectionHeader
+        title={localizeUi("ui.characters.charactersheet.title")}
+        subtitle={localizeUi("ui.characters.charactersheet.subtitle")}
+      />
+
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1.2fr)_minmax(18rem,0.8fr)]">
+        <div className="overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)]">
+          {selectedImage ? (
+            <img
+              src={selectedImage.url}
+              alt={localizeUi("ui.characters.charactersheet.previewAlt", { name: personaName })}
+              className="max-h-[32rem] w-full bg-[var(--secondary)] object-contain"
+            />
+          ) : (
+            <div className="flex min-h-64 flex-col items-center justify-center gap-3 bg-[var(--secondary)] px-6 text-center">
+              <Image size="2rem" className="text-[var(--muted-foreground)]/50" aria-hidden="true" />
+              <div>
+                <p className="text-sm font-semibold">{localizeUi("ui.characters.charactersheet.emptyTitle")}</p>
+                <p className="mt-1 text-xs text-[var(--muted-foreground)]">
+                  {localizeUi("ui.characters.charactersheet.emptyDescription")}
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="space-y-4">
+          <button
+            type="button"
+            onClick={onCreateCharacterSheet}
+            disabled={upload.isPending}
+            className="mari-editor-action mari-editor-action--primary inline-flex w-full justify-center disabled:cursor-wait disabled:opacity-60"
+          >
+            <Wand2 size="0.875rem" />
+            {localizeUi("ui.characters.charactersheet.createWithAi")}
+          </button>
+
+          <ImageUploadDropzone
+            multiple={false}
+            label={
+              selectedImage
+                ? localizeUi("ui.characters.charactersheet.replace")
+                : localizeUi("ui.characters.charactersheet.upload")
+            }
+            pending={upload.isPending}
+            pendingLabel={localizeUi("ui.characters.charactersheet.uploading")}
+            dragLabel={localizeUi("ui.characters.charactersheet.dropImage")}
+            onFilesSelected={(files) => void handleUpload(files)}
+            icon={<Upload size="1rem" />}
+            className="w-full"
+          />
+
+          <SettingsSwitch
+            label={<span className="font-medium">{localizeUi("ui.characters.charactersheet.useAsReference")}</span>}
+            description={localizeUi("ui.characters.charactersheet.useAsReferenceDescription")}
+            checked={Boolean(selectedImage) && useAsReference}
+            disabled={!selectedImage}
+            onChange={(checked) => updateField("useCharacterSheetAsReference", checked)}
+            labelPosition="start"
+            className="justify-between rounded-xl border border-[var(--border)] bg-[var(--card)] p-4"
+          />
+
+          <p className="rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-xs text-[var(--muted-foreground)]">
+            {selectedImage && useAsReference
+              ? localizeUi("ui.characters.charactersheet.activeStatus")
+              : localizeUi("ui.characters.charactersheet.avatarFallbackStatus")}
+          </p>
+
+          {(selectedImage || selectionMissing) && (
+            <button
+              type="button"
+              onClick={clearSelection}
+              className="mari-editor-action inline-flex w-full justify-center text-red-500"
+            >
+              <X size="0.875rem" />
+              {localizeUi("ui.characters.charactersheet.remove")}
+            </button>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 const PERSONA_VERSION_COMPARE_FIELDS: Array<{ key: keyof PersonaCardSnapshot; label: string }> = [
   { key: "name", label: "Name" },
   { key: "creator", label: "Creator" },
@@ -3172,6 +3905,8 @@ const PERSONA_VERSION_COMPARE_FIELDS: Array<{ key: keyof PersonaCardSnapshot; la
   { key: "scenario", label: "Scenario" },
   { key: "backstory", label: "Backstory" },
   { key: "appearance", label: "Appearance" },
+  { key: "characterSheetImageId", label: "Character Sheet" },
+  { key: "useCharacterSheetAsReference", label: "Use Character Sheet as Reference" },
   { key: "avatarCrop", label: "Avatar Crop" },
   { key: "nameColor", label: "Name Color" },
   { key: "dialogueColor", label: "Dialogue Color" },
@@ -3194,14 +3929,16 @@ function buildCurrentPersonaSnapshot(formData: PersonaFormData): PersonaCardSnap
     scenario: formData.scenario,
     backstory: formData.backstory,
     appearance: formData.appearance,
+    characterSheetImageId: formData.characterSheetImageId ?? "",
+    useCharacterSheetAsReference: String(formData.useCharacterSheetAsReference),
     avatarCrop: formData.avatarCrop ? JSON.stringify(formData.avatarCrop) : "",
     nameColor: formData.nameColor,
     dialogueColor: formData.dialogueColor,
     boxColor: formData.boxColor,
     trackerCardColors: serializeTrackerCardColorConfig(formData.trackerCardColors),
-    personaStats: formData.personaStats,
+    personaStats: formData.personaStats ? JSON.stringify(formData.personaStats) : "",
     tags: JSON.stringify(formData.tags),
-    savedStatusOptions: formData.savedStatusOptions,
+    savedStatusOptions: JSON.stringify(formData.savedStatusOptions),
     convoDisplayName: formData.convoDisplayName,
     aboutMe: formData.aboutMe,
     convoBehavior:
@@ -3591,11 +4328,9 @@ function PersonaConvoTab({
 function PersonaCardTab({
   formData,
   updateField,
-  setDirty,
 }: {
   formData: PersonaFormData;
   updateField: <K extends keyof PersonaFormData>(key: K, value: PersonaFormData[K]) => void;
-  setDirty: (v: boolean) => void;
 }) {
   const { t: localizeUi } = useUiTranslation();
   return (
@@ -3608,7 +4343,7 @@ function PersonaCardTab({
       <EditorSectionJumps items={PERSONA_CARD_SECTIONS} />
       <div className="space-y-10">
         <EditorSectionAnchor id="persona-card-description">
-          <DescriptionTab formData={formData} updateField={updateField} setDirty={setDirty} />
+          <DescriptionTab formData={formData} updateField={updateField} />
         </EditorSectionAnchor>
         <EditorSectionAnchor id="persona-card-personality">
           <TextareaTab
@@ -3684,11 +4419,9 @@ function PersonaLorebookTab({ personaId, personaName }: { personaId: string; per
 function DescriptionTab({
   formData,
   updateField,
-  setDirty: _setDirty,
 }: {
   formData: PersonaFormData;
   updateField: <K extends keyof PersonaFormData>(key: K, value: PersonaFormData[K]) => void;
-  setDirty: (v: boolean) => void;
 }) {
   const { t: localizeUi } = useUiTranslation();
   return (

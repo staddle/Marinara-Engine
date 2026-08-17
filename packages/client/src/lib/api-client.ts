@@ -109,6 +109,23 @@ export function getApiErrorMessage(value: unknown, fallback: string): string {
   return fallback;
 }
 
+/** Format the first usable Zod validation issue in an API error payload. */
+export function formatFirstApiValidationIssue(error: unknown, fallback: string): string {
+  if (error instanceof ApiError && isRecord(error.payload) && Array.isArray(error.payload.issues)) {
+    for (const issue of error.payload.issues) {
+      if (!isRecord(issue) || typeof issue.message !== "string" || !issue.message.trim()) continue;
+      const path = Array.isArray(issue.path)
+        ? issue.path.filter((segment) => typeof segment === "string" || typeof segment === "number").join(".")
+        : typeof issue.path === "string"
+          ? issue.path
+          : "";
+      return path ? `${path}: ${issue.message.trim()}` : issue.message.trim();
+    }
+  }
+  if (error instanceof Error && error.message.trim()) return error.message;
+  return fallback;
+}
+
 function getSseDataPayload(line: string): string | null {
   const normalized = line.endsWith("\r") ? line.slice(0, -1) : line;
   if (!normalized.startsWith("data:")) return null;
@@ -454,18 +471,15 @@ export const api = {
     let buffer = "";
     let completed = false;
 
-    // A backgrounded tab can leave the underlying socket half-open: after the
-    // tab resumes, reader.read() may never settle again and the stream hangs.
-    // Give a healthy stream enough time to deliver either content or the server's
-    // 15-second SSE keepalive before detaching. Disconnecting immediately on
-    // resume replaces a live typewriter with the fully persisted reply.
-    const watchResume = options?.disconnectOnResume === true && typeof document !== "undefined";
+    // A half-open socket can leave reader.read() pending forever, either after a
+    // backgrounded tab resumes or while the page remains visible. Give a healthy
+    // stream enough time to deliver content or the server's 15-second keepalive.
+    const watchPendingRead = options?.disconnectOnResume === true && typeof document !== "undefined";
     const resumeDisconnectGraceMs = Math.max(0, options?.resumeDisconnectGraceMs ?? 20_000);
-    let wasHidden = watchResume && document.visibilityState === "hidden";
     let readPending = false;
     let rejectOnResume: ((error: Error) => void) | null = null;
     let resumeDisconnectTimer: ReturnType<typeof setTimeout> | null = null;
-    const resumeDisconnect = watchResume
+    const resumeDisconnect = watchPendingRead
       ? new Promise<never>((_, reject) => {
           rejectOnResume = reject;
         })
@@ -476,7 +490,7 @@ export const api = {
       resumeDisconnectTimer = null;
     };
     const startResumeDisconnectTimer = () => {
-      if (!wasHidden || !readPending || resumeDisconnectTimer !== null) return;
+      if (!readPending || document.visibilityState !== "visible" || resumeDisconnectTimer !== null) return;
       resumeDisconnectTimer = setTimeout(() => {
         resumeDisconnectTimer = null;
         rejectOnResume?.(new StreamResumeDisconnectError());
@@ -484,19 +498,18 @@ export const api = {
     };
     const onVisibility = () => {
       if (document.visibilityState === "hidden") {
-        wasHidden = true;
         clearResumeDisconnectTimer();
       } else {
         startResumeDisconnectTimer();
       }
     };
-    if (watchResume) document.addEventListener("visibilitychange", onVisibility);
+    if (watchPendingRead) document.addEventListener("visibilitychange", onVisibility);
 
     try {
       while (true) {
         const read = reader.read();
         readPending = true;
-        if (watchResume && document.visibilityState === "visible") startResumeDisconnectTimer();
+        if (watchPendingRead) startResumeDisconnectTimer();
         let result: ReadableStreamReadResult<Uint8Array>;
         try {
           result = resumeDisconnect ? await Promise.race([read, resumeDisconnect]) : await read;
@@ -505,7 +518,6 @@ export const api = {
           clearResumeDisconnectTimer();
         }
         const { done, value } = result;
-        if (watchResume && document.visibilityState === "visible") wasHidden = false;
         if (done) {
           completed = true;
           buffer += decoder.decode();
@@ -535,7 +547,7 @@ export const api = {
         if (parsed.type === "error") return;
       }
     } finally {
-      if (watchResume) document.removeEventListener("visibilitychange", onVisibility);
+      if (watchPendingRead) document.removeEventListener("visibilitychange", onVisibility);
       clearResumeDisconnectTimer();
       await releaseSseReader(reader, completed);
     }

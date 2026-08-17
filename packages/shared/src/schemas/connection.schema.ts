@@ -2,6 +2,8 @@
 // Connection Zod Schemas
 // ──────────────────────────────────────────────
 import { z } from "zod";
+import { IMAGE_GENERATION_QUALITIES } from "../types/connection.js";
+import { MAX_IMAGE_PROMPT_INSTRUCTIONS_LENGTH } from "../constants/defaults.js";
 
 export const apiProviderSchema = z.enum([
   "openai",
@@ -16,10 +18,13 @@ export const apiProviderSchema = z.enum([
   "openrouter",
   "nanogpt",
   "xai",
+  "arli",
   "custom",
   "image_generation",
   "video_generation",
 ]);
+
+export const imageGenerationQualitySchema = z.enum(IMAGE_GENERATION_QUALITIES);
 
 export const connectionImageCaptioningDefaultsSchema = z.object({
   imageCaptioningEnabled: z.boolean().optional(),
@@ -65,6 +70,8 @@ export const createConnectionSchema = z.object({
   comfyuiWorkflow: z.string().nullable().default(null),
   imageService: z.string().nullable().default(null),
   imageEndpointId: z.string().nullable().default(null),
+  imagePromptInstructions: z.string().trim().max(MAX_IMAGE_PROMPT_INSTRUCTIONS_LENGTH).nullable().default(null),
+  imageGenerationQuality: imageGenerationQualitySchema.default("auto"),
   videoGenerationSource: z.string().nullable().default(null),
   videoService: z.string().nullable().default(null),
   promptPresetId: z.string().nullable().default(null),

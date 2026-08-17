@@ -6,29 +6,12 @@ import { Modal } from "../ui/Modal";
 import { Download, FileJson, CheckCircle, XCircle, Loader2 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { characterKeys } from "../../hooks/use-characters";
-import { api } from "../../lib/api-client";
+import { api, formatFirstApiValidationIssue } from "../../lib/api-client";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface Props {
   open: boolean;
   onClose: () => void;
-}
-
-function stringField(value: unknown) {
-  return typeof value === "string" ? value : "";
-}
-
-function firstStringField(...values: unknown[]) {
-  for (const value of values) {
-    if (typeof value === "string") return value;
-  }
-  return "";
-}
-
-function jsonStringField(value: unknown, fallback?: string) {
-  if (typeof value === "string") return value;
-  if (Array.isArray(value) || (value && typeof value === "object")) return JSON.stringify(value);
-  return fallback;
 }
 
 export function ImportPersonaModal({ open, onClose }: Props) {
@@ -97,42 +80,23 @@ export function ImportPersonaModal({ open, onClose }: Props) {
           continue;
         }
 
-        const name = typeof json.name === "string" ? json.name : "Imported Persona";
-        const data = await api.post<{ id?: string; error?: string }>("/characters/personas", {
-          name,
-          description: stringField(json.description),
-          creator: firstStringField(json.creator),
-          personaVersion: firstStringField(json.personaVersion, json.persona_version, json.character_version),
-          creatorNotes: firstStringField(json.creatorNotes, json.creator_notes),
-          personality: stringField(json.personality),
-          scenario: stringField(json.scenario),
-          backstory: stringField(json.backstory),
-          appearance: stringField(json.appearance),
-          comment: stringField(json.comment),
-          nameColor: stringField(json.nameColor),
-          dialogueColor: stringField(json.dialogueColor),
-          boxColor: stringField(json.boxColor),
-          trackerCardColors: jsonStringField(json.trackerCardColors),
-          personaStats: jsonStringField(json.personaStats, ""),
-          tags: jsonStringField(json.tags, "[]"),
-          savedStatusOptions: jsonStringField(json.savedStatusOptions, "[]"),
-          convoDisplayName: stringField(json.convoDisplayName),
-          aboutMe: stringField(json.aboutMe),
-          convoBehavior: jsonStringField(json.convoBehavior, ""),
-          avatarCrop: jsonStringField(json.avatarCrop, ""),
+        // Plain JSON uses the strict Persona-create boundary directly: known
+        // fields stay decoded and malformed input is reported by the server.
+        const persona = await api.post<{ id: string; name: string }>("/characters/personas", {
+          ...json,
           createdAt: file.lastModified,
           updatedAt: file.lastModified,
         });
         nextResults.push({
           filename: file.name,
-          success: !!data.id,
-          message: data.id ? `Imported "${name}"` : (data.error ?? "Import failed"),
+          success: true,
+          message: `Imported "${persona.name}"`,
         });
       } catch (err) {
         nextResults.push({
           filename: file.name,
           success: false,
-          message: err instanceof Error ? err.message : "Failed to parse file",
+          message: formatFirstApiValidationIssue(err, "Failed to parse file"),
         });
       }
     }

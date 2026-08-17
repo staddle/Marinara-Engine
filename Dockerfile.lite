@@ -15,7 +15,7 @@
 
 # ── Stage 1: Build ──
 # Uses wolfi-base + nodejs-24 + npm so Node ABI matches across all stages.
-FROM cgr.dev/chainguard/wolfi-base AS builder
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:07e60ff6586b56f03c625e27b604f9f7d29498fef32f099f6560f0d207b4a056 AS builder
 ARG BUILD_COMMIT
 ARG BUILD_BRANCH
 WORKDIR /app
@@ -57,7 +57,7 @@ RUN BUILD_COMMIT="$BUILD_COMMIT" BUILD_BRANCH="$BUILD_BRANCH" node -e 'const fs 
 
 # ── Stage 2: Production dependencies ──
 # Separate stage keeps builder cache warm while allowing aggressive dep stripping.
-FROM cgr.dev/chainguard/wolfi-base AS deps
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:07e60ff6586b56f03c625e27b604f9f7d29498fef32f099f6560f0d207b4a056 AS deps
 WORKDIR /app
 
 RUN apk add --no-cache nodejs-24 npm && \
@@ -94,7 +94,7 @@ RUN tar cf /tmp/node_modules.tar \
 
 # ── Stage 3: Minimal Wolfi runtime ──
 # Only the Node.js 24 binary — no npm, no build tools, no shell bloat.
-FROM cgr.dev/chainguard/wolfi-base AS production
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:07e60ff6586b56f03c625e27b604f9f7d29498fef32f099f6560f0d207b4a056 AS production
 WORKDIR /app
 
 RUN apk add --no-cache nodejs-24-minimal && \
@@ -121,6 +121,9 @@ COPY --from=builder /app/packages/server/dist packages/server/dist
 COPY --from=builder /app/packages/client/dist packages/client/dist
 COPY scripts/docker-entrypoint.mjs /usr/local/bin/marinara-docker-entrypoint.mjs
 COPY scripts/install-backgroundremover.mjs scripts/install-backgroundremover.mjs
+# The storage downgrade escape hatch (#4708) — docs/TROUBLESHOOTING.md tells
+# Docker users to run it in a one-off container, so it must ship in the image.
+COPY scripts/protect-launcher-data.mjs scripts/protect-launcher-data.mjs
 
 # User guides served by the in-app documentation viewer (/api/docs)
 COPY README.md README.md

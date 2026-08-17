@@ -10,7 +10,9 @@ export type SpotifyRuntimeAgent = ResolvedAgent & {
   __spotifyPlaybackPending?: boolean;
   __spotifyPlayUris?: string[];
   __spotifyCandidateTracks?: SpotifyRuntimeTrack[];
+  __spotifyCurrentBeforePlayUri?: string | null;
   __spotifyCurrentAfterPlayUri?: string | null;
+  __spotifyRepeatAfterPlayState?: string | null;
   __spotifyPlayDisplay?: string | null;
   __spotifyPlayReason?: string | null;
   __spotifyQueued?: number | null;
@@ -351,13 +353,29 @@ async function playSpotifyFallbackCandidates(args: {
   }
 
   const queueSize = context.chatMode === "game" ? 1 : 5;
-  const picked = candidates.tracks.slice(0, queueSize);
-  const uris = picked.map((track) => track.uri);
-  const play = await executeSpotifyAgentToolJson(
+  let picked = candidates.tracks.slice(0, queueSize);
+  let uris = picked.map((track) => track.uri);
+  let play = await executeSpotifyAgentToolJson(
     agent,
     "spotify_play",
     uris.length === 1 ? { uri: uris[0], reason } : { uris, reason },
   );
+  const activeUri = readSpotifyPlaybackTrackUri(play);
+  if (
+    play.applied !== true &&
+    play.verification === "failed" &&
+    typeof activeUri === "string" &&
+    activeUri !== uris[0] &&
+    candidates.tracks.length > 1
+  ) {
+    picked = candidates.tracks.slice(1, queueSize + 1);
+    uris = picked.map((track) => track.uri);
+    play = await executeSpotifyAgentToolJson(
+      agent,
+      "spotify_play",
+      uris.length === 1 ? { uri: uris[0], reason } : { uris, reason },
+    );
+  }
   if (play.applied !== true) {
     const playError = typeof play.error === "string" ? play.error : "Spotify play did not apply playback.";
     return { ...result, success: false, error: playError };

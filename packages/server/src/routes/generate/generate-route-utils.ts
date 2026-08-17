@@ -334,23 +334,47 @@ export function findLastIndex(messages: SimpleMessage[], role: string): number {
 
 function isLastMessagePromptBlock(content: unknown): boolean {
   if (typeof content !== "string") return false;
-  return /<\/?last_message>/i.test(content) || /(?:^|\n)\s*##\s+Last Message\s*(?:\n|$)/i.test(content);
+  const trimmed = content.trim();
+  const lowerContent = trimmed.toLowerCase();
+  if (lowerContent.startsWith("<last_message>") || lowerContent.endsWith("</last_message>")) return true;
+  const firstNewline = trimmed.indexOf("\n");
+  return isLastMessageHeadingLine(firstNewline >= 0 ? trimmed.slice(0, firstNewline) : trimmed);
+}
+
+function isLastMessageHeadingLine(line: string): boolean {
+  const heading = line.trim();
+  if (!heading.startsWith("##") || !/\s/u.test(heading[2] ?? "")) return false;
+  return heading.slice(2).trim().toLowerCase() === "last message";
 }
 
 function stripBoundaryLastMessageWrapper(content: string): string {
-  return content
-    .replace(/^\s*<last_message>\s*\n?/i, "")
-    .replace(/\n?\s*<\/last_message>\s*$/i, "")
-    .replace(/^\s*##\s+Last Message\s*\n/i, "")
-    .trim();
+  let stripped = content.trim();
+  if (stripped.toLowerCase().startsWith("<last_message>")) {
+    stripped = stripped.slice("<last_message>".length).trimStart();
+  }
+  if (stripped.toLowerCase().endsWith("</last_message>")) {
+    stripped = stripped.slice(0, -"</last_message>".length).trimEnd();
+  }
+  const firstNewline = stripped.indexOf("\n");
+  const firstLine = firstNewline >= 0 ? stripped.slice(0, firstNewline) : stripped;
+  if (isLastMessageHeadingLine(firstLine)) {
+    stripped = firstNewline >= 0 ? stripped.slice(firstNewline + 1) : "";
+  }
+  return stripped.trim();
 }
 
 function hasBoundaryChatHistoryClose(content: string): boolean {
-  return /\n?\s*<\/chat_history>\s*$/i.test(content);
+  const trimmed = content.trimEnd();
+  const closingTag = "</chat_history>";
+  return trimmed.slice(-closingTag.length).toLowerCase() === closingTag;
 }
 
 function stripBoundaryChatHistoryClose(content: string): string {
-  return content.replace(/\n?\s*<\/chat_history>\s*$/i, "").trimEnd();
+  const trimmed = content.trimEnd();
+  const closingTag = "</chat_history>";
+  return trimmed.slice(-closingTag.length).toLowerCase() === closingTag
+    ? trimmed.slice(0, -closingTag.length).trimEnd()
+    : trimmed;
 }
 
 function appendBoundaryChatHistoryClose(content: string): string {
@@ -517,7 +541,25 @@ export function getMessageHiddenFromAICharacterIds(message: { extra?: unknown })
   const value = parseExtra(message.extra).hiddenFromAICharacterIds;
   if (!Array.isArray(value)) return [];
   return Array.from(
-    new Set(value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean)),
+    new Set(
+      value
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+export function getMessageConversationStartCharacterIds(message: { extra?: unknown }): string[] {
+  const value = parseExtra(message.extra).conversationStartForCharacterIds;
+  if (!Array.isArray(value)) return [];
+  return Array.from(
+    new Set(
+      value
+        .filter((item): item is string => typeof item === "string")
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
   );
 }
 
@@ -894,7 +936,11 @@ export function shouldRestoreRegenerationCharacterTarget(
   characterIds: string[],
 ): boolean {
   const isRoleplayGroup = chatMode === "roleplay";
-  return !(isRoleplayGroup && characterIds.length > 1 && resolveGroupGenerationMode(chatMode, configuredMode) === "merged");
+  return !(
+    isRoleplayGroup &&
+    characterIds.length > 1 &&
+    resolveGroupGenerationMode(chatMode, configuredMode) === "merged"
+  );
 }
 
 export function resolvePromptCharacterIdsForTarget(
@@ -924,11 +970,7 @@ export function resolveVisibleGameStateAnchor(
     const message = messages[index]!;
     const markedSystemAnchor =
       message.role === "system" && parseExtra(message.extra).gameStateAnchor === "checkpoint_restore";
-    if (
-      (message.role !== "assistant" && !markedSystemAnchor) ||
-      typeof message.id !== "string" ||
-      !message.id
-    ) {
+    if ((message.role !== "assistant" && !markedSystemAnchor) || typeof message.id !== "string" || !message.id) {
       continue;
     }
     const swipeIndex =
@@ -1102,8 +1144,9 @@ export function parseStoredGenerationParameters(raw: unknown): StoredGenerationP
     out.customParameters = mergeCustomParameters({}, source.customParameters);
   }
   if (isPlainRecord(source.managedCustomParameters)) {
-    const managedCustomParameters =
-      generationParametersSchema.shape.managedCustomParameters.safeParse(source.managedCustomParameters);
+    const managedCustomParameters = generationParametersSchema.shape.managedCustomParameters.safeParse(
+      source.managedCustomParameters,
+    );
     if (managedCustomParameters.success) out.managedCustomParameters = managedCustomParameters.data;
   }
   if (isPlainRecord(source.enabledParameters)) {

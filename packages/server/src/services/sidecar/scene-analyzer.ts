@@ -11,6 +11,7 @@ import {
   LOCATION_KINDS,
   MUSIC_GENRES,
   MUSIC_INTENSITIES,
+  MAX_IMAGE_PROMPT_INSTRUCTIONS_LENGTH,
   type HudWidget,
   type GameNpc,
   type GameActiveState,
@@ -115,8 +116,8 @@ function buildBackgroundOptions(ctx?: SceneAnalyzerContext): string[] {
   return options;
 }
 
-function compactImagePromptInstructions(value: string | null | undefined): string {
-  return (value ?? "").trim().replace(/\s+/g, " ").slice(0, 5000);
+export function compactImagePromptInstructions(value: string | null | undefined): string {
+  return (value ?? "").trim().replace(/\s+/g, " ").slice(0, MAX_IMAGE_PROMPT_INSTRUCTIONS_LENGTH);
 }
 
 function compactPromptLabel(value: string | null | undefined): string {

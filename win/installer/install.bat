@@ -11,14 +11,14 @@ set "NODE_DOWNLOAD_URL=https://nodejs.org/dist/v24.15.0/node-v24.15.0-x64.msi"
 set "NODE_SHA256=feffb8e5cb5ac47f793666636d496ef3e975be82c84c4da5d20e6aa8fa4eb806"
 set "GIT_DOWNLOAD_URL=https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/Git-2.54.0-64-bit.exe"
 set "GIT_SHA256=2b96e7854f0520f0f6b709c21041d9801b1be44d5e1a0d9fa621b2fbc40f1983"
-set "RELEASE_TAG=v2.4.1"
+set "RELEASE_TAG=v2.4.2"
 if not defined MARINARA_RELEASE_COMMIT set "MARINARA_RELEASE_COMMIT="
 set "RELEASE_COMMIT=%MARINARA_RELEASE_COMMIT%"
 
 echo.
 echo  +==========================================+
 echo  ^|   Marinara Engine - Windows Installer     ^|
-echo  ^|   v2.4.1                                  ^|
+echo  ^|   v2.4.2                                  ^|
 
 echo  +==========================================+
 echo.
@@ -78,16 +78,17 @@ echo.
 echo  [..] Checking prerequisites...
 
 :: -- Node.js --
-where node >nul 2>&1
+node --version >nul 2>&1
 if errorlevel 1 goto :install_node
 for /f "tokens=1 delims=." %%a in ('node -v') do set "NODE_RAW=%%a"
 set "NODE_MAJOR=!NODE_RAW:v=!"
 if not defined NODE_MAJOR goto :install_node
 if !NODE_MAJOR! LSS 24 goto :install_node
+if !NODE_MAJOR! GEQ 27 goto :install_node
 goto :node_ok
 
 :install_node
-echo  [..] Node.js 24 LTS or newer not found - downloading installer...
+echo  [..] Supported Node.js 24-26 not found - downloading Node.js 24 LTS...
 set "NODE_MSI=%TEMP%\node-lts-install.msi"
 powershell -Command "try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri ""%NODE_DOWNLOAD_URL%"" -OutFile ""%NODE_MSI%"" -UseBasicParsing } catch { exit 1 }"
 if errorlevel 1 (
@@ -114,9 +115,24 @@ if errorlevel 1 (
 )
 del "%NODE_MSI%" 2>nul
 call :refresh_path
-where node >nul 2>&1
+node --version >nul 2>&1
 if errorlevel 1 (
     set "INSTALL_ERROR=Node.js installed but not found in PATH. Please restart your computer and re-run the installer."
+    goto :fatal
+)
+set "NODE_RAW="
+for /f "tokens=1 delims=." %%a in ('node -v') do set "NODE_RAW=%%a"
+set "NODE_MAJOR=!NODE_RAW:v=!"
+if not defined NODE_MAJOR (
+    set "INSTALL_ERROR=Node.js installed but its version could not be determined. Please restart your computer and re-run the installer."
+    goto :fatal
+)
+if !NODE_MAJOR! LSS 24 (
+    set "INSTALL_ERROR=Node.js installation completed, but PATH still resolves to an unsupported version. Node.js 24 through 26 is required."
+    goto :fatal
+)
+if !NODE_MAJOR! GEQ 27 (
+    set "INSTALL_ERROR=Node.js installation completed, but PATH still resolves to an unsupported version. Node.js 24 through 26 is required."
     goto :fatal
 )
 echo  [OK] Node.js installed successfully
@@ -170,24 +186,43 @@ echo  [OK] Git found
 
 :: -- Clone repository --
 echo.
+set "FRESH_CLONE_CREATED=0"
 if exist "%INSTALL_DIR%\.git" goto :update_repo
+if not exist "%INSTALL_DIR%\" set "FRESH_CLONE_CREATED=1"
 echo  [..] Cloning Marinara Engine to %INSTALL_DIR%...
 git clone --branch "%RELEASE_TAG%" --depth 1 https://github.com/Pasta-Devs/Marinara-Engine.git "%INSTALL_DIR%"
 if errorlevel 1 (
-    set "INSTALL_ERROR=Failed to clone release %RELEASE_TAG%. Check your internet connection and try again."
+    call :discard_unverified_fresh_clone
+    if exist "%INSTALL_DIR%\" (
+        set "INSTALL_ERROR=Failed to clone release %RELEASE_TAG%. The target folder was left in place; preserve any existing files before removing the incomplete checkout, then retry."
+    ) else (
+        set "INSTALL_ERROR=Failed to clone release %RELEASE_TAG%. The incomplete checkout was removed; check your internet connection and try again."
+    )
     goto :fatal
 )
 cd /d "%INSTALL_DIR%"
 set "NEW_HEAD="
 for /f "tokens=*" %%i in ('git rev-parse HEAD 2^>nul') do set "NEW_HEAD=%%i"
 if not defined NEW_HEAD (
-    set "INSTALL_ERROR=Downloaded release %RELEASE_TAG% could not be verified."
+    call :discard_unverified_fresh_clone
+    if exist "%INSTALL_DIR%\" (
+        set "INSTALL_ERROR=Downloaded release %RELEASE_TAG% could not be verified. The target folder was left untouched; choose an empty folder or preserve its files before removing the incomplete checkout, then retry."
+    ) else (
+        set "INSTALL_ERROR=Downloaded release %RELEASE_TAG% could not be verified. The incomplete checkout was removed; run the installer again."
+    )
     goto :fatal
 )
 if defined RELEASE_COMMIT if /I not "!NEW_HEAD!"=="%RELEASE_COMMIT%" (
-    echo  [WARN] Downloaded release %RELEASE_TAG% resolved to !NEW_HEAD!, not the installer-expected %RELEASE_COMMIT%.
-    echo         Continuing with the fetched release tag because hotfix tags may move.
+    set "RECEIVED_HEAD=!NEW_HEAD!"
+    call :discard_unverified_fresh_clone
+    if exist "%INSTALL_DIR%\" (
+        set "INSTALL_ERROR=Downloaded release %RELEASE_TAG% resolved to !RECEIVED_HEAD!, not the installer-expected %RELEASE_COMMIT%. The target folder was left untouched; choose an empty folder or preserve its files before removing the incomplete checkout, then retry."
+    ) else (
+        set "INSTALL_ERROR=Downloaded release %RELEASE_TAG% resolved to !RECEIVED_HEAD!, not the installer-expected %RELEASE_COMMIT%. The incomplete checkout was removed; run the installer again."
+    )
+    goto :fatal
 )
+set "FRESH_CLONE_CREATED=0"
 goto :deps
 
 :update_repo
@@ -208,8 +243,8 @@ if not defined TARGET_HEAD (
     goto :fatal
 )
 if defined RELEASE_COMMIT if /I not "!TARGET_HEAD!"=="%RELEASE_COMMIT%" (
-    echo  [WARN] Release %RELEASE_TAG% resolved to !TARGET_HEAD!, not the installer-expected %RELEASE_COMMIT%.
-    echo         Continuing with the fetched release tag because hotfix tags may move.
+    set "INSTALL_ERROR=Release %RELEASE_TAG% resolved to !TARGET_HEAD!, not the installer-expected %RELEASE_COMMIT%."
+    goto :fatal
 )
 git cat-file -e "!TARGET_HEAD!" >nul 2>&1
 if errorlevel 1 (
@@ -229,6 +264,20 @@ if errorlevel 1 (
 if /I "!OLD_HEAD!"=="!TARGET_HEAD!" (
     echo  [OK] Repository already up to date
     goto :deps
+)
+
+:: Never check out a release whose storage format predates the data on disk -
+:: it would silently show empty chat history (#4708). Exit code 2 means
+:: "blocked"; exit code 1 can also come from an older checkout whose script
+:: predates the check-target subcommand, and must not break a legitimate
+:: upgrade, so only errorlevel 2 stops the install.
+node scripts\protect-launcher-data.mjs check-target "!TARGET_HEAD!"
+if errorlevel 2 (
+    set "INSTALL_ERROR=Release %RELEASE_TAG% is older than your data's storage format. Install a newer release, or see docs/TROUBLESHOOTING.md (Chats show no messages after switching to an older version)."
+    goto :fatal
+)
+if errorlevel 1 (
+    echo  [WARN] Could not verify the release's storage format; continuing with the install.
 )
 
 set "STASHED=0"
@@ -438,6 +487,14 @@ if errorlevel 1 (
     goto :eof
 )
 git stash drop -q "!STASH_REF!" >nul 2>&1
+goto :eof
+
+:discard_unverified_fresh_clone
+if not "!FRESH_CLONE_CREATED!"=="1" goto :eof
+cd /d "%TEMP%"
+rmdir /s /q "%INSTALL_DIR%" 2>nul
+if exist "%INSTALL_DIR%\" goto :eof
+set "FRESH_CLONE_CREATED=0"
 goto :eof
 
 :: -- Fatal error handler: always visible, never silent --

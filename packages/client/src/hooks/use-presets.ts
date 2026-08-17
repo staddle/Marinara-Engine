@@ -24,6 +24,21 @@ function mutationErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
 }
 
+const pendingPresetDuplicates = new Map<string, Promise<PromptPreset>>();
+
+export function duplicatePresetOnce(id: string): Promise<PromptPreset> {
+  const pending = pendingPresetDuplicates.get(id);
+  if (pending) return pending;
+
+  const request = api.post<PromptPreset>(`/prompts/${id}/duplicate`);
+  pendingPresetDuplicates.set(id, request);
+  void request.then(
+    () => pendingPresetDuplicates.delete(id),
+    () => pendingPresetDuplicates.delete(id),
+  );
+  return request;
+}
+
 // ═══════════════════════════════════════════════
 //  Presets
 // ═══════════════════════════════════════════════
@@ -77,6 +92,20 @@ export function useUpdatePreset() {
   });
 }
 
+export function useUploadPresetImage() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, image }: { id: string; image: string }) =>
+      api.post<PromptPreset>(`/prompts/${id}/image`, { image }),
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: presetKeys.list() });
+      qc.invalidateQueries({ queryKey: presetKeys.detail(variables.id) });
+      qc.invalidateQueries({ queryKey: presetKeys.full(variables.id) });
+      qc.invalidateQueries({ queryKey: presetKeys.default() });
+    },
+  });
+}
+
 export function useDeletePreset() {
   const qc = useQueryClient();
   return useMutation({
@@ -90,7 +119,7 @@ export function useDeletePreset() {
 export function useDuplicatePreset() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => api.post<PromptPreset>(`/prompts/${id}/duplicate`),
+    mutationFn: duplicatePresetOnce,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: presetKeys.list() });
     },

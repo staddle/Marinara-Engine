@@ -29,6 +29,7 @@ export type LocalSidecarGenerationConnection = {
   comfyuiWorkflow: null;
   imageService: null;
   imageEndpointId: null;
+  imageGenerationQuality: "auto";
   defaultParameters: null;
   promptPresetId: null;
   maxTokensOverride: null;
@@ -69,10 +70,11 @@ export function createLocalSidecarGenerationConnection(): LocalSidecarGeneration
     comfyuiWorkflow: null,
     imageService: null,
     imageEndpointId: null,
+    imageGenerationQuality: "auto",
     defaultParameters: null,
     promptPresetId: null,
     maxTokensOverride: null,
-    maxParallelJobs: 1,
+    maxParallelJobs: config.maxParallelJobs,
     treatAsLocalEndpoint: "true",
     claudeFastMode: "false",
     folderId: null,

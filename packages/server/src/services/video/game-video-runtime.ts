@@ -26,6 +26,7 @@ const DEFAULT_ATLAS_CLOUD_VIDEO_BASE_URL = "https://api.atlascloud.ai/api/v1";
 const DEFAULT_SEEDANCE_VIDEO_MODEL = "seedance-2-0";
 const DEFAULT_SEEDANCE_VIDEO_BASE_URL = "https://api.seedance2.ai";
 const DEFAULT_COMFYUI_VIDEO_BASE_URL = "http://127.0.0.1:8188";
+const DEFAULT_SWARMUI_VIDEO_BASE_URL = "http://127.0.0.1:7801";
 
 interface VideoRuntimeConnection {
   baseUrl?: string | null;
@@ -92,16 +93,19 @@ export function resolveGameVideoRuntime(connection: VideoRuntimeConnection): Gam
       : inferVideoSource(connection.model || "", connection.baseUrl || ""));
   const rawServiceHint = connection.videoService || source;
   const serviceHint =
-    rawServiceHint === "google_ai_studio"
-      ? inferVideoSource(connection.model || "", connection.baseUrl || "")
-      : rawServiceHint;
+    source === "swarmui"
+      ? "swarmui"
+      : rawServiceHint === "google_ai_studio"
+        ? inferVideoSource(connection.model || "", connection.baseUrl || "")
+        : rawServiceHint;
   const isXai = source === "xai" || serviceHint === "xai";
   const isGeminiOmni = source === "gemini_omni" || serviceHint === "gemini_omni";
   const isGoogleVeo = source === "google_veo" || serviceHint === "google_veo";
   const isOpenRouter = source === "openrouter" || serviceHint === "openrouter";
   const isAtlas = source === "atlas" || serviceHint === "atlas";
   const isSeedance = source === "seedance" || serviceHint === "seedance";
-  const isComfyUi = source === "comfyui" || serviceHint === "comfyui";
+  const isSwarmUi = source === "swarmui" || serviceHint === "swarmui";
+  const isComfyUi = source === "comfyui" || serviceHint === "comfyui" || isSwarmUi;
   const activeDefaults = isXai
     ? videoDefaults.xai
     : isGoogleVeo
@@ -144,9 +148,11 @@ export function resolveGameVideoRuntime(connection: VideoRuntimeConnection): Gam
               ? DEFAULT_ATLAS_CLOUD_VIDEO_BASE_URL
               : isSeedance
                 ? DEFAULT_SEEDANCE_VIDEO_BASE_URL
-                : isComfyUi
-                  ? DEFAULT_COMFYUI_VIDEO_BASE_URL
-                  : DEFAULT_GEMINI_OMNI_BASE_URL),
+                : isSwarmUi
+                  ? DEFAULT_SWARMUI_VIDEO_BASE_URL
+                  : isComfyUi
+                    ? DEFAULT_COMFYUI_VIDEO_BASE_URL
+                    : DEFAULT_GEMINI_OMNI_BASE_URL),
     apiKey: connection.apiKey || "",
     model:
       connection.model ||

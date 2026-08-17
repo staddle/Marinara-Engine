@@ -3,9 +3,10 @@
 // ──────────────────────────────────────────────
 import type { FastifyInstance } from "fastify";
 import { existsSync, mkdirSync, writeFileSync } from "fs";
-import { join, extname } from "path";
+import { join } from "path";
 import { DATA_DIR } from "../utils/data-dir.js";
 import { assertInsideDir, isAllowedImageBuffer } from "../utils/security.js";
+import { sendValidatedMediaFile, validateImageAssetFile } from "../utils/media-file-security.js";
 import { npcAvatarSlug } from "../services/game/npc-avatar-utils.js";
 
 const AVATAR_DIR = join(DATA_DIR, "avatars");
@@ -16,15 +17,6 @@ function ensureDir() {
     mkdirSync(AVATAR_DIR, { recursive: true });
   }
 }
-
-const MIME_MAP: Record<string, string> = {
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".png": "image/png",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-  ".avif": "image/avif",
-};
 
 function isValidFilename(name: string): boolean {
   return !name.includes("..") && !name.includes("/") && !name.includes("\\");
@@ -45,13 +37,13 @@ export async function avatarsRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "Not found" });
     }
 
-    const ext = extname(filename).toLowerCase();
-    const { createReadStream } = await import("fs");
-    const stream = createReadStream(filePath);
-    return reply
-      .header("Content-Type", MIME_MAP[ext] ?? "application/octet-stream")
-      .header("Cache-Control", "public, max-age=31536000, immutable")
-      .send(stream);
+    const image = await validateImageAssetFile(filePath, filename);
+    if (!image) return reply.status(404).send({ error: "Not found" });
+    return sendValidatedMediaFile(reply, image, {
+      method: req.method,
+      rangeHeader: req.headers.range,
+      cacheControl: "public, max-age=31536000, immutable",
+    });
   });
 
   /** Serve an NPC avatar image by chatId and filename. */
@@ -67,13 +59,13 @@ export async function avatarsRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "Not found" });
     }
 
-    const ext = extname(filename).toLowerCase();
-    const { createReadStream } = await import("fs");
-    const stream = createReadStream(filePath);
-    return reply
-      .header("Content-Type", MIME_MAP[ext] ?? "application/octet-stream")
-      .header("Cache-Control", "public, max-age=604800")
-      .send(stream);
+    const image = await validateImageAssetFile(filePath, filename);
+    if (!image) return reply.status(404).send({ error: "Not found" });
+    return sendValidatedMediaFile(reply, image, {
+      method: req.method,
+      rangeHeader: req.headers.range,
+      cacheControl: "public, max-age=604800",
+    });
   });
 
   /** Upload an NPC avatar (base64 data URL). */

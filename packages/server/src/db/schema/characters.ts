@@ -11,6 +11,8 @@ export const characters = fileTable("characters", {
   comment: text("comment").notNull().default(""),
   avatarPath: text("avatar_path"),
   spriteFolderPath: text("sprite_folder_path"),
+  /** Pre-computed semantic embedding (JSON float[]), null until vectorized (#4768) */
+  embedding: text("embedding"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
@@ -33,6 +35,12 @@ export const characterCardVersions = fileTable("character_card_versions", {
   createdAt: text("created_at").notNull(),
 });
 
+/**
+ * Storage-only Persona representation. JSON-backed fields and booleans remain
+ * serialized text intentionally; do not cast these rows to the shared Persona
+ * type. Public API responses must pass through `projectPersona()` in
+ * `services/personas/persona-projector.ts`.
+ */
 export const personas = fileTable("personas", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
@@ -52,6 +60,10 @@ export const personas = fileTable("personas", {
   backstory: text("backstory").notNull().default(""),
   appearance: text("appearance").notNull().default(""),
   avatarPath: text("avatar_path"),
+  /** Persona gallery image selected as the optional visual identity sheet. */
+  characterSheetImageId: text("character_sheet_image_id"),
+  /** Whether image generation should prefer the selected sheet over the avatar. */
+  useCharacterSheetAsReference: text("use_character_sheet_as_reference").notNull().default("false"),
   /** Avatar zoom/position settings (JSON of { zoom, offsetX, offsetY, fullImage? }). Empty string = unset. */
   avatarCrop: text("avatar_crop").notNull().default(""),
   isActive: text("is_active").notNull().default("false"),
@@ -75,6 +87,8 @@ export const personas = fileTable("personas", {
   aboutMe: text("about_me").notNull().default(""),
   /** Conversation mode ONLY: behavior directive + insertion strategy (JSON, empty = unset) */
   convoBehavior: text("convo_behavior").notNull().default(""),
+  /** Pre-computed semantic embedding (JSON float[]), null until vectorized (#4768) */
+  embedding: text("embedding"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });

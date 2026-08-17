@@ -33,12 +33,15 @@ import {
 import { handleFolderRenameKeyDown, useFolderRenameGesture } from "../../hooks/use-folder-rename-gesture";
 import { useTouchFolderDrag } from "../../hooks/use-touch-folder-drag";
 import { useAgentConfigs, useCreateAgent, useUpdateAgent } from "../../hooks/use-agents";
-import { useInstalledCapabilityPackages } from "../../hooks/use-capability-packages";
+import {
+  selectVisibleTrackerCapabilityAgents,
+  useCapabilityAgentRegistry,
+  useInstalledCapabilityPackages,
+} from "../../hooks/use-capability-packages";
 import { useChatStore } from "../../stores/chat.store";
 import { useUIStore, type ConnectionPanelSort } from "../../stores/ui.store";
 import { GEMMA_RESTART_MESSAGE, useSidecarStore } from "../../stores/sidecar.store";
 import {
-  BUILT_IN_AGENTS,
   LOCAL_SIDECAR_CONNECTION_ID,
   getDefaultAgentPrompt,
   type ConnectionFolder,
@@ -118,6 +121,7 @@ const PROVIDER_COLORS: Record<string, { from: string; to: string; ring: string; 
   openrouter: CONNECTION_ICON_COLORS,
   nanogpt: CONNECTION_ICON_COLORS,
   xai: CONNECTION_ICON_COLORS,
+  arli: CONNECTION_ICON_COLORS,
   custom: CONNECTION_ICON_COLORS,
   image_generation: CONNECTION_ICON_COLORS,
   video_generation: CONNECTION_ICON_COLORS,
@@ -199,6 +203,7 @@ function getDroppedConnectionIds(event: DragEvent<HTMLElement>, fallbackId: stri
 function SidecarCard() {
   const { t: localizeUi } = useUiTranslation();
   const { data: agentConfigs } = useAgentConfigs();
+  const { data: capabilityAgents } = useCapabilityAgentRegistry();
   const { data: installedCapabilityPackages } = useInstalledCapabilityPackages();
   const createAgent = useCreateAgent();
   const updateAgentConnection = useUpdateAgent();
@@ -250,8 +255,8 @@ function SidecarCard() {
   const nativeToolLabel =
     config.backend === "llama_cpp" ? ` • Native tools ${config.enableNativeToolCalls ? "on" : "off"}` : "";
   const trackerAgents = useMemo(
-    () => BUILT_IN_AGENTS.filter((agent) => agent.category === "tracker" && !agent.libraryHidden),
-    [],
+    () => selectVisibleTrackerCapabilityAgents(capabilityAgents),
+    [capabilityAgents],
   );
   const trackerLocalCount = useMemo(() => {
     const configs = (agentConfigs ?? []) as Array<{ type: string; connectionId: string | null }>;

@@ -8,6 +8,13 @@ import {
   getFolderManifestConfig,
   isJsonRecord,
   characterDataSchema,
+  canonicalizeLegacyPersonaInput,
+  normalizeAvatarCrop,
+  normalizeConvoBehavior,
+  normalizePersonaStats,
+  normalizePersonaStringArray,
+  normalizeTrackerCardColorConfig,
+  personaCreateInputSchema,
   lorebookFilterModeSchema,
 } from "@marinara-engine/shared";
 import type {
@@ -19,6 +26,7 @@ import type {
 } from "@marinara-engine/shared";
 import { createCharactersStorage } from "../storage/characters.storage.js";
 import { createCharacterGalleryStorage } from "../storage/character-gallery.storage.js";
+import { createPersonaGalleryStorage } from "../storage/persona-gallery.storage.js";
 import { createLorebooksStorage } from "../storage/lorebooks.storage.js";
 import { createPromptsStorage } from "../storage/prompts.storage.js";
 import { normalizeTimestampOverrides, type TimestampOverrides } from "./import-timestamps.js";
@@ -27,6 +35,9 @@ import { access, mkdir, writeFile } from "fs/promises";
 import { join } from "path";
 import { DATA_DIR } from "../../utils/data-dir.js";
 import { assertInsideDir, extensionFromImageMime, isAllowedImageBuffer } from "../../utils/security.js";
+import { logger } from "../../lib/logger.js";
+import { removeUnattachedAvatarFile } from "../image/avatar-file-lifecycle.js";
+import { encodePersonaCreate } from "../personas/persona-projector.js";
 
 function resolveNativeSelectiveLogic(value: unknown): "and" | "and_all" | "or" | "not" | "not_all" {
   return value === "and_all" || value === "or" || value === "not" || value === "not_all" ? value : "and";
@@ -81,19 +92,32 @@ function decodeImageDataUrl(dataUrl: unknown): { buffer: Buffer; ext: string } |
   return { buffer, ext: extensionFromImageMime(info.mimeType) };
 }
 
+interface SavedAvatar {
+  avatarPath: string;
+  filePath: string;
+}
+
 // Decode an `avatar` data URL carried in a native export, validate it as a
-// real image, write it under data/avatars/, and return the URL path the row
-// should store. Returns null on any failure so the import still succeeds
-// without an avatar rather than 500-ing.
-async function saveAvatarFromDataUrl(dataUrl: unknown, prefix: string, id: string): Promise<string | null> {
+// real image, and write it under data/avatars/. The filesystem path lets a
+// caller remove the file if attaching it to the imported row fails.
+async function saveAvatarFromDataUrl(dataUrl: unknown, prefix: string, id: string): Promise<SavedAvatar | null> {
+  if (dataUrl === undefined || dataUrl === null || dataUrl === "") return null;
   const decoded = decodeImageDataUrl(dataUrl);
-  if (!decoded) return null;
+  if (!decoded) {
+    logger.warn("Skipped invalid %s avatar data for %s", prefix, id);
+    return null;
+  }
   const avatarsDir = join(DATA_DIR, "avatars");
   await mkdir(avatarsDir, { recursive: true });
   const filename = `${prefix}-${id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${decoded.ext}`;
   const filepath = assertInsideDir(avatarsDir, join(avatarsDir, filename));
-  await writeFile(filepath, decoded.buffer);
-  return `/api/avatars/file/${filename}`;
+  try {
+    await writeFile(filepath, decoded.buffer);
+  } catch (error) {
+    await removeUnattachedAvatarFile({ filePath: filepath });
+    throw error;
+  }
+  return { avatarPath: `/api/avatars/file/${filename}`, filePath: filepath };
 }
 
 function readLorebookScope(value: unknown): { mode: "all" | "disabled" | "specific"; chatIds: string[] } {
@@ -111,18 +135,29 @@ function readLorebookScope(value: unknown): { mode: "all" | "disabled" | "specif
 // just an expression stem + an extension matching the actual image bytes, so
 // a malicious export can't traverse out of the sprites dir.
 async function restoreSprites(sprites: unknown, id: string): Promise<void> {
-  if (!Array.isArray(sprites) || sprites.length === 0) return;
+  if (sprites === undefined || sprites === null) return;
+  if (!Array.isArray(sprites)) {
+    logger.warn("Skipped invalid sprite collection for %s", id);
+    return;
+  }
+  if (sprites.length === 0) return;
   const dir = join(DATA_DIR, "sprites", id);
   await mkdir(dir, { recursive: true });
   // Track names we've already written this batch so two exported sprites
   // whose stems sanitize to the same string (e.g. "happy!" and "happy?" both
   // collapsing to "happy_") don't silently overwrite each other.
   const usedNames = new Set<string>();
-  for (const sprite of sprites) {
-    if (!sprite || typeof sprite !== "object") continue;
+  for (const [index, sprite] of sprites.entries()) {
+    if (!sprite || typeof sprite !== "object") {
+      logger.warn("Skipped invalid sprite entry %d for %s", index, id);
+      continue;
+    }
     const entry = sprite as Record<string, unknown>;
     const decoded = decodeImageDataUrl(entry.data);
-    if (!decoded) continue;
+    if (!decoded) {
+      logger.warn("Skipped sprite %d with invalid image data for %s", index, id);
+      continue;
+    }
     const rawName = typeof entry.filename === "string" ? entry.filename : "";
     const stem =
       rawName
@@ -142,24 +177,32 @@ async function restoreSprites(sprites: unknown, id: string): Promise<void> {
     try {
       const filepath = assertInsideDir(dir, join(dir, safeName));
       await writeFile(filepath, decoded.buffer);
-    } catch {
-      // skip this sprite
+    } catch (err) {
+      logger.warn(err, "Failed to restore sprite %d for %s", index, id);
     }
   }
 }
 
 // Restore gallery images embedded as
 // [{ filename, data, prompt, provider, model, width, height }, ...]
-// in a native character export. Writes the binary under
-// data/gallery/characters/<id>/ and creates a matching row in
-// character_images so the gallery panel can find each shot.
-async function restoreCharacterGallery(
+// in a native character or persona export. Writes each binary under the
+// owner's gallery folder and creates a matching metadata row.
+async function restoreOwnerGallery(
   gallery: unknown,
-  characterId: string,
-  galleryStorage: ReturnType<typeof createCharacterGalleryStorage>,
-): Promise<void> {
-  if (!Array.isArray(gallery) || gallery.length === 0) return;
-  const dir = join(DATA_DIR, "gallery", "characters", characterId);
+  ownerId: string,
+  ownerFolder: "characters" | "personas",
+  createImage: (input: {
+    filePath: string;
+    prompt: string;
+    provider: string;
+    model: string;
+    width?: number;
+    height?: number;
+  }) => Promise<{ id: string } | null>,
+): Promise<string | null> {
+  if (!Array.isArray(gallery) || gallery.length === 0) return null;
+  let characterSheetImageId: string | null = null;
+  const dir = join(DATA_DIR, "gallery", ownerFolder, ownerId);
   await mkdir(dir, { recursive: true });
   for (const item of gallery) {
     if (!item || typeof item !== "object") continue;
@@ -208,19 +251,38 @@ async function restoreCharacterGallery(
     try {
       const filepath = assertInsideDir(dir, join(dir, safeFilename));
       await writeFile(filepath, decoded.buffer);
-      await galleryStorage.create({
-        characterId,
-        filePath: `characters/${characterId}/${safeFilename}`,
+      const restored = await createImage({
+        filePath: `${ownerFolder}/${ownerId}/${safeFilename}`,
         prompt: typeof entry.prompt === "string" ? entry.prompt : "",
         provider: typeof entry.provider === "string" ? entry.provider : "",
         model: typeof entry.model === "string" ? entry.model : "",
         width: typeof entry.width === "number" ? entry.width : undefined,
         height: typeof entry.height === "number" ? entry.height : undefined,
       });
+      if (entry.isCharacterSheet === true && restored) characterSheetImageId = restored.id;
     } catch {
       // skip this image
     }
   }
+  return characterSheetImageId;
+}
+
+function restoreCharacterGallery(
+  gallery: unknown,
+  characterId: string,
+  galleryStorage: ReturnType<typeof createCharacterGalleryStorage>,
+) {
+  return restoreOwnerGallery(gallery, characterId, "characters", (input) =>
+    galleryStorage.create({ characterId, ...input }),
+  );
+}
+
+function restorePersonaGallery(
+  gallery: unknown,
+  personaId: string,
+  galleryStorage: ReturnType<typeof createPersonaGalleryStorage>,
+) {
+  return restoreOwnerGallery(gallery, personaId, "personas", (input) => galleryStorage.create({ personaId, ...input }));
 }
 
 function readTimestampOverrides(value: unknown): TimestampOverrides | undefined {
@@ -344,6 +406,10 @@ async function importCharacter(data: unknown, db: DB) {
     charData.extensions && typeof charData.extensions === "object"
       ? ({ ...(charData.extensions as Record<string, unknown>) } as Record<string, unknown>)
       : {};
+  const useCharacterSheetAsReference = extensions.useCharacterSheetAsReference === true;
+  delete extensions.characterSheetImageId;
+  extensions.useCharacterSheetAsReference = false;
+  charData.extensions = extensions;
   const existingImportMetadata =
     extensions.importMetadata && typeof extensions.importMetadata === "object"
       ? ({ ...(extensions.importMetadata as Record<string, unknown>) } as Record<string, unknown>)
@@ -393,12 +459,29 @@ async function importCharacter(data: unknown, db: DB) {
 
   const result = await storage.create(normalizedCharacterData, undefined, readTimestampOverrides(d), comment);
   if (result?.id) {
-    const avatarPath = await saveAvatarFromDataUrl(d.avatar, "character", result.id);
-    if (avatarPath) {
-      await storage.updateAvatar(result.id, avatarPath);
+    const avatar = await saveAvatarFromDataUrl(d.avatar, "character", result.id);
+    if (avatar) {
+      try {
+        const updated = await storage.updateAvatar(result.id, avatar.avatarPath);
+        if (!updated) await removeUnattachedAvatarFile({ filePath: avatar.filePath });
+      } catch (error) {
+        await removeUnattachedAvatarFile({ filePath: avatar.filePath });
+        throw error;
+      }
     }
     await restoreSprites(d.sprites, result.id);
-    await restoreCharacterGallery(d.gallery, result.id, galleryStorage);
+    const characterSheetImageId = await restoreCharacterGallery(d.gallery, result.id, galleryStorage);
+    if (characterSheetImageId) {
+      await storage.update(
+        result.id,
+        { extensions: { characterSheetImageId, useCharacterSheetAsReference } } as Partial<CharacterData>,
+        undefined,
+        {
+          skipVersionSnapshot: true,
+          mergeExtensions: true,
+        },
+      );
+    }
   }
   return {
     success: true,
@@ -410,76 +493,148 @@ async function importCharacter(data: unknown, db: DB) {
 
 // ── Persona ──────────────────────────────────
 
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string") return value;
+  }
+  return undefined;
+}
+
+function issueField(issue: { path: PropertyKey[] }): string | undefined {
+  return typeof issue.path[0] === "string" ? issue.path[0] : undefined;
+}
+
+/**
+ * Native Persona files are a compatibility boundary: preserve valid fields
+ * while dropping malformed ones before the same strict create boundary used by
+ * direct writes. The tolerant normalizers are deliberately limited to known
+ * structured fields; direct values remain strict or are omitted here.
+ */
+function parseNativePersonaInput(input: Record<string, unknown>) {
+  const candidate = canonicalizeLegacyPersonaInput(input) as Record<string, unknown>;
+  const strict = personaCreateInputSchema.safeParse(candidate);
+  if (strict.success) return strict.data;
+
+  const invalidFields = new Set(strict.error.issues.map(issueField));
+  for (const field of invalidFields) {
+    switch (field) {
+      case "avatarCrop":
+        candidate.avatarCrop = normalizeAvatarCrop(candidate.avatarCrop);
+        break;
+      case "trackerCardColors":
+        candidate.trackerCardColors = normalizeTrackerCardColorConfig(candidate.trackerCardColors);
+        break;
+      case "personaStats":
+        candidate.personaStats = normalizePersonaStats(candidate.personaStats) ?? null;
+        break;
+      case "tags":
+      case "savedStatusOptions":
+        candidate[field] = normalizePersonaStringArray(candidate[field]);
+        break;
+      case "convoBehavior":
+        candidate.convoBehavior = normalizeConvoBehavior(candidate.convoBehavior) ?? null;
+        break;
+    }
+  }
+
+  const salvaged = personaCreateInputSchema.safeParse(candidate);
+  if (salvaged.success) return salvaged.data;
+
+  // Normalizers intentionally leave extension keys alone, so a normalized
+  // structured value can still violate a strict known-field rule (for example
+  // unsafe tracker paint). Drop each remaining invalid top-level field; an
+  // empty native name receives the import default instead.
+  for (const issue of salvaged.error.issues) {
+    const field = issueField(issue);
+    if (field === "name") candidate.name = "Imported Persona";
+    else if (field) delete candidate[field];
+  }
+  return personaCreateInputSchema.parse(candidate);
+}
+
 async function importPersona(data: unknown, db: DB) {
   const storage = createCharactersStorage(db);
-  const d = data as Record<string, unknown>;
-  if (!d || typeof d !== "object") {
+  const galleryStorage = createPersonaGalleryStorage(db);
+  if (!isJsonRecord(data)) {
     return { success: false, type: "marinara_persona" as const, error: "Invalid persona data" };
   }
-  // Stringify JSON-array DB fields if the exporter sent them as parsed arrays;
-  // the table stores them as strings ("[]" when empty).
-  const stringifyJsonField = (value: unknown, fallback: string): string => {
-    if (typeof value === "string") return value;
-    if (Array.isArray(value) || (value && typeof value === "object")) return JSON.stringify(value);
-    return fallback;
+  const d = data as Record<string, unknown>;
+  const timestampOverrides = readTimestampOverrides(d);
+  // Alias selection and native-import defaults stay local; the shared adapter
+  // owns the legacy structured-field inventory and its decoding policy.
+  const personaInput: Record<string, unknown> = {
+    name: typeof d.name === "string" ? d.name : "Imported Persona",
+    ...(d.avatarCrop === undefined ? {} : { avatarCrop: d.avatarCrop }),
+    ...(d.trackerCardColors === undefined ? {} : { trackerCardColors: d.trackerCardColors }),
+    ...(d.personaStats === undefined ? {} : { personaStats: d.personaStats }),
+    ...(d.tags === undefined ? {} : { tags: d.tags }),
+    ...(d.savedStatusOptions === undefined ? {} : { savedStatusOptions: d.savedStatusOptions }),
+    ...(d.convoBehavior === undefined ? {} : { convoBehavior: d.convoBehavior }),
   };
-  const firstStringField = (...values: unknown[]) => {
-    for (const value of values) {
-      if (typeof value === "string") return value;
-    }
-    return "";
-  };
+  for (const field of [
+    "comment",
+    "creator",
+    "phoneticName",
+    "description",
+    "personality",
+    "scenario",
+    "backstory",
+    "appearance",
+    "nameColor",
+    "dialogueColor",
+    "boxColor",
+    "convoDisplayName",
+    "aboutMe",
+  ] as const) {
+    const value = d[field];
+    if (typeof value === "string") personaInput[field] = value;
+  }
+  const personaVersion = firstString(d.personaVersion, d.persona_version, d.character_version);
+  if (personaVersion !== undefined) personaInput.personaVersion = personaVersion;
+  const creatorNotes = firstString(d.creatorNotes, d.creator_notes);
+  if (creatorNotes !== undefined) personaInput.creatorNotes = creatorNotes;
+
+  const parsed = parseNativePersonaInput(personaInput);
+  const { name, description, extra } = encodePersonaCreate(parsed);
+  const useCharacterSheetAsReference = d.useCharacterSheetAsReference === true || d.useCharacterSheetAsReference === "true";
   const result = await storage.createPersona(
-    String(d.name ?? "Imported Persona"),
-    String(d.description ?? ""),
+    name,
+    description,
     undefined,
-    {
-      comment: typeof d.comment === "string" ? d.comment : "",
-      creator: firstStringField(d.creator),
-      personaVersion: firstStringField(d.personaVersion, d.persona_version, d.character_version),
-      creatorNotes: firstStringField(d.creatorNotes, d.creator_notes),
-      personality: String(d.personality ?? ""),
-      scenario: String(d.scenario ?? ""),
-      backstory: String(d.backstory ?? ""),
-      appearance: String(d.appearance ?? ""),
-      nameColor: String(d.nameColor ?? ""),
-      dialogueColor: String(d.dialogueColor ?? ""),
-      boxColor: String(d.boxColor ?? ""),
-      trackerCardColors:
-        typeof d.trackerCardColors === "string"
-          ? d.trackerCardColors
-          : JSON.stringify(d.trackerCardColors ?? { mode: "chat" }),
-      personaStats: typeof d.personaStats === "string" ? d.personaStats : "",
-      tags: stringifyJsonField(d.tags, "[]"),
-      savedStatusOptions: stringifyJsonField(d.savedStatusOptions, "[]"),
-      convoDisplayName: firstStringField(d.convoDisplayName),
-      aboutMe: firstStringField(d.aboutMe),
-      // convoBehavior is stored as a JSON string; re-stringify objects on import.
-      convoBehavior: stringifyJsonField(d.convoBehavior, ""),
-      // avatarCrop is stored as a JSON string in the DB; the export round-trips it
-      // as either an object or the empty string. Re-stringify objects on import.
-      avatarCrop:
-        typeof d.avatarCrop === "string"
-          ? d.avatarCrop
-          : d.avatarCrop && typeof d.avatarCrop === "object"
-            ? JSON.stringify(d.avatarCrop)
-            : "",
-    },
-    readTimestampOverrides(d),
+    { ...extra, characterSheetImageId: null, useCharacterSheetAsReference: "false" },
+    timestampOverrides,
   );
   if (result?.id) {
-    const avatarPath = await saveAvatarFromDataUrl(d.avatar, "persona", result.id);
-    if (avatarPath) {
-      await storage.updatePersona(result.id, { avatarPath });
+    let avatar: SavedAvatar | null = null;
+    try {
+      avatar = await saveAvatarFromDataUrl(d.avatar, "persona", result.id);
+      if (avatar) {
+        const updated = await storage.updatePersona(result.id, { avatarPath: avatar.avatarPath });
+        if (!updated) throw new Error("Imported Persona disappeared before its avatar could be attached");
+      }
+    } catch (err) {
+      if (avatar) await removeUnattachedAvatarFile({ filePath: avatar.filePath });
+      logger.warn(err, "Skipped optional persona avatar restore for %s; persona row is already imported", result.id);
     }
-    await restoreSprites(d.sprites, result.id);
+    try {
+      await restoreSprites(d.sprites, result.id);
+    } catch (err) {
+      logger.warn(err, "Skipped optional persona sprite restore for %s; persona row is already imported", result.id);
+    }
+    try {
+      const characterSheetImageId = await restorePersonaGallery(d.gallery, result.id, galleryStorage);
+      if (characterSheetImageId) {
+        await storage.updatePersona(
+          result.id,
+          { characterSheetImageId, useCharacterSheetAsReference: String(useCharacterSheetAsReference) },
+          { skipVersionSnapshot: true },
+        );
+      }
+    } catch (err) {
+      logger.warn(err, "Skipped optional persona gallery restore for %s; persona row is already imported", result.id);
+    }
   }
-  return {
-    success: true,
-    type: "marinara_persona" as const,
-    id: result?.id,
-    name: String(d.name ?? "Imported Persona"),
-  };
+  return { success: true, type: "marinara_persona" as const, id: result?.id, name: parsed.name };
 }
 
 // ── Lorebook ─────────────────────────────────
@@ -675,7 +830,7 @@ async function importPreset(data: unknown, db: DB) {
       gamePrompt: String(p.gamePrompt ?? p.game_prompt ?? ""),
       variableGroups: safeParseJson(p.variableGroups, []),
       variableValues: safeParseJson(p.variableValues, {}),
-      parameters: safeParseJson(p.parameters, {}),
+      parameters: {},
       wrapFormat: (p.wrapFormat as any) ?? "xml",
       author: String(p.author ?? ""),
     },

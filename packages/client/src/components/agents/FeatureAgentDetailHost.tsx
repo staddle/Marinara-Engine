@@ -1,4 +1,4 @@
-import { ArrowLeft, Box, MessageSquare, Puzzle, Settings2 } from "lucide-react";
+import { ArrowLeft, Box, MessageSquare, Settings2, Sparkles } from "lucide-react";
 import type { BuiltInAgentManifest, InstalledCapabilityPackage } from "@marinara-engine/shared";
 import { CapabilityElement } from "../capabilities/CapabilityElement";
 import { useTranslation as useUiTranslation } from "react-i18next";
@@ -21,15 +21,11 @@ interface FeatureAgentDetailHostProps {
   capabilityProps?: Record<string, unknown>;
 }
 
-const MODE_LABELS: Record<string, string> = {
-  conversation: "Conversation",
-  roleplay: "Roleplay",
-  game: "Game",
+const MODE_LABEL_KEYS: Record<string, string> = {
+  conversation: "home.recentChats.mode.conversation",
+  roleplay: "home.recentChats.mode.roleplay",
+  game: "home.recentChats.mode.game",
 };
-
-function modeLabel(mode: string) {
-  return MODE_LABELS[mode] ?? mode;
-}
 
 export function FeatureAgentDetailHost({
   agent,
@@ -85,99 +81,122 @@ export function FeatureAgentDetailHost({
     );
   }
 
-  const supportedModes = agent.modeAllowlist?.map(modeLabel) ?? [];
+  const supportedModes = agent.modeAllowlist?.map((mode) => localizeUi(MODE_LABEL_KEYS[mode] ?? mode)) ?? [];
   const packageState = installedPackage
     ? installedPackage.status === "restart-required"
-      ? "Restart required"
+      ? localizeUi("ui.agents.featureagentdetailhost.packageStatus.restartRequired")
       : installedPackage.status === "error" || installedPackage.readiness === "error"
-        ? "Needs attention"
-        : "Ready"
-    : "Not installed";
+        ? localizeUi("ui.agents.featureagentdetailhost.packageStatus.needsAttention")
+        : localizeUi("ui.agents.featureagentdetailhost.packageStatus.ready")
+    : localizeUi("ui.agents.featureagentdetailhost.packageStatus.notInstalled");
 
   return (
     <section
       data-component="FeatureAgentDetailHost"
-      className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-[var(--background)] text-[var(--foreground)]"
+      className="mari-editor-shell mari-editor-legacy-bridge flex min-h-0 flex-1 flex-col overflow-hidden"
       aria-labelledby="feature-agent-detail-title"
     >
-      <header className="sticky top-0 z-10 flex min-h-14 items-center gap-3 border-b border-[var(--border)] bg-[var(--background)]/95 px-4 backdrop-blur-xl">
+      <header className="mari-editor-header">
         <button
           type="button"
           onClick={onClose}
           aria-label={localizeUi("capabilities.actions.backToAgents")}
-          className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
+          className="mari-editor-action inline-flex"
         >
-          <ArrowLeft size="1rem" />
+          <ArrowLeft size="1.125rem" />
         </button>
-        <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-[var(--primary)]/12 text-[var(--primary)]">
-          <Puzzle size="1rem" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <h1 id="feature-agent-detail-title" className="truncate text-sm font-semibold">
-            {agent.name}
-          </h1>
-          <p className="text-[0.625rem] uppercase tracking-[0.12em] text-[var(--muted-foreground)]">{localizeUi("ui.agents.featureagentdetailhost.feature")}</p>
+        <div className="mari-editor-icon-tile">
+          <Sparkles size="1.125rem" className="max-md:h-[0.875rem]! max-md:w-[0.875rem]!" />
         </div>
+        <h1 id="feature-agent-detail-title" className="mari-editor-title min-w-0 flex-1 truncate">
+          {agent.name}
+        </h1>
       </header>
 
-      <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 p-4 sm:p-6">
-        <div>
-          <p className="text-sm leading-relaxed text-[var(--muted-foreground)]">{agent.description}</p>
-          {supportedModes.length > 0 ? (
-            <div className="mt-3 flex flex-wrap gap-2" aria-label={localizeUi("ui.agents.featureagentdetailhost.supportedChatModes")}>
-              {supportedModes.map((mode) => (
-                <span
-                  key={mode}
-                  className="rounded-full bg-[var(--secondary)] px-2.5 py-1 text-[0.6875rem] font-medium"
-                >
-                  {mode}
-                </span>
-              ))}
-            </div>
-          ) : null}
-        </div>
+      <div className="mari-editor-content max-md:p-4">
+        <div className="mari-editor-content-inner mari-editor-content-inner--wide flex flex-col gap-4">
+          <div>
+            <p className="text-sm leading-relaxed text-[var(--marinara-editor-muted)]">{agent.description}</p>
+            {supportedModes.length > 0 ? (
+              <div
+                className="mt-3 flex flex-wrap gap-2"
+                aria-label={localizeUi("ui.agents.featureagentdetailhost.supportedChatModes")}
+              >
+                {supportedModes.map((mode) => (
+                  <span key={mode} className="mari-editor-chip px-2.5 py-1 text-[0.6875rem]">
+                    {mode}
+                  </span>
+                ))}
+              </div>
+            ) : null}
+          </div>
 
-        <div className="grid gap-3 sm:grid-cols-2">
-          <article className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <article className="mari-editor-panel p-4">
+              <div className="flex items-start gap-3">
+                <Box size="1rem" className="mt-0.5 shrink-0 text-[var(--marinara-editor-accent)]" />
+                <div className="min-w-0">
+                  <h2 className="text-xs font-semibold">{localizeUi("ui.agents.featureagentdetailhost.package")}</h2>
+                  <p className="mt-1 text-[0.6875rem] text-[var(--marinara-editor-muted)]">
+                    {installedPackage
+                      ? localizeUi("ui.agents.featureagentdetailhost.versionValue1Value2", {
+                          value1: installedPackage.version,
+                          value2: packageState,
+                        })
+                      : packageState}
+                  </p>
+                </div>
+              </div>
+            </article>
+            <article className="mari-editor-panel p-4">
+              <div className="flex items-start gap-3">
+                <MessageSquare size="1rem" className="mt-0.5 shrink-0 text-[var(--marinara-editor-accent)]" />
+                <div className="min-w-0">
+                  <h2 className="text-xs font-semibold">
+                    {localizeUi("ui.agents.featureagentdetailhost.currentChat")}
+                  </h2>
+                  <p className="mt-1 text-[0.6875rem] text-[var(--marinara-editor-muted)]">
+                    {!activeChat
+                      ? localizeUi("ui.agents.featureagentdetailhost.openASupportedChatToUseThisFeature")
+                      : activeChatSupported
+                        ? localizeUi("ui.agents.featureagentdetailhost.value1Value2", {
+                            value1: activeChat.name,
+                            value2: enabledForChat
+                              ? localizeUi("ui.characters.lorebooktab.active")
+                              : localizeUi("ui.agents.featureagentdetailhost.notActive"),
+                          })
+                        : localizeUi("ui.agents.featureagentdetailhost.value1IsNotASupportedMode", {
+                            value1: activeChat.name,
+                          })}
+                  </p>
+                </div>
+              </div>
+            </article>
+          </div>
+
+          <div className="mari-editor-panel mari-editor-panel--soft p-4">
             <div className="flex items-start gap-3">
-              <Box size="1rem" className="mt-0.5 shrink-0 text-[var(--primary)]" />
+              <Settings2 size="1rem" className="mt-0.5 shrink-0 text-[var(--marinara-editor-accent)]" />
               <div className="min-w-0">
-                <h2 className="text-xs font-semibold">{localizeUi("ui.agents.featureagentdetailhost.package")}</h2>
-                <p className="mt-1 text-[0.6875rem] text-[var(--muted-foreground)]">
-                  {installedPackage ?localizeUi("ui.agents.featureagentdetailhost.versionValue1Value2", { value1: installedPackage.version, value2: packageState }) : packageState}
+                <h2 className="text-xs font-semibold">
+                  {localizeUi("ui.agents.featureagentdetailhost.featureManagedSettings")}
+                </h2>
+                <p className="mt-1 text-[0.6875rem] leading-relaxed text-[var(--marinara-editor-muted)]">
+                  {localizeUi("ui.agents.featureagentdetailhost.thisFeatureDoesNotUsePipelinePromptsToolsOr")}
                 </p>
               </div>
             </div>
-          </article>
-          <article className="rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
-            <div className="flex items-start gap-3">
-              <MessageSquare size="1rem" className="mt-0.5 shrink-0 text-[var(--primary)]" />
-              <div className="min-w-0">
-                <h2 className="text-xs font-semibold">{localizeUi("ui.agents.featureagentdetailhost.currentChat")}</h2>
-                <p className="mt-1 text-[0.6875rem] text-[var(--muted-foreground)]">
-                  {!activeChat
-                    ?localizeUi("ui.agents.featureagentdetailhost.openASupportedChatToUseThisFeature")
-                    : activeChatSupported
-                      ?localizeUi("ui.agents.featureagentdetailhost.value1Value2", { value1: activeChat.name, value2: enabledForChat ?localizeUi("ui.characters.lorebooktab.active") :localizeUi("ui.agents.featureagentdetailhost.notActive") })
-                      :localizeUi("ui.agents.featureagentdetailhost.value1IsNotASupportedMode", { value1: activeChat.name })}
-                </p>
-              </div>
-            </div>
-          </article>
-        </div>
+          </div>
 
-        <div className="rounded-xl border border-dashed border-[var(--border)] bg-[var(--secondary)]/35 p-4">
-          <h2 className="text-xs font-semibold">{localizeUi("ui.agents.featureagentdetailhost.featureManagedSettings")}</h2>
-          <p className="mt-1 text-[0.6875rem] leading-relaxed text-[var(--muted-foreground)]">{localizeUi("ui.agents.featureagentdetailhost.thisFeatureDoesNotUsePipelinePromptsToolsOr")}</p>
-        </div>
-
-        <div className="flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={onManagePackage}
-            className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-4 text-xs font-medium transition-colors hover:bg-[var(--accent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
-          >
-            <Settings2 size="0.875rem" /> {localizeUi("ui.agents.featureagentdetailhost.managePackage")}</button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={onManagePackage}
+              className="mari-editor-action mari-editor-action--accent inline-flex min-h-11 px-4"
+            >
+              <Settings2 size="0.875rem" /> {localizeUi("ui.agents.featureagentdetailhost.managePackage")}
+            </button>
+          </div>
         </div>
       </div>
     </section>

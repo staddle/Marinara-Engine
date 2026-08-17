@@ -11,6 +11,7 @@ import { useUIStore } from "../../stores/ui.store";
 import { cn } from "../../lib/utils";
 import type { Message } from "@marinara-engine/shared";
 import { useTranslation as useUiTranslation } from "react-i18next";
+import { buildCyoaChoiceSubmissionPayload } from "./cyoa-choice-submission";
 
 type CyoaChoice = {
   label: string;
@@ -42,6 +43,9 @@ export function CyoaChoices({ messages }: Props) {
   const { generate, retryAgents } = useGenerate();
   const activeChatId = useChatStore((s) => s.activeChatId);
   const isStreaming = useChatStore((s) => s.isStreaming);
+  const pendingSpatialTransition = useChatStore((s) =>
+    activeChatId ? (s.pendingSpatialTransitions.get(activeChatId) ?? null) : null,
+  );
   const impersonateCyoaChoices = useUIStore((s) => s.impersonateCyoaChoices);
   const setImpersonateCyoaChoices = useUIStore((s) => s.setImpersonateCyoaChoices);
   const updateMessageExtra = useUpdateMessageExtra(activeChatId);
@@ -149,30 +153,44 @@ export function CyoaChoices({ messages }: Props) {
     async (text: string) => {
       if (!activeChatId || isStreaming || isEditing) return;
       clearChoicesForActiveChat();
+      const queuedSpatialTransition =
+        pendingSpatialTransition?.status === "ready" ? pendingSpatialTransition.transition : null;
       if (impersonateCyoaChoices) {
         const { impersonatePresetId, impersonateConnectionId, impersonateBlockAgents, impersonatePromptTemplate } =
           useUIStore.getState();
-        const trimmedPromptTemplate = impersonatePromptTemplate.trim();
-        await generate({
-          chatId: activeChatId,
-          connectionId: null,
-          impersonate: true,
-          userMessage: text,
-          ...(impersonatePresetId ? { impersonatePresetId } : {}),
-          ...(impersonateConnectionId ? { impersonateConnectionId } : {}),
-          ...(impersonateBlockAgents ? { impersonateBlockAgents: true } : {}),
-          ...(trimmedPromptTemplate ? { impersonatePromptTemplate: trimmedPromptTemplate } : {}),
-        });
+        await generate(
+          buildCyoaChoiceSubmissionPayload({
+            chatId: activeChatId,
+            text,
+            pendingSpatialTransition: queuedSpatialTransition,
+            impersonation: {
+              presetId: impersonatePresetId,
+              connectionId: impersonateConnectionId,
+              blockAgents: impersonateBlockAgents,
+              promptTemplate: impersonatePromptTemplate,
+            },
+          }),
+        );
         return;
       }
 
-      await generate({
-        chatId: activeChatId,
-        connectionId: null,
-        userMessage: text,
-      });
+      await generate(
+        buildCyoaChoiceSubmissionPayload({
+          chatId: activeChatId,
+          text,
+          pendingSpatialTransition: queuedSpatialTransition,
+        }),
+      );
     },
-    [activeChatId, isStreaming, isEditing, impersonateCyoaChoices, clearChoicesForActiveChat, generate],
+    [
+      activeChatId,
+      isStreaming,
+      isEditing,
+      pendingSpatialTransition,
+      impersonateCyoaChoices,
+      clearChoicesForActiveChat,
+      generate,
+    ],
   );
 
   const handleReroll = useCallback(async () => {

@@ -45,7 +45,7 @@ const GAME_MAP_DIVIDER_CLASS = "border-[var(--border)]";
 const GAME_MAP_FIELD_CLASS =
   "rounded-md border border-[var(--border)] bg-[var(--card)] text-[var(--foreground)] outline-none transition-colors focus:border-[var(--primary)]/50";
 const GAME_MAP_ACTION_ITEM_CLASS =
-  "text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-35";
+  "text-[var(--primary)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--primary)] disabled:cursor-not-allowed disabled:opacity-35";
 
 function hasActiveSpatialWorldMap(spatialContext?: SpatialContextResponse | null): boolean {
   return Boolean(

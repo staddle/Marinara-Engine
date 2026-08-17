@@ -1,14 +1,23 @@
-import { existsSync } from "node:fs";
+import { createWriteStream, existsSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { Transform, type Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { finishCrc32, updateCrc32State } from "../../utils/crc32.js";
 import { assertInsideDir } from "../../utils/security.js";
+import { validateImageAssetFile, validateVideoAssetFile } from "../../utils/media-file-security.js";
 
 export class ProfileImportAssetValidationError extends Error {}
 
-export type ProfileImportAssetInput = {
+export type ProfileImportAssetStream = {
+  stream: Readable;
+  expectedCrc32: number;
+};
+
+export type ProfileImportAssetInput<TContents = Buffer | ProfileImportAssetStream> = {
   path: string;
   expectedSize: number;
-  read: () => Buffer | null | Promise<Buffer | null>;
+  read: () => TContents | null | Promise<TContents | null>;
 };
 
 type StagedProfileImportAsset = {
@@ -34,9 +43,108 @@ function safeRelativeAssetParts(path: string): string[] {
   return parts;
 }
 
+function profileAssetImagePolicy(path: string): { allowSvg?: boolean } | null {
+  const normalized = path.replace(/\\/g, "/");
+  if (
+    normalized.startsWith("avatars/") ||
+    normalized.startsWith("custom-emojis/") ||
+    normalized.startsWith("custom-stickers/") ||
+    normalized.startsWith("lorebooks/images/") ||
+    normalized.startsWith("prompts/images/") ||
+    normalized.startsWith("agents/images/") ||
+    normalized.startsWith("connections/images/")
+  ) {
+    return {};
+  }
+  if (normalized.startsWith("gallery/")) return {};
+  if (normalized.startsWith("backgrounds/")) {
+    return normalized === "backgrounds/meta.json" || normalized === "backgrounds/organization.json" ? null : {};
+  }
+  if (normalized.startsWith("sprites/") || normalized.startsWith("game-assets/sprites/")) {
+    return { allowSvg: true };
+  }
+  if (normalized.startsWith("game-assets/backgrounds/")) return {};
+  return null;
+}
+
+function isProfileVideoAssetPath(path: string): boolean {
+  return (
+    path.startsWith("gallery/character-videos/") ||
+    path.startsWith("gallery/persona-videos/") ||
+    path.startsWith("game-scene-videos/") ||
+    path.startsWith("conversation-call-character-videos/")
+  );
+}
+
+async function validateProfileImportAsset(path: string, stagedPath: string, stagedRoot: string): Promise<void> {
+  const normalized = path.replace(/\\/g, "/");
+  if (isProfileVideoAssetPath(normalized)) {
+    if (/\.json$/iu.test(normalized)) return;
+    const video = await validateVideoAssetFile(stagedPath, normalized, { additionalRoot: stagedRoot });
+    if (!video) {
+      throw new ProfileImportAssetValidationError(`Profile asset ${path} is not a supported video file.`);
+    }
+    await video.handle.close();
+    return;
+  }
+
+  const imagePolicy = profileAssetImagePolicy(normalized);
+  if (!imagePolicy) {
+    const leafName = normalized.split("/").pop() ?? "";
+    const looksLikeServedImage =
+      /\.(?:avif|gif|jpe?g|png|svg|webp)$/iu.test(leafName) &&
+      (normalized.startsWith("game-assets/") || normalized.startsWith("sprites/"));
+    if (looksLikeServedImage) {
+      throw new ProfileImportAssetValidationError(`Profile asset ${path} is not a supported image file.`);
+    }
+    return;
+  }
+  const image = await validateImageAssetFile(stagedPath, path, { ...imagePolicy, additionalRoot: stagedRoot });
+  if (!image) {
+    throw new ProfileImportAssetValidationError(`Profile asset ${path} is not a supported image file.`);
+  }
+  await image.handle.close();
+}
+
+async function stageStreamedAsset(
+  source: ProfileImportAssetStream,
+  stagedPath: string,
+  expectedSize: number,
+  remainingBytes: number,
+) {
+  if (!Number.isSafeInteger(source.expectedCrc32) || source.expectedCrc32 < 0 || source.expectedCrc32 > 0xffffffff) {
+    throw new ProfileImportAssetValidationError("Profile asset has an invalid CRC manifest.");
+  }
+
+  let bytesRead = 0;
+  let crcState = 0xffffffff;
+  const inspect = new Transform({
+    transform(chunk: Buffer | Uint8Array | string, _encoding, callback) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      bytesRead += buffer.length;
+      if (bytesRead > expectedSize || bytesRead > remainingBytes) {
+        callback(new ProfileImportAssetValidationError("Profile archive restored assets are too large."));
+        return;
+      }
+      crcState = updateCrc32State(crcState, buffer);
+      callback(null, buffer);
+    },
+  });
+  await pipeline(source.stream, inspect, createWriteStream(stagedPath, { mode: 0o600 }));
+
+  if (bytesRead !== expectedSize) {
+    throw new ProfileImportAssetValidationError("Profile asset does not match its manifest size.");
+  }
+  const crc32 = finishCrc32(crcState);
+  if (crc32 !== source.expectedCrc32) {
+    throw new ProfileImportAssetValidationError("Profile asset failed its archive CRC check.");
+  }
+  return bytesRead;
+}
+
 export async function stageProfileImportAssets(
   dataDir: string,
-  inputs: ProfileImportAssetInput[],
+  inputs: Array<ProfileImportAssetInput>,
   totalByteLimit: number,
 ): Promise<StagedProfileImportAssets> {
   await mkdir(dataDir, { recursive: true });
@@ -54,18 +162,14 @@ export async function stageProfileImportAssets(
         throw new ProfileImportAssetValidationError(`Profile contains duplicate asset path ${input.path}.`);
       }
       seenPaths.add(input.path);
-      const buffer = await input.read();
-      if (!buffer) continue;
-      if (buffer.byteLength !== input.expectedSize) {
-        throw new ProfileImportAssetValidationError(
-          `Profile asset ${input.path} does not match its manifest size.`,
-        );
+      const contents = await input.read();
+      if (!contents) continue;
+      if (!Number.isSafeInteger(input.expectedSize) || input.expectedSize < 0) {
+        throw new ProfileImportAssetValidationError(`Profile asset ${input.path} has an invalid manifest size.`);
       }
-
-      totalBytes += buffer.byteLength;
-      if (totalBytes > totalByteLimit) {
+      if (totalBytes + input.expectedSize > totalByteLimit) {
         throw new ProfileImportAssetValidationError(
-          `Profile archive restored assets are too large (${totalBytes} bytes, limit ${totalByteLimit} bytes).`,
+          `Profile archive restored assets are too large (${totalBytes + input.expectedSize} bytes, limit ${totalByteLimit} bytes).`,
         );
       }
 
@@ -73,7 +177,23 @@ export async function stageProfileImportAssets(
       const outputPath = assertInsideDir(dataDir, join(dataDir, ...parts));
       const backupPath = assertInsideDir(rollbackDataDir, join(rollbackDataDir, ...parts));
       await mkdir(dirname(stagedPath), { recursive: true });
-      await writeFile(stagedPath, buffer);
+      if (Buffer.isBuffer(contents)) {
+        if (contents.byteLength !== input.expectedSize) {
+          throw new ProfileImportAssetValidationError(`Profile asset ${input.path} does not match its manifest size.`);
+        }
+        await writeFile(stagedPath, contents, { mode: 0o600 });
+      } else {
+        try {
+          await stageStreamedAsset(contents, stagedPath, input.expectedSize, totalByteLimit - totalBytes);
+        } catch (error) {
+          if (error instanceof ProfileImportAssetValidationError && !error.message.includes(input.path)) {
+            error.message = `Profile asset ${input.path}: ${error.message}`;
+          }
+          throw error;
+        }
+      }
+      await validateProfileImportAsset(input.path, stagedPath, stagedDataDir);
+      totalBytes += input.expectedSize;
       assets.push({
         path: input.path,
         stagedPath,

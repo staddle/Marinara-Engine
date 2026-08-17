@@ -11,6 +11,7 @@ import { resolveValidatedImage, safeFetch } from "../utils/security.js";
 const CHUB_API_BASE = "https://api.chub.ai";
 const CHUB_AVATARS = "https://avatars.charhub.io";
 const AVATAR_PROXY_MAX_BYTES = 10 * 1024 * 1024;
+const CARD_DOWNLOAD_MAX_BYTES = 256 * 1024 * 1024;
 
 async function fetchAvatarImage(url: string, signal: AbortSignal) {
   const res = await safeFetch(url, {
@@ -157,12 +158,17 @@ export async function botBrowserRoutes(app: FastifyInstance, options: BotBrowser
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60_000);
     try {
-      const res = await fetch(`${CHUB_AVATARS}/avatars/${encodeURI(fullPath)}/chara_card_v2.png`, {
+      const res = await safeFetch(`${CHUB_AVATARS}/avatars/${encodeURI(fullPath)}/chara_card_v2.png`, {
         signal: controller.signal,
+        policy: { allowedProtocols: ["https:"] },
+        allowedContentTypes: ["image/png", "application/octet-stream"],
+        allowMissingContentType: true,
+        maxResponseBytes: CARD_DOWNLOAD_MAX_BYTES,
       });
       if (!res.ok) throw new Error(`Download failed: ${res.status}`);
 
       const buf = Buffer.from(await res.arrayBuffer());
+      if (resolveValidatedImage(buf)?.mimeType !== "image/png") throw new Error("Downloaded card is not a PNG image");
       return reply
         .header("Content-Type", "image/png")
         .header("Content-Disposition", `attachment; filename="character.png"`)

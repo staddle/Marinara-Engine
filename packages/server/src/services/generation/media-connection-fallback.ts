@@ -5,7 +5,7 @@ import {
   VIDEO_DEFAULTS_STORAGE_KEY,
 } from "@marinara-engine/shared";
 import type { ImageGenRequest } from "../image/image-generation.js";
-import { resolveConnectionImageDefaults } from "../image/image-generation-defaults.js";
+import { resolveConnectionImageDefaults, resolveConnectionImageQuality } from "../image/image-generation-defaults.js";
 import type { VideoGenerationRequest } from "../video/video-generation.js";
 import { resolveBaseUrl } from "./connection-base-url.js";
 
@@ -40,7 +40,9 @@ export async function resolveImageConnectionFallback(
   const baseUrl = resolveBaseUrl(connection);
   if (!baseUrl) return undefined;
   const model = String(connection.model ?? "").trim();
-  const explicitSource = String(connection.imageGenerationSource ?? connection.imageService ?? "").trim();
+  const imageGenerationSource = String(connection.imageGenerationSource ?? "").trim();
+  const imageService = String(connection.imageService ?? "").trim();
+  const explicitSource = imageGenerationSource || imageService;
   const source = explicitSource || inferImageSource(model, baseUrl);
   return {
     connectionId: connection.id,
@@ -54,6 +56,9 @@ export async function resolveImageConnectionFallback(
     imageEndpointId: connection.imageEndpointId || undefined,
     comfyWorkflow: connection.comfyuiWorkflow || undefined,
     imageDefaults: resolveConnectionImageDefaults(connection),
+    quality: resolveConnectionImageQuality(connection),
+    ...(imageGenerationSource ? { imageGenerationSource } : {}),
+    ...(imageService ? { imageService } : {}),
   };
 }
 
@@ -75,7 +80,10 @@ export async function resolveVideoConnectionFallback(
     source,
     baseUrl,
     apiKey: connection.apiKey || "",
-    serviceHint: String(connection.videoService ?? connection.videoGenerationSource ?? source),
+    serviceHint:
+      source === "swarmui"
+        ? "swarmui"
+        : String(connection.videoService ?? connection.videoGenerationSource ?? source),
     model,
     comfyWorkflow: connection.comfyuiWorkflow || undefined,
     comfyLoras: comfyDefaults?.loras ?? [],

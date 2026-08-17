@@ -4,18 +4,25 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
+  canonicalizeLegacyPersonaInput,
   createCharacterSchema,
   updateCharacterSchema,
   createGroupSchema,
   updateGroupSchema,
   createPersonaGroupSchema,
   updatePersonaGroupSchema,
+  personaCreateInputSchema,
+  personaLocalPaintSchema,
+  personaUpdateInputSchema,
+  normalizeTrackerCardColorConfig,
+  trackerCardColorConfigSchema,
   PROFESSOR_MARI_ID,
   CONVERSATION_CALL_CHARACTER_VIDEO_CLIP_KINDS,
   findImageStyleProfile,
 } from "@marinara-engine/shared";
 import type { CharacterData, ConversationCallCharacterVideoClipKind, ExportEnvelope } from "@marinara-engine/shared";
-import { createCharactersStorage } from "../services/storage/characters.storage.js";
+import { createCharactersStorage, type PersonaStorageRow } from "../services/storage/characters.storage.js";
+import { encodePersonaCreate, encodePersonaUpdate, projectPersona } from "../services/personas/persona-projector.js";
 import { createCharacterGalleryStorage } from "../services/storage/character-gallery.storage.js";
 import { createPersonaGalleryStorage } from "../services/storage/persona-gallery.storage.js";
 import { createChatsStorage } from "../services/storage/chats.storage.js";
@@ -24,7 +31,10 @@ import { createConnectionsStorage } from "../services/storage/connections.storag
 import { createLorebooksStorage } from "../services/storage/lorebooks.storage.js";
 import { createNoodleStorage } from "../services/storage/noodle.storage.js";
 import { generateImage } from "../services/image/image-generation.js";
-import { resolveConnectionImageDefaults } from "../services/image/image-generation-defaults.js";
+import {
+  resolveConnectionImageDefaults,
+  resolveConnectionImageQuality,
+} from "../services/image/image-generation-defaults.js";
 import { loadImageGenerationUserSettings } from "../services/image/image-generation-settings.js";
 import { compileImagePrompt } from "../services/image/image-prompt-compiler.js";
 import { resolveImagePromptReviewSize } from "../services/image/image-prompt-review.js";
@@ -49,7 +59,13 @@ import { DATA_DIR } from "../utils/data-dir.js";
 import { createWriteStream, existsSync, rmSync, unlinkSync } from "fs";
 import { normalizeTimestampOverrides } from "../services/import/import-timestamps.js";
 import { assertInsideDir, extensionFromImageMime, isAllowedImageBuffer } from "../utils/security.js";
-import { logger } from "../lib/logger.js";
+import {
+  sendValidatedMediaFile,
+  validateImageAssetFile,
+  validateVideoAssetFile,
+} from "../utils/media-file-security.js";
+import { logger, logDebugOverride } from "../lib/logger.js";
+import { isDebugAgentsEnabled } from "../config/runtime-config.js";
 import { parseLibraryPageQuery } from "../utils/list-pagination.js";
 import { importSTLorebook } from "../services/import/st-lorebook.importer.js";
 import {
@@ -68,6 +84,12 @@ import {
   resolveStoredGalleryFile,
   unlinkGalleryFileIfUnreferenced,
 } from "../services/image/gallery-file-lifecycle.js";
+import {
+  collectCharacterAvatarPaths,
+  collectPersonaAvatarPaths,
+  mutateAvatarReferencesAndCleanup,
+  removeUnattachedAvatarFile,
+} from "../services/image/avatar-file-lifecycle.js";
 
 const CHARACTER_GALLERY_ROOT = join(DATA_DIR, "gallery", "characters");
 const PERSONA_GALLERY_ROOT = join(DATA_DIR, "gallery", "personas");
@@ -110,6 +132,39 @@ function applyTrackerCardPaint(
     else delete next[key];
   }
   return next;
+}
+
+// Exactly { mode: "chat" } is the bare-chat clear sentinel: it clears paint/stat-icon state while preserving stored portrait framing.
+function isTrackerCardClear(value: unknown): boolean {
+  return !!value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 1 && (value as Record<string, unknown>).mode === "chat";
+}
+
+const TRACKER_CARD_PAINT_FIELDS = ["mode", "displayEnabled", "nameColor", "nameColorOpacity", "accentEnabled", "dialogueColor", "dialogueColorOpacity", "surfaceEnabled", "boxColor", "boxColorOpacity", "tintIntensity", "materialBrightness", "glowIntensity", "contrastIntensity", "portraitStageBackground"] as const;
+
+function applyPersonaTrackerCardPaint(currentValue: unknown, paint: Record<string, unknown>) {
+  const current = normalizeTrackerCardColorConfig(parseCharacterDataRecord(currentValue));
+  const next: Record<string, unknown> = { ...current, ...paint };
+  for (const key of TRACKER_CARD_PAINT_FIELDS) if (!Object.hasOwn(paint, key)) delete next[key];
+  for (const key of ["portraitFocusX", "portraitFocusY", "portraitZoom", "statIcons"] as const) {
+    if (Object.hasOwn(current, key)) next[key] = current[key];
+    else delete next[key];
+  }
+  return normalizeTrackerCardColorConfig(next);
+}
+
+function mergePersonaTrackerCardColors(currentValue: unknown, patch: Record<string, unknown>) {
+  const current = parseCharacterDataRecord(currentValue), next = { ...current, ...patch };
+  for (const key of ["portraitFocusX", "portraitFocusY", "portraitZoom"] as const) {
+    if (Object.hasOwn(current, key)) next[key] = current[key];
+    else delete next[key];
+  }
+  return next;
+}
+
+function buildTrackerCardPortraitClear(currentValue: unknown): Record<string, unknown> {
+  const current = normalizeTrackerCardColorConfig(currentValue), result: Record<string, unknown> = { mode: "chat" };
+  for (const key of ["portraitFocusX", "portraitFocusY", "portraitZoom"] as const) if (Object.hasOwn(current, key)) result[key] = current[key];
+  return result;
 }
 
 type GalleryVideoEntry = {
@@ -364,15 +419,42 @@ type AvatarGenerationBody = {
   connectionId?: string;
   name?: string;
   appearance?: string;
+  purpose?: "avatar" | "character-sheet";
   referenceImages?: string[];
   width?: number;
   height?: number;
   styleProfileId?: string | null;
+  debugMode?: boolean;
   promptOverrides?: AvatarGenerationPromptOverride[];
 };
 
-const avatarGenerationPromptId = (name: string) =>
-  `avatar:${
+const AVATAR_GENERATION_MAX_DIMENSION = 4096;
+const AVATAR_GENERATION_MAX_PIXELS = 16_000_000;
+
+function validateAvatarGenerationDimensions(width: unknown, height: unknown) {
+  if (
+    typeof width !== "number" ||
+    typeof height !== "number" ||
+    !Number.isFinite(width) ||
+    !Number.isFinite(height) ||
+    !Number.isInteger(width) ||
+    !Number.isInteger(height) ||
+    width <= 0 ||
+    height <= 0
+  ) {
+    return { error: "width and height must be positive integers" as const };
+  }
+  if (width > AVATAR_GENERATION_MAX_DIMENSION || height > AVATAR_GENERATION_MAX_DIMENSION) {
+    return { error: `width and height must not exceed ${AVATAR_GENERATION_MAX_DIMENSION}` as const };
+  }
+  if (width * height > AVATAR_GENERATION_MAX_PIXELS) {
+    return { error: `width and height must not exceed ${AVATAR_GENERATION_MAX_PIXELS} total pixels` as const };
+  }
+  return { width, height };
+}
+
+const avatarGenerationPromptId = (name: string, purpose: AvatarGenerationBody["purpose"] = "avatar") =>
+  `${purpose === "character-sheet" ? "character-sheet" : "avatar"}:${
     name
       .trim()
       .toLowerCase()
@@ -383,15 +465,29 @@ const avatarGenerationPromptId = (name: string) =>
 
 const AVATAR_GENERATION_HARD_NEGATIVE_PROMPT =
   "text, captions, logos, watermarks, borders, UI, collage layouts, duplicate faces, extra people, cropped-off heads";
+const CHARACTER_SHEET_HARD_NEGATIVE_PROMPT =
+  "text, captions, logos, watermarks, decorative borders, unrelated characters, extra limbs, inconsistent faces, cropped-off body parts";
 
 function buildAvatarGenerationPrompt(body: AvatarGenerationBody, profileSubjectTags: string): string {
   const name = body.name?.trim() || "Character";
   const appearance = body.appearance?.trim() || name;
+  if (body.purpose === "character-sheet") {
+    return [
+      `Create a polished production character design sheet for ${name}.`,
+      `Canonical appearance: ${appearance}.`,
+      "Show multiple consistent views of the same character: one large full-body hero view, front and back turnaround views in neutral poses, close-up face and costume details, important accessories, and a compact color palette on a clean neutral background.",
+      "Keep the same face, body proportions, hairstyle, outfit construction, colors, accessories, and distinguishing features in every view.",
+      "Show only this character and keep every body view fully in frame.",
+    ].join(" ");
+  }
   if (profileSubjectTags.trim()) return `Canonical appearance for ${name}: ${appearance}.`;
   return `Create a polished character avatar portrait for ${name}. Canonical appearance: ${appearance}. Composition: centered face-and-shoulders portrait, readable expression, clear silhouette, suitable as a chat avatar.`;
 }
 
 async function resolveAvatarGenerationConnection(app: FastifyInstance, body: AvatarGenerationBody) {
+  if (body.purpose !== undefined && body.purpose !== "avatar" && body.purpose !== "character-sheet") {
+    return { error: "purpose must be avatar or character-sheet" as const };
+  }
   if (!body.connectionId) {
     return { error: "connectionId is required" as const };
   }
@@ -456,21 +552,13 @@ async function copyGalleryImageToAvatar(
   await mkdir(AVATAR_ROOT, { recursive: true });
   const filename = `${entityKind}-${entityId}-${newId()}.${imageInfo.ext}`;
   const avatarFilePath = assertInsideDir(AVATAR_ROOT, join(AVATAR_ROOT, filename));
-  await writeFile(avatarFilePath, imageBuffer);
-  return `/api/avatars/file/${filename}`;
-}
-
-// Remove an avatar file created by copyGalleryImageToAvatar when the record
-// update it was copied for did not go through, so failures cannot strand
-// orphaned files in the avatars directory.
-async function removeCopiedAvatarFile(avatarPath: string) {
-  const filename = avatarPath.split("/").pop();
-  if (!filename) return;
   try {
-    await unlink(assertInsideDir(AVATAR_ROOT, join(AVATAR_ROOT, filename)));
-  } catch {
-    // The copy may not exist if the failure happened before the write.
+    await writeFile(avatarFilePath, imageBuffer);
+  } catch (error) {
+    await removeUnattachedAvatarFile({ filePath: avatarFilePath });
+    throw error;
   }
+  return `/api/avatars/file/${filename}`;
 }
 
 // Read every sprite file in data/sprites/<id>/ and return it as
@@ -495,11 +583,12 @@ async function readSpritesForId(id: string): Promise<Array<{ filename: string; d
 
 // Read every gallery image for a character (metadata row + binary on disk),
 // returning a serializable list that import can rebuild the gallery from.
-async function readGalleryForCharacter(
-  characterId: string,
-  galleryStorage: { listByCharacterId: (id: string) => Promise<any[]> },
+async function readGalleryForOwner(
+  ownerId: string,
+  listImages: (id: string) => Promise<any[]>,
+  characterSheetImageId?: string | null,
 ): Promise<Array<Record<string, unknown>>> {
-  const images = await galleryStorage.listByCharacterId(characterId);
+  const images = await listImages(ownerId);
   const result: Array<Record<string, unknown>> = [];
   for (const img of images) {
     // img.filePath is stored relative to data/gallery/ — usually
@@ -520,6 +609,7 @@ async function readGalleryForCharacter(
       model: img.model ?? "",
       width: img.width ?? null,
       height: img.height ?? null,
+      ...(img.id === characterSheetImageId ? { isCharacterSheet: true } : {}),
     });
   }
   return result;
@@ -530,10 +620,16 @@ async function buildNativeCharacterEnvelope(
   data: any,
   galleryStorage: { listByCharacterId: (id: string) => Promise<any[]> },
 ) {
+  const extensions = parseCharacterDataRecord(data?.extensions);
+  const characterSheetImageId =
+    typeof extensions.characterSheetImageId === "string" ? extensions.characterSheetImageId : null;
+  const portableExtensions = { ...extensions };
+  delete portableExtensions.characterSheetImageId;
+  const portableData = { ...data, extensions: portableExtensions };
   const [avatar, sprites, gallery] = await Promise.all([
     readAvatarDataUrl(char.avatarPath),
     readSpritesForId(char.id),
-    readGalleryForCharacter(char.id, galleryStorage),
+    readGalleryForOwner(char.id, (id) => galleryStorage.listByCharacterId(id), characterSheetImageId),
   ]);
   return {
     type: "marinara_character",
@@ -542,7 +638,7 @@ async function buildNativeCharacterEnvelope(
     data: {
       spec: "chara_card_v2",
       spec_version: "2.0",
-      data,
+      data: portableData,
       ...(avatar ? { avatar } : {}),
       ...(sprites.length > 0 ? { sprites } : {}),
       ...(gallery.length > 0 ? { gallery } : {}),
@@ -556,19 +652,38 @@ async function buildNativeCharacterEnvelope(
 }
 
 function buildCompatibleCharacterExport(data: any) {
+  const extensions = parseCharacterDataRecord(data?.extensions);
+  delete extensions.characterSheetImageId;
+  extensions.useCharacterSheetAsReference = false;
   return {
     spec: "chara_card_v2",
     spec_version: "2.0",
-    data,
+    data: { ...data, extensions },
   };
 }
 
-async function buildNativePersonaEnvelope(persona: Record<string, unknown>) {
-  const { id: _id, createdAt, updatedAt, avatarPath, isActive: _isActive, ...personaData } = persona;
+async function buildNativePersonaEnvelope(
+  persona: Record<string, unknown>,
+  galleryStorage: { listByPersonaId: (id: string) => Promise<any[]> },
+) {
+  const {
+    id: _id,
+    createdAt,
+    updatedAt,
+    avatarPath,
+    isActive: _isActive,
+    characterSheetImageId: rawCharacterSheetImageId,
+    ...personaData
+  } = persona;
   const personaId = typeof _id === "string" ? _id : "";
-  const [avatar, sprites] = await Promise.all([
+  const characterSheetImageId =
+    typeof rawCharacterSheetImageId === "string" ? rawCharacterSheetImageId : null;
+  const [avatar, sprites, gallery] = await Promise.all([
     readAvatarDataUrl(typeof avatarPath === "string" ? avatarPath : null),
     personaId ? readSpritesForId(personaId) : Promise.resolve([] as Array<{ filename: string; data: string }>),
+    personaId
+      ? readGalleryForOwner(personaId, (id) => galleryStorage.listByPersonaId(id), characterSheetImageId)
+      : Promise.resolve([] as Array<Record<string, unknown>>),
   ]);
   return {
     type: "marinara_persona",
@@ -578,6 +693,7 @@ async function buildNativePersonaEnvelope(persona: Record<string, unknown>) {
       ...personaData,
       ...(avatar ? { avatar } : {}),
       ...(sprites.length > 0 ? { sprites } : {}),
+      ...(gallery.length > 0 ? { gallery } : {}),
       metadata: {
         createdAt,
         updatedAt,
@@ -593,6 +709,8 @@ function buildCompatiblePersonaExport(persona: Record<string, unknown>) {
     updatedAt: _updatedAt,
     avatarPath: _avatarPath,
     isActive: _isActive,
+    characterSheetImageId: _characterSheetImageId,
+    useCharacterSheetAsReference: _useCharacterSheetAsReference,
     ...personaData
   } = persona;
   return {
@@ -602,6 +720,78 @@ function buildCompatiblePersonaExport(persona: Record<string, unknown>) {
         exportedAt: new Date().toISOString(),
         source: "Marinara Engine compatibility export",
       },
+    },
+  };
+}
+
+function canonicalizePersonaForExport(persona: Record<string, unknown>): {
+  row: Record<string, unknown>;
+  usesFallbackName: boolean;
+} {
+  const projected = projectPersona(persona as PersonaStorageRow);
+  const {
+    id: _id,
+    avatarPath: _avatarPath,
+    isActive: _isActive,
+    createdAt: _createdAt,
+    updatedAt: _updatedAt,
+    ...projectedFields
+  } = projected;
+  const validationFields: Record<string, unknown> = { ...projectedFields };
+  const usesFallbackName = typeof validationFields.name !== "string" || !validationFields.name.trim();
+
+  if (usesFallbackName) validationFields.name = "Unnamed Persona";
+  const topLevelPaintFields = ["nameColor", "dialogueColor", "boxColor"] as const;
+  for (const field of topLevelPaintFields) {
+    if (typeof validationFields[field] === "string" && !personaLocalPaintSchema.safeParse(validationFields[field]).success) {
+      delete validationFields[field];
+    }
+  }
+  const trackerCardColors = validationFields.trackerCardColors;
+  if (trackerCardColors && typeof trackerCardColors === "object" && !Array.isArray(trackerCardColors)) {
+    const repairedTrackerCardColors = { ...(trackerCardColors as Record<string, unknown>) };
+    let removedTrackerPaint = false;
+    for (const field of topLevelPaintFields) {
+      if (
+        typeof repairedTrackerCardColors[field] === "string" &&
+        !personaLocalPaintSchema.safeParse(repairedTrackerCardColors[field]).success
+      ) {
+        delete repairedTrackerCardColors[field];
+        removedTrackerPaint = true;
+      }
+    }
+    if (removedTrackerPaint) validationFields.trackerCardColors = repairedTrackerCardColors;
+  }
+
+  const parsed = personaCreateInputSchema.safeParse(validationFields);
+  if (!parsed.success) throw new Error("Persona export invariant failed after salvage");
+
+  const { name, description, extra } = encodePersonaCreate(parsed.data);
+  const row = { ...persona, ...extra, name, description };
+  // Never restore raw rejected top-level paint over the repaired export copy.
+  for (const field of topLevelPaintFields) if (!Object.hasOwn(parsed.data, field)) delete row[field];
+  return { row, usesFallbackName };
+}
+
+export async function validateCharacterGalleryReferences<T extends Record<string, unknown>>(
+  characterId: string,
+  characterDataUpdate: T,
+  getGalleryImage: (imageId: string) => Promise<{ characterId: string } | null>,
+): Promise<T> {
+  const extensions = parseCharacterDataRecord(characterDataUpdate.extensions);
+  if (!Object.hasOwn(extensions, "characterSheetImageId")) return characterDataUpdate;
+
+  const selectedImageId =
+    typeof extensions.characterSheetImageId === "string" ? extensions.characterSheetImageId : null;
+  const selectedImage = selectedImageId ? await getGalleryImage(selectedImageId) : null;
+  if (selectedImage?.characterId === characterId) return characterDataUpdate;
+
+  return {
+    ...characterDataUpdate,
+    extensions: {
+      ...extensions,
+      characterSheetImageId: null,
+      useCharacterSheetAsReference: false,
     },
   };
 }
@@ -671,21 +861,28 @@ export async function charactersRoutes(app: FastifyInstance) {
     if ("error" in resolved) return reply.status(400).send({ error: resolved.error });
 
     const imageSettings = await loadImageGenerationUserSettings(app.db);
-    const width = body.width ?? imageSettings.portrait.width;
-    const height = body.height ?? imageSettings.portrait.height;
+    const isCharacterSheet = body.purpose === "character-sheet";
+    const dimensions = validateAvatarGenerationDimensions(
+      body.width ?? (isCharacterSheet ? imageSettings.background.width : imageSettings.portrait.width),
+      body.height ?? (isCharacterSheet ? imageSettings.background.height : imageSettings.portrait.height),
+    );
+    if ("error" in dimensions) return reply.status(400).send({ error: dimensions.error });
+    const { width, height } = dimensions;
     const imageDefaults = resolveConnectionImageDefaults(resolved.conn);
     const profileSubjectTags =
       findImageStyleProfile(
         imageSettings.styleProfiles,
         body.styleProfileId || imageDefaults?.styleProfileId || imageSettings.styleProfiles.defaultProfileId,
-      ).subjectTags.avatar ?? "";
+      ).subjectTags[isCharacterSheet ? "illustration" : "avatar"] ?? "";
     const compiled = compileImagePrompt({
-      kind: "avatar",
+      kind: isCharacterSheet ? "illustration" : "avatar",
       prompt: buildAvatarGenerationPrompt(body, profileSubjectTags),
       styleProfiles: imageSettings.styleProfiles,
       styleProfileId: body.styleProfileId,
       imageDefaults,
-      hardNegative: AVATAR_GENERATION_HARD_NEGATIVE_PROMPT,
+      hardNegative: isCharacterSheet
+        ? CHARACTER_SHEET_HARD_NEGATIVE_PROMPT
+        : AVATAR_GENERATION_HARD_NEGATIVE_PROMPT,
     });
     const previewSize = resolveImagePromptReviewSize({
       connection: resolved.conn,
@@ -698,9 +895,9 @@ export async function charactersRoutes(app: FastifyInstance) {
     return {
       items: [
         {
-          id: avatarGenerationPromptId(body.name ?? "character"),
-          kind: "avatar",
-          title: `Avatar: ${body.name?.trim() || "Character"}`,
+          id: avatarGenerationPromptId(body.name ?? "character", body.purpose),
+          kind: isCharacterSheet ? "illustration" : "avatar",
+          title: `${isCharacterSheet ? "Character sheet" : "Avatar"}: ${body.name?.trim() || "Character"}`,
           prompt: compiled.prompt,
           negativePrompt: compiled.negativePrompt,
           width: previewSize.width,
@@ -717,8 +914,13 @@ export async function charactersRoutes(app: FastifyInstance) {
 
     const conn = resolved.conn;
     const imageSettings = await loadImageGenerationUserSettings(app.db);
-    const width = body.width ?? imageSettings.portrait.width;
-    const height = body.height ?? imageSettings.portrait.height;
+    const isCharacterSheet = body.purpose === "character-sheet";
+    const dimensions = validateAvatarGenerationDimensions(
+      body.width ?? (isCharacterSheet ? imageSettings.background.width : imageSettings.portrait.width),
+      body.height ?? (isCharacterSheet ? imageSettings.background.height : imageSettings.portrait.height),
+    );
+    if ("error" in dimensions) return reply.status(400).send({ error: dimensions.error });
+    const { width, height } = dimensions;
     const rawPromptOverrides: unknown[] = Array.isArray(body.promptOverrides) ? body.promptOverrides : [];
     const promptOverrideById = new Map(
       rawPromptOverrides.flatMap((item) => {
@@ -737,7 +939,7 @@ export async function charactersRoutes(app: FastifyInstance) {
         ];
       }),
     );
-    const promptOverride = promptOverrideById.get(avatarGenerationPromptId(body.name ?? "character"));
+    const promptOverride = promptOverrideById.get(avatarGenerationPromptId(body.name ?? "character", body.purpose));
     const referenceImages = (body.referenceImages ?? [])
       .map((image) => image.trim())
       .filter((image) => image.startsWith("data:image/") || /^[A-Za-z0-9+/=\s]+$/.test(image))
@@ -753,7 +955,7 @@ export async function charactersRoutes(app: FastifyInstance) {
       findImageStyleProfile(
         imageSettings.styleProfiles,
         body.styleProfileId || imageDefaults?.styleProfileId || imageSettings.styleProfiles.defaultProfileId,
-      ).subjectTags.avatar ?? "";
+      ).subjectTags[isCharacterSheet ? "illustration" : "avatar"] ?? "";
     const imageFallback = await resolveImageConnectionFallback(connections, conn.id);
     const compiled = promptOverride
       ? {
@@ -761,13 +963,31 @@ export async function charactersRoutes(app: FastifyInstance) {
           negativePrompt: promptOverride.negativePrompt || "",
         }
       : compileImagePrompt({
-          kind: "avatar",
+          kind: isCharacterSheet ? "illustration" : "avatar",
           prompt: buildAvatarGenerationPrompt(body, profileSubjectTags),
           styleProfiles: imageSettings.styleProfiles,
           styleProfileId: body.styleProfileId,
           imageDefaults,
-          hardNegative: AVATAR_GENERATION_HARD_NEGATIVE_PROMPT,
+          hardNegative: isCharacterSheet
+            ? CHARACTER_SHEET_HARD_NEGATIVE_PROMPT
+            : AVATAR_GENERATION_HARD_NEGATIVE_PROMPT,
         });
+
+    const debugOverrideEnabled = body.debugMode === true || isDebugAgentsEnabled();
+    logDebugOverride(
+      debugOverrideEnabled,
+      "[debug/characters/%s-generation] prompt:\n%s",
+      isCharacterSheet ? "character-sheet" : "avatar",
+      compiled.prompt,
+    );
+    if (compiled.negativePrompt) {
+      logDebugOverride(
+        debugOverrideEnabled,
+        "[debug/characters/%s-generation] negative prompt:\n%s",
+        isCharacterSheet ? "character-sheet" : "avatar",
+        compiled.negativePrompt,
+      );
+    }
 
     try {
       const result = await generateImage(imgModel, imgBaseUrl, imgApiKey, imgServiceHint, {
@@ -781,6 +1001,7 @@ export async function charactersRoutes(app: FastifyInstance) {
         imageEndpointId: conn.imageEndpointId || undefined,
         comfyWorkflow: conn.comfyuiWorkflow || undefined,
         imageDefaults,
+        quality: resolveConnectionImageQuality(conn),
         fallback: imageFallback,
         onFallback: createReplyFallbackNotifier(reply),
       });
@@ -789,8 +1010,11 @@ export async function charactersRoutes(app: FastifyInstance) {
         prompt: compiled.prompt,
       };
     } catch (err) {
-      req.log.error(err, "Avatar generation failed");
-      return reply.status(500).send({ error: err instanceof Error ? err.message : "Avatar generation failed" });
+      logger.error(err, "%s generation failed", isCharacterSheet ? "Character sheet" : "Avatar");
+      return reply.status(500).send({
+        error:
+          err instanceof Error ? err.message : `${isCharacterSheet ? "Character sheet" : "Avatar"} generation failed`,
+      });
     }
   });
 
@@ -857,14 +1081,20 @@ export async function charactersRoutes(app: FastifyInstance) {
     const versionSource = typeof body.versionSource === "string" ? body.versionSource : undefined;
     const versionReason = typeof body.versionReason === "string" ? body.versionReason : undefined;
     const skipVersionSnapshot = body.skipVersionSnapshot === true;
-    return enqueueUpdate(characterUpdateQueues, req.params.id, () =>
-      storage.update(req.params.id, update.data ?? {}, avatarPath, {
+    const characterDataUpdate = update.data ?? {};
+    return enqueueUpdate(characterUpdateQueues, req.params.id, async () => {
+      const validatedDataUpdate = await validateCharacterGalleryReferences(
+        req.params.id,
+        characterDataUpdate,
+        (imageId) => characterGallery.getById(imageId),
+      );
+      return storage.update(req.params.id, validatedDataUpdate, avatarPath, {
         comment,
         versionSource,
         versionReason,
         skipVersionSnapshot,
-      }),
-    );
+      });
+    });
   });
 
   app.patch<{ Params: { id: string }; Body: { paint?: unknown } }>("/:id/tracker-card-colors", async (req, reply) => {
@@ -911,22 +1141,30 @@ export async function charactersRoutes(app: FastifyInstance) {
   });
 
   app.delete<{ Params: { id: string } }>("/:id", async (req, reply) => {
-    if (req.params.id === PROFESSOR_MARI_ID) {
+    const { id } = req.params;
+    if (isUnsafePathSegment(id)) {
+      return reply.status(400).send({ error: "Invalid character ID" });
+    }
+    if (id === PROFESSOR_MARI_ID) {
       return reply.status(403).send({ error: "Professor Mari is a built-in character and cannot be deleted" });
     }
-    const galleryImages = await characterGallery.listByCharacterId(req.params.id);
-    await storage.remove(req.params.id);
+    const galleryImages = await characterGallery.listByCharacterId(id);
+    await mutateAvatarReferencesAndCleanup({
+      db: app.db,
+      collectAvatarPaths: () => collectCharacterAvatarPaths(app.db, [id]),
+      mutateReferences: () => storage.remove(id),
+    });
     // Cascade the character's Noodle presence, otherwise its account and posts stay
     // in the timeline forever as a ghost (issue #4295).
     try {
-      await createNoodleStorage(app.db).deleteAccountByEntity("character", req.params.id);
+      await createNoodleStorage(app.db).deleteAccountByEntity("character", id);
     } catch (err) {
-      logger.error(err, "Failed to clean up Noodle account for deleted character %s", req.params.id);
+      logger.error(err, "Failed to clean up Noodle account for deleted character %s", id);
     }
     for (const image of galleryImages) {
       await unlinkGalleryFileIfUnreferenced({ db: app.db, filePath: image.filePath });
     }
-    const localPathPrefix = `characters/${req.params.id}/`;
+    const localPathPrefix = `characters/${id}/`;
     const hasSharedLocalFile = (
       await Promise.all(
         galleryImages
@@ -934,7 +1172,7 @@ export async function charactersRoutes(app: FastifyInstance) {
           .map((image) => galleryFileHasReferences(app.db, image.filePath)),
       )
     ).some(Boolean);
-    const galleryDir = join(CHARACTER_GALLERY_ROOT, req.params.id);
+    const galleryDir = assertInsideDir(CHARACTER_GALLERY_ROOT, join(CHARACTER_GALLERY_ROOT, id));
     if (!hasSharedLocalFile && existsSync(galleryDir)) {
       rmSync(galleryDir, { recursive: true, force: true });
     }
@@ -1305,7 +1543,10 @@ export async function charactersRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "Not found" });
     }
 
-    return reply.sendFile(filename, dir);
+    const video = await validateVideoAssetFile(filePath, filename);
+    if (!video) return reply.status(404).send({ error: "Not found" });
+
+    return sendValidatedMediaFile(reply, video, { method: req.method, rangeHeader: req.headers.range });
   });
 
   app.post<{ Params: { id: string } }>("/:id/gallery/upload", async (req, reply) => {
@@ -1371,7 +1612,10 @@ export async function charactersRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "Not found" });
     }
 
-    return reply.sendFile(storedFile.filename, storedFile.directory);
+    const validatedImage = await validateImageAssetFile(storedFile.absolutePath, storedFile.filename);
+    if (!validatedImage) return reply.status(404).send({ error: "Not found" });
+
+    return sendValidatedMediaFile(reply, validatedImage, { method: req.method, rangeHeader: req.headers.range });
   });
 
   app.delete<{ Params: { id: string; imageId: string } }>("/:id/gallery/:imageId", async (req, reply) => {
@@ -1382,6 +1626,21 @@ export async function charactersRoutes(app: FastifyInstance) {
     }
 
     await characterGallery.remove(imageId);
+    await enqueueUpdate(characterUpdateQueues, id, async () => {
+      const character = await storage.getById(id);
+      if (!character) return null;
+      const characterData = parseCharacterDataRecord(character.data);
+      const extensions = parseCharacterDataRecord(characterData.extensions);
+      if (extensions.characterSheetImageId !== imageId) return character;
+      return storage.update(
+        id,
+        {
+          extensions: { characterSheetImageId: null, useCharacterSheetAsReference: false },
+        } as Partial<CharacterData>,
+        undefined,
+        { skipVersionSnapshot: true, mergeExtensions: true },
+      );
+    });
     await unlinkGalleryFileIfUnreferenced({ db: app.db, filePath: image.filePath });
     return { success: true };
   });
@@ -1398,12 +1657,12 @@ export async function charactersRoutes(app: FastifyInstance) {
       avatarPath = await copyGalleryImageToAvatar("character", id, image.filePath);
       const updated = await storage.updateAvatar(id, avatarPath);
       if (!updated) {
-        await removeCopiedAvatarFile(avatarPath);
+        await removeUnattachedAvatarFile({ avatarPath });
         return reply.status(404).send({ error: "Character not found" });
       }
       return updated;
     } catch (error) {
-      if (avatarPath) await removeCopiedAvatarFile(avatarPath);
+      if (avatarPath) await removeUnattachedAvatarFile({ avatarPath });
       logger.warn(error, "Failed to set character %s avatar from gallery image %s", id, imageId);
       return reply.status(400).send({ error: "Gallery image could not be used as an avatar" });
     }
@@ -1649,7 +1908,7 @@ export async function charactersRoutes(app: FastifyInstance) {
     if (!char) return reply.status(404).send({ error: "Character not found" });
 
     const charData = JSON.parse(char.data);
-    const v2Envelope = { spec: "chara_card_v2", spec_version: "2.0", data: charData };
+    const v2Envelope = buildCompatibleCharacterExport(charData);
     const charaBase64 = Buffer.from(JSON.stringify(v2Envelope), "utf-8").toString("base64");
 
     // Read avatar image or create a minimal 1x1 transparent PNG fallback
@@ -1698,7 +1957,7 @@ export async function charactersRoutes(app: FastifyInstance) {
     const char = await storage.getById(id);
     if (!char) return reply.status(404).send({ error: "Character not found" });
 
-    const body = req.body as { avatar?: string; filename?: string };
+    const body = req.body as { avatar?: string; filename?: string; data?: unknown };
     if (!body.avatar) {
       return reply.status(400).send({ error: "No avatar data provided" });
     }
@@ -1719,13 +1978,30 @@ export async function charactersRoutes(app: FastifyInstance) {
     ext = extensionFromImageMime(imageInfo.mimeType);
 
     const avatarsDir = join(DATA_DIR, "avatars");
-    await mkdir(avatarsDir, { recursive: true });
     const filename = `character-${id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
     const filepath = assertInsideDir(avatarsDir, join(avatarsDir, filename));
-    await writeFile(filepath, imageBuffer);
-
     const avatarPath = `/api/avatars/file/${filename}`;
-    return storage.updateAvatar(id, avatarPath);
+    try {
+      await mkdir(avatarsDir, { recursive: true });
+      await writeFile(filepath, imageBuffer);
+      const characterData = body.data === undefined ? {} : (updateCharacterSchema.parse({ data: body.data }).data ?? {});
+      const updated = await enqueueUpdate(characterUpdateQueues, id, async () => {
+        const validatedData = await validateCharacterGalleryReferences(id, characterData, (imageId) =>
+          characterGallery.getById(imageId),
+        );
+        return storage.update(id, validatedData, avatarPath, {
+          versionReason: body.data === undefined ? "Avatar update" : "Character card and avatar update",
+        });
+      });
+      if (!updated) {
+        await removeUnattachedAvatarFile({ avatarPath });
+        return reply.status(404).send({ error: "Character not found" });
+      }
+      return updated;
+    } catch (error) {
+      await removeUnattachedAvatarFile({ filePath: filepath });
+      throw error;
+    }
   });
 
   app.delete<{ Params: { id: string } }>("/:id/avatar", async (req, reply) => {
@@ -1744,26 +2020,28 @@ export async function charactersRoutes(app: FastifyInstance) {
     async (req) => {
       const page = parseLibraryPageQuery(req.query);
       if (page.hasPaging) {
-        return storage.listPersonasPage({
+        const result = await storage.listPersonasPage({
           limit: page.limit,
           offset: page.offset,
           search: page.search,
           sort: page.sort,
         });
+        return { ...result, items: result.items.map(projectPersona) };
       }
-      return storage.listPersonas();
+      return (await storage.listPersonas()).map(projectPersona);
     },
   );
 
   app.get("/personas/active", async () => {
     const personas = await storage.listPersonas();
-    return personas.find((persona) => String(persona.isActive) === "true") ?? null;
+    const active = personas.find((persona) => persona.isActive === "true");
+    return active ? projectPersona(active) : null;
   });
 
   app.get<{ Params: { id: string } }>("/personas/:id", async (req, reply) => {
     const persona = await storage.getPersona(req.params.id);
     if (!persona) return reply.status(404).send({ error: "Persona not found" });
-    return persona;
+    return projectPersona(persona);
   });
 
   app.get<{ Params: { id: string } }>("/personas/:id/versions", async (req, reply) => {
@@ -1777,7 +2055,7 @@ export async function charactersRoutes(app: FastifyInstance) {
     async (req, reply) => {
       const restored = await storage.restorePersonaVersion(req.params.id, req.params.versionId);
       if (!restored) return reply.status(404).send({ error: "Persona version not found" });
-      return restored;
+      return projectPersona(restored);
     },
   );
 
@@ -1802,133 +2080,133 @@ export async function charactersRoutes(app: FastifyInstance) {
       storage.resetPersonaVersions(req.params.id),
     );
     if (!reset) return reply.status(404).send({ error: "Persona not found" });
-    return reset;
+    return projectPersona(reset);
   });
 
-  app.post("/personas", async (req) => {
-    const { name, description, createdAt, updatedAt, ...extra } = req.body as {
-      name: string;
-      description?: string;
-      comment?: string;
-      creator?: string;
-      personaVersion?: string;
-      creatorNotes?: string;
-      phoneticName?: string;
-      personality?: string;
-      scenario?: string;
-      backstory?: string;
-      appearance?: string;
-      nameColor?: string;
-      dialogueColor?: string;
-      boxColor?: string;
-      trackerCardColors?: string;
-      avatarCrop?: string;
-      createdAt?: string;
-      updatedAt?: string;
-      savedStatusOptions?: string;
-      convoDisplayName?: string;
-      aboutMe?: string;
-      convoBehavior?: string;
-    };
-    return storage.createPersona(
+  app.post("/personas", async (req, reply) => {
+    const parsed = personaCreateInputSchema.safeParse(canonicalizeLegacyPersonaInput(req.body));
+    if (!parsed.success)
+      return reply.status(400).send({ error: "Invalid persona payload", issues: parsed.error.issues });
+    const { createdAt, updatedAt, ...input } = parsed.data;
+    const { name, description, extra } = encodePersonaCreate(input);
+    const created = await storage.createPersona(
       name,
-      description ?? "",
+      description,
       undefined,
       extra,
       normalizeTimestampOverrides({ createdAt, updatedAt }),
     );
+    if (!created) return reply.status(500).send({ error: "Created persona could not be loaded" });
+    return projectPersona(created);
   });
 
   app.patch<{ Params: { id: string } }>("/personas/:id", async (req, reply) => {
     if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
       return reply.status(400).send({ error: "Persona update must be a JSON object" });
     }
-    const body = req.body as Record<string, unknown>;
-    let parsedPaint: Record<string, unknown> | null = null;
-    if (typeof body.trackerCardColors === "string") {
-      try {
-        const parsed = JSON.parse(body.trackerCardColors) as unknown;
-        if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
-          parsedPaint = parsed as Record<string, unknown>;
-        }
-      } catch {
-        // Preserve generic PATCH behavior for malformed tracker-card colors.
-      }
+    const rawBody = req.body as Record<string, unknown>;
+    const rawTrackerCardColors = rawBody.trackerCardColors;
+    const completeReset = rawTrackerCardColors === "";
+    const hasCharacterSheetImageId = Object.hasOwn(rawBody, "characterSheetImageId");
+    const hasUseCharacterSheetAsReference = Object.hasOwn(rawBody, "useCharacterSheetAsReference");
+    const characterSheetImageId = rawBody.characterSheetImageId;
+    if (hasCharacterSheetImageId && characterSheetImageId !== null && typeof characterSheetImageId !== "string") {
+      return reply.status(400).send({ error: "characterSheetImageId must be a string or null" });
+    }
+    let useCharacterSheetAsReference: "true" | "false" | undefined;
+    if (hasUseCharacterSheetAsReference) {
+      const enabled = rawBody.useCharacterSheetAsReference;
+      if (typeof enabled === "boolean") useCharacterSheetAsReference = String(enabled) as "true" | "false";
+      else if (enabled === "true" || enabled === "false") useCharacterSheetAsReference = enabled;
+      else return reply.status(400).send({ error: "useCharacterSheetAsReference must be a boolean" });
+    }
+
+    const parsed = personaUpdateInputSchema.safeParse(canonicalizeLegacyPersonaInput(rawBody));
+    if (!parsed.success)
+      return reply.status(400).send({ error: "Invalid persona update", issues: parsed.error.issues });
+    const body = parsed.data;
+    if (Object.keys(body).length === 0 && !hasCharacterSheetImageId && !hasUseCharacterSheetAsReference) {
+      const current = await storage.getPersona(req.params.id);
+      if (!current) return reply.status(404).send({ error: "Persona not found" });
+      return projectPersona(current);
     }
 
     const updated = await enqueueUpdate(personaUpdateQueues, req.params.id, async () => {
-      if (!parsedPaint) return storage.updatePersona(req.params.id, body);
-      const currentPersona = await storage.getPersona(req.params.id);
-      if (!currentPersona) return null;
+      let galleryFields: {
+        characterSheetImageId?: string | null;
+        useCharacterSheetAsReference?: "true" | "false";
+      } = hasUseCharacterSheetAsReference ? { useCharacterSheetAsReference } : {};
+      if (hasCharacterSheetImageId) {
+        const imageId = typeof characterSheetImageId === "string" ? characterSheetImageId : null;
+        const image = imageId ? await personaGallery.getById(imageId) : null;
+        galleryFields =
+          image && image.personaId === req.params.id
+            ? { ...galleryFields, characterSheetImageId: imageId }
+            : { characterSheetImageId: null, useCharacterSheetAsReference: "false" };
+      }
+      if (!Object.hasOwn(body, "trackerCardColors") || completeReset) {
+        return storage.updatePersona(req.params.id, { ...encodePersonaUpdate(body), ...galleryFields });
+      }
+      const current = await storage.getPersona(req.params.id);
+      if (!current) return null;
+      const trackerCardColors = isTrackerCardClear(body.trackerCardColors)
+        ? buildTrackerCardPortraitClear(current.trackerCardColors)
+        : mergePersonaTrackerCardColors(current.trackerCardColors, body.trackerCardColors as Record<string, unknown>);
       return storage.updatePersona(req.params.id, {
-        ...body,
-        trackerCardColors: JSON.stringify(
-          applyTrackerCardPaint(currentPersona.trackerCardColors, parsedPaint, false),
-        ),
+        ...encodePersonaUpdate({ ...body, trackerCardColors }),
+        ...galleryFields,
       });
     });
     if (!updated) return reply.status(404).send({ error: "Persona not found" });
-    return updated;
+    return projectPersona(updated);
   });
 
   app.patch<{ Params: { id: string } }>("/personas/:id/tracker-card-colors", async (req, reply) => {
-    const body = (req.body ?? {}) as {
-      paint?: unknown;
-      portrait?: unknown;
-    };
-    const hasPaint = body.paint !== undefined;
-    const portrait = body.portrait;
-    const hasPortrait = portrait !== undefined;
-    if (hasPaint === hasPortrait) {
+    const body = (req.body ?? {}) as { paint?: unknown; portrait?: unknown };
+    const hasPaint = body.paint !== undefined,
+      hasPortrait = body.portrait !== undefined;
+    if (hasPaint === hasPortrait)
       return reply.status(400).send({ error: "Provide exactly one tracker-card paint or portrait update" });
-    }
-    const portraitRecord =
-      portrait !== null && typeof portrait === "object" && !Array.isArray(portrait)
-        ? (portrait as Record<string, unknown>)
-        : null;
-    const hasValidPortrait =
-      hasPortrait &&
-      portraitRecord !== null &&
-      typeof portraitRecord.portraitFocusX === "number" &&
-      Number.isFinite(portraitRecord.portraitFocusX) &&
-      typeof portraitRecord.portraitFocusY === "number" &&
-      Number.isFinite(portraitRecord.portraitFocusY) &&
-      typeof portraitRecord.portraitZoom === "number" &&
-      Number.isFinite(portraitRecord.portraitZoom);
-    if (hasPortrait && !hasValidPortrait) {
-      return reply.status(400).send({ error: "Tracker-card portrait values must be finite numbers" });
-    }
-
     let paint: Record<string, unknown> | null = null;
+    let portrait: Record<string, unknown> | null = null;
     if (hasPaint) {
-      if (body.paint === null || typeof body.paint !== "object" || Array.isArray(body.paint)) {
+      if (!body.paint || typeof body.paint !== "object" || Array.isArray(body.paint))
         return reply.status(400).send({ error: "Tracker-card paint must be a JSON object" });
+      const parsed = trackerCardColorConfigSchema.safeParse(body.paint);
+      if (!parsed.success)
+        return reply
+          .status(400)
+          .send({ error: "Tracker-card paint contains invalid values", issues: parsed.error.issues });
+      paint = parsed.data as Record<string, unknown>;
+    } else {
+      if (!body.portrait || typeof body.portrait !== "object" || Array.isArray(body.portrait))
+        return reply.status(400).send({ error: "Tracker-card portrait values must be finite numbers" });
+      const parsed = trackerCardColorConfigSchema.safeParse(body.portrait);
+      if (
+        !parsed.success ||
+        parsed.data.portraitFocusX === undefined ||
+        parsed.data.portraitFocusY === undefined ||
+        parsed.data.portraitZoom === undefined
+      ) {
+        return reply
+          .status(400)
+          .send({
+            error: "Tracker-card portrait contains invalid values",
+            ...(parsed.success ? {} : { issues: parsed.error.issues }),
+          });
       }
-      paint = body.paint as Record<string, unknown>;
+      portrait = {
+        portraitFocusX: parsed.data.portraitFocusX,
+        portraitFocusY: parsed.data.portraitFocusY,
+        portraitZoom: parsed.data.portraitZoom,
+      };
     }
-
     const updated = await enqueueUpdate(personaUpdateQueues, req.params.id, async () => {
-      const currentPersona = await storage.getPersona(req.params.id);
-      if (!currentPersona) return null;
-
-      let current: Record<string, unknown> = { mode: "chat" };
-      try {
-        const parsed = JSON.parse(currentPersona.trackerCardColors) as unknown;
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          current = parsed as Record<string, unknown>;
-        }
-      } catch {
-        // Preserve the storage default when legacy data is malformed.
-      }
-
+      const current = await storage.getPersona(req.params.id);
+      if (!current) return null;
       const next = paint
-        ? applyTrackerCardPaint(current, paint)
-        : {
-            ...current,
-            portraitFocusX: portraitRecord!.portraitFocusX,
-            portraitFocusY: portraitRecord!.portraitFocusY,
-            portraitZoom: portraitRecord!.portraitZoom,
-          };
+        ? applyPersonaTrackerCardPaint(current.trackerCardColors, paint)
+        : normalizeTrackerCardColorConfig({ ...parseCharacterDataRecord(current.trackerCardColors), ...portrait! });
       return storage.updatePersona(
         req.params.id,
         { trackerCardColors: JSON.stringify(next) },
@@ -1936,7 +2214,7 @@ export async function charactersRoutes(app: FastifyInstance) {
       );
     });
     if (!updated) return reply.status(404).send({ error: "Persona not found" });
-    return updated;
+    return projectPersona(updated);
   });
 
   app.post<{ Params: { id: string } }>("/personas/:id/avatar", async (req, reply) => {
@@ -1952,13 +2230,28 @@ export async function charactersRoutes(app: FastifyInstance) {
     const imageBuffer = Buffer.from(base64, "base64");
     const imageInfo = isAllowedImageBuffer(imageBuffer, hintedExt);
     if (!imageInfo) return reply.status(400).send({ error: "Unsupported or invalid avatar image" });
+    if (!(await storage.getPersona(req.params.id))) {
+      return reply.status(404).send({ error: "Persona not found" });
+    }
     const filename = `persona-${req.params.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${imageInfo.ext}`;
     const avatarsDir = join(DATA_DIR, "avatars");
-    await mkdir(avatarsDir, { recursive: true });
-    const filepath = assertInsideDir(avatarsDir, join(avatarsDir, filename));
-    await writeFile(filepath, imageBuffer);
     const avatarPath = `/api/avatars/file/${filename}`;
-    return storage.updatePersona(req.params.id, { avatarPath }, { versionReason: "Avatar update" });
+    try {
+      await mkdir(avatarsDir, { recursive: true });
+      const filepath = assertInsideDir(avatarsDir, join(avatarsDir, filename));
+      await writeFile(filepath, imageBuffer);
+      const updated = await enqueueUpdate(personaUpdateQueues, req.params.id, () =>
+        storage.updatePersona(req.params.id, { avatarPath, avatarCrop: "" }, { versionReason: "Avatar update" }),
+      );
+      if (!updated) {
+        await removeUnattachedAvatarFile({ avatarPath });
+        return reply.status(404).send({ error: "Persona not found" });
+      }
+      return projectPersona(updated);
+    } catch (error) {
+      await removeUnattachedAvatarFile({ avatarPath });
+      throw error;
+    }
   });
 
   app.put<{ Params: { id: string } }>("/personas/:id/activate", async (req, reply) => {
@@ -1980,7 +2273,11 @@ export async function charactersRoutes(app: FastifyInstance) {
     if (!persona) return reply.status(404).send({ error: "Persona not found" });
 
     const galleryImages = await personaGallery.listByPersonaId(id);
-    await storage.removePersona(id);
+    await mutateAvatarReferencesAndCleanup({
+      db: app.db,
+      collectAvatarPaths: () => collectPersonaAvatarPaths(app.db, [id]),
+      mutateReferences: () => storage.removePersona(id),
+    });
     for (const image of galleryImages) {
       await unlinkGalleryFileIfUnreferenced({ db: app.db, filePath: image.filePath });
     }
@@ -2310,7 +2607,10 @@ export async function charactersRoutes(app: FastifyInstance) {
         return reply.status(404).send({ error: "Not found" });
       }
 
-      return reply.sendFile(filename, dir);
+      const video = await validateVideoAssetFile(filePath, filename);
+      if (!video) return reply.status(404).send({ error: "Not found" });
+
+      return sendValidatedMediaFile(reply, video, { method: req.method, rangeHeader: req.headers.range });
     },
   );
 
@@ -2433,7 +2733,10 @@ export async function charactersRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "Not found" });
     }
 
-    return reply.sendFile(storedFile.filename, storedFile.directory);
+    const validatedImage = await validateImageAssetFile(storedFile.absolutePath, storedFile.filename);
+    if (!validatedImage) return reply.status(404).send({ error: "Not found" });
+
+    return sendValidatedMediaFile(reply, validatedImage, { method: req.method, rangeHeader: req.headers.range });
   });
 
   app.delete<{ Params: { id: string; imageId: string } }>("/personas/:id/gallery/:imageId", async (req, reply) => {
@@ -2444,6 +2747,15 @@ export async function charactersRoutes(app: FastifyInstance) {
     }
 
     await personaGallery.remove(imageId);
+    await enqueueUpdate(personaUpdateQueues, id, async () => {
+      const persona = await storage.getPersona(id);
+      if (!persona || persona.characterSheetImageId !== imageId) return persona;
+      return storage.updatePersona(
+        id,
+        { characterSheetImageId: null, useCharacterSheetAsReference: "false" },
+        { skipVersionSnapshot: true },
+      );
+    });
     await unlinkGalleryFileIfUnreferenced({ db: app.db, filePath: image.filePath });
     return { success: true };
   });
@@ -2462,18 +2774,16 @@ export async function charactersRoutes(app: FastifyInstance) {
         avatarPath = await copyGalleryImageToAvatar("persona", id, image.filePath);
         // The previous crop was normalized against the old image's framing, so
         // it must not carry over to the replacement avatar.
-        const updated = await storage.updatePersona(
-          id,
-          { avatarPath, avatarCrop: "" },
-          { versionReason: "Avatar update" },
+        const updated = await enqueueUpdate(personaUpdateQueues, id, () =>
+          storage.updatePersona(id, { avatarPath, avatarCrop: "" }, { versionReason: "Avatar update" }),
         );
         if (!updated) {
-          await removeCopiedAvatarFile(avatarPath);
+          await removeUnattachedAvatarFile({ avatarPath });
           return reply.status(404).send({ error: "Persona not found" });
         }
-        return updated;
+        return projectPersona(updated);
       } catch (error) {
-        if (avatarPath) await removeCopiedAvatarFile(avatarPath);
+        if (avatarPath) await removeUnattachedAvatarFile({ avatarPath });
         logger.warn(error, "Failed to set persona %s avatar from gallery image %s", id, imageId);
         return reply.status(400).send({ error: "Gallery image could not be used as an avatar" });
       }
@@ -2509,7 +2819,7 @@ export async function charactersRoutes(app: FastifyInstance) {
   app.post<{ Params: { id: string } }>("/personas/:id/duplicate", async (req, reply) => {
     const result = await storage.duplicatePersona(req.params.id);
     if (!result) return reply.status(404).send({ error: "Persona not found" });
-    return result;
+    return projectPersona(result);
   });
 
   // ── Persona Export ──
@@ -2520,13 +2830,14 @@ export async function charactersRoutes(app: FastifyInstance) {
       const persona = await storage.getPersona(req.params.id);
       if (!persona) return reply.status(404).send({ error: "Persona not found" });
       const compatible = req.query.format === "compatible";
+      const canonical = canonicalizePersonaForExport(persona as Record<string, unknown>);
       const payload = compatible
-        ? buildCompatiblePersonaExport(persona as Record<string, unknown>)
-        : await buildNativePersonaEnvelope(persona as Record<string, unknown>);
+        ? buildCompatiblePersonaExport(canonical.row)
+        : await buildNativePersonaEnvelope(canonical.row, personaGallery);
       return reply
         .header(
           "Content-Disposition",
-          `attachment; filename="${encodeURIComponent(String(persona.name || "persona"))}.${compatible ? "json" : "marinara.json"}"`,
+          `attachment; filename="${encodeURIComponent(toSafeExportName(canonical.usesFallbackName ? "" : String(canonical.row.name), "unnamed-persona"))}.${compatible ? "json" : "marinara.json"}"`,
         )
         .send(payload);
     },
@@ -2543,12 +2854,16 @@ export async function charactersRoutes(app: FastifyInstance) {
     for (const id of ids) {
       const persona = await storage.getPersona(id);
       if (!persona) continue;
+      const canonical = canonicalizePersonaForExport(persona as Record<string, unknown>);
       const payload =
         format === "compatible"
-          ? buildCompatiblePersonaExport(persona as Record<string, unknown>)
-          : await buildNativePersonaEnvelope(persona as Record<string, unknown>);
+          ? buildCompatiblePersonaExport(canonical.row)
+          : await buildNativePersonaEnvelope(canonical.row, personaGallery);
       zip.addFile(
-        `${toSafeExportName(String(persona.name ?? "persona"), `persona-${exportedCount + 1}`)}.${format === "compatible" ? "json" : "marinara.json"}`,
+        `${toSafeExportName(
+          canonical.usesFallbackName ? "" : String(canonical.row.name),
+          `unnamed-persona-${exportedCount + 1}`,
+        )}.${format === "compatible" ? "json" : "marinara.json"}`,
         Buffer.from(JSON.stringify(payload, null, 2), "utf-8"),
       );
       exportedCount++;

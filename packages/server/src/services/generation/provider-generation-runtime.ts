@@ -21,7 +21,11 @@ import {
 import { mergeModelContextLimit, resolveStoredModelContextLimit } from "./model-access-policy.js";
 import { normalizeChatTopP } from "./generation-parameters.js";
 import { clampGenerationMaxOutputTokens } from "./output-token-limits.js";
-import { withConnectionFallbackProvider, type FallbackConnection } from "../llm/connection-fallback-provider.js";
+import {
+  withConnectionFallbackProvider,
+  type FallbackConnection,
+  type GenerationProviderOrigin,
+} from "../llm/connection-fallback-provider.js";
 import type { GenerationFallbackNotifier } from "./fallback-notification.js";
 
 type GenerationConnection = {
@@ -43,6 +47,7 @@ type GenerationProviderRuntimeArgs = {
   fallbackConnection?: FallbackConnection | null;
   fallbackBaseUrl?: string;
   onFallback?: GenerationFallbackNotifier;
+  onProviderUsed?: (origin: GenerationProviderOrigin) => void;
   chatMode: string;
   isSceneChat: boolean;
   chatParameters: unknown;
@@ -219,6 +224,7 @@ export function resolveGenerationProviderRuntime(args: GenerationProviderRuntime
     fallbackBaseUrl: args.fallbackBaseUrl ?? "",
     category: "main",
     onFallback: args.onFallback,
+    onProviderUsed: args.onProviderUsed,
   });
 
   return {

@@ -11,7 +11,7 @@ import { DATA_DIR } from "../../utils/data-dir.js";
 import { newId, now } from "../../utils/id-generator.js";
 import { assertInsideDir, extensionFromImageMime, isAllowedImageBuffer } from "../../utils/security.js";
 import { generateImage, type ImageGenResult } from "../image/image-generation.js";
-import { resolveConnectionImageDefaults } from "../image/image-generation-defaults.js";
+import { resolveConnectionImageDefaults, resolveConnectionImageQuality } from "../image/image-generation-defaults.js";
 import { loadImageGenerationUserSettings } from "../image/image-generation-settings.js";
 import { compileImagePrompt } from "../image/image-prompt-compiler.js";
 import { resolveImageConnectionFallback } from "../generation/media-connection-fallback.js";
@@ -24,6 +24,12 @@ import { createChatsStorage } from "../storage/chats.storage.js";
 import { buildAssetManifest } from "../game/asset-manifest.service.js";
 import type { MariDbCommandResult } from "@marinara-engine/shared";
 import { deleteChatGalleryImageEverywhere } from "../image/chat-gallery-cascade-deletion.js";
+import {
+  collectPersonaAvatarPaths,
+  mutateAvatarReferencesAndCleanup,
+  removeUnattachedAvatarFile,
+  withAvatarFileLifecycleLock,
+} from "../image/avatar-file-lifecycle.js";
 import {
   decodeSafePathSegment,
   resolveOwnedGalleryPath,
@@ -720,6 +726,7 @@ export class MariImagesService {
       imageEndpointId: connection.imageEndpointId || undefined,
       comfyWorkflow: connection.comfyuiWorkflow || undefined,
       imageDefaults,
+      quality: resolveConnectionImageQuality(connection),
       fallback,
     });
 
@@ -1001,15 +1008,29 @@ export class MariImagesService {
 
   private async assignPersonaAvatar(source: ResolvedImage, personaId: string) {
     const store = createCharactersStorage(this.db);
-    const existing = await store.getPersona(personaId);
-    if (!existing) throw new Error(`Persona not found: ${personaId}`);
     await mkdir(AVATAR_DIR, { recursive: true });
     const filename = `persona-${personaId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${source.ext}`;
     const path = assertInsideDir(AVATAR_DIR, join(AVATAR_DIR, filename));
-    await writeFile(path, source.buffer);
     const avatarPath = `/api/avatars/file/${filename}`;
-    const updated = await store.updatePersona(personaId, { avatarPath });
-    return { avatarPath, row: updated };
+
+    const row = await withAvatarFileLifecycleLock(async () => {
+      const existing = await store.getPersona(personaId);
+      if (!existing) throw new Error(`Persona not found: ${personaId}`);
+      try {
+        await writeFile(path, source.buffer);
+        const updated = await store.updatePersona(
+          personaId,
+          { avatarPath, avatarCrop: "" },
+          { _avatarLifecycleLocked: true },
+        );
+        if (!updated) throw new Error(`Persona not found: ${personaId}`);
+        return updated;
+      } catch (error) {
+        await removeUnattachedAvatarFile({ filePath: path });
+        throw error;
+      }
+    });
+    return { avatarPath, row };
   }
 
   private async assignLorebookImage(source: ResolvedImage, lorebookId: string) {
@@ -1132,13 +1153,8 @@ export class MariImagesService {
         if (deleteFile && existing.avatarPath) await this.deleteKnownAppImage(existing.avatarPath);
         return store.updateAvatar(target.characterId, null);
       }
-      case "persona-avatar": {
-        const store = createCharactersStorage(this.db);
-        const existing = await store.getPersona(target.personaId);
-        if (!existing) throw new Error(`Persona not found: ${target.personaId}`);
-        if (deleteFile && existing.avatarPath) await this.deleteKnownAppImage(existing.avatarPath);
-        return store.updatePersona(target.personaId, { avatarPath: null });
-      }
+      case "persona-avatar":
+        return this.clearPersonaAvatar(target.personaId, deleteFile);
       case "lorebook-image": {
         const store = createLorebooksStorage(this.db);
         const existing = await store.getById(target.lorebookId);
@@ -1158,6 +1174,25 @@ export class MariImagesService {
         if (!target.imageId) throw new Error("character-gallery delete requires --image <id>");
         return this.deleteCharacterGallery(target.characterId, target.imageId);
     }
+  }
+
+  private async clearPersonaAvatar(personaId: string, deleteFile: boolean) {
+    const store = createCharactersStorage(this.db);
+    const { result, filesDeleted } = await mutateAvatarReferencesAndCleanup({
+      db: this.db,
+      collectAvatarPaths: () => collectPersonaAvatarPaths(this.db, [personaId]),
+      mutateReferences: async () => {
+        const updated = await store.updatePersona(
+          personaId,
+          { avatarPath: null, avatarCrop: "" },
+          { _avatarLifecycleLocked: true },
+        );
+        if (!updated) throw new Error(`Persona not found: ${personaId}`);
+        return updated;
+      },
+      cleanupFiles: deleteFile,
+    });
+    return { ...result, filesDeleted };
   }
 
   private async deleteKnownAppImage(value: string) {

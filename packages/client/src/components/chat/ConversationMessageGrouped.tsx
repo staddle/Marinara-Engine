@@ -73,7 +73,8 @@ export function ConversationMessageGrouped({
     isHiddenFromAI,
     canRegenerate,
     isLastAssistantMessage,
-    thinking,
+    hasReasoning,
+    reasoningSummaryUnavailable,
     thinkingButtonRef,
     generationReplay,
     isGuided,
@@ -134,7 +135,7 @@ export function ConversationMessageGrouped({
         isGrouped ? "mt-0" : "mt-3",
         isStreaming && "bg-[var(--secondary)]/20",
         multiSelectMode && isSelected && MESSAGE_SELECTION_SURFACE_CLASS,
-        hideActions && thinking && "max-sm:pb-8",
+        hideActions && hasReasoning && "max-sm:pb-8",
       )}
       onClick={handleMobileTap}
     >
@@ -442,19 +443,20 @@ export function ConversationMessageGrouped({
       )}
 
       {/* Action bar */}
-      {(!hideActions || !!thinking) && (
+      {(!hideActions || hasReasoning) && (
         <ConversationMessageActions
           isBubbleStyle={isBubbleStyle}
           isUser={false}
           showActions={showActions}
-          forceShowActions={hideActions && !!thinking ? true : forceShowActions}
-          thinkingOnly={hideActions && !!thinking}
+          forceShowActions={hideActions && hasReasoning ? true : forceShowActions}
+          thinkingOnly={hideActions && hasReasoning}
           copied={copied}
           translatedText={translatedText}
           isHiddenFromAI={isHiddenFromAI}
           canRegenerate={canRegenerate}
           isLastAssistantMessage={isLastAssistantMessage}
-          thinking={thinking}
+          hasReasoning={hasReasoning}
+          reasoningSummaryUnavailable={reasoningSummaryUnavailable}
           thinkingButtonRef={thinkingButtonRef}
           generationReplay={generationReplay}
           isGuided={isGuided}

@@ -35,7 +35,10 @@ import {
 import { resolveGameVideoRuntime } from "../services/video/game-video-runtime.js";
 import { generateImage, removeSavedImageFromDisk, saveImageToDisk } from "../services/image/image-generation.js";
 import { resolveGalleryImagePath } from "../services/image/gallery-image-path.js";
-import { resolveConnectionImageDefaults } from "../services/image/image-generation-defaults.js";
+import {
+  resolveConnectionImageDefaults,
+  resolveConnectionImageQuality,
+} from "../services/image/image-generation-defaults.js";
 import { loadImageGenerationUserSettings } from "../services/image/image-generation-settings.js";
 import {
   compileImagePrompt,
@@ -63,6 +66,7 @@ import {
 import { resolveIllustratorPromptRuntime } from "../services/generation/illustrator-prompt-runtime.js";
 import { resolveIllustratorImageConnectionId } from "../services/generation/illustrator-background-generation.js";
 import { resolveConversationSelfieSystemPrompt } from "../services/conversation/selfie-prompt.js";
+import { appendImagePromptInstructions } from "../services/generation/image-prompt-instructions.js";
 import {
   suppressesReferencePromptLine,
   resolveIllustratorCharacterReferences,
@@ -83,6 +87,11 @@ import { isDebugAgentsEnabled } from "../config/runtime-config.js";
 import { newId } from "../utils/id-generator.js";
 import { DATA_DIR } from "../utils/data-dir.js";
 import { assertInsideDir, isAllowedImageBuffer } from "../utils/security.js";
+import {
+  sendValidatedMediaFile,
+  validateImageAssetFile,
+  validateVideoAssetFile,
+} from "../utils/media-file-security.js";
 import { logger, logDebugOverride } from "../lib/logger.js";
 
 const GALLERY_DIR = join(DATA_DIR, "gallery");
@@ -886,7 +895,9 @@ export async function galleryRoutes(app: FastifyInstance) {
       if (!storedFile || !existsSync(storedFile.absolutePath)) {
         return reply.status(404).send({ error: "Not found" });
       }
-      return reply.sendFile(storedFile.filename, storedFile.directory);
+      const validatedImage = await validateImageAssetFile(storedFile.absolutePath, storedFile.filename);
+      if (!validatedImage) return reply.status(404).send({ error: "Not found" });
+      return sendValidatedMediaFile(reply, validatedImage, { method: req.method, rangeHeader: req.headers.range });
     }
 
     if (parts[0] === "sprites" && (parts[1] === "facial" || parts[1] === "fullbody") && parts[2]) {
@@ -894,7 +905,11 @@ export async function galleryRoutes(app: FastifyInstance) {
       if (!isSafeAssetSegment(target)) return reply.status(400).send({ error: "Invalid sprite target" });
       const match = await findContextualSprite(chat, parts[1], target);
       if (!match) return reply.status(404).send({ error: "Sprite not found" });
-      return reply.sendFile(match.filename, join(SPRITES_DIR, match.ownerId));
+      const spritePath = assertInsideDir(SPRITES_DIR, join(SPRITES_DIR, match.ownerId, match.filename));
+      const validatedImage = await validateImageAssetFile(spritePath, match.filename, { allowSvg: true });
+      if (!validatedImage) return reply.status(404).send({ error: "Sprite not found" });
+      if (validatedImage.isSvg) reply.header("Content-Security-Policy", "sandbox; default-src 'none'");
+      return sendValidatedMediaFile(reply, validatedImage, { method: req.method, rangeHeader: req.headers.range });
     }
 
     return reply.status(404).send({ error: "Asset not found" });
@@ -1026,10 +1041,14 @@ export async function galleryRoutes(app: FastifyInstance) {
 
       const filePath = assertInsideDir(GAME_SCENE_VIDEOS_ROOT, join(GAME_SCENE_VIDEOS_ROOT, chatId, filename));
       if (!existsSync(filePath)) return reply.status(404).send({ error: "Scene video file not found" });
+      const video = await validateVideoAssetFile(filePath, filename);
+      if (!video) return reply.status(404).send({ error: "Scene video file not found" });
 
-      return reply
-        .header("Content-Type", "video/mp4")
-        .sendFile(filename, join(GAME_SCENE_VIDEOS_ROOT, chatId), { maxAge: "1y", immutable: true });
+      return sendValidatedMediaFile(reply, video, {
+        method: req.method,
+        rangeHeader: req.headers.range,
+        cacheControl: "public, max-age=31536000, immutable",
+      });
     },
   );
 
@@ -1252,6 +1271,10 @@ export async function galleryRoutes(app: FastifyInstance) {
     const selfieSystemPrompt = styleGuidance
       ? `${baseSelfieSystemPrompt}${formatImageStylePromptGuidance(styleGuidance)}`
       : baseSelfieSystemPrompt;
+    const selfieSystemPromptWithImageInstructions = appendImagePromptInstructions(
+      selfieSystemPrompt,
+      imageConn.imagePromptInstructions,
+    );
 
     const selfieAbortSignal = createResponseAbortSignal(reply, SCENE_VIDEO_GENERATION_TIMEOUT_MS, "Selfie generation");
     let promptRuntime;
@@ -1273,7 +1296,7 @@ export async function galleryRoutes(app: FastifyInstance) {
       : `Generate a casual selfie of ${characterName} based on the current conversation context.`;
 
     if (debugLogsEnabled) {
-      debugLog("[debug/gallery/selfie] prompt-builder system:\n%s", selfieSystemPrompt);
+      debugLog("[debug/gallery/selfie] prompt-builder system:\n%s", selfieSystemPromptWithImageInstructions);
       debugLog("[debug/gallery/selfie] prompt-builder user:\n%s", promptContext);
     }
 
@@ -1282,7 +1305,7 @@ export async function galleryRoutes(app: FastifyInstance) {
       try {
         const promptResult = await promptBuilder.chatComplete(
           [
-            { role: "system", content: selfieSystemPrompt },
+            { role: "system", content: selfieSystemPromptWithImageInstructions },
             { role: "user", content: promptContext },
           ],
           {
@@ -1323,6 +1346,7 @@ export async function galleryRoutes(app: FastifyInstance) {
     if (selfieUseAvatarReferences || selfieIncludeCharacterAppearance) {
       const referenceResolution = await resolveIllustratorCharacterReferences({
         charactersStore: characters,
+        characterGallery,
         chatCharacters: [
           {
             id: character.id,
@@ -1432,6 +1456,7 @@ export async function galleryRoutes(app: FastifyInstance) {
                 imageEndpointId: imageConn.imageEndpointId || undefined,
                 comfyWorkflow: imageConn.comfyuiWorkflow || undefined,
                 imageDefaults,
+                quality: resolveConnectionImageQuality(imageConn),
                 referenceImages,
                 signal: selfieAbortSignal,
                 fallback: imageFallback,
@@ -1593,6 +1618,7 @@ export async function galleryRoutes(app: FastifyInstance) {
               imageEndpointId: context.imageConnection.imageEndpointId || undefined,
               comfyWorkflow: context.imageConnection.comfyuiWorkflow || undefined,
               imageDefaults: context.imageDefaults,
+              quality: resolveConnectionImageQuality(context.imageConnection),
               signal,
               fallback: context.imageFallback,
             },
@@ -1752,7 +1778,10 @@ export async function galleryRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "Not found" });
     }
 
-    return reply.sendFile(storedFile.filename, storedFile.directory);
+    const validatedImage = await validateImageAssetFile(storedFile.absolutePath, storedFile.filename);
+    if (!validatedImage) return reply.status(404).send({ error: "Not found" });
+
+    return sendValidatedMediaFile(reply, validatedImage, { method: req.method, rangeHeader: req.headers.range });
   });
 
   // Delete a gallery image

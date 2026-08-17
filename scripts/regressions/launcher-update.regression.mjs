@@ -41,10 +41,7 @@ assert.match(
   "Plain pnpm fallbacks must delegate project commands to the packageManager pin",
 );
 
-for (const descriptorBearingPath of [
-  "packages/server/src/routes/updates.routes.ts",
-  "win/installer/installer.nsi",
-]) {
+for (const descriptorBearingPath of ["packages/server/src/routes/updates.routes.ts", "win/installer/installer.nsi"]) {
   const descriptorBearingSource = readFileSync(join(repositoryRoot, descriptorBearingPath), "utf8");
   assert.ok(
     descriptorBearingSource.includes(pinnedPnpmDescriptor),
@@ -98,9 +95,16 @@ for (const runtimePath of [
 }
 
 const windowsInstallerSource = readFileSync(join(repositoryRoot, "win/installer/installer.nsi"), "utf8");
+for (const variable of ["2", "3"]) {
+  assert.match(
+    windowsInstallerSource,
+    new RegExp(`Pop \\$${variable}\\s+\\$\\{StrTrimNewLines\\} \\$${variable} "\\$${variable}"`, "u"),
+    `The Windows installer must trim git commit output in $${variable} before exact comparison`,
+  );
+}
 assert.match(
   windowsInstallerSource,
-  /pnpm --version \| %SystemRoot%\\System32\\findstr\.exe \/x \/l \/c:\$\{PNPM_VERSION\}/u,
+  /nsExec::ExecToStack 'cmd \/d \/c pnpm --version 2>nul'[\s\S]*\$\{StrTrimNewLines\} \$CURRENT_PNPM_VERSION "\$CURRENT_PNPM_VERSION"[\s\S]*\$\{If\} \$CURRENT_PNPM_VERSION == "\$\{PNPM_VERSION\}"/u,
   "The Windows installer must reject a global pnpm version that differs from the repository pin",
 );
 assert.equal(
@@ -110,6 +114,36 @@ assert.equal(
 );
 
 const batchInstallerSource = readFileSync(join(repositoryRoot, "win/installer/install.bat"), "utf8");
+const freshCloneStart = batchInstallerSource.indexOf('set "FRESH_CLONE_CREATED=0"');
+const freshCloneCommand = batchInstallerSource.indexOf("git clone --branch", freshCloneStart);
+const freshCloneAuthorization = batchInstallerSource.indexOf(
+  'if not exist "%INSTALL_DIR%\\" set "FRESH_CLONE_CREATED=1"',
+  freshCloneStart,
+);
+assert.ok(
+  freshCloneStart >= 0 && freshCloneAuthorization >= freshCloneStart && freshCloneAuthorization < freshCloneCommand,
+  "Fresh-clone cleanup must be authorized only when the install directory did not exist before cloning",
+);
+assert.equal(
+  batchInstallerSource.match(/set "FRESH_CLONE_CREATED=1"/gu)?.length,
+  1,
+  "A successful clone into a pre-existing directory must not become cleanup-authorized",
+);
+assert.match(
+  batchInstallerSource,
+  /if not defined NEW_HEAD \(\s+call :discard_unverified_fresh_clone[\s\S]*if defined RELEASE_COMMIT[^\n]+\(\s+set "RECEIVED_HEAD=[^\n]+\s+call :discard_unverified_fresh_clone/u,
+  "The batch installer must discard an unverified fresh clone before either verification failure exits",
+);
+assert.match(
+  batchInstallerSource,
+  /:discard_unverified_fresh_clone[\s\S]*if not "!FRESH_CLONE_CREATED!"=="1" goto :eof[\s\S]*rmdir \/s \/q "%INSTALL_DIR%"/u,
+  "Fresh-clone cleanup must be limited to the install tree created by this run",
+);
+assert.match(
+  batchInstallerSource.slice(freshCloneCommand, batchInstallerSource.indexOf("cd /d", freshCloneCommand)),
+  /if errorlevel 1 \(\s+call :discard_unverified_fresh_clone/u,
+  "A failed clone must clean a partial tree when this installer created its target directory",
+);
 const batchInstallerDeps = batchInstallerSource.indexOf(":deps");
 const batchInstallerDescriptorLookup = batchInstallerSource.indexOf("packageManager?.replace", batchInstallerDeps);
 const batchInstallerInstall = batchInstallerSource.indexOf(
@@ -124,6 +158,18 @@ assert.ok(
 assert.ok(
   batchInstallerInstall > batchInstallerDescriptorLookup,
   "The batch installer must resolve the checked-out descriptor before its frozen dependency install",
+);
+const installNodeLabel = batchInstallerSource.indexOf("\n:install_node");
+const nodeOkLabel = batchInstallerSource.indexOf("\n:node_ok", installNodeLabel);
+assert.match(
+  batchInstallerSource.slice(batchInstallerSource.indexOf(":: -- Node.js --"), installNodeLabel),
+  /if !NODE_MAJOR! GEQ 27/u,
+  "The batch installer must reject Node.js versions above the supported range before installation",
+);
+assert.match(
+  batchInstallerSource.slice(batchInstallerSource.indexOf("call :refresh_path", installNodeLabel), nodeOkLabel),
+  /if !NODE_MAJOR! GEQ 27/u,
+  "The batch installer must reject Node.js versions above the supported range after installation",
 );
 
 const troubleshootingSource = readFileSync(join(repositoryRoot, "docs/TROUBLESHOOTING.md"), "utf8");
@@ -241,10 +287,7 @@ for (const launcherName of ["start.sh", "start-termux.sh"]) {
   );
   const resolutionFailure = windowsLauncherSource.indexOf('set "PNPM_RESOLUTION_FAILED=1"', updateSuccess);
   const dataRestore = windowsLauncherSource.indexOf("restore-if-missing", resolutionFailure);
-  const resolutionAbort = windowsLauncherSource.indexOf(
-    'if "!PNPM_RESOLUTION_FAILED!"=="1"',
-    dataRestore,
-  );
+  const resolutionAbort = windowsLauncherSource.indexOf('if "!PNPM_RESOLUTION_FAILED!"=="1"', dataRestore);
 
   assert.ok(updateSuccess >= 0, "start.bat must identify a successful checkout update");
   assert.ok(refreshedRunner > updateSuccess, "start.bat must reload the pnpm pin after updating the checkout");

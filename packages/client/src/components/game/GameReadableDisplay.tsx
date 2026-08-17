@@ -135,10 +135,15 @@ export function GameReadableDisplay({ type, content, onClose }: GameReadableDisp
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")
+      .replace(/(^|\n)[ \t]*-#(?:[ \t]+([^\n]*))?(?=\n|$)/g, '$1<small class="mari-md-subtext">$2</small>')
       .replace(/\*\*(.+?)\*\*/gs, "<strong>$1</strong>")
+      .replace(/__(.+?)__/gs, '<u class="mari-md-underline">$1</u>')
       .replace(/\*(.+?)\*/gs, "<em>$1</em>")
       .replace(/\n/g, "<br />");
-    return DOMPurify.sanitize(html, { ALLOWED_TAGS: ["strong", "em", "br"] });
+    return DOMPurify.sanitize(html, {
+      ALLOWED_TAGS: ["strong", "em", "u", "small", "br"],
+      ALLOWED_ATTR: ["class"],
+    });
   }, [content]);
 
   return (

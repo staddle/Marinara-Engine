@@ -24,6 +24,24 @@ const SIMILARITY_THRESHOLD = 0.25;
 
 /** Maximum number of recalled memories per generation. */
 const DEFAULT_TOP_K = 8;
+const memoryMutationTails = new Map<string, Promise<void>>();
+
+async function serializeMemoryMutation<T>(chatId: string, task: () => Promise<T>): Promise<T> {
+  const previous = memoryMutationTails.get(chatId) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  memoryMutationTails.set(chatId, current);
+
+  await previous.catch(() => undefined);
+  try {
+    return await task();
+  } finally {
+    release();
+    if (memoryMutationTails.get(chatId) === current) memoryMutationTails.delete(chatId);
+  }
+}
 
 // ── Cosine similarity ──
 
@@ -64,6 +82,8 @@ export interface RecalledMemory {
 }
 
 export interface MemoryRecallEmbeddingSource {
+  /** Stable identity for the provider/model vector space, when known. */
+  spaceId?: string;
   label: string;
   embed(texts: string[], signal?: AbortSignal): Promise<number[][] | null>;
 }
@@ -250,7 +270,7 @@ async function pruneNativeMemoryChunksAfter(
  * Chunk any un-chunked messages for a given chat and embed them.
  * Should be called after generation completes (fire-and-forget).
  */
-export async function chunkAndEmbedMessages(
+async function chunkAndEmbedMessagesUnlocked(
   db: DB,
   chatId: string,
   /** Map from role → display name. Used to format "Name: content" lines. */
@@ -383,6 +403,15 @@ export async function chunkAndEmbedMessages(
   logger.debug("[memory-recall] Created %d chunk(s) for chat %s", embeddableChunks.length, chatId);
 }
 
+export async function chunkAndEmbedMessages(
+  db: DB,
+  chatId: string,
+  nameMap: { userName: string; characterNames: Record<string, string> },
+  options: ChunkAndEmbedMessagesOptions = {},
+): Promise<void> {
+  return serializeMemoryMutation(chatId, () => chunkAndEmbedMessagesUnlocked(db, chatId, nameMap, options));
+}
+
 /**
  * Rebuild all memory-recall chunks for a chat from the current message log.
  */
@@ -394,14 +423,16 @@ export async function rebuildMemoryChunks(
 ): Promise<number> {
   if (isLite) return 0;
 
-  await db.delete(memoryChunks).where(and(eq(memoryChunks.chatId, chatId), isNull(memoryChunks.sourceChatId)));
-  await chunkAndEmbedMessages(db, chatId, nameMap, options);
+  return serializeMemoryMutation(chatId, async () => {
+    await db.delete(memoryChunks).where(and(eq(memoryChunks.chatId, chatId), isNull(memoryChunks.sourceChatId)));
+    await chunkAndEmbedMessagesUnlocked(db, chatId, nameMap, options);
 
-  const rebuilt = await db
-    .select({ id: memoryChunks.id })
-    .from(memoryChunks)
-    .where(and(eq(memoryChunks.chatId, chatId), isNull(memoryChunks.sourceChatId)));
-  return rebuilt.length;
+    const rebuilt = await db
+      .select({ id: memoryChunks.id })
+      .from(memoryChunks)
+      .where(and(eq(memoryChunks.chatId, chatId), isNull(memoryChunks.sourceChatId)));
+    return rebuilt.length;
+  });
 }
 
 /**

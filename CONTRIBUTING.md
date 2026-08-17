@@ -192,6 +192,7 @@ The overlay is not a substitute for this guide. When instructions conflict, foll
 - Update documentation in the same PR when behavior changes affect installation, updates, release flow, launchers, or platform-specific behavior.
 - Include screenshots or short recordings for UI changes.
 - Call out manual validation clearly, especially for launcher, installer, or Android wrapper changes.
+- Add a concise user-focused entry under the appropriate `CHANGELOG.md` `[Unreleased]` heading for every bug fix, behavior change, or new feature. Purely mechanical changes with no product or contributor-workflow impact may omit one.
 - Avoid version drift. If your PR intentionally bumps a release, update every version-bearing file in one pass.
 
 ## Documentation Rules
@@ -258,6 +259,7 @@ Android policy:
 
 - `versionName` must match the app version.
 - `versionCode` must increase monotonically for every shipped APK.
+- Stable and tagged release APKs require the configured `ANDROID_SIGNING_*` keystore credentials. The manual pre-alpha workflow may publish a debug-signed APK only as a draft, test-only artifact.
 
 Release-related behavior already in the repo:
 

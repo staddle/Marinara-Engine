@@ -3,6 +3,9 @@ import {
   type CapabilityChatMetadataUpdate,
   type CapabilityChatRecord,
   type CapabilityCreateMessageWithSwipeInput,
+  type CapabilityGameStateRecord,
+  type CapabilityRoleplayEventInput,
+  type CapabilityRoleplayEventRecord,
   type CapabilityDocumentRecord,
   type CapabilityDocumentStore,
   type CapabilityMessageRecord,
@@ -14,6 +17,8 @@ import {
 } from "@marinara-engine/shared";
 import type { DB } from "../../db/connection.js";
 import { and, desc, eq, inArray, ne, or } from "../../db/file-query.js";
+import { FileUniqueConstraintError } from "../../db/file-schema.js";
+import { engineEventOwner } from "./capability-roleplay-events.service.js";
 import { ensureTimestampAfter } from "../import/import-timestamps.js";
 import {
   chats,
@@ -55,6 +60,9 @@ function parseMetadata(value: unknown): Record<string, unknown> | null {
 function readTrimmedString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
+
+const MAX_ROLEPLAY_EVENT_TEXT_CHARS = 1_000;
+const MAX_ROLEPLAY_EVENT_PAYLOAD_CHARS = 8_000;
 
 function mapBranchMetadata(value: unknown): CapabilityChatRecord["branch"] {
   const metadata = parseMetadata(value);
@@ -106,6 +114,37 @@ function mapMessage(row: typeof messages.$inferSelect): CapabilityMessageRecord 
     activeSwipeIndex: row.activeSwipeIndex,
     extra: row.extra,
     createdAt: row.createdAt,
+  };
+}
+
+function parsePresentCharacterIds(value: unknown): string[] {
+  if (typeof value !== "string") return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((entry) => {
+      if (!entry || typeof entry !== "object") return [];
+      const record = entry as { characterId?: unknown; id?: unknown };
+      const id = record.characterId ?? record.id;
+      return typeof id === "string" && id.trim().length > 0 ? [id] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function mapGameState(row: typeof gameStateSnapshots.$inferSelect): CapabilityGameStateRecord {
+  return {
+    snapshotId: row.id,
+    chatId: row.chatId,
+    messageId: row.messageId,
+    swipeIndex: row.swipeIndex,
+    date: row.date,
+    time: row.time,
+    location: row.location,
+    weather: row.weather,
+    temperature: row.temperature,
+    presentCharacterIds: parsePresentCharacterIds(row.presentCharacters),
   };
 }
 
@@ -355,6 +394,42 @@ function createPersistenceSession(db: DB): CapabilityPersistenceSession {
         .where(eq(messages.chatId, chatId))
         .orderBy(messages.createdAt, messages.id);
       return rows.map(mapMessage);
+    },
+    async getGameState(chatId) {
+      const rows = await db
+        .select()
+        .from(gameStateSnapshots)
+        .where(and(eq(gameStateSnapshots.chatId, chatId), eq(gameStateSnapshots.committed, 1)))
+        .orderBy(desc(gameStateSnapshots.createdAt), desc(gameStateSnapshots.id))
+        .limit(1);
+      return rows[0] ? mapGameState(rows[0]) : null;
+    },
+    async appendRoleplayEvent(input: CapabilityRoleplayEventInput): Promise<CapabilityRoleplayEventRecord | null> {
+      const scopedOwner = engineEventOwner(input.chatId);
+      const text = input.text.trim().slice(0, MAX_ROLEPLAY_EVENT_TEXT_CHARS);
+      if (!text || input.idempotencyKey.length === 0) return null;
+      const event = { ...input, text };
+      const data = JSON.stringify(event);
+      if (data.length > MAX_ROLEPLAY_EVENT_PAYLOAD_CHARS) return null;
+      const now = input.createdAt;
+      try {
+        await db.insert(capabilityDocuments).values({
+          id: input.id,
+          packageId: scopedOwner,
+          kind: "roleplay-event",
+          name: input.eventType,
+          description: input.sourcePackageId,
+          data,
+          idempotencyKey: input.idempotencyKey,
+          revision: 1,
+          createdAt: now,
+          updatedAt: now,
+        });
+      } catch (error) {
+        if (error instanceof FileUniqueConstraintError) return null;
+        throw error;
+      }
+      return event;
     },
     async listExistingLorebookEntryIds(entryIds) {
       const requestedIds = Array.from(new Set(entryIds.filter((entryId) => entryId.length > 0)));

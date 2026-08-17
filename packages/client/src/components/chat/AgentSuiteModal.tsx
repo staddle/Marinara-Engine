@@ -19,7 +19,7 @@ import {
   Wand2,
 } from "lucide-react";
 import { toast } from "sonner";
-import type { Chat, GameState, PlayerStats } from "@marinara-engine/shared";
+import type { Chat, GameState } from "@marinara-engine/shared";
 import {
   useAgentMemory,
   useAgentSuiteRewrite,
@@ -37,6 +37,7 @@ import { showConfirmDialog } from "../../lib/app-dialogs";
 import { deriveActiveLorebookViews, getChatActiveLorebookIds, getChatExcludedLorebookIds } from "../../lib/chat-lorebooks";
 import { getChatCharacterIds } from "../../lib/chat-macros";
 import { filterLanguageGenerationConnections } from "../../lib/connection-filters";
+import { AGENT_SUITE_TRACKER_SLICES } from "../../lib/agent-suite-tracker-slices";
 import { cn } from "../../lib/utils";
 import { useAgentStore } from "../../stores/agent.store";
 import { useChatStore } from "../../stores/chat.store";
@@ -108,85 +109,6 @@ const CATEGORY_LABELS: Record<string, string> = {
   tracker: "Tracker",
   misc: "Misc",
   custom: "Custom",
-};
-
-function createEmptyPlayerStats(): PlayerStats {
-  return {
-    stats: [],
-    attributes: null,
-    skills: {},
-    inventory: [],
-    activeQuests: [],
-    status: "",
-  };
-}
-
-/** Per-tracker-agent slice of the latest game-state snapshot. */
-const TRACKER_SLICES: Record<
-  string,
-  {
-    label: string;
-    description: string;
-    getValue: (gs: GameState) => unknown;
-    buildPatch: (gs: GameState, parsed: unknown) => Record<string, unknown> | { error: string };
-  }
-> = {
-  "world-state": {
-    label: "Scene",
-    description: "Date, time, location, weather, and temperature of the current scene.",
-    getValue: (gs) => ({
-      date: gs.date,
-      time: gs.time,
-      location: gs.location,
-      weather: gs.weather,
-      temperature: gs.temperature,
-    }),
-    buildPatch: (_gs, parsed) => {
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        return { error: "Scene data must be a JSON object" };
-      }
-      const record = parsed as Record<string, unknown>;
-      // Only send keys present in the edited JSON: a dropped key (e.g. from an
-      // AI rewrite) means "leave unchanged" — an explicit null still clears.
-      const patch: Record<string, unknown> = {};
-      for (const key of ["date", "time", "location", "weather", "temperature"] as const) {
-        if (key in record) patch[key] = record[key] ?? null;
-      }
-      return patch;
-    },
-  },
-  "character-tracker": {
-    label: "Present Characters",
-    description: "Characters in the current scene with mood, appearance, outfit, and thoughts.",
-    getValue: (gs) => gs.presentCharacters ?? [],
-    buildPatch: (_gs, parsed) =>
-      Array.isArray(parsed) ? { presentCharacters: parsed } : { error: "Present characters must be a JSON array" },
-  },
-  "persona-stats": {
-    label: "Persona Stats",
-    description: "Your persona's status bars (satiety, energy, etc.).",
-    getValue: (gs) => gs.personaStats ?? [],
-    buildPatch: (_gs, parsed) =>
-      Array.isArray(parsed) ? { personaStats: parsed } : { error: "Persona stats must be a JSON array" },
-  },
-  "custom-tracker": {
-    label: "Custom Tracker Fields",
-    description: "User-defined tracker fields maintained by the Custom Tracker agent.",
-    getValue: (gs) => gs.playerStats?.customTrackerFields ?? [],
-    buildPatch: (gs, parsed) =>
-      Array.isArray(parsed)
-        ? { playerStats: { ...(gs.playerStats ?? createEmptyPlayerStats()), customTrackerFields: parsed } }
-        : { error: "Custom tracker fields must be a JSON array" },
-  },
-  quest: {
-    label: "Active Quests",
-    description: "Quest progress tracked for this chat.",
-    getValue: (gs) => gs.playerStats?.activeQuests ?? [],
-    buildPatch: (gs, parsed) =>
-      Array.isArray(parsed)
-        ? { playerStats: { ...(gs.playerStats ?? createEmptyPlayerStats()), activeQuests: parsed } }
-        : { error: "Active quests must be a JSON array" },
-  },
 };
 
 function serializeValue(value: unknown, mode: "text" | "json"): string {
@@ -506,7 +428,7 @@ export function AgentSuiteModal({ chat, open, onClose, onCloseGuardChange, agent
   const effectiveAgentId =
     selectedAgentId && agents.some((a) => a.id === selectedAgentId) ? selectedAgentId : (agents[0]?.id ?? null);
   const selectedAgent = agents.find((a) => a.id === effectiveAgentId) ?? null;
-  const isTrackerAgent = !!selectedAgent && !!TRACKER_SLICES[selectedAgent.id];
+  const isTrackerAgent = !!selectedAgent && !!AGENT_SUITE_TRACKER_SLICES[selectedAgent.id];
 
   // 2. React Query hooks
   const { data: connections } = useConnections();
@@ -763,7 +685,7 @@ export function AgentSuiteModal({ chat, open, onClose, onCloseGuardChange, agent
 
   const saveTrackerSlice = useCallback(
     async (agentId: string, draftText: string) => {
-      const slice = TRACKER_SLICES[agentId];
+      const slice = AGENT_SUITE_TRACKER_SLICES[agentId];
       if (!slice) throw new Error("No tracker snapshot to update");
       // Flush queued HUD edits, then build the patch from a fresh snapshot so
       // the whole-playerStats write can't revert concurrent agent or HUD
@@ -822,7 +744,7 @@ export function AgentSuiteModal({ chat, open, onClose, onCloseGuardChange, agent
   }, [customRunsQuery.data, selectedAgent]);
 
   const hideSpoilers = selectedAgent?.id === "director" && !spoilersRevealed && memoryEntries.length > 0;
-  const trackerSlice = selectedAgent ? TRACKER_SLICES[selectedAgent.id] : undefined;
+  const trackerSlice = selectedAgent ? AGENT_SUITE_TRACKER_SLICES[selectedAgent.id] : undefined;
 
   const contextPicker: ReactNode = (
     <div className="space-y-1.5 rounded-md border border-[var(--border)] bg-[var(--background)]/40 p-2">

@@ -168,6 +168,12 @@ class SidecarModelService {
         );
         nextConfig.topP = normalizeFloatSetting(nextConfig.topP, SIDECAR_DEFAULT_CONFIG.topP, Number.EPSILON, 1);
         nextConfig.topK = normalizeIntegerSetting(nextConfig.topK, SIDECAR_DEFAULT_CONFIG.topK, 0, 500);
+        nextConfig.maxParallelJobs = normalizeIntegerSetting(
+          nextConfig.maxParallelJobs,
+          SIDECAR_DEFAULT_CONFIG.maxParallelJobs,
+          1,
+          16,
+        );
         nextConfig.gpuLayers = normalizeIntegerSetting(
           nextConfig.gpuLayers,
           SIDECAR_DEFAULT_CONFIG.gpuLayers,
@@ -564,6 +570,7 @@ class SidecarModelService {
         | "temperature"
         | "topP"
         | "topK"
+        | "maxParallelJobs"
         | "gpuLayers"
         | "enableNativeToolCalls"
         | "embeddingPooling"
