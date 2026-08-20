@@ -1,5 +1,5 @@
 import type { AgentWriteApprovalEnvelope, AgentWriteApprovalProposal } from "@marinara-engine/shared";
-import { mergeLorebookKeeperUpdateContent } from "./lorebook-keeper-utils.js";
+import { mergeLorebookKeeperUpdateContent, readLorebookKeeperUpdateOrder } from "./lorebook-keeper-utils.js";
 
 const LOREBOOK_APPROVAL_ENTRY_DELIMITER = "<!-- marinara:lorebook-entry:v1 -->";
 
@@ -129,6 +129,9 @@ export function formatLorebookWriteApprovalText(
       const name = readUpdateName(update) || `Entry ${index + 1}`;
       const keys = readUpdateKeys(update);
       const tag = readUpdateTag(update);
+      const targetLorebook =
+        typeof update.targetLorebook === "string" && update.targetLorebook.trim() ? update.targetLorebook.trim() : null;
+      const order = readLorebookKeeperUpdateOrder(update);
       const content = mergeLorebookKeeperUpdateContent({
         existingContent: existingContentByName.get(normalizeEntryName(name)) ?? "",
         replacementContent: readUpdateReplacementContent(update),
@@ -139,6 +142,8 @@ export function formatLorebookWriteApprovalText(
         `### ${name}`,
         `Keys: ${keys.join(", ")}`,
         `Tag: ${tag}`,
+        ...(targetLorebook ? [`Lorebook: ${targetLorebook}`] : []),
+        ...(order !== undefined ? [`Order: ${order}`] : []),
         "",
         content || "Add the lorebook text here.",
       ].join("\n");
@@ -166,6 +171,8 @@ export function parseLorebookWriteApprovalText(text: string): Array<Record<strin
     const lines = block.split(/\r?\n/);
     const keys: string[] = [];
     let tag = "";
+    let order: number | undefined;
+    let targetLorebook: string | undefined;
     let contentStart = 0;
     let sawMetadata = false;
 
@@ -173,6 +180,8 @@ export function parseLorebookWriteApprovalText(text: string): Array<Record<strin
       const line = lines[lineIndex]!;
       const keyMatch = line.match(/^Keys:\s*(.*)$/i);
       const tagMatch = line.match(/^Tag:\s*(.*)$/i);
+      const orderMatch = line.match(/^Order:\s*(.*)$/i);
+      const lorebookMatch = line.match(/^Lorebook:\s*(.*)$/i);
       if (keyMatch) {
         sawMetadata = true;
         keys.push(
@@ -187,6 +196,20 @@ export function parseLorebookWriteApprovalText(text: string): Array<Record<strin
       if (tagMatch) {
         sawMetadata = true;
         tag = tagMatch[1]!.trim();
+        contentStart = lineIndex + 1;
+        continue;
+      }
+      if (orderMatch) {
+        sawMetadata = true;
+        const rawOrder = orderMatch[1]!.trim();
+        const parsedOrder = /^[+-]?\d+$/u.test(rawOrder) ? Number(rawOrder) : NaN;
+        order = Number.isSafeInteger(parsedOrder) ? parsedOrder : undefined;
+        contentStart = lineIndex + 1;
+        continue;
+      }
+      if (lorebookMatch) {
+        sawMetadata = true;
+        targetLorebook = lorebookMatch[1]!.trim() || undefined;
         contentStart = lineIndex + 1;
         continue;
       }
@@ -206,6 +229,8 @@ export function parseLorebookWriteApprovalText(text: string): Array<Record<strin
       content,
       keys: Array.from(new Set(keys)),
       tag,
+      ...(targetLorebook ? { targetLorebook } : {}),
+      ...(order !== undefined ? { order } : {}),
     });
   }
 
@@ -219,6 +244,9 @@ export function buildLorebookWriteApprovalProposal(args: {
   updates: Array<Record<string, unknown>>;
   preferredTargetLorebookId: string | null;
   writableLorebookIds: string[] | null;
+  writableLorebooks?: Array<{ id: string; name: string }>;
+  lorebookNamingScheme?: Record<string, string>;
+  worldName?: string | null;
   existingEntries?: Array<{ name?: string | null; content?: string | null }>;
 }): AgentWriteApprovalProposal {
   return {
@@ -231,6 +259,9 @@ export function buildLorebookWriteApprovalProposal(args: {
     payload: {
       preferredTargetLorebookId: args.preferredTargetLorebookId,
       writableLorebookIds: args.writableLorebookIds,
+      writableLorebooks: args.writableLorebooks,
+      lorebookNamingScheme: args.lorebookNamingScheme,
+      worldName: args.worldName,
       updates: args.updates,
     },
     canRegenerate: !!args.agentType,

@@ -44,6 +44,10 @@ export interface CharacterExtensions {
   dialogueColor?: string;
   /** Marinara Engine: Chat bubble / dialogue box background color */
   boxColor?: string;
+  /** Marinara Engine: Alternative names/nicknames that should be colored with this
+   *  character's nameColor when they appear in chat prose. The character's primary
+   *  `name` is always a trigger; these are additional aliases (e.g. "Kate", "Kitty"). */
+  nameAliases?: string[];
   /** Marinara Engine: RPG stats toggle + custom attributes */
   rpgStats?: RPGStatsConfig;
   /** Marinara Engine: per-character Tracker fields copied into each new Roleplay chat. */
@@ -67,6 +71,8 @@ export interface CharacterExtensions {
   convoBehavior?: ConvoBehaviorConfig;
   /** Marinara Engine: character-specific direction for Conversation selfie image prompts. */
   conversationImageInstructions?: string;
+  /** Retain prior card revisions and automatically advance character_version on edits. */
+  versioningEnabled?: boolean;
   /** Marinara Engine: also apply conversationImageInstructions to this character's Noodle images. */
   applyConversationImageInstructionsToNoodle?: boolean;
   /** Marinara Engine: gallery image selected as this character's optional visual reference sheet. */
@@ -209,6 +215,7 @@ export interface PersonaCardSnapshot {
   name: string;
   creator: string;
   personaVersion: string;
+  versioningEnabled: string;
   creatorNotes: string;
   phoneticName?: string;
   description: string;

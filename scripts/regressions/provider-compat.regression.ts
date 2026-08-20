@@ -37,12 +37,14 @@ import {
 } from "../../packages/server/src/utils/openrouter-attribution.js";
 import {
   ConnectionFallbackProvider,
+  prepareAssistantReasoningPrefillMessages,
   withConnectionFallbackProvider,
   type FallbackConnection,
   type GenerationProviderOrigin,
 } from "../../packages/server/src/services/llm/connection-fallback-provider.js";
 import {
   BaseLLMProvider,
+  resolveEmbeddingEndpointUrl,
   type ChatMessage,
   type ChatOptions,
   type LLMUsage,
@@ -55,8 +57,17 @@ import {
   runWithGenerationFallbackNotifier,
   type GenerationFallbackNotice,
 } from "../../packages/server/src/services/generation/fallback-notification.js";
-import { resolveStoredChatOptions } from "../../packages/server/src/services/generation/generation-parameters.js";
+import {
+  resolveStoredChatOptions,
+  supportsAssistantReasoningPrefill,
+} from "../../packages/server/src/services/generation/generation-parameters.js";
 import { resolveMainGenerationToolChoice } from "../../packages/server/src/services/generation/tool-resolution-runtime.js";
+import {
+  appendGenerationTailMessages,
+  hasProviderMessagePayload,
+  parseStoredGenerationParameters,
+  type SimpleMessage,
+} from "../../packages/server/src/routes/generate/generate-route-utils.js";
 import {
   generateImage,
   imageAdmissionKey,
@@ -79,6 +90,7 @@ import {
 class RegressionProvider extends BaseLLMProvider {
   calls = 0;
   lastOptions: ChatOptions | null = null;
+  lastMessages: ChatMessage[] | null = null;
 
   constructor(
     private readonly chunks: string[],
@@ -88,8 +100,9 @@ class RegressionProvider extends BaseLLMProvider {
     super("", "");
   }
 
-  async *chat(_messages: ChatMessage[], options: ChatOptions): AsyncGenerator<string, LLMUsage | void, unknown> {
+  async *chat(messages: ChatMessage[], options: ChatOptions): AsyncGenerator<string, LLMUsage | void, unknown> {
     this.calls += 1;
+    this.lastMessages = messages;
     this.lastOptions = options;
     for (const chunk of this.chunks) yield chunk;
     if (this.failure) throw this.failure;
@@ -117,6 +130,16 @@ async function collectProviderOutput(provider: BaseLLMProvider, options: ChatOpt
   return output;
 }
 
+async function collectProviderOutputForMessages(
+  provider: BaseLLMProvider,
+  messages: ChatMessage[],
+  options: ChatOptions,
+): Promise<string> {
+  let output = "";
+  for await (const chunk of provider.chat(messages, options)) output += chunk;
+  return output;
+}
+
 const gatewaySseBody = [
   ": x-omniroute-cache-hit=false",
   'data: {"choices":[{"delta":{},"finish_reason":null}]}',
@@ -127,6 +150,15 @@ const gatewaySseBody = [
 assert.equal(resolveNovelAiStyleReferenceSecondaryStrength(1), 0);
 assert.equal(resolveNovelAiStyleReferenceSecondaryStrength(0.75), 0.25);
 assert.equal(resolveNovelAiStyleReferenceSecondaryStrength(0), 1);
+assert.equal(resolveEmbeddingEndpointUrl("https://openrouter.ai/api/v1"), "https://openrouter.ai/api/v1/embeddings");
+assert.equal(
+  resolveEmbeddingEndpointUrl("https://nano-gpt.com/api/v1/embeddings"),
+  "https://nano-gpt.com/api/v1/embeddings",
+);
+assert.equal(
+  resolveEmbeddingEndpointUrl("https://example.com/v1/embeddings/?source=memory"),
+  "https://example.com/v1/embeddings?source=memory",
+);
 const gatewayServer = createServer((_request, response) => {
   response.writeHead(200, { "content-type": "text/event-stream" });
   response.end(gatewaySseBody);
@@ -206,6 +238,11 @@ const customParametersServer = createServer(async (request, response) => {
   const chunks: Buffer[] = [];
   for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   customParametersRequestBody = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+  if (customParametersRequestBody.stream === true) {
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end(['data: {"choices":[{"delta":{"content":"configured"}}]}', "", "data: [DONE]", "", ""].join("\n"));
+    return;
+  }
   response.writeHead(200, { "content-type": "application/json" });
   response.end(JSON.stringify({ choices: [{ message: { content: "configured" }, finish_reason: "stop" }] }));
 });
@@ -239,6 +276,116 @@ try {
     "unknown custom models must not receive inherited reasoning effort",
   );
   assert.equal(customParametersRequestBody.verbosity, "low");
+
+  const buildPrefillMessages = (
+    assistantPrefill: string,
+    assistantReasoningPrefill: string,
+    overrides: Partial<Parameters<typeof appendGenerationTailMessages>[1]> = {},
+  ) => {
+    const messages: SimpleMessage[] = [{ role: "user", content: "Continue." }];
+    appendGenerationTailMessages(messages, {
+      assistantPrefill,
+      assistantReasoningPrefill,
+      supportsAssistantReasoningPrefill: true,
+      followUpIteration: 0,
+      impersonate: false,
+      isGoogleProvider: false,
+      regenerateUserMessage: null,
+      ...overrides,
+    });
+    return messages;
+  };
+
+  const recoveredPrefills = parseStoredGenerationParameters({
+    assistantPrefill: "Visible prefix",
+    assistantReasoningPrefill: "Reasoning prefix",
+    temperature: "malformed",
+  });
+  assert.equal(recoveredPrefills?.assistantPrefill, "Visible prefix");
+  assert.equal(recoveredPrefills?.assistantReasoningPrefill, "Reasoning prefix");
+
+  customParametersRequestBody = null;
+  await provider.chatComplete(buildPrefillMessages("Visible prefix  \n", "Reasoning prefix  \n"), {
+    model: "kimi-k3",
+    stream: false,
+  });
+  assert.ok(customParametersRequestBody);
+  assert.deepEqual((customParametersRequestBody.messages as unknown[]).at(-1), {
+    role: "assistant",
+    content: "Visible prefix",
+    reasoning_content: "Reasoning prefix",
+    partial: true,
+  });
+
+  assert.equal(supportsAssistantReasoningPrefill("custom"), true);
+  assert.equal(supportsAssistantReasoningPrefill("grok_subscription"), false);
+  assert.deepEqual(buildPrefillMessages("", "Unsupported reasoning", { supportsAssistantReasoningPrefill: false }), [
+    { role: "user", content: "Continue." },
+  ]);
+  assert.deepEqual(
+    buildPrefillMessages("Visible", "Unsupported reasoning", { supportsAssistantReasoningPrefill: false }),
+    [
+      { role: "user", content: "Continue." },
+      { role: "assistant", content: "Visible" },
+    ],
+  );
+
+  customParametersRequestBody = null;
+  let streamedPrefillOutput = "";
+  for await (const chunk of provider.chat(buildPrefillMessages("", "Reasoning only"), {
+    model: "kimi-k3",
+    stream: true,
+  })) {
+    streamedPrefillOutput += chunk;
+  }
+  assert.equal(streamedPrefillOutput, "configured");
+  assert.ok(customParametersRequestBody);
+  assert.deepEqual((customParametersRequestBody.messages as unknown[]).at(-1), {
+    role: "assistant",
+    content: "",
+    reasoning_content: "Reasoning only",
+    partial: true,
+  });
+  const reasoningOnlyMessages = buildPrefillMessages("", "Reasoning only") as ChatMessage[];
+  assert.equal(hasProviderMessagePayload(reasoningOnlyMessages.at(-1)!), true);
+  assert.deepEqual(prepareAssistantReasoningPrefillMessages(reasoningOnlyMessages, false), [
+    { role: "user", content: "Continue." },
+  ]);
+  assert.deepEqual(
+    prepareAssistantReasoningPrefillMessages(
+      [
+        {
+          role: "assistant",
+          content: "",
+          providerMetadata: { partial: true, reasoning_content: "Reasoning only", trace_id: "keep-me" },
+        },
+      ],
+      false,
+    ),
+    [{ role: "assistant", content: "", providerMetadata: { trace_id: "keep-me" } }],
+  );
+
+  customParametersRequestBody = null;
+  await provider.chatComplete(buildPrefillMessages("Visible only", ""), { model: "kimi-k3", stream: false });
+  assert.ok(customParametersRequestBody);
+  assert.deepEqual((customParametersRequestBody.messages as unknown[]).at(-1), {
+    role: "assistant",
+    content: "Visible only",
+  });
+
+  assert.deepEqual(buildPrefillMessages("Visible", "Reasoning", { followUpIteration: 1 }), [
+    { role: "user", content: "Continue." },
+  ]);
+  assert.deepEqual(buildPrefillMessages("Visible", "Reasoning", { impersonate: true }), [
+    { role: "user", content: "Continue." },
+  ]);
+  assert.deepEqual(
+    buildPrefillMessages("Visible", "Reasoning", {
+      isGoogleProvider: true,
+      regenerateUserMessage: { role: "user", content: "Regenerate this user turn." },
+    }).map((message) => message.role),
+    ["user", "assistant", "user"],
+  );
 
   customParametersRequestBody = null;
   await provider.chatComplete([{ role: "user", content: "disable reasoning" }], {
@@ -332,6 +479,167 @@ try {
 } finally {
   await new Promise<void>((resolve, reject) =>
     customParametersServer.close((error) => (error ? reject(error) : resolve())),
+  );
+}
+
+// A locally hosted OpenAI-compatible server (llama.cpp / Ollama / vLLM / LM Studio)
+// is reached through the "custom" provider kind. Disabling reasoning there has to
+// arrive as BOTH reasoning_effort and chat_template_kwargs.enable_thinking:
+// llama.cpp only skips the thinking pass for the latter, while reasoning_format
+// alone would merely hide the thinking and still pay for the tokens.
+let localReasoningRequestBody: Record<string, unknown> | null = null;
+const localReasoningServer = createServer(async (request, response) => {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  localReasoningRequestBody = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(JSON.stringify({ choices: [{ message: { content: "ok" }, finish_reason: "stop" }] }));
+});
+await new Promise<void>((resolve) => localReasoningServer.listen(0, "127.0.0.1", resolve));
+try {
+  const address = localReasoningServer.address();
+  assert.ok(address && typeof address === "object");
+  const localProvider = new OpenAIProvider(
+    `http://127.0.0.1:${address.port}/v1`,
+    "test",
+    undefined,
+    undefined,
+    undefined,
+    "custom",
+  );
+
+  await localProvider.chatComplete([{ role: "user", content: "no thinking please" }], {
+    model: "Qwen3.8-27B-Uncensored-HauhauCS-Aggressive",
+    stream: false,
+    reasoningEffort: "none",
+    enabledParameters: { reasoningEffort: true },
+    customParameters: { chat_template_kwargs: { enable_thinking: true, use_jinja: true } },
+  });
+  assert.ok(localReasoningRequestBody);
+  assert.equal(
+    localReasoningRequestBody.reasoning_effort,
+    "none",
+    "local endpoints must receive an explicit reasoning disable",
+  );
+  assert.deepEqual(
+    localReasoningRequestBody.chat_template_kwargs,
+    { enable_thinking: false, use_jinja: true },
+    "llama.cpp needs enable_thinking=false to win over custom parameters while preserving sibling options",
+  );
+
+  // Graded levels stay gated for off-catalog models: llama.cpp accepts them but
+  // treats every non-"none" value identically to sending nothing.
+  localReasoningRequestBody = null;
+  await localProvider.chatComplete([{ role: "user", content: "think hard" }], {
+    model: "Qwen3.8-27B-Uncensored-HauhauCS-Aggressive",
+    stream: false,
+    reasoningEffort: "high",
+    enabledParameters: { reasoningEffort: true },
+  });
+  assert.ok(localReasoningRequestBody);
+  assert.equal("reasoning_effort" in localReasoningRequestBody, false);
+  assert.equal("chat_template_kwargs" in localReasoningRequestBody, false);
+
+  // The parameter's own send-switch still wins over everything.
+  localReasoningRequestBody = null;
+  await localProvider.chatComplete([{ role: "user", content: "provider default" }], {
+    model: "Qwen3.8-27B-Uncensored-HauhauCS-Aggressive",
+    stream: false,
+    reasoningEffort: "none",
+    enabledParameters: { reasoningEffort: false },
+  });
+  assert.ok(localReasoningRequestBody);
+  assert.equal("reasoning_effort" in localReasoningRequestBody, false);
+  assert.equal("chat_template_kwargs" in localReasoningRequestBody, false);
+} finally {
+  await new Promise<void>((resolve, reject) =>
+    localReasoningServer.close((error) => (error ? reject(error) : resolve())),
+  );
+}
+
+// The enable_thinking addition is a local-endpoint carve-out. A remote custom
+// endpoint keeps the previous behaviour: reasoning_effort only, no template kwargs.
+for (const localBaseUrl of [
+  "http://host.docker.internal:11434/v1",
+  "http://host.containers.internal:11434/v1",
+  "http://ollama:11434/v1",
+  "http://127.0.0.2:11434/v1",
+]) {
+  const localHostnameProvider = new OpenAIProvider(localBaseUrl, "test", undefined, undefined, undefined, "custom");
+  assert.equal(
+    (
+      localHostnameProvider as unknown as {
+        isLocalInferenceEndpoint(): boolean;
+      }
+    ).isLocalInferenceEndpoint(),
+    true,
+    `${localBaseUrl} should be recognized as a local inference endpoint`,
+  );
+}
+
+const previousTrustedPrivateNetworks = process.env.TRUSTED_PRIVATE_NETWORKS;
+process.env.TRUSTED_PRIVATE_NETWORKS = "10.0.0.0/8";
+try {
+  const privateAddressProvider = new OpenAIProvider(
+    "http://192.168.50.2:11434/v1",
+    "test",
+    undefined,
+    undefined,
+    undefined,
+    "custom",
+  );
+  assert.equal(
+    (
+      privateAddressProvider as unknown as {
+        isLocalInferenceEndpoint(): boolean;
+      }
+    ).isLocalInferenceEndpoint(),
+    true,
+    "inference endpoint detection must not depend on the authentication trust-list override",
+  );
+} finally {
+  if (previousTrustedPrivateNetworks === undefined) delete process.env.TRUSTED_PRIVATE_NETWORKS;
+  else process.env.TRUSTED_PRIVATE_NETWORKS = previousTrustedPrivateNetworks;
+}
+
+let remoteReasoningRequestBody: Record<string, unknown> | null = null;
+const remoteReasoningServer = createServer(async (request, response) => {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  remoteReasoningRequestBody = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(JSON.stringify({ choices: [{ message: { content: "ok" }, finish_reason: "stop" }] }));
+});
+await new Promise<void>((resolve) => remoteReasoningServer.listen(0, "127.0.0.1", resolve));
+try {
+  const address = remoteReasoningServer.address();
+  assert.ok(address && typeof address === "object");
+  const remoteProvider = new OpenAIProvider(
+    `http://127.0.0.1:${address.port}/v1`,
+    "test",
+    undefined,
+    undefined,
+    undefined,
+    "custom",
+  );
+  // Force the local check to fail while keeping the loopback transport.
+  Object.defineProperty(remoteProvider, "isLocalInferenceEndpoint", { value: () => false });
+  await remoteProvider.chatComplete([{ role: "user", content: "no thinking please" }], {
+    model: "some-remote-model",
+    stream: false,
+    reasoningEffort: "none",
+    enabledParameters: { reasoningEffort: true },
+  });
+  assert.ok(remoteReasoningRequestBody);
+  assert.equal(remoteReasoningRequestBody.reasoning_effort, "none");
+  assert.equal(
+    "chat_template_kwargs" in remoteReasoningRequestBody,
+    false,
+    "enable_thinking must stay a local-endpoint carve-out",
+  );
+} finally {
+  await new Promise<void>((resolve, reject) =>
+    remoteReasoningServer.close((error) => (error ? reject(error) : resolve())),
   );
 }
 
@@ -886,6 +1194,57 @@ const fallbackConnection: FallbackConnection = {
   }),
 };
 
+const fallbackReasoningMessages: ChatMessage[] = [
+  { role: "user", content: "Continue." },
+  {
+    role: "assistant",
+    content: "",
+    providerMetadata: { reasoning_content: "Fallback reasoning prefix", partial: true },
+  },
+];
+const unsupportedPrimary = new RegressionProvider([], new Error("primary unavailable"));
+const supportedReasoningFallback = new RegressionProvider(["fallback response"]);
+assert.equal(
+  await collectProviderOutputForMessages(
+    new ConnectionFallbackProvider(
+      unsupportedPrimary,
+      supportedReasoningFallback,
+      fallbackConnection,
+      "main",
+      undefined,
+      undefined,
+      undefined,
+      false,
+      true,
+    ),
+    fallbackReasoningMessages,
+    { model: "primary-model" },
+  ),
+  "fallback response",
+);
+assert.deepEqual(unsupportedPrimary.lastMessages, [{ role: "user", content: "Continue." }]);
+assert.deepEqual(supportedReasoningFallback.lastMessages, fallbackReasoningMessages);
+
+const supportedReasoningPrimary = new RegressionProvider([], new Error("primary unavailable"));
+const unsupportedFallback = new RegressionProvider(["fallback response"]);
+await collectProviderOutputForMessages(
+  new ConnectionFallbackProvider(
+    supportedReasoningPrimary,
+    unsupportedFallback,
+    fallbackConnection,
+    "main",
+    undefined,
+    undefined,
+    undefined,
+    true,
+    false,
+  ),
+  fallbackReasoningMessages,
+  { model: "primary-model" },
+);
+assert.deepEqual(supportedReasoningPrimary.lastMessages, fallbackReasoningMessages);
+assert.deepEqual(unsupportedFallback.lastMessages, [{ role: "user", content: "Continue." }]);
+
 resetConnectionAdmissionForTests();
 let releasePrimaryCall!: () => void;
 const primaryCallHeld = new Promise<void>((resolve) => {
@@ -1183,6 +1542,76 @@ assert.equal(
 // An image fallback is the same logical attempt on another endpoint, so a successful fallback
 // must be recorded completed rather than leaving the primary's failure as the attempt's result.
 const onePixelPng = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+const nanoGPTRequests: Array<Record<string, unknown>> = [];
+const nanoGPTImageServer = createServer(async (request, response) => {
+  if (request.url === "/result.png") {
+    response.writeHead(200, { "content-type": "image/png" });
+    response.end(Buffer.from(onePixelPng, "base64"));
+    return;
+  }
+
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  nanoGPTRequests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>);
+  const address = nanoGPTImageServer.address();
+  assert.ok(address && typeof address === "object");
+  response.writeHead(200, { "content-type": "application/json" });
+  if (nanoGPTRequests.length === 1) {
+    response.end(JSON.stringify({ data: [{ url: `http://127.0.0.1:${address.port}/result.png` }] }));
+  } else if (nanoGPTRequests.length === 2) {
+    response.end(JSON.stringify({ data: [{ b64_json: `data:image/png;base64,${onePixelPng}` }] }));
+  } else {
+    response.end(JSON.stringify({ data: [{ revised_prompt: "missing output" }] }));
+  }
+});
+await new Promise<void>((resolve) => nanoGPTImageServer.listen(0, "127.0.0.1", resolve));
+try {
+  const address = nanoGPTImageServer.address();
+  assert.ok(address && typeof address === "object");
+  const baseUrl = `http://127.0.0.1:${address.port}/v1`;
+  const oversizedReferences = [
+    Buffer.alloc(1_700_000, 1).toString("base64"),
+    Buffer.alloc(1_700_000, 2).toString("base64"),
+    Buffer.alloc(1_700_000, 3).toString("base64"),
+  ];
+
+  const urlResult = await generateImage("nanogpt", baseUrl, "nanogpt-secret", "nanogpt", {
+    prompt: "a moonlit laboratory",
+    model: "qwen-image",
+    referenceImages: oversizedReferences,
+    allowLocalUrls: true,
+  });
+  assert.equal(urlResult.base64, onePixelPng);
+  assert.equal(nanoGPTRequests[0]?.response_format, "url");
+  assert.equal(typeof nanoGPTRequests[0]?.imageDataUrl, "string");
+  assert.equal(nanoGPTRequests[0]?.imageDataUrls, undefined);
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(nanoGPTRequests[0]), "utf8") <= 4 * 1024 * 1024,
+    "NanoGPT reference requests must stay within the documented 4 MB upload limit",
+  );
+
+  const fallbackResult = await generateImage("nanogpt", baseUrl, "nanogpt-secret", "nanogpt", {
+    prompt: "a base64 fallback",
+    model: "qwen-image",
+    allowLocalUrls: true,
+  });
+  assert.equal(fallbackResult.base64, onePixelPng);
+  assert.equal(fallbackResult.mimeType, "image/png");
+
+  await assert.rejects(
+    generateImage("nanogpt", baseUrl, "nanogpt-secret", "nanogpt", {
+      prompt: "an invalid response",
+      model: "qwen-image",
+      allowLocalUrls: true,
+    }),
+    /No image data in NanoGPT response \(fields: revised_prompt\)/u,
+  );
+} finally {
+  await new Promise<void>((resolve, reject) =>
+    nanoGPTImageServer.close((error) => (error ? reject(error) : resolve())),
+  );
+}
+
 let arliRequest:
   | { url: string; authorization: string | undefined; contentType: string | undefined; body: Record<string, unknown> }
   | undefined;
@@ -1221,10 +1650,10 @@ try {
   assert.equal(arliRequest?.body.height, 512);
 
   const imageEditResult = await generateImage("arli", `http://127.0.0.1:${address.port}/v1`, "arli-secret", "arli", {
-      prompt: "add blue light",
-      model: "Arli/FluxModel",
-      referenceImage: `data:image/png;base64,${onePixelPng}`,
-      allowLocalUrls: true,
+    prompt: "add blue light",
+    model: "Arli/FluxModel",
+    referenceImage: `data:image/png;base64,${onePixelPng}`,
+    allowLocalUrls: true,
   });
   assert.equal(imageEditResult.base64, onePixelPng);
   assert.equal(arliRequest?.url, "/v1/img2img");
@@ -1581,10 +2010,10 @@ const callbackFallback = new RegressionProvider(["must not replace visible callb
 let callbackOutput = "";
 await assert.rejects(
   collectProviderOutput(new ConnectionFallbackProvider(callbackPrimary, callbackFallback, fallbackConnection, "main"), {
-      model: "primary-model",
-      onToken: (chunk) => {
-        callbackOutput += chunk;
-      },
+    model: "primary-model",
+    onToken: (chunk) => {
+      callbackOutput += chunk;
+    },
   }),
   /stream interrupted after callback output/,
 );

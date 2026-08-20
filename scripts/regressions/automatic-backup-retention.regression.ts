@@ -8,6 +8,7 @@ import {
   buildBackupRestoreNotes,
   inspectStoredBackupArchiveForRegression,
   isPermittedLargeStoredBackupEntry,
+  limitAutomaticBackupOmissionHistory,
   readStoredBackupImportForRegression,
   readStoredBackupAssetForRegression,
   writeStoredBackupArchiveForRegression,
@@ -37,6 +38,12 @@ assert.equal(normalizeAutomaticBackupRetentionCount(undefined), 1);
 assert.equal(normalizeAutomaticBackupRetentionCount(0), 1);
 assert.equal(normalizeAutomaticBackupRetentionCount(10_000), 9_999);
 assert.equal(normalizeAutomaticBackupRetentionCount(3.9), 3);
+assert.equal(
+  limitAutomaticBackupOmissionHistory(Array.from({ length: 1_001 }, (_, index) => `missing-${index}`)).length,
+  1_000,
+);
+assert.deepEqual(limitAutomaticBackupOmissionHistory(["kept", 42, "also-kept"]), ["kept", "also-kept"]);
+assert.equal(limitAutomaticBackupOmissionHistory(["x".repeat(256 * 1024 + 1)]).length, 0);
 
 const backupRouteSource = await readFile(
   new URL("../../packages/server/src/routes/backup.routes.ts", import.meta.url),
@@ -210,6 +217,23 @@ try {
   } finally {
     await cleanupStagedProfileAssets(zip64Restore);
   }
+
+  const manyEntriesSource = join(zipFixtureRoot, "empty-entry.json");
+  const manyEntriesArchive = join(zipFixtureRoot, "many-entries.zip");
+  await writeFile(manyEntriesSource, "");
+  await writeStoredBackupArchiveForRegression(
+    manyEntriesArchive,
+    Array.from({ length: 8_193 }, (_, index) => ({
+      entryName: `storage/entries/${String(index).padStart(4, "0")}.json`,
+      filePath: manyEntriesSource,
+      size: 0,
+    })),
+  );
+  assert.equal(
+    (await inspectStoredBackupArchiveForRegression(manyEntriesArchive)).entries.length,
+    8_193,
+    "profile archives must not fail at the former artificial 8,192-entry ceiling",
+  );
 
   const retainedSource = join(zipFixtureRoot, "retained.gif");
   const missingSource = join(zipFixtureRoot, "missing.gif");

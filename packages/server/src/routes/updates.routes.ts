@@ -19,7 +19,11 @@ import { getBuildBranch, getBuildCommit, getBuildLabel } from "../config/build-i
 import { getFileStorageDir } from "../config/runtime-config.js";
 import { requirePrivilegedAccess } from "../middleware/privileged-gate.js";
 import { isLoopbackIp } from "../middleware/ip-allowlist.js";
-import { isGitUpdateApplyAllowed } from "../services/updates/update-apply-policy.js";
+import {
+  isGitUpdateApplyAllowed,
+  isUpdateChannelSwitch,
+  resolveDockerChannelImageTags,
+} from "../services/updates/update-apply-policy.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -72,8 +76,7 @@ function updateStepTimeout(baseMs: number): number {
 }
 const MANUAL_PNPM_COMMAND = `corepack pnpm@${DEFAULT_PNPM_DESCRIPTOR}`;
 const DOCKER_IMAGE = "ghcr.io/pasta-devs/marinara-engine";
-const MANUAL_GIT_UPDATE_COMMAND =
-  `git fetch origin +refs/heads/main:refs/remotes/origin/main && (git merge --ff-only origin/main || git checkout --detach origin/main) && ${MANUAL_PNPM_COMMAND} --config.trustPolicy=off --config.confirmModulesPurge=false install --force --frozen-lockfile && ${MANUAL_PNPM_COMMAND} --filter @marinara-engine/shared build && ${MANUAL_PNPM_COMMAND} --filter @marinara-engine/server --filter @marinara-engine/client --parallel run build && ${MANUAL_PNPM_COMMAND} start`;
+const MANUAL_GIT_UPDATE_COMMAND = `git fetch origin +refs/heads/main:refs/remotes/origin/main && (git merge --ff-only origin/main || git checkout --detach origin/main) && ${MANUAL_PNPM_COMMAND} --config.trustPolicy=off --config.confirmModulesPurge=false install --force --frozen-lockfile && ${MANUAL_PNPM_COMMAND} --filter @marinara-engine/shared build && ${MANUAL_PNPM_COMMAND} --filter @marinara-engine/server --filter @marinara-engine/client --parallel run build && ${MANUAL_PNPM_COMMAND} start`;
 const DOCKER_UPDATE_COMMAND = "docker compose pull && docker compose up -d";
 const ANDROID_APK_NOTICE =
   "> [!IMPORTANT]\n" +
@@ -222,7 +225,10 @@ function getManualUpdateCommand(installType: InstallType, platform: ServerPlatfo
 
 function getManualUpdateHint(installType: InstallType, platform: ServerPlatform, channel = UPDATE_CHANNELS.stable) {
   if (installType === "docker") {
-    return "Pull the published container image and restart the container. Versioned tags are published from vX.Y.Z release tags.";
+    if (channel.id === "staging") {
+      return `Set the Compose image to ${DOCKER_IMAGE}:staging, then pull it and restart the container. Use a separate data volume for staging.`;
+    }
+    return `Set the Compose image to the stable tag shown below (or ${DOCKER_IMAGE}:latest), then pull it and restart the container.`;
   }
   if (installType === "git" && channel.id === "staging") {
     return "Staging is a tester branch. Make a profile backup first, then apply from the browser or run the command below from the repo checkout.";
@@ -354,7 +360,11 @@ async function checkTargetStorageFormat(
   return { compatible: targetFormat >= onDiskFormat, verified: true, onDiskFormat, targetFormat };
 }
 
-async function checkoutOrCreateUpdateBranch(root: string, channel: UpdateChannelInfo, targetHead: string): Promise<void> {
+async function checkoutOrCreateUpdateBranch(
+  root: string,
+  channel: UpdateChannelInfo,
+  targetHead: string,
+): Promise<void> {
   const branchRef = `refs/heads/${channel.branch}`;
   const branchExists = await gitCommandSucceeds(root, ["show-ref", "--verify", "--quiet", branchRef]);
   if (branchExists) {
@@ -401,7 +411,9 @@ async function createUpdateStash(root: string): Promise<UpdateStash | null> {
     return { oid, marker };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`Git created update stash marker ${marker}, but its immutable recovery commit could not be found: ${message}`);
+    throw new Error(
+      `Git created update stash marker ${marker}, but its immutable recovery commit could not be found: ${message}`,
+    );
   }
 }
 
@@ -761,14 +773,12 @@ function serializeUpdateChannels() {
   }));
 }
 
-function buildReleasePayload(release: NonNullable<typeof cachedRelease>) {
+function buildReleasePayload(release: NonNullable<typeof cachedRelease>, channel = UPDATE_CHANNELS.stable) {
   const releaseTag = `v${release.latestVersion}`;
   return {
     ...release,
     releaseTag,
-    dockerImage: DOCKER_IMAGE,
-    dockerImageTag: `${DOCKER_IMAGE}:${release.latestVersion}`,
-    dockerLiteImageTag: `${DOCKER_IMAGE}:${release.latestVersion}-lite`,
+    ...resolveDockerChannelImageTags(DOCKER_IMAGE, release.latestVersion, channel.id),
   };
 }
 
@@ -838,7 +848,7 @@ export async function updatesRoutes(app: FastifyInstance) {
       (req.query as { channel?: unknown } | undefined)?.channel,
       currentBranch,
     );
-    const channelSwitch = gitInstall && currentChannel.id !== channel.id;
+    const channelSwitch = isUpdateChannelSwitch(installType, currentChannel.id, channel.id);
     const applyAvailability = getApplyAvailability(
       installType,
       serverPlatform,
@@ -858,81 +868,63 @@ export async function updatesRoutes(app: FastifyInstance) {
       }
     }
 
-    // Return cached release info if fresh
-    if (cachedRelease && now - cacheTimestamp < CACHE_TTL_MS) {
-      const versionUpdate = isNewerVersion(APP_VERSION, cachedRelease.latestVersion);
-      return {
-        currentVersion: APP_VERSION,
-        currentCommit,
-        currentBuild,
-        channel: channel.id,
-        channelLabel: channel.label,
-        currentBranch,
-        channels: serializeUpdateChannels(),
-        ...buildReleasePayload(cachedRelease),
-        updateAvailable:
-          channelSwitch || (channel.id === "stable" && versionUpdate) || (commitsBehind != null && commitsBehind > 0),
-        versionUpdate: channel.id === "stable" ? versionUpdate : false,
-        commitsBehind: commitsBehind ?? 0,
-        installType,
-        serverPlatform,
-        clientPlatform,
-        ...applyAvailability,
-        targetRef: channel.targetRef,
-        targetCommit: gitInstall ? await resolveGitRef(root, channel.targetRef) : null,
-      };
-    }
+    let release = cachedRelease && now - cacheTimestamp < CACHE_TTL_MS ? cachedRelease : null;
 
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10_000);
+    if (!release) {
       try {
-        cachedRelease = await resolveLatestReleaseFromGitHub(controller.signal);
-      } finally {
-        clearTimeout(timeout);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10_000);
+        try {
+          release = await resolveLatestReleaseFromGitHub(controller.signal);
+        } finally {
+          clearTimeout(timeout);
+        }
+        cachedRelease = release;
+        cacheTimestamp = now;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        return reply.status(502).send({
+          error: `Failed to check for updates: ${message}`,
+          currentVersion: APP_VERSION,
+          currentCommit,
+          currentBuild,
+          channel: channel.id,
+          channelLabel: channel.label,
+          currentBranch,
+          channels: serializeUpdateChannels(),
+          updateAvailable: channelSwitch || (commitsBehind != null && commitsBehind > 0),
+          channelSwitch,
+          commitsBehind: commitsBehind ?? 0,
+          installType,
+          serverPlatform,
+          clientPlatform,
+          ...applyAvailability,
+        });
       }
-      cacheTimestamp = now;
-
-      const versionUpdate = isNewerVersion(APP_VERSION, cachedRelease.latestVersion);
-      return {
-        currentVersion: APP_VERSION,
-        currentCommit,
-        currentBuild,
-        channel: channel.id,
-        channelLabel: channel.label,
-        currentBranch,
-        channels: serializeUpdateChannels(),
-        ...buildReleasePayload(cachedRelease),
-        updateAvailable:
-          channelSwitch || (channel.id === "stable" && versionUpdate) || (commitsBehind != null && commitsBehind > 0),
-        versionUpdate: channel.id === "stable" ? versionUpdate : false,
-        commitsBehind: commitsBehind ?? 0,
-        installType,
-        serverPlatform,
-        clientPlatform,
-        ...applyAvailability,
-        targetRef: channel.targetRef,
-        targetCommit: gitInstall ? await resolveGitRef(root, channel.targetRef) : null,
-      };
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      return reply.status(502).send({
-        error: `Failed to check for updates: ${message}`,
-        currentVersion: APP_VERSION,
-        currentCommit,
-        currentBuild,
-        channel: channel.id,
-        channelLabel: channel.label,
-        currentBranch,
-        channels: serializeUpdateChannels(),
-        updateAvailable: channelSwitch || (commitsBehind != null && commitsBehind > 0),
-        commitsBehind: commitsBehind ?? 0,
-        installType,
-        serverPlatform,
-        clientPlatform,
-        ...applyAvailability,
-      });
     }
+
+    const versionUpdate = isNewerVersion(APP_VERSION, release.latestVersion);
+    return {
+      currentVersion: APP_VERSION,
+      currentCommit,
+      currentBuild,
+      channel: channel.id,
+      channelLabel: channel.label,
+      currentBranch,
+      channels: serializeUpdateChannels(),
+      ...buildReleasePayload(release, channel),
+      updateAvailable:
+        channelSwitch || (channel.id === "stable" && versionUpdate) || (commitsBehind != null && commitsBehind > 0),
+      channelSwitch,
+      versionUpdate: channel.id === "stable" ? versionUpdate : false,
+      commitsBehind: commitsBehind ?? 0,
+      installType,
+      serverPlatform,
+      clientPlatform,
+      ...applyAvailability,
+      targetRef: channel.targetRef,
+      targetCommit: gitInstall ? await resolveGitRef(root, channel.targetRef) : null,
+    };
   });
 
   // ── Apply update (git installs only) ──

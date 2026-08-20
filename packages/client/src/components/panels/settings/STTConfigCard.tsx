@@ -230,7 +230,9 @@ export function STTConfigCard() {
               <span className="text-xs tabular-nums text-[var(--muted-foreground)]">
                 {localizeUi("ui.panels.sttconfigcard.value1S", { value1: (callModeSilenceMs / 1000).toFixed(1) })}
               </span>
-              <HelpTooltip text={localizeUi("ui.panels.sttconfigcard.howLongASilentPauseCanLastMidSentenceDuringACall")} />
+              <HelpTooltip
+                text={localizeUi("ui.panels.sttconfigcard.howLongASilentPauseCanLastMidSentenceDuringACall")}
+              />
             </div>
             <input
               type="range"

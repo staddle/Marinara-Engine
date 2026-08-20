@@ -107,6 +107,7 @@ const EXPECTED_AGENT_RESULT_TYPE_VALUES = [
   "character_tracker_update",
   "persona_stats_update",
   "custom_tracker_update",
+  "inventory_tracker_update",
   "spotify_control",
   "youtube_control",
   "local_music_control",
@@ -217,6 +218,68 @@ const arrayJsonResult = await executeAgent(
 );
 assert.equal(arrayJsonResult.success, false, "structured agent output must be a JSON object, not an array");
 assert.equal(arrayJsonProvider.calls, 2, "array-shaped JSON should retain the existing single retry");
+
+const toolJsonProvider = new RecordingProvider('{"weather":"rain"}');
+await executeAgent(
+  {
+    ...makeAgent("world-state", "game_state_update"),
+    enabledParameters: { temperature: true },
+  },
+  context,
+  toolJsonProvider,
+  "agent-model",
+  {
+    tools: [
+      {
+        type: "function",
+        function: { name: "lookup", description: "Look up context", parameters: { type: "object" } },
+      },
+    ],
+    executeToolCall: async () => "unused",
+  },
+);
+assert.equal(toolJsonProvider.options[0]?.reasoningEffort, "none", "JSON agents with tools should disable reasoning");
+assert.deepEqual(
+  toolJsonProvider.options[0]?.enabledParameters,
+  { temperature: true, reasoningEffort: true },
+  "the JSON reasoning override should preserve the connection's other parameter switches",
+);
+
+const batchReasoningProvider = new RecordingProvider(
+  JSON.stringify({
+    "world-state": { weather: "rain" },
+    quest: { quests: [] },
+  }),
+);
+await executeAgentBatch(
+  [makeAgent("world-state", "game_state_update"), makeAgent("quest", "quest_update")],
+  context,
+  batchReasoningProvider,
+  "agent-model",
+);
+assert.equal(
+  batchReasoningProvider.options[0]?.reasoningEffort,
+  "none",
+  "batched agent requests should disable reasoning because the combined response must be JSON",
+);
+assert.equal(batchReasoningProvider.options[0]?.enabledParameters?.reasoningEffort, true);
+
+const inheritedReasoningProvider = new RecordingProvider('{"weather":"rain"}');
+await executeAgent(
+  {
+    ...makeAgent("world-state", "game_state_update"),
+    enabledParameters: { reasoningEffort: false },
+  },
+  context,
+  inheritedReasoningProvider,
+  "agent-model",
+);
+assert.equal(
+  inheritedReasoningProvider.options[0]?.reasoningEffort,
+  undefined,
+  "the connection send-switch should still allow the provider default",
+);
+assert.equal(inheritedReasoningProvider.options[0]?.enabledParameters?.reasoningEffort, false);
 
 const mixedParameterBatchProvider = new RecordingProvider();
 await executeAgentBatch(

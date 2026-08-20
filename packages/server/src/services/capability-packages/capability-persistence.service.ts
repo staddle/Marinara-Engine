@@ -89,16 +89,17 @@ function mapBranchMetadata(value: unknown): CapabilityChatRecord["branch"] {
 }
 
 function mapChat(row: typeof chats.$inferSelect): CapabilityChatRecord {
+  const branch = mapBranchMetadata(row.metadata);
   return {
     id: row.id,
-    name: row.name,
+    name: branch?.title ?? row.name,
     mode: row.mode,
     characterIds: parseStringArray(row.characterIds),
     groupId: row.groupId,
     personaId: row.personaId,
     connectionId: row.connectionId,
     metadata: row.metadata,
-    branch: mapBranchMetadata(row.metadata),
+    branch,
     lastMessageAt: row.lastMessageAt,
     updatedAt: row.updatedAt,
   };

@@ -4,6 +4,7 @@
 import {
   BaseLLMProvider,
   llmFetch,
+  llmHttpErrorFromResponse,
   sanitizeApiError,
   type ChatMessage,
   type ChatOptions,
@@ -23,6 +24,7 @@ import {
   shouldSuppressUnknownModelParameters,
 } from "@marinara-engine/shared";
 import { logger } from "../../../lib/logger.js";
+import { isLoopbackIp, isNonRoutableNetworkIp } from "../../../middleware/ip-allowlist.js";
 import { applyGlmThinkingParameters } from "./glm-request-compat.js";
 
 /**
@@ -84,11 +86,7 @@ export function normalizeOpenAIChatCompletionsResponseFormat(
 
   if (responseFormat.type === "json_schema") {
     if (responseFormat.json_schema && typeof responseFormat.json_schema === "object") return responseFormat;
-    if (
-      typeof responseFormat.name === "string" &&
-      responseFormat.schema &&
-      typeof responseFormat.schema === "object"
-    ) {
+    if (typeof responseFormat.name === "string" && responseFormat.schema && typeof responseFormat.schema === "object") {
       return {
         type: "json_schema",
         json_schema: {
@@ -511,6 +509,7 @@ export class OpenAIProvider extends BaseLLMProvider {
     if (!providerMetadata) return {};
     if (model && !this.shouldReplayChatCompletionsReasoning(model)) return {};
     const metadata = OpenAIProvider.extractReasoningMetadata(providerMetadata);
+    if (providerMetadata.partial === true) metadata.partial = true;
     if (Array.isArray(metadata.reasoning_details) && metadata.reasoning_details.length) {
       return { reasoning_details: metadata.reasoning_details };
     }
@@ -702,6 +701,49 @@ export class OpenAIProvider extends BaseLLMProvider {
 
   private hasExplicitReasoningDisable(reasoningEffort?: string | null): boolean {
     return reasoningEffort === "none";
+  }
+
+  /**
+   * True when baseUrl points at an inference server running on this machine or
+   * this LAN (llama.cpp, Ollama, vLLM, LM Studio). Such servers expose
+   * arbitrary model names that never match the OpenAI/xAI catalog patterns the
+   * reasoning gates rely on, so without this the user's explicit "reasoning
+   * off" choice is silently discarded before it reaches the request body.
+   */
+  private isLocalInferenceEndpoint(): boolean {
+    try {
+      const hostname = new URL(this.baseUrl).hostname.toLowerCase().replace(/^\[|\]$|\.$/g, "");
+      if (hostname === "localhost" || isLoopbackIp(hostname)) return true;
+      if (hostname.endsWith(".local") || hostname.endsWith(".localhost")) return true;
+      if (hostname === "host.docker.internal" || hostname === "host.containers.internal") return true;
+      if (!hostname.includes(".") || hostname.endsWith(".internal")) return true;
+      return isNonRoutableNetworkIp(hostname);
+    } catch {
+      return false;
+    }
+  }
+
+  private enforceLocalInferenceThinkingDisable(
+    body: Record<string, unknown>,
+    options: ChatOptions,
+    suppressModelParameters: boolean,
+  ): void {
+    if (
+      suppressModelParameters ||
+      !this.isGenericCustomProvider() ||
+      !this.shouldSendParameter(options, "reasoningEffort") ||
+      !this.hasExplicitReasoningDisable(options.reasoningEffort) ||
+      !this.isLocalInferenceEndpoint()
+    ) {
+      return;
+    }
+    const templateOptions =
+      body.chat_template_kwargs &&
+      typeof body.chat_template_kwargs === "object" &&
+      !Array.isArray(body.chat_template_kwargs)
+        ? (body.chat_template_kwargs as Record<string, unknown>)
+        : {};
+    body.chat_template_kwargs = { ...templateOptions, enable_thinking: false };
   }
 
   private supportsOpenAIReasoningDisable(model: string): boolean {
@@ -931,11 +973,7 @@ export class OpenAIProvider extends BaseLLMProvider {
   }
 
   private shouldUseOpenRouterPromptCaching(options: ChatOptions): boolean {
-    return (
-      !this.isGenericCustomProvider() &&
-      this.baseUrl.includes("openrouter.ai") &&
-      !!options.enableCaching
-    );
+    return !this.isGenericCustomProvider() && this.baseUrl.includes("openrouter.ai") && !!options.enableCaching;
   }
 
   private applyOpenRouterPromptCaching(body: Record<string, unknown>, options: ChatOptions): void {
@@ -1016,9 +1054,12 @@ export class OpenAIProvider extends BaseLLMProvider {
     const devRole = model && this.usesDeveloperRole(model);
     return messages
       .filter((m) => {
+        const reasoningPayload =
+          m.role === "assistant" ? this.assistantReasoningPayload(m.providerMetadata, model) : {};
         // Keep tool messages and assistant messages with tool_calls regardless of content
         if (m.role === "tool") return true;
         if (m.role === "assistant" && m.tool_calls?.length) return true;
+        if (Object.keys(reasoningPayload).length > 0) return true;
         // Drop messages with no text or provider-native attachments.
         return m.content?.trim() || m.images?.length || m.files?.length || m.media?.length;
       })
@@ -1177,6 +1218,9 @@ export class OpenAIProvider extends BaseLLMProvider {
 
     this.applyOpenRouterServiceTier(body, options);
     this.applyCustomParameters(body, options);
+    // Local chat templates may ignore reasoning_effort. Apply this after custom
+    // parameters so an explicit Reasoning Effort: Off choice remains authoritative.
+    this.enforceLocalInferenceThinkingDisable(body, options, suppressModelParameters);
     this.stripUnsupportedSamplerParameters(body, options);
 
     logger.debug(
@@ -1203,7 +1247,10 @@ export class OpenAIProvider extends BaseLLMProvider {
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(this.formatChatCompletionsHttpError(response.status, errorText, effectiveStream));
+      throw llmHttpErrorFromResponse(
+        this.formatChatCompletionsHttpError(response.status, errorText, effectiveStream),
+        response,
+      );
     }
 
     if (!effectiveStream) {
@@ -1459,6 +1506,7 @@ export class OpenAIProvider extends BaseLLMProvider {
 
     this.applyOpenRouterServiceTier(body, options);
     this.applyCustomParameters(body, options);
+    this.enforceLocalInferenceThinkingDisable(body, options, suppressModelParameters);
     this.stripUnsupportedSamplerParameters(body, options);
 
     logger.debug(
@@ -1481,7 +1529,10 @@ export class OpenAIProvider extends BaseLLMProvider {
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(this.formatChatCompletionsHttpError(response.status, errorText, useStream));
+      throw llmHttpErrorFromResponse(
+        this.formatChatCompletionsHttpError(response.status, errorText, useStream),
+        response,
+      );
     }
 
     if (!useStream) {
@@ -2015,10 +2066,16 @@ export class OpenAIProvider extends BaseLLMProvider {
         });
         if (!response.ok) {
           const retryError = await response.text();
-          throw new Error(`OpenAI Responses API error ${response.status}: ${sanitizeApiError(retryError)}`);
+          throw llmHttpErrorFromResponse(
+            `OpenAI Responses API error ${response.status}: ${sanitizeApiError(retryError)}`,
+            response,
+          );
         }
       } else {
-        throw new Error(`OpenAI Responses API error ${response.status}: ${sanitizeApiError(errorText)}`);
+        throw llmHttpErrorFromResponse(
+          `OpenAI Responses API error ${response.status}: ${sanitizeApiError(errorText)}`,
+          response,
+        );
       }
     }
 
@@ -2274,10 +2331,16 @@ export class OpenAIProvider extends BaseLLMProvider {
         });
         if (!response.ok) {
           const retryError = await response.text();
-          throw new Error(`OpenAI Responses API error ${response.status}: ${sanitizeApiError(retryError)}`);
+          throw llmHttpErrorFromResponse(
+            `OpenAI Responses API error ${response.status}: ${sanitizeApiError(retryError)}`,
+            response,
+          );
         }
       } else {
-        throw new Error(`OpenAI Responses API error ${response.status}: ${sanitizeApiError(errorText)}`);
+        throw llmHttpErrorFromResponse(
+          `OpenAI Responses API error ${response.status}: ${sanitizeApiError(errorText)}`,
+          response,
+        );
       }
     }
 

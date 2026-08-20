@@ -722,9 +722,9 @@ function SetupGenerationParametersPanel({
       <button
         type="button"
         onClick={() => onEnabledChange(!enabled)}
-        className="flex w-full items-center justify-between gap-3 text-left"
+        className="flex min-w-0 w-full items-center justify-between gap-3 text-left"
       >
-        <div>
+        <div className="min-w-0 flex-1">
           <span className="block text-xs font-medium text-[var(--foreground)]">
             {localizeUi("ui.chat.setupgenerationparameterspanel.customizeParameters")}
           </span>
@@ -734,7 +734,7 @@ function SetupGenerationParametersPanel({
         </div>
         <div
           className={cn(
-            "h-5 w-9 rounded-full p-0.5 transition-colors",
+            "h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors",
             enabled ? "bg-[var(--primary)]" : "bg-[var(--muted-foreground)]/50",
           )}
         >

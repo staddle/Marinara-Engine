@@ -51,6 +51,7 @@ export const AGENT_RESULT_TYPE_VALUES = [
   "character_tracker_update",
   "persona_stats_update",
   "custom_tracker_update",
+  "inventory_tracker_update",
   "spotify_control",
   "youtube_control",
   "local_music_control",
@@ -62,6 +63,7 @@ export const AGENT_RESULT_TYPE_VALUES = [
   "game_map_update",
   "game_state_transition",
   "prompt_patch",
+  "character_activity_update",
   "frontend_theme_update",
   "about_me_update",
 ] as const;
@@ -360,6 +362,8 @@ export interface AgentContext {
   characters: Array<{
     id: string;
     name: string;
+    /** Persisted character-card world name, when configured. */
+    world?: string;
     description: string;
     personality?: string;
     scenario?: string;
@@ -373,6 +377,12 @@ export interface AgentContext {
     avatarPath?: string | null;
     avatarCrop?: unknown;
     rpgStats?: import("./character.js").RPGStatsConfig;
+  }>;
+  /** Every character attached to the chat, with only the data needed for activity routing. */
+  chatCharacters?: Array<{
+    id: string;
+    name: string;
+    active: boolean;
   }>;
   /** Latest known tracker entries, including recurring characters that are currently absent. */
   characterTrackerHistory?: import("./game-state.js").PresentCharacter[];
@@ -545,6 +555,7 @@ export const CUSTOM_AGENT_CAPABILITY_IDS = [
   "trigger_image_generation",
   "access_vectors",
   "edit_main_prompt",
+  "manage_chat_characters",
 ] as const;
 
 export type CustomAgentCapability = (typeof CUSTOM_AGENT_CAPABILITY_IDS)[number];
@@ -616,10 +627,12 @@ const CUSTOM_AGENT_RESULT_CAPABILITY: Partial<Record<AgentResultType, CustomAgen
   character_tracker_update: "edit_trackers",
   persona_stats_update: "edit_trackers",
   custom_tracker_update: "edit_trackers",
+  inventory_tracker_update: "edit_trackers",
   quest_update: "edit_trackers",
   game_state_update: "edit_trackers",
   image_prompt: "trigger_image_generation",
   prompt_patch: "edit_main_prompt",
+  character_activity_update: "manage_chat_characters",
   frontend_theme_update: "change_frontend_styling",
   background_change: "change_backgrounds",
   sprite_change: "change_sprites",
@@ -722,6 +735,18 @@ const OBSOLETE_BUILT_IN_PROMPT_TEMPLATE_IDS: Record<string, ReadonlySet<string>>
   illustrator: new Set(["illustration", "sketch"]),
 };
 
+const ADDITIONAL_BUILT_IN_PROMPT_TEMPLATE_COLLECTION_KEYS: Record<string, readonly string[]> = {
+  storyboard: [
+    "illustrationTemplates",
+    "videoTemplates",
+    "animationRefinementTemplates",
+    "roleplayEpisodeTemplates",
+    "roleplayStyleTemplates",
+    "roleplayAnimationTemplates",
+    "roleplayOutputTemplates",
+  ],
+};
+
 const RETIRED_BUILT_IN_AGENT_TOOLS: Record<string, ReadonlySet<string>> = {
   expression: new Set(["set_expression"]),
 };
@@ -731,6 +756,30 @@ export function normalizeBuiltInAgentEnabledTools(agentType: string, value: unkn
   const enabledTools = value.filter((tool): tool is string => typeof tool === "string");
   const retiredTools = RETIRED_BUILT_IN_AGENT_TOOLS[agentType];
   return retiredTools ? enabledTools.filter((tool) => !retiredTools.has(tool)) : enabledTools;
+}
+
+function mergeBuiltInPromptTemplateCollection(
+  defaultValue: unknown,
+  savedValue: unknown,
+  obsoleteIds: ReadonlySet<string> = new Set(),
+): AgentPromptTemplateOption[] {
+  const defaultOptions = normalizeAgentPromptTemplateOptions(defaultValue);
+  const savedOptions = normalizeAgentPromptTemplateOptions(savedValue);
+  const savedOptionsById = new Map(
+    savedOptions.filter((entry) => !obsoleteIds.has(entry.id)).map((entry) => [entry.id, entry]),
+  );
+  const usedIds = new Set<string>();
+  const mergedDefaultOptions = defaultOptions.map((defaultOption) => {
+    usedIds.add(defaultOption.id);
+    const savedOption = savedOptionsById.get(defaultOption.id);
+    return savedOption ? { ...defaultOption, ...savedOption } : defaultOption;
+  });
+  const customOptions = savedOptions.filter((entry) => {
+    if (obsoleteIds.has(entry.id) || usedIds.has(entry.id)) return false;
+    usedIds.add(entry.id);
+    return true;
+  });
+  return [...mergedDefaultOptions, ...customOptions];
 }
 
 export function mergeBuiltInAgentSettings(agentType: string, settings: unknown): Record<string, unknown> {
@@ -747,29 +796,19 @@ export function mergeBuiltInAgentSettings(agentType: string, settings: unknown):
     ...normalizedSettings,
   };
 
-  const defaultPromptTemplates = normalizeAgentPromptTemplateOptions(defaults.promptTemplates);
-  const savedPromptTemplates = normalizeAgentPromptTemplateOptions(normalizedSettings.promptTemplates);
-  const obsoleteIds = OBSOLETE_BUILT_IN_PROMPT_TEMPLATE_IDS[agentType] ?? new Set<string>();
-  const savedPromptTemplatesById = new Map(
-    savedPromptTemplates.filter((entry) => !obsoleteIds.has(entry.id)).map((entry) => [entry.id, entry]),
-  );
-  const usedIds = new Set<string>();
-  const mergedDefaultPromptTemplates = defaultPromptTemplates.map((defaultOption) => {
-    usedIds.add(defaultOption.id);
-    const savedOption = savedPromptTemplatesById.get(defaultOption.id);
-    return savedOption ? { ...defaultOption, ...savedOption } : defaultOption;
-  });
-  const customPromptTemplates = savedPromptTemplates.filter((entry) => {
-    if (obsoleteIds.has(entry.id) || usedIds.has(entry.id)) return false;
-    usedIds.add(entry.id);
-    return true;
-  });
-  const promptTemplates = [...mergedDefaultPromptTemplates, ...customPromptTemplates];
-
-  if (promptTemplates.length) {
-    merged.promptTemplates = promptTemplates;
-  } else {
-    delete merged.promptTemplates;
+  const promptTemplateCollectionKeys = [
+    "promptTemplates",
+    ...(ADDITIONAL_BUILT_IN_PROMPT_TEMPLATE_COLLECTION_KEYS[agentType] ?? []),
+  ];
+  for (const key of promptTemplateCollectionKeys) {
+    const obsoleteIds =
+      key === "promptTemplates" ? (OBSOLETE_BUILT_IN_PROMPT_TEMPLATE_IDS[agentType] ?? new Set<string>()) : undefined;
+    const promptTemplates = mergeBuiltInPromptTemplateCollection(defaults[key], normalizedSettings[key], obsoleteIds);
+    if (promptTemplates.length) {
+      merged[key] = promptTemplates;
+    } else {
+      delete merged[key];
+    }
   }
 
   return merged;
@@ -801,6 +840,8 @@ export interface LorebookUpdateResult {
     content: string;
     keys: string[];
     tag?: string;
+    /** Optional lorebook injection priority. Omission preserves the existing/default order. */
+    order?: number;
   };
 }
 

@@ -33,6 +33,7 @@ import {
   useDeleteTTSCloneReference,
 } from "../../../hooks/use-tts";
 import { useCharacters } from "../../../hooks/use-characters";
+import { useConnections } from "../../../hooks/use-connections";
 import { ttsService } from "../../../lib/tts-service";
 import {
   listCachedTTSAudioEntries,
@@ -207,6 +208,30 @@ type VoiceOption = {
   category?: string | null;
   labels?: Record<string, string | number | boolean | null> | null;
 };
+
+type TTSLanguageConnectionOption = {
+  id: string;
+  name: string;
+  model: string;
+  defaultForAgents: unknown;
+};
+
+function isTTSLanguageConnectionOption(value: unknown): value is TTSLanguageConnectionOption {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const connection = value as Record<string, unknown>;
+  return (
+    typeof connection.id === "string" &&
+    typeof connection.name === "string" &&
+    typeof connection.model === "string" &&
+    connection.provider !== "image_generation" &&
+    connection.provider !== "video_generation" &&
+    connection.provider !== "audio"
+  );
+}
+
+function isDefaultAgentTTSConnection(connection: TTSLanguageConnectionOption): boolean {
+  return connection.defaultForAgents === true || connection.defaultForAgents === "true";
+}
 
 function getTtsRequestErrorMessage(error: unknown, fallback: string): string {
   if (error instanceof ApiError) {
@@ -577,14 +602,14 @@ function TtsSearchableSelect({
         onClick={() => setOpen((current) => !current)}
         className={cn(
           INPUT_CLS,
-          "relative flex min-w-0 cursor-pointer items-center pr-10 text-left disabled:cursor-not-allowed disabled:opacity-50",
-          compact && "py-2 text-xs",
+          "relative flex min-w-0 cursor-pointer items-center text-left disabled:cursor-not-allowed disabled:opacity-50",
+          compact ? "py-2 pr-3 text-xs" : "pr-10",
         )}
       >
         <span className={cn("truncate", !value && "text-[var(--muted-foreground)]")}>
           {(selected?.label ?? value) || placeholder}
         </span>
-        <TtsDropdownIcon compact={compact} />
+        {!compact && <TtsDropdownIcon />}
       </button>
       {open &&
         typeof document !== "undefined" &&
@@ -906,6 +931,7 @@ export function TTSConfigCard() {
   const { data: characters } = useCharacters();
   const uploadCloneReference = useUploadTTSCloneReference();
   const deleteCloneReference = useDeleteTTSCloneReference();
+  const { data: connections } = useConnections();
 
   // Local draft state
   const [enabled, setEnabled] = useState(false);
@@ -937,6 +963,9 @@ export function TTSConfigCard() {
   const [autoplayGame, setAutoplayGame] = useState(false);
   const [progressivePlayback, setProgressivePlayback] = useState(false);
   const [dialogueOnly, setDialogueOnly] = useState(false);
+  const [roleplaySpeakerExtractorEnabled, setRoleplaySpeakerExtractorEnabled] = useState(false);
+  const [roleplaySpeakerExtractorConnectionId, setRoleplaySpeakerExtractorConnectionId] = useState("");
+  const [roleplaySpeakerExtractorEmotionsEnabled, setRoleplaySpeakerExtractorEmotionsEnabled] = useState(false);
   const [dialoguePauseSeconds, setDialoguePauseSeconds] = useState(TTS_DIALOGUE_PAUSE_DEFAULT_SECONDS);
   const [audioFormat, setAudioFormat] = useState<TTSAudioFormat>("mp3");
   const [callAudioEnabled, setCallAudioEnabled] = useState(false);
@@ -1010,6 +1039,9 @@ export function TTSConfigCard() {
     setAutoplayGame(savedConfig.autoplayGame);
     setProgressivePlayback(savedConfig.progressivePlayback ?? false);
     setDialogueOnly(savedConfig.dialogueOnly ?? false);
+    setRoleplaySpeakerExtractorEnabled(savedConfig.roleplaySpeakerExtractorEnabled ?? false);
+    setRoleplaySpeakerExtractorConnectionId(savedConfig.roleplaySpeakerExtractorConnectionId ?? "");
+    setRoleplaySpeakerExtractorEmotionsEnabled(savedConfig.roleplaySpeakerExtractorEmotionsEnabled ?? false);
     setDialoguePauseSeconds((savedConfig.dialoguePauseMs ?? TTS_DIALOGUE_PAUSE_DEFAULT_SECONDS * 1000) / 1000);
     setAudioFormat(savedConfig.audioFormat ?? "mp3");
     setCallAudioEnabled(savedConfig.callAudioEnabled ?? false);
@@ -1087,6 +1119,9 @@ export function TTSConfigCard() {
     autoplayGame,
     progressivePlayback,
     dialogueOnly,
+    roleplaySpeakerExtractorEnabled,
+    roleplaySpeakerExtractorConnectionId,
+    roleplaySpeakerExtractorEmotionsEnabled,
     dialoguePauseMs: dialoguePauseSeconds * 1000,
     audioFormat,
     callAudioEnabled,
@@ -1238,6 +1273,9 @@ export function TTSConfigCard() {
         await ttsService.speak("Hello! This is a preview of the text to speech voice.", "tts-preview", {
           throwOnError: true,
           voice: previewVoice,
+          // This card configures the legacy settings blob; the preview must
+          // test THAT, not whatever audio connection is the category default.
+          audioConnectionId: "",
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : "TTS preview failed.";
@@ -1397,6 +1435,14 @@ export function TTSConfigCard() {
       .filter((option): option is CharacterOption => Boolean(option))
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [characters]);
+  const languageConnectionOptions = useMemo(
+    () => (connections ?? []).filter(isTTSLanguageConnectionOption).sort((a, b) => a.name.localeCompare(b.name)),
+    [connections],
+  );
+  const defaultAgentConnection = languageConnectionOptions.find(isDefaultAgentTTSConnection) ?? null;
+  const selectedExtractorConnectionMissing =
+    !!roleplaySpeakerExtractorConnectionId &&
+    !languageConnectionOptions.some((connection) => connection.id === roleplaySpeakerExtractorConnectionId);
   const assignedCharacterIds = useMemo(
     () => new Set(voiceAssignments.map((assignment) => assignment.characterId).filter(Boolean)),
     [voiceAssignments],
@@ -1643,9 +1689,9 @@ export function TTSConfigCard() {
                     : source === "audio_cpp"
                       ? localizeUi("ui.panels.ttsconfigcard.audioCppsSelfHostedServerRootItsDefaultIsHttp")
                       : source === "fish_audio"
-                        ?localizeUi("ui.panels.ttsconfigcard.fishAudioSApiRootUseTheDefaultUnless")
+                        ? localizeUi("ui.panels.ttsconfigcard.fishAudioSApiRootUseTheDefaultUnless")
                         : source === "sglang_omni"
-                          ?localizeUi("ui.panels.ttsconfigcard.yourSglangOmniServerRootEGHttpLocalhost")
+                          ? localizeUi("ui.panels.ttsconfigcard.yourSglangOmniServerRootEGHttpLocalhost")
                           : localizeUi("ui.panels.ttsconfigcard.theOpenaiCompatibleTtsApiEndpointUseTheDefault")
             }
           >
@@ -1699,9 +1745,9 @@ export function TTSConfigCard() {
                     : source === "audio_cpp"
                       ? localizeUi("ui.panels.ttsconfigcard.theModelNameAudioCppShouldUseEGFishAudio")
                       : source === "fish_audio"
-                        ?localizeUi("ui.panels.ttsconfigcard.fishAudioModelToUseSentAsARequest")
+                        ? localizeUi("ui.panels.ttsconfigcard.fishAudioModelToUseSentAsARequest")
                         : source === "sglang_omni"
-                          ?localizeUi("ui.panels.ttsconfigcard.theHuggingFaceModelIdServedBySglangOmni")
+                          ? localizeUi("ui.panels.ttsconfigcard.theHuggingFaceModelIdServedBySglangOmni")
                           : localizeUi("ui.panels.ttsconfigcard.ttsModelToUseEGTts1Tts")
             }
           >
@@ -1763,7 +1809,7 @@ export function TTSConfigCard() {
               label={localizeUi("ui.panels.ttsconfigcard.referenceClip")}
               help={
                 source === "sglang_omni"
-                  ?localizeUi("ui.panels.ttsconfigcard.optionalUploadAReferenceClipToCloneThatVoice")
+                  ? localizeUi("ui.panels.ttsconfigcard.optionalUploadAReferenceClipToCloneThatVoice")
                   : localizeUi("ui.panels.ttsconfigcard.uploadAShortReferenceClipOfTheVoiceTo")
               }
             >
@@ -2008,12 +2054,7 @@ export function TTSConfigCard() {
               help={localizeUi("ui.panels.ttsconfigcard.assignVoicesToSpecificCharactersFromYourCharactersTab")}
             >
               <div className="space-y-2 rounded-xl border border-sky-400/15 bg-sky-400/5 p-2">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="grid min-w-0 flex-1 gap-2 text-[0.625rem] font-semibold uppercase tracking-wide text-[var(--muted-foreground)] sm:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_auto]">
-                    <span>{localizeUi("ui.panels.appearancesettings.character")}</span>
-                    <span>{localizeUi("ui.panels.ttsconfigcard.voice_3091c84")}</span>
-                    <span className="hidden sm:block" />
-                  </div>
+                <div className="flex justify-end">
                   <button
                     type="button"
                     onClick={() => void handleRefreshVoices()}
@@ -2033,7 +2074,7 @@ export function TTSConfigCard() {
                 {voiceAssignments.map((assignment, index) => (
                   <div
                     key={`voice-assignment-${index}`}
-                    className="grid gap-2 sm:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_auto]"
+                    className="space-y-2 rounded-lg border border-[var(--border)] bg-[var(--background)]/35 p-2"
                   >
                     <CharacterSelect
                       value={assignment.characterId}
@@ -2041,39 +2082,41 @@ export function TTSConfigCard() {
                       assignedCharacterIds={assignedCharacterIds}
                       onChange={(characterId) => handleVoiceAssignmentCharacterChange(index, characterId)}
                     />
-                    {source === "openai" ? (
-                      <CustomizableVoiceInput
-                        value={assignment.voice}
-                        onChange={(nextVoice) => handleVoiceAssignmentVoiceChange(index, nextVoice)}
-                        options={voiceOptions}
-                        placeholder={localizeUi("ui.panels.ttsconfigcard.customVoiceOrKokoroMix")}
-                        ariaLabel={localizeUi("ui.panels.ttsconfigcard.characterVoiceFor", {
-                          name: assignment.characterName || localizeUi("ui.panels.appearancesettings.character"),
-                        })}
-                        testId={`tts-custom-voice-input-character-${assignment.characterId || index}`}
-                        compact
-                      />
-                    ) : (
-                      <VoiceSelect
-                        value={assignment.voice}
-                        onChange={(nextVoice) => handleVoiceAssignmentVoiceChange(index, nextVoice)}
-                        disabled={fetchingVoices || voiceOptions.length === 0}
-                        options={voiceOptions}
-                        placeholder={localizeUi("ui.panels.ttsconfigcard.selectVoice")}
-                        ariaLabel={localizeUi("ui.panels.ttsconfigcard.characterVoiceFor", {
-                          name: assignment.characterName || localizeUi("ui.panels.appearancesettings.character"),
-                        })}
-                        compact
-                      />
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveVoiceAssignment(index)}
-                      className="mari-chrome-control mari-chrome-control--small h-9 min-h-0 px-2 sm:w-9"
-                      title={localizeUi("ui.panels.ttsconfigcard.removeCharacterVoice")}
-                    >
-                      <X size="0.75rem" />
-                    </button>
+                    <div className="flex min-w-0 gap-2">
+                      {source === "openai" ? (
+                        <CustomizableVoiceInput
+                          value={assignment.voice}
+                          onChange={(nextVoice) => handleVoiceAssignmentVoiceChange(index, nextVoice)}
+                          options={voiceOptions}
+                          placeholder={localizeUi("ui.panels.ttsconfigcard.customVoiceOrKokoroMix")}
+                          ariaLabel={localizeUi("ui.panels.ttsconfigcard.characterVoiceFor", {
+                            name: assignment.characterName || localizeUi("ui.panels.appearancesettings.character"),
+                          })}
+                          testId={`tts-custom-voice-input-character-${assignment.characterId || index}`}
+                          compact
+                        />
+                      ) : (
+                        <VoiceSelect
+                          value={assignment.voice}
+                          onChange={(nextVoice) => handleVoiceAssignmentVoiceChange(index, nextVoice)}
+                          disabled={fetchingVoices || voiceOptions.length === 0}
+                          options={voiceOptions}
+                          placeholder={localizeUi("ui.panels.ttsconfigcard.selectVoice")}
+                          ariaLabel={localizeUi("ui.panels.ttsconfigcard.characterVoiceFor", {
+                            name: assignment.characterName || localizeUi("ui.panels.appearancesettings.character"),
+                          })}
+                          compact
+                        />
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveVoiceAssignment(index)}
+                        className="mari-chrome-control mari-chrome-control--small h-9 min-h-0 w-9 shrink-0 p-0"
+                        title={localizeUi("ui.panels.ttsconfigcard.removeCharacterVoice")}
+                      >
+                        <X size="0.75rem" />
+                      </button>
+                    </div>
                   </div>
                 ))}
                 <button
@@ -2336,6 +2379,71 @@ export function TTSConfigCard() {
                 mark({ autoplayRP: v });
               }}
             />
+            <ToggleRow
+              label={localizeUi("ui.panels.ttsconfigcard.roleplaySpeakerExtractor")}
+              checked={roleplaySpeakerExtractorEnabled}
+              onChange={(value) => {
+                setRoleplaySpeakerExtractorEnabled(value);
+                mark({ roleplaySpeakerExtractorEnabled: value });
+              }}
+            />
+            {roleplaySpeakerExtractorEnabled && (
+              <div className="ml-2 space-y-2 rounded-xl border border-[var(--border)] bg-[var(--secondary)]/35 p-2.5">
+                <FieldRow
+                  label={localizeUi("ui.panels.ttsconfigcard.speakerExtractorConnection")}
+                  help={localizeUi("ui.panels.ttsconfigcard.speakerExtractorConnectionHelp")}
+                >
+                  <select
+                    value={roleplaySpeakerExtractorConnectionId}
+                    onChange={(event) => {
+                      const connectionId = event.target.value;
+                      setRoleplaySpeakerExtractorConnectionId(connectionId);
+                      mark({ roleplaySpeakerExtractorConnectionId: connectionId });
+                    }}
+                    className={cn(INPUT_CLS, "cursor-pointer appearance-none")}
+                  >
+                    <option value="">
+                      {defaultAgentConnection
+                        ? localizeUi("ui.panels.ttsconfigcard.defaultAgentConnectionNamed", {
+                            name: defaultAgentConnection.name,
+                          })
+                        : localizeUi("ui.panels.ttsconfigcard.defaultAgentConnectionNotConfigured")}
+                    </option>
+                    {selectedExtractorConnectionMissing && (
+                      <option value={roleplaySpeakerExtractorConnectionId}>
+                        {localizeUi("ui.panels.ttsconfigcard.selectedConnectionUnavailable")}
+                      </option>
+                    )}
+                    {languageConnectionOptions.map((connection) => (
+                      <option key={connection.id} value={connection.id}>
+                        {connection.model
+                          ? localizeUi("ui.panels.ttsconfigcard.connectionNameAndModel", {
+                              name: connection.name,
+                              model: connection.model,
+                            })
+                          : connection.name}
+                      </option>
+                    ))}
+                  </select>
+                </FieldRow>
+                {languageConnectionOptions.length === 0 && (
+                  <p className="text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+                    {localizeUi("ui.panels.ttsconfigcard.noLanguageModelConnectionsAvailable")}
+                  </p>
+                )}
+                <ToggleRow
+                  label={localizeUi("ui.panels.ttsconfigcard.enableEmotionIndicators")}
+                  checked={roleplaySpeakerExtractorEmotionsEnabled}
+                  onChange={(value) => {
+                    setRoleplaySpeakerExtractorEmotionsEnabled(value);
+                    mark({ roleplaySpeakerExtractorEmotionsEnabled: value });
+                  }}
+                />
+                <p className="text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
+                  {localizeUi("ui.panels.ttsconfigcard.roleplaySpeakerExtractorHelp")}
+                </p>
+              </div>
+            )}
             <ToggleRow
               label={localizeUi("ui.panels.ttsconfigcard.conversationMessages")}
               checked={autoplayConvo}

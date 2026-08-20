@@ -41,6 +41,17 @@ import { sanitizePromptLeaf } from "../prompt/prompt-escaping.js";
 import { settleAgentJobsWithConcurrencyLimit } from "./agent-concurrency.js";
 import { normalizeCyoaChoiceOutput } from "./cyoa-choice-normalization.js";
 import { getAssetManifest } from "../game/asset-manifest.service.js";
+import { normalizeBeholderProse } from "./beholder-normalizer.js";
+import {
+  BEHOLDER_PASS_LANES,
+  buildBeholderUserMessage,
+  formatBeholderRequestContext,
+  isBeholderLaneResponse,
+  mergeBeholderLaneDeltas,
+  parseBeholderLanePrompts,
+  resolveBeholderStateResponse,
+  type BeholderPassLane,
+} from "./beholder-state.js";
 
 const MAX_AGENT_CONTEXT_MESSAGES = 200;
 const EXPRESSION_AGENT_RECENT_CONTEXT_MESSAGES = 2;
@@ -53,6 +64,10 @@ const ILLUSTRATOR_AGENT_CALL_TIMEOUT_MS = 30 * 60_000;
 const AGENT_BATCH_FALLBACK_MAX_CONCURRENT = 4;
 
 /** Strip HTML/XML-style tags (e.g. <div style="..."> <br> <speaker>) from text to save tokens. */
+/** Per-message history cap for agent context. Beholder opts out: a truncated
+ *  turn silently hides whatever state the rest of the message described. */
+const HISTORY_MESSAGE_MAX_CHARS = 2000;
+
 function stripHtmlTags(text: string): string {
   return text
     .replace(/<\/?[a-zA-Z][^>]*>/g, "")
@@ -541,6 +556,7 @@ function normalizeAgentTemperature(value: unknown, fallback = DEFAULT_AGENT_TEMP
 
 function resolveAgentTemperature(config: AgentExecConfig): number | undefined {
   if (config.suppressModelParameters || config.enabledParameters?.temperature === false) return undefined;
+  if (config.type === "beholder") return 0;
   return normalizeAgentTemperature(config.temperature);
 }
 
@@ -643,9 +659,24 @@ function debugUsage(usage?: LLMUsage): Partial<AgentCallDebugEvent> {
 }
 
 function emitAgentDebug(context: AgentContext, event: AgentCallDebugEvent): void {
-  if ((event.stage === "response" || event.stage === "retry_response") && typeof event.response === "string") {
+  const debugOverrideEnabled = Boolean(context.agentDebug) || isDebugAgentsEnabled();
+  if ((event.stage === "request" || event.stage === "retry_request") && event.messages) {
+    const prompt = event.messages
+      .map((message) => `[${message.role}${message.name ? `:${message.name}` : ""}] ${message.content}`)
+      .join("\n\n");
+    const tools = event.tools?.length ? `\navailable tools: ${event.tools.join(", ")}` : "";
     logDebugOverride(
-      Boolean(context.agentDebug) || isDebugAgentsEnabled(),
+      debugOverrideEnabled,
+      "[agent-debug] %s %s request%s:\n%s%s",
+      event.agentType,
+      event.stage === "retry_request" ? "retry" : "provider",
+      event.round ? ` (round ${event.round})` : "",
+      prompt,
+      tools,
+    );
+  } else if ((event.stage === "response" || event.stage === "retry_response") && typeof event.response === "string") {
+    logDebugOverride(
+      debugOverrideEnabled,
       "[agent-debug] %s %s response (%d chars):\n%s",
       event.agentType,
       event.stage === "retry_response" ? "retry" : "raw",
@@ -716,7 +747,9 @@ export async function executeAgent(
           ? buildKnowledgeRetrievalAgentMessages(config, template, context)
           : config.type === "spotify"
             ? buildSpotifyAgentMessages(config, template, context)
-            : buildStandardAgentMessages(config, template, context);
+            : config.type === "beholder"
+              ? buildBeholderMessages(config, template, context)
+              : buildStandardAgentMessages(config, template, context);
 
     const temperature = resolveAgentTemperature(config);
     const maxTokens = applyAgentMaxTokensCaps(
@@ -726,6 +759,7 @@ export async function executeAgent(
     );
     const streamResponses = context.streaming !== false;
     const customParameters = agentCustomParameters(config);
+    const reasoningOverride = jsonAgentReasoningOverride(config);
 
     // If tools are available, use the tool call loop.
     // `await` so a rethrow from the tool loop is caught by this function's
@@ -741,10 +775,30 @@ export async function executeAgent(
         temperature,
         maxTokens,
         toolContext,
+        reasoningOverride,
         streamResponses,
         startTime,
         context,
       );
+    }
+
+    // A per-pass Beholder template asks one narrow question per call, which is
+    // what a locally hosted per-lane extractor was trained on. Single-prompt
+    // templates parse to null and keep the one-call path below.
+    const lanePrompts = config.type === "beholder" ? parseBeholderLanePrompts(template) : null;
+    if (lanePrompts) {
+      return await executeBeholderLanePasses({
+        config,
+        context,
+        provider,
+        model,
+        lanePrompts,
+        temperature,
+        maxTokens,
+        streamResponses,
+        customParameters,
+        startTime,
+      });
     }
 
     // Call LLM (streaming to avoid proxy timeouts, no tools)
@@ -770,6 +824,7 @@ export async function executeAgent(
       cachingAtDepth: config.cachingAtDepth,
       customParameters,
       enabledParameters: config.enabledParameters,
+      ...reasoningOverride,
       suppressModelParameters: config.suppressModelParameters,
       stream: streamResponses,
       onToken: streamResponses
@@ -818,6 +873,7 @@ export async function executeAgent(
         cachingAtDepth: config.cachingAtDepth,
         customParameters,
         enabledParameters: config.enabledParameters,
+        ...reasoningOverride,
         suppressModelParameters: config.suppressModelParameters,
         stream: streamResponses,
         onToken: streamResponses
@@ -850,15 +906,18 @@ export async function executeAgent(
       invalidJson = shouldFailInvalidJsonResult(config, parsed.data);
     }
 
+    const structured = invalidJson
+      ? { data: parsed.data, valid: false, error: invalidJsonAgentError(parsed.type) }
+      : resolveStructuredAgentResult(config, context, parsed.data);
     return {
       agentId: config.id,
       agentType: config.type,
       type: parsed.type,
-      data: parsed.data,
+      data: structured.data,
       tokensUsed: totalTokens,
       durationMs: Date.now() - startTime,
-      success: !invalidJson,
-      error: invalidJson ? invalidJsonAgentError(parsed.type) : null,
+      success: structured.valid,
+      error: structured.error ?? null,
     };
   } catch (err) {
     emitAgentDebug(context, {
@@ -878,6 +937,133 @@ export async function executeAgent(
 }
 
 /**
+ * Run one Beholder extraction as five narrow passes and union the results.
+ *
+ * A locally hosted Beholder model is trained per lane: it answers about worn
+ * items, wounds, held items, species, or bare/missing flags one at a time, so
+ * asking for the whole state in a single call is off-distribution for it. Each
+ * lane gets the same user message with its own system prompt; the lanes own
+ * disjoint slot fields, so their deltas union cleanly into the single
+ * `{changed, delta}` payload the rest of the pipeline already understands.
+ *
+ * A lane that fails or returns nothing is skipped rather than failing the turn —
+ * losing one lane is better than discarding the four that succeeded.
+ */
+async function executeBeholderLanePasses(args: {
+  config: AgentExecConfig;
+  context: AgentContext;
+  provider: BaseLLMProvider;
+  model: string;
+  lanePrompts: Record<BeholderPassLane, string>;
+  temperature: number | undefined;
+  maxTokens: number;
+  streamResponses: boolean;
+  customParameters: Record<string, unknown> | undefined;
+  startTime: number;
+}): Promise<AgentResult> {
+  const { config, context, provider, model, lanePrompts, temperature, maxTokens, streamResponses, startTime } = args;
+
+  logger.info(`[agent] ${config.type} (${config.name}) — ${model} — ${BEHOLDER_PASS_LANES.length} passes`);
+
+  // Bounded dispatch, not Promise.all: each lane's timeout budget starts when
+  // agentCallSignal builds it, so launching all five at once would let a lane
+  // queued behind a rate limit burn its budget before the provider starts work.
+  const settled = await settleAgentJobsWithConcurrencyLimit(
+    [...BEHOLDER_PASS_LANES],
+    AGENT_BATCH_FALLBACK_MAX_CONCURRENT,
+    async (lane) => {
+      const messages = buildBeholderMessages(config, lanePrompts[lane], context);
+      logger.debug(`[agent] ═══ ${config.type} [${lane}] PROMPT ═══`);
+      for (const msg of messages) {
+        logger.debug(`[agent] [${msg.role}] ${msg.content}`);
+      }
+      logger.debug(`[agent] ═══ END ${lane} PROMPT — temperature=${temperature} maxTokens=${maxTokens} ═══\n`);
+      emitAgentDebug(context, {
+        stage: "request",
+        ...agentDebugBase(config, model, temperature, maxTokens),
+        messageCount: messages.length,
+        messages: debugMessages(messages),
+      });
+
+      let laneText = "";
+      const result = await provider.chatComplete(messages, {
+        model,
+        temperature,
+        maxTokens,
+        enableCaching: config.enableCaching,
+        anthropicExtendedCacheTtl: config.anthropicExtendedCacheTtl,
+        cachingAtDepth: config.cachingAtDepth,
+        customParameters: args.customParameters,
+        enabledParameters: config.enabledParameters,
+        suppressModelParameters: config.suppressModelParameters,
+        stream: streamResponses,
+        onToken: streamResponses
+          ? (chunk) => {
+              laneText += chunk;
+            }
+          : undefined,
+        signal: agentCallSignal(context.signal),
+      });
+      if (!laneText && result.content) laneText = result.content;
+      laneText = laneText.trim();
+      logger.debug(`[agent] ${config.type} [${lane}] raw response: ${laneText.slice(0, 500)}`);
+      emitAgentDebug(context, {
+        stage: "response",
+        ...agentDebugBase(config, model, temperature, maxTokens),
+        messageCount: messages.length,
+        durationMs: Date.now() - startTime,
+        finishReason: result.finishReason,
+        ...debugUsage(result.usage),
+        ...responseDebugFields(laneText),
+      });
+      return { laneText, tokens: result.usage?.totalTokens ?? 0 };
+    },
+  );
+
+  const laneResponses: unknown[] = [];
+  let totalTokens = 0;
+  for (const [index, outcome] of settled.entries()) {
+    const lane = BEHOLDER_PASS_LANES[index];
+    if (outcome.status !== "fulfilled") {
+      logger.warn("[agent] %s pass %s failed: %s", config.type, lane, extractErrorMessage(outcome.reason));
+      continue;
+    }
+    totalTokens += outcome.value.tokens;
+    // Reuse the shared JSON extraction so a fenced or chatty lane reply is
+    // handled exactly like a single-call response. Unparseable output is
+    // reported rather than counted: parseAgentResponse hands back a
+    // parseError marker instead of throwing, and treating that as a usable
+    // lane would let five broken replies look like a clean no-change turn.
+    const laneData = parseAgentResponse(config, outcome.value.laneText).data;
+    if (shouldFailInvalidJsonResult(config, laneData) || !isBeholderLaneResponse(laneData)) {
+      logger.warn("[agent] %s pass %s did not answer in the extraction contract; skipping lane", config.type, lane);
+      continue;
+    }
+    laneResponses.push(laneData);
+  }
+
+  if (laneResponses.length === 0) {
+    return makeError(config, "Every Beholder extraction pass failed or returned unusable output", startTime);
+  }
+
+  const merged = mergeBeholderLaneDeltas(laneResponses);
+  logger.info(
+    `[agent] ${config.type} done (${laneResponses.length}/${BEHOLDER_PASS_LANES.length} passes, changed=${merged.changed}, ${Date.now() - startTime}ms)`,
+  );
+  const structured = resolveStructuredAgentResult(config, context, merged);
+  return {
+    agentId: config.id,
+    agentType: config.type,
+    type: resolveAgentResultType(config),
+    data: structured.data,
+    tokensUsed: totalTokens,
+    durationMs: Date.now() - startTime,
+    success: structured.valid,
+    error: structured.error ?? null,
+  };
+}
+
+/**
  * Execute an agent with tool-calling support.
  * Loops: call LLM → handle tool calls → feed results back → repeat until final response.
  */
@@ -889,6 +1075,7 @@ async function executeAgentWithTools(
   temperature: number | undefined,
   maxTokens: number,
   toolContext: AgentToolContext,
+  reasoningOverride: JsonReasoningOverride,
   streamResponses: boolean,
   startTime: number,
   context: AgentContext,
@@ -922,6 +1109,7 @@ async function executeAgentWithTools(
       cachingAtDepth: config.cachingAtDepth,
       customParameters,
       enabledParameters: config.enabledParameters,
+      ...reasoningOverride,
       suppressModelParameters: config.suppressModelParameters,
       stream: streamResponses,
       tools: toolContext.tools,
@@ -947,15 +1135,18 @@ async function executeAgentWithTools(
       const responseText = result.content?.trim() ?? "";
       const parsed = parseAgentResponse(config, responseText);
       const invalidJson = shouldFailInvalidJsonResult(config, parsed.data);
+      const structured = invalidJson
+        ? { data: parsed.data, valid: false, error: invalidJsonAgentError(parsed.type) }
+        : resolveStructuredAgentResult(config, context, parsed.data);
       return {
         agentId: config.id,
         agentType: config.type,
         type: parsed.type,
-        data: parsed.data,
+        data: structured.data,
         tokensUsed: totalTokens,
         durationMs: Date.now() - startTime,
-        success: !invalidJson,
-        error: invalidJson ? invalidJsonAgentError(parsed.type) : null,
+        success: structured.valid,
+        error: structured.error ?? null,
       };
     }
 
@@ -1010,6 +1201,7 @@ async function executeAgentWithTools(
     cachingAtDepth: config.cachingAtDepth,
     customParameters,
     enabledParameters: config.enabledParameters,
+    ...reasoningOverride,
     suppressModelParameters: config.suppressModelParameters,
     stream: streamResponses,
     signal: nextCallSignal(),
@@ -1029,15 +1221,18 @@ async function executeAgentWithTools(
   });
   const parsed = parseAgentResponse(config, responseText);
   const invalidJson = shouldFailInvalidJsonResult(config, parsed.data);
+  const structured = invalidJson
+    ? { data: parsed.data, valid: false, error: invalidJsonAgentError(parsed.type) }
+    : resolveStructuredAgentResult(config, context, parsed.data);
   return {
     agentId: config.id,
     agentType: config.type,
     type: parsed.type,
-    data: parsed.data,
+    data: structured.data,
     tokensUsed: totalTokens,
     durationMs: Date.now() - startTime,
-    success: !invalidJson,
-    error: invalidJson ? invalidJsonAgentError(parsed.type) : null,
+    success: structured.valid,
+    error: structured.error ?? null,
   };
 }
 
@@ -1157,6 +1352,7 @@ export async function executeAgentBatch(
   const perAgentTokens = configs.map((c) => normalizeAgentMaxTokens(c.settings.maxTokens));
   const temperature = resolveAgentTemperature(configs[0]!);
   const customParameters = agentCustomParameters(configs[0]!);
+  const reasoningOverride = jsonResponseReasoningOverride(configs[0]!.enabledParameters);
   const enableCaching = configs[0]!.enableCaching;
   const anthropicExtendedCacheTtl = configs[0]!.anthropicExtendedCacheTtl;
   const cachingAtDepth = configs[0]!.cachingAtDepth;
@@ -1236,6 +1432,7 @@ export async function executeAgentBatch(
         cachingAtDepth,
         customParameters,
         enabledParameters: configs[0]!.enabledParameters,
+        ...reasoningOverride,
         suppressModelParameters: configs[0]!.suppressModelParameters,
         stream: streamResponses,
         onToken: streamResponses
@@ -1616,6 +1813,16 @@ function invalidJsonAgentError(resultType: AgentResultType): string {
   return `Agent returned invalid JSON instead of the requested ${resultType} format. Check this agent's model/connection settings and try again.`;
 }
 
+function resolveStructuredAgentResult(
+  config: Pick<AgentExecConfig, "type">,
+  context: AgentContext,
+  data: unknown,
+): { data: unknown; valid: boolean; error?: string } {
+  if (config.type !== "beholder") return { data, valid: true };
+  const resolution = resolveBeholderStateResponse(data, context.memory._beholderState, context.persona?.name ?? "User");
+  return { data: resolution.state, valid: resolution.valid, error: resolution.error };
+}
+
 function shouldRetryInvalidJsonAgent(config: Pick<AgentExecConfig, "type" | "settings">): boolean {
   return (config.type !== "spotify" || musicDjUsesJsonOnlyProvider(config)) && agentResponseIsJson(config);
 }
@@ -1645,6 +1852,7 @@ function shouldRunAgentIndividually(config: Pick<AgentExecConfig, "type" | "sett
   // must not be merged into unrelated batched agent requests.
   return (
     config.type === "illustrator" ||
+    config.type === "beholder" ||
     customAgentHasCapability(config.settings, "trigger_image_generation") ||
     config.type === "lorebook-keeper" ||
     resolveAgentResultType(config) === "text_rewrite" ||
@@ -1761,6 +1969,24 @@ function buildCustomAgentCapabilityBlock(config: AgentExecConfig, context: Agent
     }
   }
 
+  if (capabilities.manage_chat_characters) {
+    const chatCharacters = context.chatCharacters ?? [];
+    parts.push(
+      context.chatMode === "conversation" || context.chatMode === "roleplay"
+        ? `Chat character activity control is enabled. For Character Activity output, return {"activeCharacterIds":["exact-character-id"]}. Select at least one ID from <chat_characters>; that selection controls the current main reply.`
+        : `Chat character activity control is unavailable in this chat mode.`,
+    );
+    if (chatCharacters.length > 0) {
+      parts.push("<chat_characters>");
+      for (const character of chatCharacters) {
+        parts.push(
+          `<character id="${escapeXml(character.id)}" active="${character.active ? "true" : "false"}">${escapeXml(character.name)}</character>`,
+        );
+      }
+      parts.push("</chat_characters>");
+    }
+  }
+
   if (capabilities.access_vectors) {
     const contextSources = getAgentContextSources(config);
     const vectorContextAvailable =
@@ -1784,6 +2010,35 @@ function buildCustomAgentCapabilityBlock(config: AgentExecConfig, context: Agent
 
   parts.push("</custom_agent_abilities>");
   return parts.join("\n");
+}
+
+/**
+ * Build the two messages one Beholder extraction runs on, matching the reference
+ * extractor exactly: the prompt as the raw system message, and a single user message
+ * holding the persona, the tracked state, and the new narration.
+ *
+ * Beholder deliberately does not use the shared agent scaffolding. The standard
+ * builder wraps the prompt in <role>/<lore>/<agents>, appends an output-format block
+ * and other context, and passes chat history as separate turns. A general model reads
+ * past that; a small purpose-trained extractor was fitted to one exact input shape and
+ * treats the surrounding text as part of the task, which costs accuracy.
+ *
+ * The narration is normalized to canonical prose and is not truncated: for other agents
+ * history is background, but here the message IS the thing being extracted from, so
+ * cutting it silently hides whatever state the rest of it described.
+ */
+function buildBeholderMessages(config: AgentExecConfig, template: string, context: AgentContext): ChatMessage[] {
+  const contextSize = normalizeAgentContextSize(config.settings.contextSize);
+  const recent = contextSize > 0 ? context.recentMessages.slice(-contextSize) : [];
+  const narration = recent
+    .map((message) => normalizeBeholderProse(message.content))
+    .filter((text) => text.length > 0)
+    .join("\n");
+  const user = buildBeholderUserMessage(context.memory._beholderState, context.persona?.name ?? null, narration);
+  return [
+    { role: "system", content: template },
+    { role: "user", content: user },
+  ];
 }
 
 function buildStandardAgentMessages(config: AgentExecConfig, template: string, context: AgentContext): ChatMessage[] {
@@ -2323,7 +2578,7 @@ function buildAgentMessages(
     for (let msgIdx = 0; msgIdx < recent.length; msgIdx++) {
       const msg = recent[msgIdx]!;
       const role: "user" | "assistant" = msg.role === "assistant" ? "assistant" : "user";
-      let content = stripHtmlTags(msg.content).slice(0, 2000);
+      let content = stripHtmlTags(msg.content).slice(0, HISTORY_MESSAGE_MAX_CHARS);
       if (options.includeMessageIds && msg.id) {
         content = `<message_id>${msg.id}</message_id>\n${content}`;
       }
@@ -2399,7 +2654,9 @@ function buildAgentMessages(
     typeof context.memory._imagePromptInstructions === "string" ? context.memory._imagePromptInstructions.trim() : "";
   if (options.includeImagePromptInstructions === true && lateImagePromptInstructions) {
     finalParts.push("\n<image_prompting_instructions>");
-    finalParts.push("Apply these image-backend instructions when writing the provider-ready image prompt. Do not copy the instructions as prompt content.");
+    finalParts.push(
+      "Apply these image-backend instructions when writing the provider-ready image prompt. Do not copy the instructions as prompt content.",
+    );
     finalParts.push(lateImagePromptInstructions);
     finalParts.push("</image_prompting_instructions>");
   }
@@ -2595,6 +2852,10 @@ function buildAgentExtras(
     }
   }
 
+  if (agentTypes.includes("beholder")) {
+    parts.push(formatBeholderRequestContext(context.memory._beholderState, context.persona?.name ?? "User"));
+  }
+
   if (sources.trackerData && context.gameState) {
     parts.push(`<current_game_state>`);
     parts.push(JSON.stringify(compactGameStateForAgentContext(context.gameState, agentTypes)));
@@ -2757,6 +3018,17 @@ function buildAgentExtras(
     }
   }
 
+  if (agentTypes.includes("lorebook-keeper") && Array.isArray(context.memory._writableLorebooks)) {
+    const books = (context.memory._writableLorebooks as Array<{ id?: unknown; name?: unknown }>)
+      .filter((book) => typeof book.id === "string" && typeof book.name === "string")
+      .map((book, index) => `[${index}] "${escapeXml(String(book.name))}" (id: ${escapeXml(String(book.id))})`);
+    if (books.length > 0) {
+      parts.push(`<writable_lorebooks>`);
+      parts.push(books.join("\n"));
+      parts.push(`</writable_lorebooks>`);
+    }
+  }
+
   if (sources.activatedLorebookEntries && context.activatedLorebookEntries?.length) {
     parts.push(`<activated_lorebook_context>`);
     parts.push(`Lorebook entries activated for the main generation on this turn:`);
@@ -2813,10 +3085,17 @@ function buildAgentExtras(
   }
 
   if (context.memory._connectedDevices) {
-    const devices = context.memory._connectedDevices as Array<{ name: string; index: number; capabilities: string[] }>;
+    const devices = context.memory._connectedDevices as Array<{
+      name: string;
+      type?: string;
+      index: number;
+      capabilities: string[];
+    }>;
     parts.push(`<connected_devices>`);
     for (const d of devices) {
-      parts.push(`- ${d.name} (index ${d.index}): ${d.capabilities.join(", ")}`);
+      parts.push(
+        `- model/name: ${d.name}; index: ${d.index}; device type: ${d.type ?? "haptic device"}; supported actions: ${d.capabilities.join(", ")}`,
+      );
     }
     parts.push(`</connected_devices>`);
   }
@@ -2869,12 +3148,14 @@ const AGENT_RESULT_TYPE_MAP: Record<string, AgentResultType> = {
   "character-tracker": "character_tracker_update",
   "persona-stats": "persona_stats_update",
   "custom-tracker": "custom_tracker_update",
+  "inventory-tracker": "inventory_tracker_update",
   html: "text_rewrite",
   spotify: "spotify_control",
   "knowledge-retrieval": "context_injection",
   haptic: "haptic_command",
   cyoa: "cyoa_choices",
   "about-me-keeper": "about_me_update",
+  beholder: "context_injection",
 };
 
 const AGENT_RESULT_TYPES = new Set<AgentResultType>(AGENT_RESULT_TYPE_VALUES);
@@ -2890,6 +3171,40 @@ export function resolveAgentResultType(config: Pick<AgentExecConfig, "type" | "s
     return configured as AgentResultType;
   }
   return AGENT_RESULT_TYPE_MAP[config.type] ?? "context_injection";
+}
+
+/**
+ * Agents whose output has to parse as JSON gain nothing from a visible
+ * thinking pass — the reasoning is discarded, never injected. On local models
+ * it actively breaks them: a reasoning model can spend its entire completion
+ * budget thinking and return empty content, which fails the JSON parse and
+ * triggers a second, equally wasteful retry. Observed on Gemma-4 12B backing
+ * prose-guardian: two calls, finish_reason "length", 4096 completion tokens
+ * each, empty content both times, ~273s for a turn that should take seconds.
+ *
+ * Ask for reasoning off, unless the agent's own connection deliberately turned
+ * that parameter's send-switch off (in which case the provider default stands).
+ */
+type JsonReasoningOverride = {
+  reasoningEffort?: "none";
+  enabledParameters?: GenerationParameterSendMap;
+};
+
+function jsonResponseReasoningOverride(
+  enabledParameters: GenerationParameterSendMap | undefined,
+): JsonReasoningOverride {
+  if (enabledParameters?.reasoningEffort === false) return {};
+  return {
+    reasoningEffort: "none",
+    enabledParameters: { ...(enabledParameters ?? {}), reasoningEffort: true },
+  };
+}
+
+function jsonAgentReasoningOverride(
+  config: Pick<AgentExecConfig, "type" | "settings" | "enabledParameters">,
+): JsonReasoningOverride {
+  if (!agentResponseIsJson(config)) return {};
+  return jsonResponseReasoningOverride(config.enabledParameters);
 }
 
 function agentResponseIsJson(config: Pick<AgentExecConfig, "type" | "settings">): boolean {
@@ -2915,11 +3230,13 @@ const JSON_AGENTS = new Set([
   "character-tracker",
   "persona-stats",
   "custom-tracker",
+  "inventory-tracker",
   "about-me-keeper",
   "html",
   "spotify",
   "haptic",
   "cyoa",
+  "beholder",
 ]);
 
 /**

@@ -1260,8 +1260,11 @@ export function ConversationInput({
   }, []);
 
   const cameraSession = useCallCameraSession({ onError: handleCallCameraError });
-  const { start: startCallCameraSession, stop: stopCallCameraSession, captureFrame: captureCallCameraFrame } =
-    cameraSession;
+  const {
+    start: startCallCameraSession,
+    stop: stopCallCameraSession,
+    captureFrame: captureCallCameraFrame,
+  } = cameraSession;
 
   const handleCallUtterance = useCallback(
     (blob: Blob) => {
@@ -2222,393 +2225,395 @@ export function ConversationInput({
         />
       ) : (
         <>
-      {/* Slash command autocomplete */}
-      {completions.length > 0 && (
-        <div className="absolute bottom-full left-3 right-3 z-40 mb-1 max-h-[min(18rem,45dvh)] overflow-y-auto rounded-lg border border-foreground/10 bg-[var(--card)] shadow-lg [-webkit-overflow-scrolling:touch]">
-          {completions.map((cmd, i) => (
-            <button
-              key={cmd.key}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                if (textareaRef.current) {
-                  textareaRef.current.value = cmd.insertValue;
-                  textareaRef.current.setSelectionRange(cmd.cursor, cmd.cursor);
-                  syncInputState(cmd.insertValue);
-                  if (activeChatId) setInputDraft(activeChatId, cmd.insertValue);
-                  setCompletions([]);
-                  textareaRef.current.focus();
-                }
-              }}
-              className={cn(
-                "flex w-full min-w-0 items-start gap-2 px-3 py-2.5 text-left text-sm transition-colors",
-                i === selectedCompletion ? "bg-foreground/10 text-foreground" : "hover:bg-foreground/10",
-              )}
-            >
-              <span
-                className={cn(
-                  "shrink-0 whitespace-nowrap text-xs",
-                  cmd.kind === "character" ? "font-medium" : "font-mono",
-                )}
-              >
-                {cmd.label}
-              </span>
-              {cmd.description && (
-                <span className="min-w-0 flex-1 text-[0.6875rem] leading-snug text-foreground/45 [overflow-wrap:anywhere]">
-                  {cmd.description}
-                </span>
-              )}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* @mention autocomplete */}
-      {mentionCompletions.length > 0 && (
-        <div className="absolute bottom-full left-0 right-0 mb-1 overflow-hidden rounded-lg border border-foreground/10 bg-[var(--card)] shadow-lg">
-          {mentionCompletions.map((name, i) => (
-            <button
-              key={name}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                insertMention(name);
-              }}
-              className={cn(
-                "flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors",
-                i === selectedMention ? "bg-foreground/10 text-foreground" : "hover:bg-foreground/10",
-              )}
-            >
-              <AtSign size="0.75rem" className="shrink-0 text-foreground/45" />
-              <span className="font-medium">{name}</span>
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* :emoji: autocomplete */}
-      {emojiCompletions.length > 0 && (
-        <div className="absolute bottom-full left-0 right-0 mb-1 max-h-56 overflow-y-auto rounded-lg border border-foreground/10 bg-[var(--card)] shadow-lg sm:left-[2%] sm:right-[2%]">
-          {emojiCompletions.map((em, i) => (
-            <button
-              key={em.name}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                insertEmoji(em);
-              }}
-              className={cn(
-                "flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm transition-colors",
-                i === selectedEmojiCompletion ? "bg-foreground/10 text-foreground" : "hover:bg-foreground/10",
-              )}
-            >
-              {em.kind === "custom" ? (
-                <img
-                  src={em.url}
-                  alt={localizeUi("ui.chat.conversationinput.value1", { value1: em.name })}
-                  className="h-5 w-5 shrink-0 object-contain"
-                />
-              ) : (
-                <span className="flex h-5 w-5 shrink-0 items-center justify-center text-base" aria-hidden="true">
-                  {em.emoji}
-                </span>
-              )}
-              <span className="min-w-0 flex-1 truncate font-medium">:{em.name}:</span>
-              <span className="hidden shrink-0 text-xs text-foreground/40 sm:inline">{em.source}</span>
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* Multipurpose picker sheet — Emoji / GIFs / Stickers / Tools */}
-      {mobilePickerOpen && (
-        <ConversationMediaPickerPanel
-          tabs={mobilePickerTabs}
-          activeTab={mobilePickerTab}
-          onActiveTabChange={setMobilePickerTab}
-          onClose={() => setMobilePickerOpen(false)}
-          onEmojiSelect={handleEmojiSelect}
-          onGifSelect={handleGifSelect}
-          onStickerSelect={handleStickerSelect}
-          className="absolute bottom-full left-0 right-0 z-20 mb-3 sm:hidden"
-          toolsContent={mediaPickerToolsContent}
-        />
-      )}
-
-      {/* Feedback toast */}
-      {feedback && (
-        <div className="absolute bottom-full left-3 right-3 z-50 mb-2">
-          <SlashCommandFeedback feedback={feedback} onDismiss={() => setFeedback(null)} />
-        </div>
-      )}
-
-      {/* Attachment preview */}
-      {(attachments.length > 0 || isReadingAttachments) && (
-        <div className="mb-2 flex flex-wrap gap-2">
-          {attachments.map((att, i) => (
-            <div
-              key={i}
-              className="flex items-center gap-1.5 rounded-lg bg-foreground/10 px-2.5 py-1.5 text-xs ring-1 ring-foreground/10"
-            >
-              {att.type.startsWith("image/") ? null : (
-                <FileText
-                  size="0.875rem"
+          {/* Slash command autocomplete */}
+          {completions.length > 0 && (
+            <div className="absolute bottom-full left-3 right-3 z-40 mb-1 max-h-[min(18rem,45dvh)] overflow-y-auto rounded-lg border border-foreground/10 bg-[var(--card)] shadow-lg [-webkit-overflow-scrolling:touch]">
+              {completions.map((cmd, i) => (
+                <button
+                  key={cmd.key}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    if (textareaRef.current) {
+                      textareaRef.current.value = cmd.insertValue;
+                      textareaRef.current.setSelectionRange(cmd.cursor, cmd.cursor);
+                      syncInputState(cmd.insertValue);
+                      if (activeChatId) setInputDraft(activeChatId, cmd.insertValue);
+                      setCompletions([]);
+                      textareaRef.current.focus();
+                    }
+                  }}
                   className={cn(
-                    "shrink-0",
-                    att.type === PDF_ATTACHMENT_MIME_TYPE ? "text-[var(--primary)]" : "text-foreground/45",
+                    "flex w-full min-w-0 items-start gap-2 px-3 py-2.5 text-left text-sm transition-colors",
+                    i === selectedCompletion ? "bg-foreground/10 text-foreground" : "hover:bg-foreground/10",
                   )}
-                />
+                >
+                  <span
+                    className={cn(
+                      "shrink-0 whitespace-nowrap text-xs",
+                      cmd.kind === "character" ? "font-medium" : "font-mono",
+                    )}
+                  >
+                    {cmd.label}
+                  </span>
+                  {cmd.description && (
+                    <span className="min-w-0 flex-1 text-[0.6875rem] leading-snug text-foreground/45 [overflow-wrap:anywhere]">
+                      {cmd.description}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* @mention autocomplete */}
+          {mentionCompletions.length > 0 && (
+            <div className="absolute bottom-full left-0 right-0 mb-1 overflow-hidden rounded-lg border border-foreground/10 bg-[var(--card)] shadow-lg">
+              {mentionCompletions.map((name, i) => (
+                <button
+                  key={name}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    insertMention(name);
+                  }}
+                  className={cn(
+                    "flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors",
+                    i === selectedMention ? "bg-foreground/10 text-foreground" : "hover:bg-foreground/10",
+                  )}
+                >
+                  <AtSign size="0.75rem" className="shrink-0 text-foreground/45" />
+                  <span className="font-medium">{name}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* :emoji: autocomplete */}
+          {emojiCompletions.length > 0 && (
+            <div className="absolute bottom-full left-0 right-0 mb-1 max-h-56 overflow-y-auto rounded-lg border border-foreground/10 bg-[var(--card)] shadow-lg sm:left-[2%] sm:right-[2%]">
+              {emojiCompletions.map((em, i) => (
+                <button
+                  key={em.name}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    insertEmoji(em);
+                  }}
+                  className={cn(
+                    "flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm transition-colors",
+                    i === selectedEmojiCompletion ? "bg-foreground/10 text-foreground" : "hover:bg-foreground/10",
+                  )}
+                >
+                  {em.kind === "custom" ? (
+                    <img
+                      src={em.url}
+                      alt={localizeUi("ui.chat.conversationinput.value1", { value1: em.name })}
+                      className="h-5 w-5 shrink-0 object-contain"
+                    />
+                  ) : (
+                    <span className="flex h-5 w-5 shrink-0 items-center justify-center text-base" aria-hidden="true">
+                      {em.emoji}
+                    </span>
+                  )}
+                  <span className="min-w-0 flex-1 truncate font-medium">:{em.name}:</span>
+                  <span className="hidden shrink-0 text-xs text-foreground/40 sm:inline">{em.source}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Multipurpose picker sheet — Emoji / GIFs / Stickers / Tools */}
+          {mobilePickerOpen && (
+            <ConversationMediaPickerPanel
+              tabs={mobilePickerTabs}
+              activeTab={mobilePickerTab}
+              onActiveTabChange={setMobilePickerTab}
+              onClose={() => setMobilePickerOpen(false)}
+              onEmojiSelect={handleEmojiSelect}
+              onGifSelect={handleGifSelect}
+              onStickerSelect={handleStickerSelect}
+              className="absolute bottom-full left-0 right-0 z-20 mb-3 sm:hidden"
+              toolsContent={mediaPickerToolsContent}
+            />
+          )}
+
+          {/* Feedback toast */}
+          {feedback && (
+            <div className="absolute bottom-full left-3 right-3 z-50 mb-2">
+              <SlashCommandFeedback feedback={feedback} onDismiss={() => setFeedback(null)} />
+            </div>
+          )}
+
+          {/* Attachment preview */}
+          {(attachments.length > 0 || isReadingAttachments) && (
+            <div className="mb-2 flex flex-wrap gap-2">
+              {attachments.map((att, i) => (
+                <div
+                  key={i}
+                  className="flex items-center gap-1.5 rounded-lg bg-foreground/10 px-2.5 py-1.5 text-xs ring-1 ring-foreground/10"
+                >
+                  {att.type.startsWith("image/") ? null : (
+                    <FileText
+                      size="0.875rem"
+                      className={cn(
+                        "shrink-0",
+                        att.type === PDF_ATTACHMENT_MIME_TYPE ? "text-[var(--primary)]" : "text-foreground/45",
+                      )}
+                    />
+                  )}
+                  <span className="max-w-[120px] truncate">{att.name}</span>
+                  <button
+                    onClick={() => updateAttachments((prev) => prev.filter((_, idx) => idx !== i))}
+                    className="rounded p-0.5 text-foreground/45 hover:text-[var(--destructive)]"
+                  >
+                    <X size="0.625rem" />
+                  </button>
+                </div>
+              ))}
+              {isReadingAttachments && (
+                <div className="flex items-center gap-1.5 rounded-lg bg-foreground/10 px-2.5 py-1.5 text-xs text-foreground/60 ring-1 ring-foreground/10">
+                  <Loader2 size="0.875rem" className="animate-spin" />
+                  {localizeUi("ui.chat.chatinput.readingFile")}
+                </div>
               )}
-              <span className="max-w-[120px] truncate">{att.name}</span>
-              <button
-                onClick={() => updateAttachments((prev) => prev.filter((_, idx) => idx !== i))}
-                className="rounded p-0.5 text-foreground/45 hover:text-[var(--destructive)]"
-              >
-                <X size="0.625rem" />
-              </button>
-            </div>
-          ))}
-          {isReadingAttachments && (
-            <div className="flex items-center gap-1.5 rounded-lg bg-foreground/10 px-2.5 py-1.5 text-xs text-foreground/60 ring-1 ring-foreground/10">
-              <Loader2 size="0.875rem" className="animate-spin" />
-              {localizeUi("ui.chat.chatinput.readingFile")}
             </div>
           )}
-        </div>
-      )}
 
-      {chipRowHint && (
-        <p className="mb-1 flex items-center gap-1.5 px-0.5 text-xs text-[var(--muted-foreground)]">
-          <Sparkles size="0.75rem" className="shrink-0 text-[var(--primary)]" />
-          <span>{chipRowHint}</span>
-        </p>
-      )}
-      <MariSuggestionChips chips={chipRowChips} onSelect={handleMariChipSelect} disabled={isSendBlocked} />
-
-      {/* Input bar */}
-      <div
-        ref={inputBarRef}
-        data-chat-resource-drop-exclude
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
-        onPointerDown={(event) => {
-          const target = event.target as HTMLElement;
-          if (target.closest("button, input, textarea, select, a, [role='button']")) return;
-          event.preventDefault();
-          const textarea = textareaRef.current;
-          if (!textarea) return;
-          textarea.focus({ preventScroll: true });
-          const caret = textarea.value.length;
-          textarea.setSelectionRange(caret, caret);
-        }}
-        className={getChatInputShellClass({
-          dragging: isDragging,
-          hasContent: hasInput || attachments.length > 0,
-          layout: "conversation",
-        })}
-      >
-        {/* Attach button */}
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*,application/pdf,.pdf,.txt,.md,.markdown,.json,.jsonl,.csv,.log,.xml,.yaml,.yml"
-          multiple
-          className="hidden"
-          onChange={(e) => {
-            void handleFileUpload(e.target.files);
-            e.target.value = "";
-          }}
-        />
-        <button
-          onClick={() => fileInputRef.current?.click()}
-          className={cn(
-            "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl transition-all active:scale-90 sm:h-8 sm:w-8",
-            attachments.length
-              ? "bg-foreground/10 text-foreground/75 ring-1 ring-foreground/20"
-              : "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70",
+          {chipRowHint && (
+            <p className="mb-1 flex items-center gap-1.5 px-0.5 text-xs text-[var(--muted-foreground)]">
+              <Sparkles size="0.75rem" className="shrink-0 text-[var(--primary)]" />
+              <span>{chipRowHint}</span>
+            </p>
           )}
-          title={t("chat.input.attachFiles")}
-        >
-          <Paperclip size="1rem" />
-        </button>
+          <MariSuggestionChips chips={chipRowChips} onSelect={handleMariChipSelect} disabled={isSendBlocked} />
 
-        {/* Quick Switchers — desktop: inline, mobile: chevron */}
-        <div className="hidden shrink-0 items-center gap-1 sm:flex">
-          <QuickConnectionSwitcher />
-          <QuickPersonaSwitcher />
-        </div>
-        <div className="flex shrink-0 sm:hidden">
-          <QuickSwitcherMobile />
-        </div>
-
-        {/* Textarea */}
-
-        <textarea
-          ref={textareaRef}
-          data-chat-composer="true"
-          placeholder={inputPlaceholder}
-          rows={1}
-          onInput={handleInput}
-          onKeyDown={handleKeyDown}
-          onPaste={handlePaste}
-          onFocus={() => {
-            if (mobilePickerOpen) setMobilePickerOpen(false);
-            ensureInputVisible();
-          }}
-          className="max-h-[12.5rem] min-h-9 min-w-0 flex-1 resize-none bg-transparent px-1 py-2 text-[1rem] leading-tight text-foreground outline-none placeholder:text-foreground/30 sm:min-h-0 sm:px-0 sm:py-0 sm:leading-normal"
-        />
-
-        {/* Right actions */}
-        <div className="ml-0 flex shrink-0 flex-nowrap items-center justify-end gap-0 sm:ml-auto sm:gap-0.5">
-          {/* Mobile: one multipurpose button → Emoji/GIFs/Stickers/Tools sheet */}
-          <button
-            type="button"
-            onClick={() => {
-              const next = !mobilePickerOpen;
-              setMobilePickerOpen(next);
-              if (next) textareaRef.current?.blur();
-              else textareaRef.current?.focus();
+          {/* Input bar */}
+          <div
+            ref={inputBarRef}
+            data-chat-resource-drop-exclude
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            onPointerDown={(event) => {
+              const target = event.target as HTMLElement;
+              if (target.closest("button, input, textarea, select, a, [role='button']")) return;
+              event.preventDefault();
+              const textarea = textareaRef.current;
+              if (!textarea) return;
+              textarea.focus({ preventScroll: true });
+              const caret = textarea.value.length;
+              textarea.setSelectionRange(caret, caret);
             }}
-            className={cn(
-              "flex h-9 w-9 items-center justify-center rounded-xl transition-colors sm:hidden",
-              mobilePickerOpen
-                ? "bg-foreground/10 text-foreground/75 ring-1 ring-foreground/20"
-                : "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70",
-            )}
-            title={
-              mobilePickerOpen
-                ? t("chat.input.showKeyboard")
-                : showMobileToolsTab
-                  ? t("chat.input.mediaAndTools")
-                  : t("chat.input.media")
-            }
-            aria-label={
-              mobilePickerOpen
-                ? t("chat.input.showKeyboard")
-                : showMobileToolsTab
-                  ? t("chat.input.mediaAndTools")
-                  : t("chat.input.media")
-            }
+            className={getChatInputShellClass({
+              dragging: isDragging,
+              hasContent: hasInput || attachments.length > 0,
+              layout: "conversation",
+            })}
           >
-            {mobilePickerOpen ? <Keyboard size="1.25rem" /> : <Smile size="1.25rem" />}
-          </button>
-
-          <div className="relative hidden sm:block">
-            <button
-              type="button"
-              onClick={() => {
-                setMobilePickerOpen((value) => !value);
+            {/* Attach button */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*,application/pdf,.pdf,.txt,.md,.markdown,.json,.jsonl,.csv,.log,.xml,.yaml,.yml"
+              multiple
+              className="hidden"
+              onChange={(e) => {
+                void handleFileUpload(e.target.files);
+                e.target.value = "";
               }}
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
               className={cn(
-                "flex h-8 w-8 items-center justify-center rounded-full transition-colors",
-                mobilePickerOpen
+                "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl transition-all active:scale-90 sm:h-8 sm:w-8",
+                attachments.length
                   ? "bg-foreground/10 text-foreground/75 ring-1 ring-foreground/20"
                   : "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70",
               )}
-              title={t(showMobileToolsTab ? "chat.input.mediaAndTools" : "chat.input.media")}
-              aria-label={t(showMobileToolsTab ? "chat.input.mediaAndTools" : "chat.input.media")}
-              aria-expanded={mobilePickerOpen}
+              title={t("chat.input.attachFiles")}
             >
-              <Smile size="1.25rem" />
+              <Paperclip size="1rem" />
             </button>
-            {mobilePickerOpen && (
-              <ConversationMediaPickerPanel
-                tabs={mobilePickerTabs}
-                activeTab={mobilePickerTab}
-                onActiveTabChange={setMobilePickerTab}
-                onClose={() => setMobilePickerOpen(false)}
-                onEmojiSelect={handleEmojiSelect}
-                onGifSelect={handleGifSelect}
-                onStickerSelect={handleStickerSelect}
-                className="absolute bottom-full right-0 z-30 mb-4 w-[min(24rem,calc(100vw-1.5rem))]"
-                toolsContent={mediaPickerToolsContent}
-              />
-            )}
-          </div>
 
-          {showDraftTranslateButton && (
-            <button
-              type="button"
-              onClick={() => void handleTranslateDraft()}
-              disabled={!activeChatId || !hasInput || isTranslatingDraft}
-              className={cn(
-                "hidden h-11 w-11 items-center justify-center rounded-full transition-colors sm:flex sm:h-8 sm:w-8",
-                hasInput && !isTranslatingDraft
-                  ? "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70"
-                  : "text-foreground/25",
-              )}
-              title={t("chat.input.translateDraft")}
-            >
-              {isTranslatingDraft ? <Loader2 size="1rem" className="animate-spin" /> : <Languages size="1rem" />}
-            </button>
-          )}
-
-          {speechToTextEnabled && (
-            <SpeechToTextButton
-              disabled={!activeChatId}
-              onTranscript={handleSpeechTranscript}
-              className="hidden rounded-full sm:flex"
-              iconSize={16}
-            />
-          )}
-
-          {pushToTalkEnabled && (
-            <PushToTalkButton
-              disabled={!activeChatId || isSendBlocked}
-              onTranscribed={handleVoiceMessage}
-              className="hidden rounded-full sm:flex"
-              iconSize={16}
-            />
-          )}
-
-          {pushToTalkEnabled && (
-            <button
-              type="button"
-              onClick={handleStartCall}
-              disabled={!activeChatId || isSendBlocked}
-              className={cn(
-                "hidden h-11 w-11 shrink-0 items-center justify-center rounded-xl transition-all duration-200 active:scale-90 sm:flex sm:h-8 sm:w-8",
-                "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70",
-                (!activeChatId || isSendBlocked) && "cursor-not-allowed opacity-50",
-              )}
-              title={localizeUi("ui.chat.chatinput.startVoiceCall")}
-            >
-              <Phone size={16} />
-            </button>
-          )}
-
-          {showQuickRepliesMenu && quickReplyActions.length > 0 && (
-            <div className="hidden sm:block">
-              <QuickReplyMenu actions={quickReplyActions} disabled={!activeChatId || isReadingAttachments} />
+            {/* Quick Switchers — desktop: inline, mobile: chevron */}
+            <div className="hidden shrink-0 items-center gap-1 sm:flex">
+              <QuickConnectionSwitcher />
+              <QuickPersonaSwitcher />
             </div>
-          )}
+            <div className="flex shrink-0 sm:hidden">
+              <QuickSwitcherMobile />
+            </div>
 
-          <button
-            onClick={
-              isActuallyGenerating
-                ? () => useChatStore.getState().stopGeneration(activeChatId ?? undefined)
-                : handleSend
-            }
-            disabled={!isActuallyGenerating && (isSendBlocked || isReadingAttachments || !activeChatId || !canSubmit)}
-            aria-label={sendButtonTitle}
-            className={cn(
-              "flex h-9 w-9 items-center justify-center rounded-xl transition-all duration-200 sm:h-8 sm:w-8",
-              isActuallyGenerating
-                ? "text-foreground/75 hover:bg-foreground/10 hover:text-foreground/90"
-                : canSubmit && !isSendBlocked && !isReadingAttachments
-                  ? "text-foreground/75 hover:bg-foreground/10 hover:text-foreground/90 active:scale-90"
-                  : "text-foreground/20",
-            )}
-            title={sendButtonTitle}
-          >
-            {isActuallyGenerating ? (
-              <StopCircle size="1rem" />
-            ) : showRetrySendState ? (
-              <RefreshCw size="0.9375rem" />
-            ) : (
-              <Send size="0.9375rem" />
-            )}
-          </button>
-        </div>
-      </div>
+            {/* Textarea */}
+
+            <textarea
+              ref={textareaRef}
+              data-chat-composer="true"
+              placeholder={inputPlaceholder}
+              rows={1}
+              onInput={handleInput}
+              onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
+              onFocus={() => {
+                if (mobilePickerOpen) setMobilePickerOpen(false);
+                ensureInputVisible();
+              }}
+              className="max-h-[12.5rem] min-h-9 min-w-0 flex-1 resize-none bg-transparent px-1 py-2 text-[1rem] leading-tight text-foreground outline-none placeholder:text-foreground/30 sm:min-h-0 sm:px-0 sm:py-0 sm:leading-normal"
+            />
+
+            {/* Right actions */}
+            <div className="ml-0 flex shrink-0 flex-nowrap items-center justify-end gap-0 sm:ml-auto sm:gap-0.5">
+              {/* Mobile: one multipurpose button → Emoji/GIFs/Stickers/Tools sheet */}
+              <button
+                type="button"
+                onClick={() => {
+                  const next = !mobilePickerOpen;
+                  setMobilePickerOpen(next);
+                  if (next) textareaRef.current?.blur();
+                  else textareaRef.current?.focus();
+                }}
+                className={cn(
+                  "flex h-9 w-9 items-center justify-center rounded-xl transition-colors sm:hidden",
+                  mobilePickerOpen
+                    ? "bg-foreground/10 text-foreground/75 ring-1 ring-foreground/20"
+                    : "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70",
+                )}
+                title={
+                  mobilePickerOpen
+                    ? t("chat.input.showKeyboard")
+                    : showMobileToolsTab
+                      ? t("chat.input.mediaAndTools")
+                      : t("chat.input.media")
+                }
+                aria-label={
+                  mobilePickerOpen
+                    ? t("chat.input.showKeyboard")
+                    : showMobileToolsTab
+                      ? t("chat.input.mediaAndTools")
+                      : t("chat.input.media")
+                }
+              >
+                {mobilePickerOpen ? <Keyboard size="1.25rem" /> : <Smile size="1.25rem" />}
+              </button>
+
+              <div className="relative hidden sm:block">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMobilePickerOpen((value) => !value);
+                  }}
+                  className={cn(
+                    "flex h-8 w-8 items-center justify-center rounded-full transition-colors",
+                    mobilePickerOpen
+                      ? "bg-foreground/10 text-foreground/75 ring-1 ring-foreground/20"
+                      : "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70",
+                  )}
+                  title={t(showMobileToolsTab ? "chat.input.mediaAndTools" : "chat.input.media")}
+                  aria-label={t(showMobileToolsTab ? "chat.input.mediaAndTools" : "chat.input.media")}
+                  aria-expanded={mobilePickerOpen}
+                >
+                  <Smile size="1.25rem" />
+                </button>
+                {mobilePickerOpen && (
+                  <ConversationMediaPickerPanel
+                    tabs={mobilePickerTabs}
+                    activeTab={mobilePickerTab}
+                    onActiveTabChange={setMobilePickerTab}
+                    onClose={() => setMobilePickerOpen(false)}
+                    onEmojiSelect={handleEmojiSelect}
+                    onGifSelect={handleGifSelect}
+                    onStickerSelect={handleStickerSelect}
+                    className="absolute bottom-full right-0 z-30 mb-4 w-[min(24rem,calc(100vw-1.5rem))]"
+                    toolsContent={mediaPickerToolsContent}
+                  />
+                )}
+              </div>
+
+              {showDraftTranslateButton && (
+                <button
+                  type="button"
+                  onClick={() => void handleTranslateDraft()}
+                  disabled={!activeChatId || !hasInput || isTranslatingDraft}
+                  className={cn(
+                    "hidden h-11 w-11 items-center justify-center rounded-full transition-colors sm:flex sm:h-8 sm:w-8",
+                    hasInput && !isTranslatingDraft
+                      ? "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70"
+                      : "text-foreground/25",
+                  )}
+                  title={t("chat.input.translateDraft")}
+                >
+                  {isTranslatingDraft ? <Loader2 size="1rem" className="animate-spin" /> : <Languages size="1rem" />}
+                </button>
+              )}
+
+              {speechToTextEnabled && (
+                <SpeechToTextButton
+                  disabled={!activeChatId}
+                  onTranscript={handleSpeechTranscript}
+                  className="hidden rounded-full sm:flex"
+                  iconSize={16}
+                />
+              )}
+
+              {pushToTalkEnabled && (
+                <PushToTalkButton
+                  disabled={!activeChatId || isSendBlocked}
+                  onTranscribed={handleVoiceMessage}
+                  className="hidden rounded-full sm:flex"
+                  iconSize={16}
+                />
+              )}
+
+              {pushToTalkEnabled && (
+                <button
+                  type="button"
+                  onClick={handleStartCall}
+                  disabled={!activeChatId || isSendBlocked}
+                  className={cn(
+                    "hidden h-11 w-11 shrink-0 items-center justify-center rounded-xl transition-all duration-200 active:scale-90 sm:flex sm:h-8 sm:w-8",
+                    "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70",
+                    (!activeChatId || isSendBlocked) && "cursor-not-allowed opacity-50",
+                  )}
+                  title={localizeUi("ui.chat.chatinput.startVoiceCall")}
+                >
+                  <Phone size={16} />
+                </button>
+              )}
+
+              {showQuickRepliesMenu && quickReplyActions.length > 0 && (
+                <div className="hidden sm:block">
+                  <QuickReplyMenu actions={quickReplyActions} disabled={!activeChatId || isReadingAttachments} />
+                </div>
+              )}
+
+              <button
+                onClick={
+                  isActuallyGenerating
+                    ? () => useChatStore.getState().stopGeneration(activeChatId ?? undefined)
+                    : handleSend
+                }
+                disabled={
+                  !isActuallyGenerating && (isSendBlocked || isReadingAttachments || !activeChatId || !canSubmit)
+                }
+                aria-label={sendButtonTitle}
+                className={cn(
+                  "flex h-9 w-9 items-center justify-center rounded-xl transition-all duration-200 sm:h-8 sm:w-8",
+                  isActuallyGenerating
+                    ? "text-foreground/75 hover:bg-foreground/10 hover:text-foreground/90"
+                    : canSubmit && !isSendBlocked && !isReadingAttachments
+                      ? "text-foreground/75 hover:bg-foreground/10 hover:text-foreground/90 active:scale-90"
+                      : "text-foreground/20",
+                )}
+                title={sendButtonTitle}
+              >
+                {isActuallyGenerating ? (
+                  <StopCircle size="1rem" />
+                ) : showRetrySendState ? (
+                  <RefreshCw size="0.9375rem" />
+                ) : (
+                  <Send size="0.9375rem" />
+                )}
+              </button>
+            </div>
+          </div>
         </>
       )}
     </div>

@@ -54,7 +54,10 @@ function readProviderErrorDetail(body: string): string {
     const message =
       typeof error === "string"
         ? error
-        : error && typeof error === "object" && "message" in error && typeof (error as { message?: unknown }).message === "string"
+        : error &&
+            typeof error === "object" &&
+            "message" in error &&
+            typeof (error as { message?: unknown }).message === "string"
           ? (error as { message: string }).message
           : undefined;
     return message ?? (typeof data.message === "string" ? data.message : body.slice(0, 500));
@@ -136,7 +139,9 @@ export async function sttRoutes(app: FastifyInstance) {
 
     const body = await providerRes.text().catch(() => "");
     if (!providerRes.ok) {
-      return reply.status(502).send({ error: `STT provider returned ${providerRes.status}`, detail: readProviderErrorDetail(body) });
+      return reply
+        .status(502)
+        .send({ error: `STT provider returned ${providerRes.status}`, detail: readProviderErrorDetail(body) });
     }
 
     let text = "";

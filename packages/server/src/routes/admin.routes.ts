@@ -3,16 +3,23 @@
 // ──────────────────────────────────────────────
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { eq, ne } from "../db/file-query.js";
+import { spawn } from "node:child_process";
 import { existsSync, readdirSync, rmSync } from "fs";
 import { join } from "path";
 import { PROFESSOR_MARI_ID, TTS_SETTINGS_KEY } from "@marinara-engine/shared";
 import { DATA_DIR } from "../utils/data-dir.js";
 import * as schema from "../db/schema/index.js";
 import { requirePrivilegedAccess } from "../middleware/privileged-gate.js";
+import { ADMIN_RESTART_RATE_LIMIT, AVATAR_STORAGE_RATE_LIMIT } from "../middleware/rate-limit.js";
+import { logger } from "../lib/logger.js";
+import { isDockerRuntime } from "../config/runtime-config.js";
 import {
+  ABANDONED_AVATAR_MIN_AGE_MS,
   collectCharacterAvatarPaths,
   collectPersonaAvatarPaths,
+  deleteAbandonedAvatarFiles,
   mutateAvatarReferencesAndCleanup,
+  scanAbandonedAvatarFiles,
 } from "../services/image/avatar-file-lifecycle.js";
 
 type ExpungeScope =
@@ -24,6 +31,8 @@ type ExpungeScope =
   | "connections"
   | "automation"
   | "media";
+
+const GRACEFUL_RESTART_TIMEOUT_MS = 30_000;
 
 const ALL_EXPUNGE_SCOPES: ExpungeScope[] = [
   "chats",
@@ -57,6 +66,75 @@ function isValidScope(scope: unknown): scope is ExpungeScope {
 }
 
 export async function adminRoutes(app: FastifyInstance) {
+  let restartScheduled = false;
+
+  app.post<{ Body: { confirm?: boolean } }>(
+    "/restart",
+    { config: { rateLimit: ADMIN_RESTART_RATE_LIMIT } },
+    async (req, reply) => {
+      if (!requirePrivilegedAccess(req, reply, { feature: "Server restart" })) return;
+      if (req.body?.confirm !== true) {
+        return reply.status(400).send({ error: "Must send { confirm: true } to restart the server" });
+      }
+      if (restartScheduled) {
+        return reply.status(409).send({ error: "Server restart is already scheduled" });
+      }
+
+      restartScheduled = true;
+      setTimeout(() => {
+        void (async () => {
+          const forceCloseTimer = setTimeout(() => {
+            logger.warn("Forcing server restart after %dms", GRACEFUL_RESTART_TIMEOUT_MS);
+            app.server.closeAllConnections();
+          }, GRACEFUL_RESTART_TIMEOUT_MS);
+          forceCloseTimer.unref();
+          try {
+            await app.close();
+            if (!isDockerRuntime()) {
+              const child = spawn(process.execPath, [...process.execArgv, ...process.argv.slice(1)], {
+                cwd: process.cwd(),
+                detached: true,
+                env: process.env,
+                stdio: "inherit",
+                windowsHide: true,
+              });
+              child.unref();
+            }
+            logger.info("Server restart requested from Advanced Settings");
+            process.exit(0);
+          } catch (error) {
+            logger.error(error, "Graceful server restart failed");
+            process.exit(1);
+          } finally {
+            clearTimeout(forceCloseTimer);
+          }
+        })();
+      }, 750);
+
+      return reply.status(202).send({ status: "restarting" });
+    },
+  );
+
+  app.get("/avatar-storage/abandoned", { config: { rateLimit: AVATAR_STORAGE_RATE_LIMIT } }, async (req, reply) => {
+    if (!requirePrivilegedAccess(req, reply, { feature: "Avatar storage scan" })) return;
+    const result = await scanAbandonedAvatarFiles({ db: app.db });
+    return { ...result, minimumAgeMinutes: ABANDONED_AVATAR_MIN_AGE_MS / 60_000 };
+  });
+
+  app.post<{ Body: { confirm: boolean } }>(
+    "/avatar-storage/cleanup",
+    { config: { rateLimit: AVATAR_STORAGE_RATE_LIMIT } },
+    async (req, reply) => {
+      if (!requirePrivilegedAccess(req, reply, { feature: "Avatar storage cleanup" })) return;
+      if (req.body?.confirm !== true) {
+        return reply.status(400).send({ error: "Must send { confirm: true } to proceed" });
+      }
+      const result = await deleteAbandonedAvatarFiles({ db: app.db });
+      logger.info("Removed %d abandoned avatar files (%d bytes)", result.files, result.bytes);
+      return { ...result, minimumAgeMinutes: ABANDONED_AVATAR_MIN_AGE_MS / 60_000 };
+    },
+  );
+
   const runExpunge = async (requestedScopes: ExpungeScope[], reply: FastifyReply) => {
     if (requestedScopes.length === 0) {
       return reply.status(400).send({ error: "At least one valid scope is required" });
@@ -106,10 +184,7 @@ export async function adminRoutes(app: FastifyInstance) {
             db,
             deletedCharacters.map((row) => row.id),
           );
-          return [
-            ...characterAvatarPaths,
-            ...deletedGroups.flatMap((row) => (row.avatarPath ? [row.avatarPath] : [])),
-          ];
+          return [...characterAvatarPaths, ...deletedGroups.flatMap((row) => (row.avatarPath ? [row.avatarPath] : []))];
         },
         mutateReferences: async () => {
           await runDelete("character_groups", () => db.delete(schema.characterGroups).run());

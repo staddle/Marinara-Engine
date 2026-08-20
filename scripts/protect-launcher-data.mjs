@@ -2,7 +2,7 @@
 
 import { execFileSync } from "node:child_process";
 import { chmod, cp, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { parseEnv } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -138,26 +138,93 @@ export async function checkTargetStorageFormat({
   return { compatible: targetFormat >= onDiskFormat, verified: true, onDiskFormat, targetFormat };
 }
 
-// Kept in sync with SHARDED_TABLES in packages/server/src/db/file-backed-store.ts
+// Kept in sync with FILE_BACKED_TABLES in packages/server/src/db/file-backed-store.ts.
+// Every file-backed table is sharded as of storage format 5.
 // (this script must run offline, so it cannot import server code).
 const SHARDED_TABLES = [
+  "chats",
   "messages",
   "message_swipes",
-  "memory_chunks",
-  "chat_images",
-  "agent_runs",
-  "agent_memory",
   "conversation_call_sessions",
   "conversation_call_messages",
+  "conversation_call_sounds",
+  "characters",
+  "character_card_versions",
+  "personas",
+  "persona_card_versions",
+  "character_groups",
+  "persona_groups",
+  "noodle_accounts",
+  "noodle_posts",
+  "noodle_account_subscriptions",
+  "noodle_post_unlocks",
+  "noodle_interactions",
+  "noodler_creator_reply_claims",
+  "noodler_prepared_posts",
+  "noodler_automatic_attempts",
+  "noodler_reserve_state",
+  "noodler_fan_activity_state",
+  "noodle_activity_digests",
+  "noodle_refresh_runs",
+  "slurp_accounts",
+  "slurp_posts",
+  "slurp_account_subscriptions",
+  "slurp_post_unlocks",
+  "slurp_interactions",
+  "slurp_creator_reply_claims",
+  "slurp_prepared_posts",
+  "slurp_automatic_attempts",
+  "slurp_reserve_state",
+  "slurp_fan_activity_state",
+  "slurp_activity_digests",
+  "slurp_refresh_runs",
+  "lorebooks",
+  "lorebook_character_links",
+  "lorebook_persona_links",
+  "lorebook_folders",
+  "lorebook_entries",
+  "prompt_presets",
+  "prompt_groups",
+  "prompt_sections",
+  "choice_blocks",
+  "api_connections",
+  "assets",
+  "agent_configs",
+  "agent_runs",
+  "agent_memory",
+  "custom_tools",
   "game_state_snapshots",
+  "spatial_context_snapshots",
+  "capability_documents",
   "game_engine_state",
   "game_checkpoints",
-  "game_turn_storyboards",
   "game_scene_videos",
-  "spatial_context_snapshots",
+  "game_turn_storyboards",
+  "game_turn_storyboard_keyframes",
+  "regex_scripts",
+  "chat_images",
+  "character_images",
+  "persona_images",
+  "gallery_folders",
+  "global_images",
+  "custom_emojis",
+  "custom_stickers",
   "ooc_influences",
   "conversation_notes",
+  "memory_chunks",
+  "chat_folders",
+  "api_connection_folders",
+  "custom_themes",
+  "app_settings",
+  "achievement_unlocks",
+  "chat_presets",
+  "prompt_overrides",
+  "installed_extensions",
+  "library_folders",
+  "mari_instructions",
+  "mari_workspace_context",
 ];
+const PRIMARY_KEY_COLUMNS = { app_settings: "key", prompt_overrides: "key" };
 const UNSHARD_SENTINEL = ".unshard-in-progress";
 
 async function pathExists(path) {
@@ -316,17 +383,18 @@ export async function unshardLauncherStorage({
       }
       rows.push(...records);
     }
-    // Mirror the store's load normalization: (createdAt, id) order, then
+    // Mirror the store's load normalization: (createdAt, primary key) order, then
     // keep-first dedup on primary key.
+    const primaryKey = PRIMARY_KEY_COLUMNS[table] ?? "id";
     rows.sort(
       (a, b) =>
         String(a.createdAt ?? "").localeCompare(String(b.createdAt ?? "")) ||
-        String(a.id ?? "").localeCompare(String(b.id ?? "")),
+        String(a[primaryKey] ?? "").localeCompare(String(b[primaryKey] ?? "")),
     );
     const seenIds = new Set();
     const deduped = [];
     for (const row of rows) {
-      const id = typeof row.id === "string" ? row.id : null;
+      const id = typeof row[primaryKey] === "string" ? row[primaryKey] : null;
       if (id && seenIds.has(id)) continue;
       if (id) seenIds.add(id);
       deduped.push(row);
@@ -462,6 +530,8 @@ export async function snapshotLauncherData({
   const backupName = `update-${timestamp}-${process.pid}`;
   const incompleteDir = resolve(backupRoot, `.incomplete-${backupName}`);
   const backupDir = resolve(backupRoot, backupName);
+  const capabilityRuntimeLink = resolve(dataDir, "capability-packages", "node_modules");
+  const downloadableDataDirs = ["models", "sidecar-runtime"].map((name) => resolve(dataDir, name));
 
   await rm(incompleteDir, { recursive: true, force: true });
   try {
@@ -470,6 +540,15 @@ export async function snapshotLauncherData({
       recursive: true,
       preserveTimestamps: true,
       errorOnExist: true,
+      filter: (source) => {
+        const sourcePath = resolve(source);
+        return (
+          sourcePath !== capabilityRuntimeLink &&
+          downloadableDataDirs.every(
+            (downloadableDir) => sourcePath !== downloadableDir && !sourcePath.startsWith(`${downloadableDir}${sep}`),
+          )
+        );
+      },
     });
     await writeFile(
       resolve(incompleteDir, "manifest.json"),

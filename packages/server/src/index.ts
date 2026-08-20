@@ -4,6 +4,7 @@
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 import { buildApp } from "./app.js";
+import { StorageWriterLeaseError } from "./db/file-backed-store.js";
 import { logger } from "./lib/logger.js";
 import { getHost, getPort, getServerProtocol, loadTlsOptions, logStorageDiagnostics } from "./config/runtime-config.js";
 import { logCsrfTrustSummary } from "./middleware/csrf-protection.js";
@@ -32,6 +33,18 @@ function logFatalProcessError(reason: unknown, message: string): void {
   }
 
   logger.error({ reason }, message);
+}
+
+function stopDevelopmentWatcherAfterLeaseConflict(error: unknown): void {
+  if (!(error instanceof StorageWriterLeaseError) || !process.argv.includes("--marinara-dev-watch")) return;
+  if (process.ppid <= 1) return;
+  try {
+    process.kill(process.ppid, "SIGTERM");
+  } catch (signalError) {
+    if ((signalError as NodeJS.ErrnoException).code !== "ESRCH") {
+      logger.warn(signalError, "[startup] Could not stop the development watcher after a writer lease conflict");
+    }
+  }
 }
 
 async function main() {
@@ -113,5 +126,6 @@ async function main() {
 
 main().catch((err) => {
   logger.error(err, "[startup] Unhandled error during server bootstrap");
+  stopDevelopmentWatcherAfterLeaseConflict(err);
   process.exit(1);
 });

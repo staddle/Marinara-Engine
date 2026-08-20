@@ -44,7 +44,18 @@ import {
 } from "lucide-react";
 import { decodeEncodedSpeakerTags, formatTextQuotes, type Message, type QuoteFormat } from "@marinara-engine/shared";
 import type { GameTurnStoryboard, GameTurnStoryboardKeyframe } from "@marinara-engine/shared";
-import { memo, useState, useMemo, useRef, useEffect, useId, useLayoutEffect, useCallback, type ReactNode } from "react";
+import {
+  memo,
+  useState,
+  useMemo,
+  useRef,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useCallback,
+  cloneElement,
+  type ReactNode,
+} from "react";
 import { useTranslation, useTranslation as useUiTranslation } from "react-i18next";
 import { useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { chatKeys, rememberRecentMessageContentEdit } from "../../hooks/use-chats";
@@ -921,7 +932,7 @@ function renderWithSpeakerTags(
 ): ReactNode[] {
   const renderLine = (line: string, color = defaultDialogueColor) => highlightDialogue(line, color, boldDialogue);
 
-  if (!speakerColorMap || !SPEAKER_TAG_RE.test(text)) {
+  if (!SPEAKER_TAG_RE.test(text)) {
     return renderLine(text, defaultDialogueColor);
   }
   SPEAKER_TAG_RE.lastIndex = 0;
@@ -938,7 +949,7 @@ function renderWithSpeakerTags(
     }
     const speakerName = match[1]!;
     const dialogue = match[2]!;
-    const speakerColor = speakerColorMap.get(speakerName) ?? defaultDialogueColor;
+    const speakerColor = speakerColorMap?.get(speakerName) ?? defaultDialogueColor;
     // Render the dialogue content (without the tags) using the speaker's color
     nodes.push(<span key={`s${key++}`}>{renderLine(dialogue, speakerColor)}</span>);
     lastIndex = match.index + match[0].length;
@@ -1203,6 +1214,369 @@ function extractChatStyleBlocks(html: string): { html: string; css: string } {
   });
   return { html: withoutStyles, css: cssBlocks.join("\n") };
 }
+/**
+ * Extract the brightest solid color from a gradient string.
+ * Handles formats like: gradient(linear-gradient(90deg, #ff6b6b, #4ecdc4))
+ * Parses all color stops, converts to RGB, and picks the one with highest
+ * perceived luminance (0.299*R + 0.587*G + 0.114*B).
+ * Falls back to a sensible default if extraction fails.
+ */
+function extractSolidColorFromGradient(gradientStr: string): string {
+  // Extract the inner gradient content
+  const inner = gradientStr.replace(/^gradient\(\s*/i, "").replace(/\s*\)$/i, "");
+
+  // Collect ALL color values from the gradient string
+  const colors: string[] = [];
+
+  // Hex colors (#rgb, #rrggbb, #rrggbbaa)
+  const hexMatches = inner.match(/#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b/g);
+  if (hexMatches) colors.push(...hexMatches);
+
+  // rgb/rgba colors
+  const rgbMatches = inner.match(/rgba?\([^)]+\)/gi);
+  if (rgbMatches) colors.push(...rgbMatches);
+
+  // hsl/hsla colors
+  const hslMatches = inner.match(/hsla?\([^)]+\)/gi);
+  if (hslMatches) colors.push(...hslMatches);
+
+  // Named CSS colors (extended list)
+  const namedMatches = inner.match(
+    /\b(red|blue|green|yellow|purple|orange|pink|cyan|magenta|white|black|gray|grey|brown|navy|teal|lime|gold|crimson|salmon|coral|turquoise|indigo|violet|silver|maroon|olive|aqua|fuchsia|azure|beige|chocolate|lavender|plum|orchid|tan|wheat|ivory|seashell|snow|linen|khaki|goldenrod|darkred|darkblue|darkgreen|lightblue|lightgreen|lightcoral|lightpink|lightsalmon|lightseagreen|skyblue|steelblue|royalblue|midnightblue|dodgerblue|deepskyblue|cornflowerblue|mediumslateblue|slateblue|darkslateblue|mediumpurple|rebeccapurple|darkorchid|darkviolet|mediumorchid|thistle|orchid|violet|indigo|darkmagenta|mediumvioletred|palevioletred|hotpink|deeppink|lightpink|pink|palegoldenrod|lemonchiffon|lightyellow|lightgoldenrodyellow)\b/gi,
+  );
+  if (namedMatches) colors.push(...namedMatches);
+
+  // No parseable stop (for example `var(--x)` or `color-mix()`): keep the original value.
+  if (colors.length === 0) return gradientStr;
+
+  // Convert any color string to {r, g, b}
+  const toRgb = (color: string): { r: number; g: number; b: number } | null => {
+    // Hex
+    if (color.startsWith("#")) {
+      let hex = color.slice(1);
+      if (hex.length === 3)
+        hex = hex
+          .split("")
+          .map((c) => c + c)
+          .join("");
+      if (hex.length === 4)
+        hex = hex
+          .slice(0, 3)
+          .split("")
+          .map((c) => c + c)
+          .join("");
+      if (hex.length >= 6) {
+        return {
+          r: parseInt(hex.slice(0, 2), 16),
+          g: parseInt(hex.slice(2, 4), 16),
+          b: parseInt(hex.slice(4, 6), 16),
+        };
+      }
+      return null;
+    }
+
+    // rgb/rgba
+    const rgbMatch = color.match(/rgba?\(([^)]+)\)/i);
+    if (rgbMatch) {
+      const parts = rgbMatch[1].split(",").map((p) => parseFloat(p.trim()));
+      if (parts.length >= 3) {
+        return { r: parts[0], g: parts[1], b: parts[2] };
+      }
+      return null;
+    }
+
+    // hsl/hsla
+    const hslMatch = color.match(/hsla?\(([^)]+)\)/i);
+    if (hslMatch) {
+      const parts = hslMatch[1].split(",").map((p) => parseFloat(p.trim().replace("%", "")));
+      if (parts.length >= 3) {
+        const h = parts[0] / 360;
+        const s = parts[1] / 100;
+        const l = parts[2] / 100;
+        const hue2rgb = (p: number, q: number, t: number) => {
+          if (t < 0) t += 1;
+          if (t > 1) t -= 1;
+          if (t < 1 / 6) return p + (q - p) * 6 * t;
+          if (t < 1 / 2) return q;
+          if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+          return p;
+        };
+        const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+        const p = 2 * l - q;
+        return {
+          r: Math.round(hue2rgb(p, q, h + 1 / 3) * 255),
+          g: Math.round(hue2rgb(p, q, h) * 255),
+          b: Math.round(hue2rgb(p, q, h - 1 / 3) * 255),
+        };
+      }
+      return null;
+    }
+
+    // Named colors — use a canvas or a lookup table
+    // For simplicity, use the browser's color parser via a temporary element
+    if (typeof document !== "undefined") {
+      const ctx = document.createElement("canvas").getContext("2d");
+      if (ctx) {
+        ctx.fillStyle = color;
+        const computed = ctx.fillStyle;
+        if (computed.startsWith("#")) {
+          return toRgb(computed);
+        }
+        if (computed.startsWith("rgb")) {
+          return toRgb(computed);
+        }
+      }
+    }
+
+    return null;
+  };
+
+  // Calculate perceived luminance: 0.299*R + 0.587*G + 0.114*B
+  const luminance = (rgb: { r: number; g: number; b: number }) => 0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b;
+
+  // Find the brightest color
+  let bestColor = colors[0];
+  let bestLuminance = -1;
+
+  for (const color of colors) {
+    const rgb = toRgb(color);
+    if (!rgb) continue;
+    const lum = luminance(rgb);
+    if (lum > bestLuminance) {
+      bestLuminance = lum;
+      bestColor = color;
+    }
+  }
+
+  // Return the brightest color, normalized to hex if it was rgb/hsl
+  const bestRgb = toRgb(bestColor);
+  if (bestRgb) {
+    return `#${bestRgb.r.toString(16).padStart(2, "0")}${bestRgb.g.toString(16).padStart(2, "0")}${bestRgb.b.toString(16).padStart(2, "0")}`;
+  }
+
+  return bestColor;
+}
+/**
+ * Color character names in text, skipping any name that appears inside
+ * quotation marks (dialogue). Works on raw text before dialogue highlighting.
+ * Supports gradient colors via background-clip and bold weight.
+ */
+function colorNamesSkippingQuotes(text: string, nameColorMap: Map<string, string>, textShadow?: string): string {
+  if (!text || nameColorMap.size === 0) return text;
+  const names = Array.from(nameColorMap.keys());
+  if (names.length === 0) return text;
+  const escaped = names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).sort((a, b) => b.length - a.length);
+  const nameRegex = new RegExp(`\\b(${escaped.join("|")})\\b`, "gi");
+
+  // Quote pairs to track: straight, curly, guillemet, Japanese corner brackets
+  const openQuotes = ['"', "\u201C", "\u00AB", "\u300C", "\u300E"];
+  const closeQuotes = ['"', "\u201D", "\u00BB", "\u300D", "\u300F"];
+
+  const result: string[] = [];
+  let lastIndex = 0;
+  let inQuotes = false;
+  let activeQuoteIdx = -1;
+  let quoteStartPos = -1;
+  let i = 0;
+  // Cache the next match so the regex is not re-run for every character.
+  nameRegex.lastIndex = 0;
+  let nextMatch: RegExpExecArray | null = nameRegex.exec(text);
+
+  while (i < text.length) {
+    // Check for quote characters
+    const char = text[i];
+    if (!inQuotes) {
+      const openIdx = openQuotes.indexOf(char);
+      if (openIdx >= 0) {
+        inQuotes = true;
+        activeQuoteIdx = openIdx;
+        quoteStartPos = i;
+        i++;
+        continue;
+      }
+    } else {
+      // Check for the matching close quote (or any close quote for straight quotes)
+      const closeIdx =
+        activeQuoteIdx === 0
+          ? closeQuotes.indexOf(char, 0) // straight quotes — either direction matches
+          : closeQuotes.indexOf(char, activeQuoteIdx);
+      if (closeIdx >= 0 && (activeQuoteIdx === 0 || closeIdx === activeQuoteIdx)) {
+        inQuotes = false;
+        activeQuoteIdx = -1;
+        quoteStartPos = -1;
+        i++;
+        continue;
+      }
+    }
+    // Safety valve: unmatched quote — reset after 500 chars of "dialogue"
+    if (inQuotes && quoteStartPos >= 0 && i - quoteStartPos > 500) {
+      inQuotes = false;
+      activeQuoteIdx = -1;
+      quoteStartPos = -1;
+    }
+    // If not in quotes, try to match a name at this position
+    if (!inQuotes) {
+      while (nextMatch && nextMatch.index < i) {
+        nameRegex.lastIndex = i;
+        nextMatch = nameRegex.exec(text);
+      }
+      const match = nextMatch;
+      if (match && match.index === i && match[0].length > 0) {
+        // Push any text before this match
+        if (i > lastIndex) {
+          result.push(text.slice(lastIndex, i));
+        }
+        const matchedName = match[0];
+        const color = nameColorMap.get(matchedName.toLowerCase());
+        if (color) {
+          if (isGradientNameColor(color)) {
+            const style = gradientNameColorStyle(color);
+            const styleStr = Object.entries(style)
+              .map(([k, v]) => `${k.replace(/[A-Z]/g, (m) => "-" + m.toLowerCase())}:${v}`)
+              .join(";");
+            const dropShadow = textShadow ? `;text-shadow:none;filter:drop-shadow(${textShadow})` : ";text-shadow:none";
+            result.push(
+              `<span style="${styleStr};font-weight:700;-webkit-text-stroke:0px;paint-order:fill${dropShadow}">${matchedName}</span>`,
+            );
+          } else {
+            result.push(
+              `<span style="color:${color};-webkit-text-fill-color:${color};font-weight:700">${matchedName}</span>`,
+            );
+          }
+        } else {
+          result.push(matchedName);
+        }
+        i += matchedName.length;
+        lastIndex = i;
+        continue;
+      }
+    }
+
+    i++;
+  }
+
+  if (lastIndex < text.length) {
+    result.push(text.slice(lastIndex));
+  }
+
+  return result.length > 0 ? result.join("") : text;
+}
+
+/**
+ * Color character names in React nodes, skipping any name inside a
+ * dialogue-colored span (which represents quoted text in the markdown path).
+ * Creates proper React <span> elements with style objects.
+ */
+function colorNamesInNodes(
+  nodes: ReactNode | ReactNode[],
+  nameColorMap: Map<string, string>,
+  textShadow?: string,
+): ReactNode | ReactNode[] {
+  if (!nodes || nameColorMap.size === 0) return nodes;
+  const names = Array.from(nameColorMap.keys());
+  if (names.length === 0) return nodes;
+  const escaped = names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).sort((a, b) => b.length - a.length);
+  const nameRegex = new RegExp(`\\b(${escaped.join("|")})\\b`, "gi");
+
+  const isCodeNode = (node: ReactNode): boolean => {
+    if (node && typeof node === "object" && "props" in node) {
+      const tagName = (node as React.ReactElement).type;
+      return tagName === "code" || tagName === "pre";
+    }
+    return false;
+  };
+
+  // Check if a node is a dialogue-colored context (skip names inside it)
+  const isColoredContext = (node: ReactNode): boolean => {
+    if (!node || typeof node !== "object" || !("props" in node)) return false;
+    const element = node as React.ReactElement;
+    const props = element.props as Record<string, unknown>;
+    if ("data-spk" in props) return true;
+    if (props.style && typeof props.style === "object") {
+      const style = props.style as Record<string, unknown>;
+      if ("color" in style || "WebkitTextFillColor" in style) return true;
+    }
+    if (element.type === "font") return true;
+    return false;
+  };
+
+  const processString = (str: string, nodeIdx: number): ReactNode => {
+    if (!str || str.length === 0) return str;
+    const parts: ReactNode[] = [];
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+    let k = 0;
+    nameRegex.lastIndex = 0;
+    while ((match = nameRegex.exec(str)) !== null) {
+      if (match[0].length === 0) {
+        nameRegex.lastIndex += 1;
+        continue;
+      }
+      if (match.index > lastIndex) parts.push(str.slice(lastIndex, match.index));
+      const matchedName = match[0];
+      const color = nameColorMap.get(matchedName.toLowerCase());
+      if (color) {
+        if (isGradientNameColor(color)) {
+          const style: React.CSSProperties = {
+            ...gradientNameColorStyle(color),
+            display: "inline",
+            fontWeight: 700,
+            WebkitTextStroke: "0px",
+            paintOrder: "fill",
+            textShadow: "none",
+            ...(textShadow ? { filter: `drop-shadow(${textShadow})` } : {}),
+          };
+          parts.push(
+            <span key={`name-color-${nodeIdx}-${k++}`} style={style}>
+              {matchedName}
+            </span>,
+          );
+        } else {
+          const style: React.CSSProperties = {
+            color,
+            WebkitTextFillColor: color,
+            fontWeight: 700,
+          };
+          parts.push(
+            <span key={`name-color-${nodeIdx}-${k++}`} style={style}>
+              {matchedName}
+            </span>,
+          );
+        }
+      } else {
+        parts.push(matchedName);
+      }
+      lastIndex = match.index + matchedName.length;
+    }
+    if (parts.length === 0) return str;
+    if (lastIndex < str.length) parts.push(str.slice(lastIndex));
+    return parts;
+  };
+
+  const processNode = (node: ReactNode, idx: number): ReactNode => {
+    if (node === null || node === undefined || typeof node === "boolean") return node;
+    if (typeof node === "string") return processString(node, idx);
+    if (typeof node === "number") return node;
+    if (isCodeNode(node) || isColoredContext(node)) return node;
+
+    if (node && typeof node === "object" && "props" in node) {
+      const element = node as React.ReactElement;
+      const props = element.props as Record<string, unknown>;
+      if (props.children !== undefined) {
+        const children = Array.isArray(props.children)
+          ? props.children.map((c: ReactNode, i: number) => processNode(c, i))
+          : processNode(props.children as ReactNode, 0);
+        return cloneElement(element, {}, children);
+      }
+    }
+    return node;
+  };
+
+  if (Array.isArray(nodes)) {
+    return nodes.map((n, i) => processNode(n, i));
+  }
+  return processNode(nodes, 0);
+}
 
 /**
  * Render message content, handling both plain text with dialogue highlighting
@@ -1217,6 +1591,8 @@ function renderContent(
   quoteFormat: QuoteFormat = "straight",
   selfCharacterId?: string | null,
   galleryIndex?: ChatGalleryIndex | null,
+  nameColorMap?: Map<string, string> | null,
+  textShadow?: string,
 ): ReactNode {
   // Portable card://self/gallery refs resolve to the speaking character before
   // any rendering, covering both the markdown branch and the embedded-HTML
@@ -1229,21 +1605,32 @@ function renderContent(
   // Strip speaker tags before HTML detection (they aren't real HTML)
   const withoutSpeakerTags = normalized.replace(/<\/?speaker(?:="[^"]*")?>/g, "");
 
-  if (!HTML_TAG_RE.test(withoutSpeakerTags)) {
-    // renderWithHeadings handles headings, *** and --- horizontal rules,
-    // and delegates the rest to speaker-tag / dialogue rendering.
-    return renderMarkdownBlocks(normalized, (seg, _kp) =>
+  const isHtmlPath = HTML_TAG_RE.test(withoutSpeakerTags);
+
+  // Markdown path — renderWithHeadings handles headings, *** and --- horizontal rules,
+  // and delegates the rest to speaker-tag / dialogue rendering.
+  // Name coloring runs AFTER on the React tree so injected spans don't
+  // interfere with paragraph splitting or trigger the HTML path.
+  if (!isHtmlPath) {
+    const markdownResult = renderMarkdownBlocks(normalized, (seg, _kp) =>
       renderWithSpeakerTags(seg, dialogueColor, speakerColorMap, boldDialogue),
     );
+    if (nameColorMap && nameColorMap.size > 0) {
+      return colorNamesInNodes(markdownResult, nameColorMap, textShadow);
+    }
+    return markdownResult;
   }
+
+  const withNameColors =
+    nameColorMap && nameColorMap.size > 0 ? colorNamesSkippingQuotes(normalized, nameColorMap, textShadow) : normalized;
 
   // For HTML content, replace speaker tags with color-annotated spans (preserves per-character colors)
   const stripped = speakerColorMap
-    ? normalized.replace(SPEAKER_TAG_RE, (_, name, dialogue) => {
+    ? withNameColors.replace(SPEAKER_TAG_RE, (_, name, dialogue) => {
         const color = speakerColorMap.get(name as string);
         return color ? `<span data-spk="${color}">${dialogue as string}</span>` : (dialogue as string);
       })
-    : normalized.replace(SPEAKER_TAG_RE, "$2");
+    : withNameColors.replace(SPEAKER_TAG_RE, "$2");
 
   const { html: strippedWithoutStyleBlocks, css: rawStyleBlocks } = extractChatStyleBlocks(stripped);
 
@@ -1370,6 +1757,8 @@ export function RoleplayMessagePreview({
         htmlScopeClass,
         quoteFormat,
         selfCharacterId,
+        undefined, // nameColorMap
+        undefined, // textShadowStr
       ),
     [boldDialogue, content, htmlScopeClass, quoteFormat, resolvedDialogueColor, selfCharacterId],
   );
@@ -1465,6 +1854,8 @@ export const ChatMessage = memo(function ChatMessage({
     showTokenUsage,
     showMessageNumbers,
     boldDialogue,
+    colorInlineNames,
+    disableInlineNameGradients,
     editMessageOnDoubleClick,
     quoteFormat,
     ttsLineVolume,
@@ -1486,6 +1877,8 @@ export const ChatMessage = memo(function ChatMessage({
       showTokenUsage: s.showTokenUsage,
       showMessageNumbers: s.showMessageNumbers,
       boldDialogue: s.boldDialogue ?? true,
+      colorInlineNames: s.colorInlineNames,
+      disableInlineNameGradients: s.disableInlineNameGradients,
       editMessageOnDoubleClick: s.editMessageOnDoubleClick,
       quoteFormat: s.quoteFormat,
       ttsLineVolume: s.ttsLineVolume,
@@ -1500,6 +1893,7 @@ export const ChatMessage = memo(function ChatMessage({
         : {},
     [textStrokeWidth, textStrokeColor],
   );
+  const textShadowStr = textStrokeWidth > 0 ? `0px 0px ${textStrokeWidth}px ${textStrokeColor}` : "";
   const messageTextStyle = useMemo<React.CSSProperties>(
     () => ({
       fontSize: chatFontSize,
@@ -2192,6 +2586,25 @@ export const ChatMessage = memo(function ChatMessage({
   const boxBgColor = msgColors?.boxColor;
   const msgNameColor = msgColors?.nameColor;
   const roleplayBubbleBg = boxBgColor ? boxBgColor : isUser ? userBubbleBg : assistantBubbleBg;
+  const nameColorMap = useMemo(() => {
+    if (!colorInlineNames || !scopedCharacterMap) return null;
+    const map = new Map<string, string>();
+    const addName = (name: string | undefined | null, color: string) => {
+      const key = name?.trim().toLowerCase();
+      if (key) map.set(key, color);
+    };
+    scopedCharacterMap.forEach((char) => {
+      const color = char.nameColor;
+      if (!color) return;
+      // If gradients are disabled, extract the first solid color from gradient strings
+      const effectiveColor =
+        disableInlineNameGradients && isGradientNameColor(color) ? extractSolidColorFromGradient(color) : color;
+      addName(char.name, effectiveColor);
+      addName(char.convoDisplayName, effectiveColor);
+      for (const alias of char.nameAliases ?? []) addName(alias, effectiveColor);
+    });
+    return map.size > 0 ? map : null;
+  }, [colorInlineNames, scopedCharacterMap, disableInlineNameGradients]);
 
   // Build speaker → dialogueColor map for group chat speaker tag coloring
   const speakerColorMap = useMemo(() => {
@@ -2331,8 +2744,21 @@ export const ChatMessage = memo(function ChatMessage({
       quoteFormat,
       selfCharacterId,
       galleryIndex,
+      nameColorMap,
+      textShadowStr,
     );
-  }, [text, dialogueColor, speakerColorMap, boldDialogue, htmlScopeClass, quoteFormat, selfCharacterId, galleryIndex]);
+  }, [
+    text,
+    dialogueColor,
+    speakerColorMap,
+    boldDialogue,
+    htmlScopeClass,
+    quoteFormat,
+    selfCharacterId,
+    galleryIndex,
+    nameColorMap,
+    textShadowStr,
+  ]);
   const renderStreamingText = useCallback(
     (streamText: string) =>
       renderContent(
@@ -2344,8 +2770,20 @@ export const ChatMessage = memo(function ChatMessage({
         quoteFormat,
         selfCharacterId,
         galleryIndex,
+        nameColorMap,
+        textShadowStr,
       ),
-    [boldDialogue, dialogueColor, galleryIndex, htmlScopeClass, quoteFormat, selfCharacterId, speakerColorMap],
+    [
+      boldDialogue,
+      dialogueColor,
+      galleryIndex,
+      htmlScopeClass,
+      quoteFormat,
+      selfCharacterId,
+      speakerColorMap,
+      nameColorMap,
+      textShadowStr,
+    ],
   );
 
   // Translated text is rendered through the same markdown pipeline as the
@@ -2362,6 +2800,8 @@ export const ChatMessage = memo(function ChatMessage({
             quoteFormat,
             selfCharacterId,
             galleryIndex,
+            nameColorMap,
+            textShadowStr,
           )
         : null,
     [
@@ -2373,6 +2813,8 @@ export const ChatMessage = memo(function ChatMessage({
       quoteFormat,
       selfCharacterId,
       galleryIndex,
+      nameColorMap,
+      textShadowStr,
     ],
   );
   const translationDisplayOnly = useMemo(

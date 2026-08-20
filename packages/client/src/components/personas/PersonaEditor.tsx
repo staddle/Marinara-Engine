@@ -211,6 +211,7 @@ interface PersonaFormData {
   phoneticName: string;
   creator: string;
   personaVersion: string;
+  versioningEnabled: boolean;
   creatorNotes: string;
   description: string;
   personality: string;
@@ -321,6 +322,7 @@ function personaFormFromPersona(persona: Persona): PersonaFormData {
     phoneticName: persona.phoneticName ?? "",
     creator: persona.creator ?? "",
     personaVersion: persona.personaVersion ?? "1.0",
+    versioningEnabled: persona.versioningEnabled !== false,
     creatorNotes: persona.creatorNotes ?? "",
     description: persona.description,
     personality: persona.personality ?? "",
@@ -1237,6 +1239,7 @@ function createCharacterDataFromPersona(formData: PersonaFormData): CharacterDat
       depth_prompt: { prompt: "", depth: 4, role: "system" },
       backstory: formData.backstory ?? "",
       appearance: formData.appearance ?? "",
+      versioningEnabled: formData.versioningEnabled,
       phoneticName: formData.phoneticName.trim() || undefined,
       nameColor: formData.nameColor || undefined,
       dialogueColor: formData.dialogueColor || undefined,
@@ -1348,10 +1351,7 @@ export function PersonaEditor() {
 
   /** True while the completion still belongs to the mounted editor session.
    *  Anything else may touch caches but not local state. */
-  const isCurrentEditorSession = useCallback(
-    (session: string) => editorSessionRef.current === session,
-    [],
-  );
+  const isCurrentEditorSession = useCallback((session: string) => editorSessionRef.current === session, []);
   const imageGenerationAvailable =
     Array.isArray(connectionsList) &&
     (connectionsList as Array<{ provider?: string }>).some((connection) => connection.provider === "image_generation");
@@ -1568,8 +1568,7 @@ export function PersonaEditor() {
       previousAvatarPreview: string | null;
       previousAvatarCrop: AvatarCrop | null;
     }) => {
-      const stillCurrent = () =>
-        isCurrentEditorSession(session) && mutationTokenRef.current === operationToken;
+      const stillCurrent = () => isCurrentEditorSession(session) && mutationTokenRef.current === operationToken;
       if (!stillCurrent()) return false;
 
       // The pending image is its own crop owner, so the incoming picture is never
@@ -1745,9 +1744,7 @@ export function PersonaEditor() {
     } catch (error) {
       if (!isCurrentEditorSession(session) || loadedPersonaIdRef.current !== deletedPersonaId) return;
       console.error("[PersonaEditor] Delete failed:", error);
-      toast.error(
-        formatFirstApiValidationIssue(error, localizeUi("ui.personas.personaeditor.failedToDeletePersona")),
-      );
+      toast.error(formatFirstApiValidationIssue(error, localizeUi("ui.personas.personaeditor.failedToDeletePersona")));
     } finally {
       // A failure retains the editor and draft; success closes once above. An old
       // completion cannot clear a newer session's operation token.
@@ -3669,17 +3666,36 @@ function PersonaMetadataTab({
             placeholder={localizeUi("ui.personas.personametadatatab.yourName")}
           />
         </label>
-        <label className="space-y-1.5">
-          <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-            {localizeUi("ui.personas.personametadatatab.version")}{" "}
-            <HelpTooltip
-              text={localizeUi("ui.personas.personametadatatab.versionNumberForTrackingChangesToThisPersonaDefinition")}
+        <div className="space-y-1.5">
+          <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+            <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
+              {localizeUi("ui.personas.personametadatatab.version")}{" "}
+              <HelpTooltip
+                text={localizeUi(
+                  "ui.personas.personametadatatab.versionNumberForTrackingChangesToThisPersonaDefinition",
+                )}
+              />
+            </span>
+            <SettingsSwitch
+              checked={formData.versioningEnabled}
+              onChange={(enabled) => {
+                updateField("versioningEnabled", enabled);
+                if (enabled && !formData.personaVersion.trim()) {
+                  updateField("personaVersion", "1.0");
+                }
+              }}
+              label={localizeUi("ui.cardversionhistory.automaticVersioning")}
+              labelPosition="end"
+              title={localizeUi("ui.cardversionhistory.automaticVersioningDescription")}
+              className="min-h-11 gap-2 rounded-md px-1 py-0"
+              labelClassName="text-xs font-medium text-[var(--muted-foreground)]"
             />
-          </span>
+          </div>
           <input
             value={formData.personaVersion}
             onChange={(e) => updateField("personaVersion", e.target.value)}
-            className="w-full rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm outline-none focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
+            disabled={!formData.versioningEnabled}
+            className="w-full rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm outline-none focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20 disabled:cursor-not-allowed disabled:opacity-50"
             placeholder="1.0"
           />
           <PersonaVersionHistoryPanel
@@ -3688,7 +3704,7 @@ function PersonaMetadataTab({
             currentAvatarPath={avatarPreview}
             hasUnsavedChanges={hasUnsavedChanges}
           />
-        </label>
+        </div>
       </div>
 
       <div className="space-y-2">
@@ -3923,6 +3939,7 @@ function buildCurrentPersonaSnapshot(formData: PersonaFormData): PersonaCardSnap
     name: formData.name,
     creator: formData.creator,
     personaVersion: formData.personaVersion,
+    versioningEnabled: String(formData.versioningEnabled),
     creatorNotes: formData.creatorNotes,
     description: formData.description,
     personality: formData.personality,

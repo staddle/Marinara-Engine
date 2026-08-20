@@ -1,7 +1,7 @@
-import { existsSync, lchownSync, lstatSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { lchownSync, lstatSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { constants as osConstants } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const DEFAULT_COMMAND = ["node", "packages/server/dist/index.js"];
 
@@ -57,15 +57,45 @@ function resolveStoragePath(value) {
   return isAbsolute(value) ? value : resolve(process.cwd(), value);
 }
 
-function shouldRepairOwnership(path, uid, gid) {
-  if (!existsSync(path)) return true;
+function isSameOrDescendant(parent, candidate) {
+  const nestedPath = relative(parent, candidate);
+  return nestedPath === "" || (nestedPath !== ".." && !nestedPath.startsWith(`..${sep}`) && !isAbsolute(nestedPath));
+}
+
+function minimizeOwnershipRoots(paths) {
+  const roots = [...new Set(paths.map((path) => resolve(path)))].sort(
+    (left, right) => left.length - right.length || left.localeCompare(right),
+  );
+  return roots.filter(
+    (candidate, index) => !roots.slice(0, index).some((parent) => isSameOrDescendant(parent, candidate)),
+  );
+}
+
+function hasExpectedOwnership(path, uid, gid) {
   const stat = lstatSync(path);
-  return stat.uid !== uid || stat.gid !== gid;
+  return stat.uid === uid && stat.gid === gid;
+}
+
+function findOwnershipRepairRoots(dataDir, fileStorageDir, uid, gid) {
+  // A moved or restored data directory still gets the original full-tree repair. When its root is already correct,
+  // limit discovery to common top-level imports while always checking storage, whose permission hardening is recursive.
+  if (!hasExpectedOwnership(dataDir, uid, gid)) {
+    return minimizeOwnershipRoots([dataDir, fileStorageDir]);
+  }
+
+  const repairRoots = [fileStorageDir];
+  for (const child of readdirSync(dataDir)) {
+    const childPath = join(dataDir, child);
+    if (resolve(childPath) === resolve(fileStorageDir)) continue;
+    if (!hasExpectedOwnership(childPath, uid, gid)) repairRoots.push(childPath);
+  }
+  return minimizeOwnershipRoots(repairRoots);
 }
 
 function chownRecursive(path, uid, gid) {
   const stack = [path];
   let firstError = null;
+  let repairedEntries = 0;
 
   while (stack.length > 0) {
     const current = stack.pop();
@@ -73,7 +103,10 @@ function chownRecursive(path, uid, gid) {
 
     try {
       const stat = lstatSync(current);
-      lchownSync(current, uid, gid);
+      if (stat.uid !== uid || stat.gid !== gid) {
+        lchownSync(current, uid, gid);
+        repairedEntries += 1;
+      }
       if (!stat.isDirectory() || stat.isSymbolicLink()) continue;
 
       for (const child of readdirSync(current)) {
@@ -85,6 +118,7 @@ function chownRecursive(path, uid, gid) {
   }
 
   if (firstError) throw firstError;
+  return repairedEntries;
 }
 
 function prepareDataDirectories(uid, gid) {
@@ -98,10 +132,11 @@ function prepareDataDirectories(uid, gid) {
 
   if (process.env.MARINARA_SKIP_DATA_CHOWN === "true") return;
 
-  for (const dir of dirs) {
-    if (!shouldRepairOwnership(dir, uid, gid)) continue;
-    log(`Repairing ownership for ${dir}`);
-    chownRecursive(dir, uid, gid);
+  for (const dir of findOwnershipRepairRoots(dataDir, fileStorageDir, uid, gid)) {
+    const repairedEntries = chownRecursive(dir, uid, gid);
+    if (repairedEntries > 0) {
+      log(`Repaired ownership for ${repairedEntries} ${repairedEntries === 1 ? "entry" : "entries"} under ${dir}`);
+    }
   }
 }
 

@@ -16,7 +16,12 @@ export function isAdminAuthorized(request: FastifyRequest): boolean {
 export function requirePrivilegedAccess(
   request: FastifyRequest,
   reply: FastifyReply,
-  options: { loopbackOnly?: boolean; trustedNetwork?: boolean; feature?: string } = {},
+  options: {
+    loopbackOnly?: boolean;
+    trustedNetwork?: boolean;
+    feature?: string;
+    oneTimeCapabilityAuthorized?: boolean;
+  } = {},
 ): boolean {
   if (!isRequestHostTrusted(request)) {
     reply.status(421).send({
@@ -50,11 +55,14 @@ export function requirePrivilegedAccess(
     return true;
   }
 
+  // A route-scoped, single-use capability may replace the reusable admin secret,
+  // but never the trusted-host or normal-authentication checks above.
+  if (options.oneTimeCapabilityAuthorized) return true;
+
   if (!getAdminSecret()) {
     reply.status(403).send({
       error: "ADMIN_SECRET is required for privileged APIs",
-      message:
-        "Set ADMIN_SECRET=<secret> in the server .env and send the same value in the X-Admin-Secret header.",
+      message: "Set ADMIN_SECRET=<secret> in the server .env and send the same value in the X-Admin-Secret header.",
     });
     return false;
   }

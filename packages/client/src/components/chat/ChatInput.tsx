@@ -291,7 +291,7 @@ export const ChatInput = memo(function ChatInput({
   const isStreaming = hasActiveStream && !isBackgroundIllustration;
   const isInputBusy = isGenerationSendBlocked({
     streamActive: hasActiveStream,
-    agentsProcessing: interactionsLocked,
+    agentsProcessing: mode === "roleplay" ? false : interactionsLocked,
     backgroundIllustration: isBackgroundIllustration,
   });
   const responseQueue = useChatStore((s) =>
@@ -1836,8 +1836,11 @@ export const ChatInput = memo(function ChatInput({
   }, []);
 
   const cameraSession = useCallCameraSession({ onError: handleCallCameraError });
-  const { start: startCallCameraSession, stop: stopCallCameraSession, captureFrame: captureCallCameraFrame } =
-    cameraSession;
+  const {
+    start: startCallCameraSession,
+    stop: stopCallCameraSession,
+    captureFrame: captureCallCameraFrame,
+  } = cameraSession;
 
   const handleCallUtterance = useCallback(
     (blob: Blob) => {

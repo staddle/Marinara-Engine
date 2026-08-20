@@ -73,6 +73,7 @@ import { CallClipGenerationModal } from "../ui/CallClipGenerationModal";
 import { ImageUploadDropzone } from "../ui/ImageUploadDropzone";
 import { CustomEmojiTagButton } from "../ui/CustomEmojiTagButton";
 import { CharacterRegexSection } from "./CharacterRegexSection";
+import { NameAliasesSection } from "../ui/NameAliasesSection";
 import {
   ArrowDown,
   ArrowLeft,
@@ -792,6 +793,7 @@ export function CharacterEditor() {
         comment: formData.creator_notes ?? "",
         creator: formData.creator ?? "",
         personaVersion: formData.character_version ?? "1.0",
+        versioningEnabled: formData.extensions.versioningEnabled !== false,
         creatorNotes: formData.creator_notes ?? "",
         description: formData.description ?? "",
         personality: formData.personality ?? "",
@@ -1628,16 +1630,31 @@ function MetadataTab({
           />
         </label>
         <div className="space-y-1.5">
-          <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
-            {localizeUi("ui.characters.metadatatab.version")}{" "}
-            <HelpTooltip
-              text={localizeUi("ui.characters.metadatatab.versionNumberForTrackingChangesToThisCharacterDefinition")}
+          <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+            <span className="inline-flex items-center gap-1 text-xs font-medium text-[var(--muted-foreground)]">
+              {localizeUi("ui.characters.metadatatab.version")}{" "}
+              <HelpTooltip
+                text={localizeUi("ui.characters.metadatatab.versionNumberForTrackingChangesToThisCharacterDefinition")}
+              />
+            </span>
+            <SettingsSwitch
+              checked={formData.extensions.versioningEnabled !== false}
+              onChange={(enabled) => {
+                updateExtension("versioningEnabled", enabled);
+                if (enabled && !formData.character_version.trim()) updateField("character_version", "1.0");
+              }}
+              label={localizeUi("ui.cardversionhistory.automaticVersioning")}
+              labelPosition="end"
+              title={localizeUi("ui.cardversionhistory.automaticVersioningDescription")}
+              className="min-h-11 gap-2 rounded-md px-1 py-0"
+              labelClassName="text-xs font-medium text-[var(--muted-foreground)]"
             />
-          </span>
+          </div>
           <input
             value={formData.character_version}
             onChange={(e) => updateField("character_version", e.target.value)}
-            className="w-full rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm outline-none focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20"
+            disabled={formData.extensions.versioningEnabled === false}
+            className="w-full rounded-xl border border-[var(--border)] bg-[var(--secondary)] px-3 py-2 text-sm outline-none focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20 disabled:cursor-not-allowed disabled:opacity-50"
             placeholder="1.0"
           />
           <CharacterVersionHistoryPanel
@@ -2760,10 +2777,7 @@ function CharacterGalleryTab({
       let failedDownloads = 0;
       for (const [index, image] of selectedImages.entries()) {
         try {
-          await downloadUrlToDevice(
-            image.url,
-            image.filePath.split("/").pop() || `character-gallery-${index + 1}.png`,
-          );
+          await downloadUrlToDevice(image.url, image.filePath.split("/").pop() || `character-gallery-${index + 1}.png`);
         } catch {
           failedDownloads += 1;
         }
@@ -5106,6 +5120,7 @@ function ColorsTab({
   const nameColor = (formData.extensions.nameColor as string) ?? "";
   const dialogueColor = (formData.extensions.dialogueColor as string) ?? "";
   const boxColor = (formData.extensions.boxColor as string) ?? "";
+  const nameAliases = (formData.extensions.nameAliases as string[] | undefined) ?? [];
   const [extracting, setExtracting] = useState(false);
 
   const handleExtract = async () => {
@@ -5228,6 +5243,12 @@ function ColorsTab({
         onChange={(v) => updateExtension("boxColor", v)}
         label={localizeUi("ui.characters.colorstab.messageBoxColor")}
         helpText="Background color for this character's chat message bubbles. Use a semi-transparent color for best results (e.g. rgba)."
+      />
+      {/* Name Aliases */}
+      <NameAliasesSection
+        aliases={nameAliases}
+        onChange={(next) => updateExtension("nameAliases", next)}
+        nameColor={nameColor}
       />
     </div>
   );

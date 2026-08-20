@@ -20,6 +20,8 @@ export type CharacterMap = Map<
     avatarCrop?: AvatarCrop | null;
     conversationStatus?: "online" | "idle" | "dnd" | "offline";
     conversationActivity?: string;
+    /** Alternative names/nicknames for inline name coloring. */
+    nameAliases?: string[];
   }
 >;
 

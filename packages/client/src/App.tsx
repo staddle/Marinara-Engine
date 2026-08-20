@@ -36,11 +36,7 @@ import { useSidecarStore } from "./stores/sidecar.store";
 import { useDialogStore } from "./stores/dialog.store";
 import { api } from "./lib/api-client";
 import { forceRefreshSpa } from "./lib/browser-runtime";
-import {
-  formatRuntimeBuild,
-  getServerRuntimeBuild,
-  isRuntimeBuildCurrent,
-} from "./lib/runtime-build";
+import { formatRuntimeBuild, getServerRuntimeBuild, isRuntimeBuildCurrent } from "./lib/runtime-build";
 import {
   getCssColorFallback,
   getCssGradientColorStops,
@@ -636,8 +632,7 @@ export function App() {
       const paused = !(
         document.visibilityState === "visible" &&
         document.hasFocus() &&
-        !pauseChromeEffectsForAppearance &&
-        !reduceAmbientEffects
+        !pauseChromeEffectsForAppearance
       );
       if (!paused) {
         delete root.dataset.marinaraEffectsPaused;
@@ -662,7 +657,7 @@ export function App() {
       window.removeEventListener("pagehide", syncEffectsPausedState);
       delete root.dataset.marinaraEffectsPaused;
     };
-  }, [pauseChromeEffectsForAppearance, reduceAmbientEffects]);
+  }, [pauseChromeEffectsForAppearance]);
 
   useEffect(() => {
     const root = document.documentElement;

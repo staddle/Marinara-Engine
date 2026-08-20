@@ -86,13 +86,20 @@ import { useTTSConfig } from "../../hooks/use-tts";
 import {
   buildTTSVoiceRequests,
   extractReadyTTSSpeech,
-  normalizeTTSCharacterName,
+  findTTSCharacterIdBySpeakerName,
   withTTSVoiceRequestCacheKeys,
 } from "../../lib/tts-dialogue";
+import {
+  buildExtractedRoleplayTTSVoiceRequests,
+  extractRoleplayTTSSpeakers,
+} from "../../lib/tts-roleplay-speaker-extractor";
 import {
   findLatestTTSAutoplayMessage,
   getTTSAutoplayRevision,
   shouldAutoplayGeneratedTTS,
+  TTS_AUTOPLAY_MESSAGE_READY_EVENT,
+  type TTSAutoplayMessage,
+  type TTSAutoplayMessageReadyDetail,
 } from "../../lib/tts-autoplay";
 import { CHAT_SCROLL_TO_BOTTOM_EVENT, type ChatScrollToBottomDetail } from "../../lib/chat-scroll-events";
 import { CHAT_RESOURCE_AGENT_SETUP_EVENT } from "../../lib/chat-resource-drag";
@@ -384,6 +391,7 @@ function toCharacterMapValue(char: CharacterRow): CharacterMapValue {
       avatarCrop: normalizeAvatarCrop(extensions.avatarCrop),
       conversationStatus: extensions.conversationStatus || undefined,
       conversationActivity: extensions.conversationActivity || undefined,
+      nameAliases: extensions.nameAliases || undefined,
     };
   } catch {
     return { name: "Unknown", avatarUrl: char.avatarPath ?? null };
@@ -413,6 +421,11 @@ function areCharacterMapValuesEqual(a: CharacterMapValue, b: CharacterMapValue):
     a.boxColor === b.boxColor &&
     a.conversationStatus === b.conversationStatus &&
     a.conversationActivity === b.conversationActivity &&
+    (a.nameAliases === b.nameAliases ||
+      (Array.isArray(a.nameAliases) &&
+        Array.isArray(b.nameAliases) &&
+        a.nameAliases.length === b.nameAliases.length &&
+        a.nameAliases.every((alias, index) => alias === b.nameAliases![index]))) &&
     // avatarCrop is a small plain object — compare by value, not reference.
     (a.avatarCrop === b.avatarCrop || JSON.stringify(a.avatarCrop ?? null) === JSON.stringify(b.avatarCrop ?? null))
   );
@@ -458,6 +471,11 @@ const CharacterScheduleEditorModal = lazy(preloadCharacterScheduleEditorModal);
 
 type FloatingPanelAnchor = ReturnType<typeof readChatToolbarFloatingPanelAnchor>;
 type OpenSettingsOptions = { initialSection?: ChatSettingsInitialSection };
+type TTSGenerationSnapshot = {
+  chatId: string;
+  beforeRevision: string | null;
+  failed: boolean;
+};
 
 export const ChatArea = memo(function ChatArea() {
   const { t: localizeUi } = useUiTranslation();
@@ -2173,7 +2191,7 @@ export const ChatArea = memo(function ChatArea() {
     (direction: -1 | 1) => {
       const supportsMode = chatMode === "conversation" || isRoleplay;
       if (!supportsMode || !intuitiveSwipeNavigation || intuitiveSwipeBlocked) return false;
-      if (!activeChatId || isStreaming || agentProcessing || !latestAssistantMessageForSwipes) return false;
+      if (!activeChatId || isStreaming || !latestAssistantMessageForSwipes) return false;
 
       const swipeCount = latestAssistantMessageForSwipes.swipeCount ?? 1;
       const activeIndex = latestAssistantMessageForSwipes.activeSwipeIndex ?? 0;
@@ -2195,7 +2213,6 @@ export const ChatArea = memo(function ChatArea() {
     },
     [
       activeChatId,
-      agentProcessing,
       chatMode,
       handleRegenerate,
       handleSetActiveSwipe,
@@ -2485,7 +2502,7 @@ export const ChatArea = memo(function ChatArea() {
     if (!isStreaming) userScrolledAwayRef.current = false;
   }, [isStreaming]);
 
-  // TTS autoplay — speak the last assistant message when streaming ends
+  // TTS autoplay — start on finalized assistant text, with stream-end recovery for older/missed events.
   const { data: ttsConfig } = useTTSConfig();
   const ttsConfigRef = useRef(ttsConfig);
   ttsConfigRef.current = ttsConfig;
@@ -2497,11 +2514,8 @@ export const ChatArea = memo(function ChatArea() {
   const callActiveRef = useRef(callActiveForChat);
   callActiveRef.current = callActiveForChat;
   const prevIsStreamingRef = useRef(false);
-  const ttsGenerationRef = useRef<{
-    chatId: string;
-    beforeRevision: string | null;
-    failed: boolean;
-  } | null>(null);
+  const ttsGenerationRef = useRef<TTSGenerationSnapshot | null>(null);
+  const startedTTSAutoplayRevisionsRef = useRef(new Set<string>());
   // How much of the streaming message's live text has already been sent to
   // TTS, plus the in-progress playback sequence it's being spoken into (if
   // any) — lets autoplay start on the first finished sentence instead of
@@ -2519,16 +2533,127 @@ export const ChatArea = memo(function ChatArea() {
     return () => window.removeEventListener("marinara:generation-error", handleGenerationError);
   }, []);
   const resolveTTSCharacterId = useCallback(
-    (speaker?: string | null) => {
-      const normalizedSpeaker = normalizeTTSCharacterName(speaker);
-      if (!normalizedSpeaker) return null;
-      for (const [characterId, character] of characterMap) {
-        if (normalizeTTSCharacterName(character.name) === normalizedSpeaker) return characterId;
-      }
-      return null;
-    },
+    (speaker?: string | null) => findTTSCharacterIdBySpeakerName(speaker, characterMap),
     [characterMap],
   );
+  const speakTTSAutoplayMessage = useCallback(
+    async (lastMsg: TTSAutoplayMessage, targetChatId: string, generationAtStart: TTSGenerationSnapshot | null) => {
+      if (useChatStore.getState().activeChatId !== targetChatId) return;
+
+      const cfg = ttsConfigRef.current;
+      if (!cfg?.enabled) return;
+
+      const mode = chatModeRef.current;
+      if (!shouldAutoplayTTSForMode(cfg, mode, callActiveRef.current)) return;
+
+      const targetRevision = getTTSAutoplayRevision(lastMsg);
+      if (!targetRevision) return;
+      const revisionKey = `${targetChatId}\n${targetRevision}`;
+      if (startedTTSAutoplayRevisionsRef.current.has(revisionKey)) return;
+      startedTTSAutoplayRevisionsRef.current.add(revisionKey);
+      while (startedTTSAutoplayRevisionsRef.current.size > 50) {
+        const oldest = startedTTSAutoplayRevisionsRef.current.values().next().value;
+        if (typeof oldest !== "string") break;
+        startedTTSAutoplayRevisionsRef.current.delete(oldest);
+      }
+
+      // Speak only what the incremental effect below hasn't already sent — its
+      // conservatively-held-back trailing fragment (always at least the final
+      // sentence, which never gets "more text after it" to confirm it's done
+      // until the stream ends), or the whole message if incremental speech
+      // never started for it (disabled, dialogue-tagged, extractor-enabled, or
+      // a config change mid-stream).
+      const incrementalHandle = incrementalTTSHandleRef.current;
+      incrementalTTSHandleRef.current = null;
+      const spokenUpTo = incrementalTTSCursorRef.current;
+      incrementalTTSCursorRef.current = 0;
+      const remainingText = lastMsg.content.slice(spokenUpTo);
+      if (!remainingText.trim()) {
+        incrementalHandle?.finish();
+        return;
+      }
+
+      const fallbackSpeaker =
+        lastMsg.role === "narrator"
+          ? "Narrator"
+          : lastMsg.characterId
+            ? characterMap.get(lastMsg.characterId)?.name
+            : undefined;
+      let ttsRequests;
+      if (mode === "roleplay" && cfg.roleplaySpeakerExtractorEnabled) {
+        try {
+          const extracted = await extractRoleplayTTSSpeakers({
+            message: remainingText,
+            group: getChatDisplayName(chat) || characterNames.join(", "),
+            user: personaInfo?.name || "User",
+            characters: characterNames,
+            messageAuthor: lastMsg.characterId ? characterMap.get(lastMsg.characterId)?.name : undefined,
+            debugMode: useUIStore.getState().debugMode,
+          });
+          ttsRequests = buildExtractedRoleplayTTSVoiceRequests(
+            extracted.segments,
+            cfg,
+            fallbackSpeaker,
+            lastMsg.characterId,
+            resolveTTSCharacterId,
+          );
+        } catch (error) {
+          console.warn("[TTS] Roleplay speaker extractor failed; using standard autoplay.", error);
+          ttsRequests = buildTTSVoiceRequests(
+            remainingText,
+            cfg,
+            fallbackSpeaker,
+            lastMsg.characterId,
+            resolveTTSCharacterId,
+          );
+        }
+      } else {
+        ttsRequests = buildTTSVoiceRequests(
+          remainingText,
+          cfg,
+          fallbackSpeaker,
+          lastMsg.characterId,
+          resolveTTSCharacterId,
+        );
+      }
+
+      const currentGeneration = ttsGenerationRef.current;
+      const currentMessage = findLatestTTSAutoplayMessage(messagesRef.current ?? []);
+      if (
+        useChatStore.getState().activeChatId !== targetChatId ||
+        (currentGeneration !== null && currentGeneration !== generationAtStart) ||
+        (currentMessage?.id === lastMsg.id && getTTSAutoplayRevision(currentMessage) !== targetRevision)
+      ) {
+        incrementalHandle?.abort();
+        return;
+      }
+      if (ttsRequests.length === 0) {
+        incrementalHandle?.finish();
+        return;
+      }
+
+      const requestsWithCacheKeys = withTTSVoiceRequestCacheKeys(ttsRequests, cfg, lastMsg.id);
+      if (incrementalHandle) {
+        incrementalHandle.push(requestsWithCacheKeys);
+        incrementalHandle.finish();
+      } else {
+        await ttsService.speakSequence(requestsWithCacheKeys, lastMsg.id, {
+          progressive: cfg.progressivePlayback,
+          volume: ttsLineVolume / 100,
+        });
+      }
+    },
+    [characterMap, characterNames, chat, personaInfo?.name, resolveTTSCharacterId, ttsLineVolume],
+  );
+  useEffect(() => {
+    const handleMessageReady = (event: Event) => {
+      const detail = (event as CustomEvent<TTSAutoplayMessageReadyDetail>).detail;
+      if (!detail || detail.chatId !== activeChatId) return;
+      void speakTTSAutoplayMessage(detail.message, detail.chatId, ttsGenerationRef.current);
+    };
+    window.addEventListener(TTS_AUTOPLAY_MESSAGE_READY_EVENT, handleMessageReady);
+    return () => window.removeEventListener(TTS_AUTOPLAY_MESSAGE_READY_EVENT, handleMessageReady);
+  }, [activeChatId, speakTTSAutoplayMessage]);
   useEffect(() => {
     const wasStreaming = prevIsStreamingRef.current;
     prevIsStreamingRef.current = isStreaming;
@@ -2550,21 +2675,7 @@ export const ChatArea = memo(function ChatArea() {
 
     const generation = ttsGenerationRef.current;
     ttsGenerationRef.current = null;
-    const incrementalHandle = incrementalTTSHandleRef.current;
-    incrementalTTSHandleRef.current = null;
-    const spokenUpTo = incrementalTTSCursorRef.current;
-    incrementalTTSCursorRef.current = 0;
-    if (!activeChatId || generation?.chatId !== activeChatId) {
-      incrementalHandle?.abort();
-      return;
-    }
-
-    const cfg = ttsConfigRef.current;
-    const mode = chatModeRef.current;
-    if (!shouldAutoplayTTSForMode(cfg, mode, callActiveRef.current)) {
-      incrementalHandle?.abort();
-      return;
-    }
+    if (!activeChatId || generation?.chatId !== activeChatId) return;
 
     const msgs = messagesRef.current ?? [];
     const lastMsg = findLatestTTSAutoplayMessage(msgs);
@@ -2575,54 +2686,14 @@ export const ChatArea = memo(function ChatArea() {
         message: lastMsg,
         generationFailed: generation.failed,
       })
-    ) {
-      incrementalHandle?.abort();
+    )
       return;
-    }
-
-    const fallbackSpeaker =
-      lastMsg.role === "narrator"
-        ? "Narrator"
-        : lastMsg.characterId
-          ? characterMap.get(lastMsg.characterId)?.name
-          : undefined;
-    // Speak only what the incremental effect below hasn't already sent — its
-    // conservatively-held-back trailing fragment (always at least the final
-    // sentence, which never gets "more text after it" to confirm it's done
-    // until the stream ends), or the whole message if incremental speech
-    // never started for it (disabled, dialogue-tagged, or config change).
-    const remainingText = lastMsg.content.slice(spokenUpTo);
-    if (!remainingText.trim()) {
-      incrementalHandle?.finish();
-      return;
-    }
-    const ttsRequests = buildTTSVoiceRequests(
-      remainingText,
-      cfg!,
-      fallbackSpeaker,
-      lastMsg.characterId,
-      resolveTTSCharacterId,
-    );
-    if (ttsRequests.length === 0) {
-      incrementalHandle?.finish();
-      return;
-    }
-
-    const requestsWithCacheKeys = withTTSVoiceRequestCacheKeys(ttsRequests, cfg!, lastMsg.id);
-    if (incrementalHandle) {
-      incrementalHandle.push(requestsWithCacheKeys);
-      incrementalHandle.finish();
-    } else {
-      void ttsService.speakSequence(requestsWithCacheKeys, lastMsg.id, {
-        progressive: cfg!.progressivePlayback,
-        volume: ttsLineVolume / 100,
-      });
-    }
-  }, [activeChatId, characterMap, isStreaming, resolveTTSCharacterId, ttsLineVolume]);
+    void speakTTSAutoplayMessage(lastMsg, activeChatId, generation);
+  }, [activeChatId, isStreaming, speakTTSAutoplayMessage]);
 
   // Incremental TTS — speak each sentence as it finishes streaming in,
-  // instead of waiting for the whole message. Runs alongside the effect
-  // above, which picks up whatever trailing fragment this one held back.
+  // instead of waiting for the whole message. Runs alongside the effects
+  // above, which pick up whatever trailing fragment this one held back.
   useEffect(() => {
     if (!isStreaming || !activeChatId) return;
     const generation = ttsGenerationRef.current;
@@ -2631,8 +2702,9 @@ export const ChatArea = memo(function ChatArea() {
     const cfg = ttsConfigRef.current;
     if (!shouldAutoplayTTSForMode(cfg, chatModeRef.current, callActiveRef.current)) return;
     // Multi-speaker/dialogue extraction needs the full message; leave those
-    // entirely to the end-of-stream effect above.
+    // entirely to the finalize path above.
     if (cfg!.dialogueOnly) return;
+    if (chatModeRef.current === "roleplay" && cfg!.roleplaySpeakerExtractorEnabled) return;
 
     const ready = extractReadyTTSSpeech(streamBuffer, incrementalTTSCursorRef.current);
     if (!ready) return;
