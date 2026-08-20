@@ -4,10 +4,20 @@ This file is the release-notes source of truth for Marinara Engine. Reuse these 
 
 ## [Unreleased]
 
+### Added
+
+- Added TTS playback that speaks a message's completed sentences as they stream in from the model, instead of waiting for the whole reply to finish generating, cutting perceived voice latency in Call Mode and message auto-play alike.
+- Added audio.cpp, Fish Audio, and SGLang-Omni (Higgs TTS) as new Text to Speech provider sources, each reusing the existing reference-clip voice-cloning fields. SGLang-Omni also adds a raw-PCM streaming endpoint for sub-second time-to-first-audio, with synthesis of the next sentence overlapping the current one's playback instead of waiting for it to finish so a single-node inference server stays continuously busy instead of idling between sentences.
+- Added a push-to-talk hold-to-speak button to Call Mode as a secondary input alongside automatic voice detection, for when continuous listening misjudges a pause or isn't wanted.
+- Added a configurable Call Mode pause-tolerance setting (default 1700ms) for how long a mid-sentence silence is tolerated before automatic voice detection ends the turn.
+
 ### Fixed
 
 - Kept the caret at the chosen insertion point when typing quotes or apostrophes in expanded Character and Persona text editors (#4656).
-- Prevented multiple Marinara processes from silently overwriting a shared local data directory; stale diagnostic counts are repaired without hiding stored rows (#5013).
+- Prevented multiple Marinara processes from silently overwriting a shared local data directory; stale diagnostic counts are repaired without hiding stored rows (#5013). Hardened the underlying same-host detection with a stable, cross-platform machine identity (Linux machine-id, macOS IOPlatformUUID, Windows MachineGuid) instead of hostname and MAC address, which could change across process launches on the same physical machine and made the original fix unreliable on both Docker and macOS.
+- Fixed Call Mode's automatic voice-activity cutoff firing mid-sentence during natural thinking pauses, by making the silence threshold configurable instead of a fixed value.
+- Kept Call Mode's push-to-talk button usable while the microphone is muted, since muting is how you opt out of automatic detection specifically — exactly when holding a button to speak is wanted.
+- Made an active Call Mode call always speak replies, instead of staying silent whenever the chat's per-mode auto-play toggle happened to be off.
 
 ## [2.4.2]
 

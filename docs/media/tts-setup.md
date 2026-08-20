@@ -16,12 +16,17 @@ Turning TTS on does not make anything speak by itself. It only reveals the **Spe
 2. Click the switch in the card header to turn TTS on. Hover over the switch to see its tooltip: **Enable TTS** when off, **Disable TTS** when on.
 3. Open the **Source** dropdown and pick your provider.
 
-A **Source** is the service that makes the audio. The four choices are:
+A **Source** is the service that makes the audio. The choices are:
 
 - **OpenAI-compatible**: OpenAI, or any server that copies OpenAI's TTS format.
 - **ElevenLabs**: the ElevenLabs voice service.
 - **PocketTTS**: a free voice server you run on your own computer.
 - **xAI Voice**: xAI's voice service.
+- **audio.cpp**: a self-hosted OpenAI-compatible server with reference-clip voice cloning.
+- **Fish Audio**: Fish Audio's cloud voice-cloning service.
+- **SGLang-Omni (Higgs TTS)**: a self-hosted server for Boson AI's Higgs TTS models, with true low-latency audio streaming.
+
+The last three are covered in their own section below, [audio.cpp, Fish Audio, and SGLang-Omni specifics](#audiocpp-fish-audio-and-sglang-omni-specifics), since each needs a field the others don't.
 
 The default Source is **OpenAI-compatible**. Marinara keeps a separate saved profile for each Source, including its encrypted API key, endpoint, model, voices, and provider parameters. Switching Sources restores that Source's previous setup; a Source you have not configured yet starts with its defaults.
 
@@ -35,12 +40,15 @@ Each Source needs a web address and, for most sources, an API key. An API key is
 
 The app fills in these defaults per Source:
 
-| Source            | Default Base URL          | Default Model          | Default voice the app pre-fills |
-| ----------------- | ------------------------- | ---------------------- | ------------------------------- |
-| OpenAI-compatible | https://api.openai.com/v1 | tts-1                  | alloy                           |
-| ElevenLabs        | https://api.elevenlabs.io | eleven_multilingual_v2 | none (you must pick one)        |
-| PocketTTS         | http://localhost:8000     | pocket-tts             | alba                            |
-| xAI Voice         | https://api.x.ai/v1       | grok-tts               | eve                             |
+| Source                | Default Base URL          | Default Model               | Default voice the app pre-fills |
+| --------------------- | -------------------------- | ---------------------------- | -------------------------------- |
+| OpenAI-compatible      | https://api.openai.com/v1 | tts-1                         | alloy                            |
+| ElevenLabs             | https://api.elevenlabs.io | eleven_multilingual_v2       | none (you must pick one)         |
+| PocketTTS              | http://localhost:8000     | pocket-tts                    | alba                             |
+| xAI Voice              | https://api.x.ai/v1       | grok-tts                      | eve                              |
+| audio.cpp              | http://localhost:8081/v1  | fish_audio                    | none (path-based, see below)     |
+| Fish Audio             | https://api.fish.audio    | s2-pro                        | none (reference ID, see below)   |
+| SGLang-Omni (Higgs TTS) | http://localhost:8000    | bosonai/higgs-audio-v3-tts-4b | default                          |
 
 For **ElevenLabs**, the **Model** field loads the speech-capable models available through your connection and always keeps the full list visible when you open it. Pick a normal speech model. Model IDs that contain `ttv` are voice-design models, not speech models, and they cannot read text out loud. If you choose one by mistake, playback fails with an error that tells you to use a speech model instead.
 
@@ -49,6 +57,20 @@ For **ElevenLabs**, the **Model** field loads the speech-capable models availabl
 PocketTTS is not built into Marinara Engine. Install [the official PocketTTS server](https://github.com/kyutai-labs/pocket-tts) separately, then start it with `uvx pocket-tts serve`. Marinara does not download or manage it for you.
 
 The official server uses `http://localhost:8000` by default. Leave the **Base URL** on that value unless you changed the host or port. Marinara detects the official multipart `/tts` API automatically. Existing custom URLs for the [OpenAI-compatible PocketTTS wrapper](https://github.com/teddybear082/pocket-tts-openai_streaming_server) remain supported.
+
+### audio.cpp, Fish Audio, and SGLang-Omni specifics
+
+These three are also not built into Marinara Engine. audio.cpp and SGLang-Omni are self-hosted servers you run yourself; Fish Audio is a cloud service that needs an API key.
+
+Each uses a different way to identify the cloned voice:
+
+- **audio.cpp** needs a **Voice Reference Path**: the path to the reference clip on the machine running audio.cpp itself, not a file you upload through Marinara.
+- **Fish Audio** needs a **Voice Reference ID**: the ID of a voice already uploaded to your Fish Audio account.
+- **SGLang-Omni** reuses the same **Reference Clip** upload field as OpenAI-compatible voice cloning. Leave it empty to use the model's default zero-shot voice instead of cloning one.
+
+audio.cpp and SGLang-Omni also show the **Reference Transcript** field, for the reference clip's spoken words — the same field OpenAI-compatible voice cloning uses. Fish Audio has no reference clip or transcript in Marinara at all; its voice comes entirely from the account-side reference ID.
+
+SGLang-Omni is the only source with true audio streaming: instead of waiting for a whole line to finish generating, it starts speaking as the model produces audio, and Call Mode overlaps the next sentence's synthesis with the current one's playback so a single-node server stays continuously busy instead of idling between sentences. The other sources (including audio.cpp and Fish Audio) return one complete clip per request like every other provider.
 
 ## Step 3: Choose a voice (Voice Option)
 
@@ -161,7 +183,7 @@ This override is used only during Conversation audio and video calls. The regula
 - Nothing speaks: confirm the **Enable TTS** switch is on. Then check the right per-mode **Auto-play** toggle, or use the per-message **Speak** button. The **Speak** button and auto-play options only appear after TTS is enabled.
 - No voices in the dropdown: save the card with TTS enabled and a valid API key, then click **Refresh voices**. The official PocketTTS server uses Marinara's built-in list because it has no voice-list endpoint. For a compatible PocketTTS wrapper, verify that `<Base URL>/v1/voices` responds.
 - ElevenLabs will not speak: make sure you selected a real voice, not the "Select an ElevenLabs voice" placeholder. Also check that the **Model** is a speech model, not a voice-design model whose ID contains `ttv`.
-- A self-hosted TTS server on a local address is blocked: turn on the server setting `TTS_LOCAL_URLS_ENABLED`. It lets the app reach a local or private address for OpenAI-compatible or ElevenLabs-style servers. PocketTTS does not need this setting. See [Server Configuration Reference](../CONFIGURATION.md).
+- A self-hosted TTS server on a local address is blocked: turn on the server setting `TTS_LOCAL_URLS_ENABLED`. It lets the app reach a local or private address for OpenAI-compatible or ElevenLabs-style servers. PocketTTS, audio.cpp, and SGLang-Omni do not need this setting. See [Server Configuration Reference](../CONFIGURATION.md).
 - Test your setup fast: click the **Preview** button in the card to play a short sample line with your current settings.
 
 ## Related guides
