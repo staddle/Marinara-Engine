@@ -1132,17 +1132,63 @@ function readStableMachineId() {
   );
 }
 
-const CURRENT_HOST_ID = (() => {
-  const machineId = readStableMachineId();
-  if (!machineId) return null;
-  return createHash("sha256")
-    .update(`marinara-writer-lease-v2\n${process.platform}\n${machineId.toLowerCase()}`)
-    .digest("hex");
-})();
+// Containers commonly have no /etc/machine-id at all (minimal Debian/Alpine
+// base images don't provision one), so readStableMachineId() alone leaves
+// every container with a null host ID — meaning a v2 lease could never be
+// reclaimed after the container is recreated (a routine image update), even
+// though the same persistent volume is still attached. Anchor identity in
+// that volume itself as a fallback: a random ID written once next to the
+// data survives exactly as long as the guarantee we actually care about
+// (this is still "the same storage", even if the OS-level machine ID
+// changed or was never available).
+const persistedHostSaltCache = new Map<string, string>();
 
-function writerLeaseBelongsToCurrentHost(record: StorageWriterLeaseRecord) {
+function getOrCreatePersistedHostSalt(rootDir: string): string | null {
+  const cached = persistedHostSaltCache.get(rootDir);
+  if (cached) return cached;
+  const path = join(rootDir, ".host-id");
+  try {
+    const existing = readFileSync(path, "utf8").trim();
+    if (existing) {
+      persistedHostSaltCache.set(rootDir, existing);
+      return existing;
+    }
+  } catch {
+    // Falls through to create it below.
+  }
+  const generated = randomUUID();
+  try {
+    writeFileSync(path, generated, { encoding: "utf8", flag: "wx", mode: PRIVATE_FILE_MODE });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") return null;
+    try {
+      const raceWinner = readFileSync(path, "utf8").trim();
+      if (!raceWinner) return null;
+      persistedHostSaltCache.set(rootDir, raceWinner);
+      return raceWinner;
+    } catch {
+      return null;
+    }
+  }
+  persistedHostSaltCache.set(rootDir, generated);
+  return generated;
+}
+
+function computeHostId(rootDir: string): string | null {
+  const machineId = readStableMachineId();
+  if (machineId) {
+    return createHash("sha256")
+      .update(`marinara-writer-lease-v2\n${process.platform}\n${machineId.toLowerCase()}`)
+      .digest("hex");
+  }
+  const salt = getOrCreatePersistedHostSalt(rootDir);
+  if (!salt) return null;
+  return createHash("sha256").update(`marinara-writer-lease-v2-persisted\n${salt}`).digest("hex");
+}
+
+function writerLeaseBelongsToCurrentHost(record: StorageWriterLeaseRecord, currentHostId: string | null) {
   if (record.version === 2) {
-    return Boolean(CURRENT_HOST_ID && record.hostId === CURRENT_HOST_ID);
+    return Boolean(currentHostId && record.hostId === currentHostId);
   }
   if (CURRENT_LEGACY_HOST_ID && record.hostId === CURRENT_LEGACY_HOST_ID) return true;
 
@@ -1558,6 +1604,7 @@ class FileTableStore {
 
   private async acquireWriterLease() {
     const path = writerLeasePath(this.rootDir);
+    const hostId = computeHostId(this.rootDir);
     for (let attempt = 0; attempt < 10; attempt++) {
       const token = randomUUID();
       let created = false;
@@ -1567,7 +1614,7 @@ class FileTableStore {
         const record: StorageWriterLeaseRecord = {
           version: 2,
           pid: process.pid,
-          hostId: CURRENT_HOST_ID,
+          hostId,
           hostname: CURRENT_HOSTNAME,
           token,
           acquiredAt: new Date().toISOString(),
@@ -1602,7 +1649,8 @@ class FileTableStore {
         }
         throw err;
       }
-      const sameHost = writerLeaseBelongsToCurrentHost(existing.record) || isTermuxPrivateHomeStorage(this.rootDir);
+      const sameHost =
+        writerLeaseBelongsToCurrentHost(existing.record, hostId) || isTermuxPrivateHomeStorage(this.rootDir);
       const isRecycledSelfPid =
         existing.record.pid === process.pid && !OWN_PROCESS_LEASE_TOKENS.has(existing.record.token);
       const priorOwnerGone = isRecycledSelfPid || pidDefinitelyExited(existing.record.pid);

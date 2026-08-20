@@ -20,6 +20,7 @@ This file is the release-notes source of truth for Marinara Engine. Reuse these 
 
 ### Fixed
 
+- Docker/Linux deployments without an OS-level machine ID (most minimal container base images, including this project's own) no longer fail to reclaim their own storage writer lease every time the container is recreated (e.g. redeploying an updated image); host identity now falls back to a random ID persisted alongside the data volume when no stable machine ID is available, instead of always treating the fresh container as a different, conflicting host.
 - Docker containers now repair mixed ownership inside file storage and imported top-level data folders even when the data root already belongs to the runtime user, preventing private storage hardening from blocking startup (#5323).
 - Chat Settings now presents its transient Stop Active Generation action like the neighboring neutral controls instead of making it look like an enabled destructive preference.
 - Android APK chats now keep their intended message text size instead of letting WebView enlarge Conversation, Roleplay, and Game prose, the New Chat parameter toggle stays inside its card at larger text sizes, and card versioning switches now match the alignment and inactive color of other settings toggles (#5315, #5316, #5318).
