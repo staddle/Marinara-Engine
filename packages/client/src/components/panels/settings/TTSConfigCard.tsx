@@ -113,6 +113,27 @@ const TTS_SOURCE_DEFAULTS: Record<
     voice: "eve",
     idleText: "xAI Voice",
   },
+  audio_cpp: {
+    label: "audio.cpp",
+    baseUrl: "http://localhost:8081/v1",
+    model: "fish_audio",
+    voice: "",
+    idleText: "audio.cpp (voice cloning)",
+  },
+  fish_audio: {
+    label: "Fish Audio",
+    baseUrl: "https://api.fish.audio",
+    model: "s2-pro",
+    voice: "",
+    idleText: "Fish Audio (cloud voice cloning)",
+  },
+  sglang_omni: {
+    label: "SGLang Omni (Higgs TTS)",
+    baseUrl: "http://localhost:8000",
+    model: "bosonai/higgs-audio-v3-tts-4b",
+    voice: "default",
+    idleText: "SGLang Omni (Higgs TTS, streaming)",
+  },
 };
 
 const TTS_SOURCE_OPTIONS: Array<{ value: TTSSource; label: string }> = [
@@ -120,6 +141,9 @@ const TTS_SOURCE_OPTIONS: Array<{ value: TTSSource; label: string }> = [
   { value: "elevenlabs", label: "ElevenLabs" },
   { value: "pockettts", label: "PocketTTS" },
   { value: "xai", label: "xAI Voice" },
+  { value: "audio_cpp", label: "audio.cpp" },
+  { value: "fish_audio", label: "Fish Audio" },
+  { value: "sglang_omni", label: "SGLang Omni (Higgs TTS)" },
 ];
 
 function defaultSourceProfile(source: TTSSource): TTSSourceProfile {
@@ -139,6 +163,8 @@ function defaultSourceProfile(source: TTSSource): TTSSourceProfile {
     cloneReferenceText: "",
     cloneReferenceAudioFile: "",
     cloneReferenceAudioName: "",
+    audioCppVoiceRefPath: "",
+    fishAudioReferenceId: "",
     narratorVoiceEnabled: false,
     narratorVoice: defaults.voice,
     npcDefaultVoicesEnabled: false,
@@ -894,6 +920,8 @@ export function TTSConfigCard() {
   const [cloneReferenceAudioFile, setCloneReferenceAudioFile] = useState("");
   const [cloneReferenceAudioName, setCloneReferenceAudioName] = useState("");
   const [uploadingCloneReference, setUploadingCloneReference] = useState(false);
+  const [audioCppVoiceRefPath, setAudioCppVoiceRefPath] = useState("");
+  const [fishAudioReferenceId, setFishAudioReferenceId] = useState("");
   const [narratorVoiceEnabled, setNarratorVoiceEnabled] = useState(false);
   const [narratorVoice, setNarratorVoice] = useState("");
   const [npcDefaultVoicesEnabled, setNpcDefaultVoicesEnabled] = useState(false);
@@ -965,6 +993,8 @@ export function TTSConfigCard() {
     setCloneReferenceText(savedConfig.cloneReferenceText ?? "");
     setCloneReferenceAudioFile(savedConfig.cloneReferenceAudioFile ?? "");
     setCloneReferenceAudioName(savedConfig.cloneReferenceAudioName ?? "");
+    setAudioCppVoiceRefPath(savedConfig.audioCppVoiceRefPath ?? "");
+    setFishAudioReferenceId(savedConfig.fishAudioReferenceId ?? "");
     setNarratorVoiceEnabled(savedConfig.narratorVoiceEnabled ?? false);
     setNarratorVoice(savedConfig.narratorVoice ?? "");
     setNpcDefaultVoicesEnabled(savedConfig.npcDefaultVoicesEnabled ?? false);
@@ -1040,6 +1070,8 @@ export function TTSConfigCard() {
     cloneReferenceText,
     cloneReferenceAudioFile,
     cloneReferenceAudioName,
+    audioCppVoiceRefPath,
+    fishAudioReferenceId,
     narratorVoiceEnabled,
     narratorVoice,
     npcDefaultVoicesEnabled,
@@ -1121,6 +1153,8 @@ export function TTSConfigCard() {
     setCloneReferenceText(nextProfile.cloneReferenceText);
     setCloneReferenceAudioFile(nextProfile.cloneReferenceAudioFile);
     setCloneReferenceAudioName(nextProfile.cloneReferenceAudioName);
+    setAudioCppVoiceRefPath(nextProfile.audioCppVoiceRefPath);
+    setFishAudioReferenceId(nextProfile.fishAudioReferenceId);
     setNarratorVoiceEnabled(nextProfile.narratorVoiceEnabled);
     setNarratorVoice(nextProfile.narratorVoice);
     setNpcDefaultVoicesEnabled(nextProfile.npcDefaultVoicesEnabled);
@@ -1606,7 +1640,13 @@ export function TTSConfigCard() {
                   ? localizeUi("ui.panels.ttsconfigcard.thePocketttsOpenaiCompatibleServerRootItsDefaultIs")
                   : source === "xai"
                     ? localizeUi("ui.panels.ttsconfigcard.theXaiVoiceApiRootUseHttpsApiX")
-                    : localizeUi("ui.panels.ttsconfigcard.theOpenaiCompatibleTtsApiEndpointUseTheDefault")
+                    : source === "audio_cpp"
+                      ? localizeUi("ui.panels.ttsconfigcard.audioCppsSelfHostedServerRootItsDefaultIsHttp")
+                      : source === "fish_audio"
+                        ?localizeUi("ui.panels.ttsconfigcard.fishAudioSApiRootUseTheDefaultUnless")
+                        : source === "sglang_omni"
+                          ?localizeUi("ui.panels.ttsconfigcard.yourSglangOmniServerRootEGHttpLocalhost")
+                          : localizeUi("ui.panels.ttsconfigcard.theOpenaiCompatibleTtsApiEndpointUseTheDefault")
             }
           >
             <div className="relative">
@@ -1656,7 +1696,13 @@ export function TTSConfigCard() {
                   ? localizeUi("ui.panels.ttsconfigcard.pocketttsSelectsItsLanguageModelWhenYouStartThe")
                   : source === "xai"
                     ? localizeUi("ui.panels.ttsconfigcard.xaiVoiceCurrentlyUsesTheTtsEndpointThisIs")
-                    : localizeUi("ui.panels.ttsconfigcard.ttsModelToUseEGTts1Tts")
+                    : source === "audio_cpp"
+                      ? localizeUi("ui.panels.ttsconfigcard.theModelNameAudioCppShouldUseEGFishAudio")
+                      : source === "fish_audio"
+                        ?localizeUi("ui.panels.ttsconfigcard.fishAudioModelToUseSentAsARequest")
+                        : source === "sglang_omni"
+                          ?localizeUi("ui.panels.ttsconfigcard.theHuggingFaceModelIdServedBySglangOmni")
+                          : localizeUi("ui.panels.ttsconfigcard.ttsModelToUseEGTts1Tts")
             }
           >
             {source === "elevenlabs" ? (
@@ -1712,10 +1758,14 @@ export function TTSConfigCard() {
             )}
           </FieldRow>
 
-          {cloneSelectedAnywhere && (
+          {(cloneSelectedAnywhere || source === "sglang_omni") && (
             <FieldRow
               label={localizeUi("ui.panels.ttsconfigcard.referenceClip")}
-              help={localizeUi("ui.panels.ttsconfigcard.uploadAShortReferenceClipOfTheVoiceTo")}
+              help={
+                source === "sglang_omni"
+                  ?localizeUi("ui.panels.ttsconfigcard.optionalUploadAReferenceClipToCloneThatVoice")
+                  : localizeUi("ui.panels.ttsconfigcard.uploadAShortReferenceClipOfTheVoiceTo")
+              }
             >
               <div className="space-y-2">
                 <div className="flex items-center gap-2">
@@ -1769,7 +1819,41 @@ export function TTSConfigCard() {
             </FieldRow>
           )}
 
-          {cloneSelectedAnywhere && (
+          {source === "audio_cpp" && (
+            <FieldRow
+              label={localizeUi("ui.panels.ttsconfigcard.voiceReferencePath")}
+              help={localizeUi("ui.panels.ttsconfigcard.theServerSidePathToTheReferenceClipOnYour")}
+            >
+              <input
+                value={audioCppVoiceRefPath}
+                onChange={(e) => {
+                  setAudioCppVoiceRefPath(e.target.value);
+                  mark({ audioCppVoiceRefPath: e.target.value });
+                }}
+                className={cn(INPUT_CLS, "font-mono")}
+                placeholder={localizeUi("ui.panels.ttsconfigcard.voiceNameWav")}
+              />
+            </FieldRow>
+          )}
+
+          {source === "fish_audio" && (
+            <FieldRow
+              label={localizeUi("ui.panels.ttsconfigcard.voiceReferenceId")}
+              help={localizeUi("ui.panels.ttsconfigcard.theReferenceIdOfAVoiceAlreadyUploadedTo")}
+            >
+              <input
+                value={fishAudioReferenceId}
+                onChange={(e) => {
+                  setFishAudioReferenceId(e.target.value);
+                  mark({ fishAudioReferenceId: e.target.value });
+                }}
+                className={cn(INPUT_CLS, "font-mono")}
+                placeholder={localizeUi("ui.panels.ttsconfigcard.ce0fc6c205384fa49ddeb45e6d186c4d")}
+              />
+            </FieldRow>
+          )}
+
+          {(cloneSelectedAnywhere || source === "audio_cpp" || source === "sglang_omni") && (
             <FieldRow
               label={localizeUi("ui.panels.ttsconfigcard.referenceTranscript")}
               help={localizeUi("ui.panels.ttsconfigcard.theExactWordsSpokenInTheReferenceClipSent")}

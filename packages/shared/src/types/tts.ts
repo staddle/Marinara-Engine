@@ -3,7 +3,15 @@
 // ──────────────────────────────────────────────
 import { z } from "zod";
 
-export const ttsSourceSchema = z.enum(["openai", "elevenlabs", "pockettts", "xai"]);
+export const ttsSourceSchema = z.enum([
+  "openai",
+  "elevenlabs",
+  "pockettts",
+  "xai",
+  "audio_cpp",
+  "fish_audio",
+  "sglang_omni",
+]);
 export type TTSSource = z.infer<typeof ttsSourceSchema>;
 
 export const ttsAudioFormatSchema = z.enum(["mp3", "wav"]);
@@ -147,6 +155,10 @@ const ttsConfigBaseSchema = z.object({
   cloneReferenceAudioFile: z.string().default(""),
   /** Voice cloning: original filename of the uploaded reference clip, for display. */
   cloneReferenceAudioName: z.string().default(""),
+  /** audio.cpp only: server-side path to the reference clip, e.g. "voice\\name.wav". Reuses cloneReferenceText as its transcript. */
+  audioCppVoiceRefPath: z.string().default(""),
+  /** Fish Audio only: id of a pre-uploaded/managed voice model, sent as reference_id. */
+  fishAudioReferenceId: z.string().default(""),
   narratorVoiceEnabled: z.boolean().default(false),
   narratorVoice: z.string().default(""),
   npcDefaultVoicesEnabled: z.boolean().default(false),
@@ -200,6 +212,8 @@ export const ttsSourceProfileSchema = ttsConfigBaseSchema.pick({
   cloneReferenceText: true,
   cloneReferenceAudioFile: true,
   cloneReferenceAudioName: true,
+  audioCppVoiceRefPath: true,
+  fishAudioReferenceId: true,
   narratorVoiceEnabled: true,
   narratorVoice: true,
   npcDefaultVoicesEnabled: true,
@@ -215,6 +229,9 @@ export const ttsSourceProfilesSchema = z
     elevenlabs: ttsSourceProfileSchema.optional(),
     pockettts: ttsSourceProfileSchema.optional(),
     xai: ttsSourceProfileSchema.optional(),
+    audio_cpp: ttsSourceProfileSchema.optional(),
+    fish_audio: ttsSourceProfileSchema.optional(),
+    sglang_omni: ttsSourceProfileSchema.optional(),
   })
   .default({});
 export type TTSSourceProfiles = z.infer<typeof ttsSourceProfilesSchema>;
@@ -242,6 +259,8 @@ export function ttsSourceProfileFromConfig(config: TTSConfig): TTSSourceProfile 
     cloneReferenceText: config.cloneReferenceText,
     cloneReferenceAudioFile: config.cloneReferenceAudioFile,
     cloneReferenceAudioName: config.cloneReferenceAudioName,
+    audioCppVoiceRefPath: config.audioCppVoiceRefPath,
+    fishAudioReferenceId: config.fishAudioReferenceId,
     narratorVoiceEnabled: config.narratorVoiceEnabled,
     narratorVoice: config.narratorVoice,
     npcDefaultVoicesEnabled: config.npcDefaultVoicesEnabled,

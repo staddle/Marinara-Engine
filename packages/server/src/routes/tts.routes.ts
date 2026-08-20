@@ -8,6 +8,7 @@ import { createHash, randomUUID } from "crypto";
 import { readFile, access, mkdir, rename, unlink, writeFile } from "fs/promises";
 import { join, extname, basename } from "path";
 import { pipeline } from "stream/promises";
+import { Readable } from "stream";
 import {
   ttsConfigSchema,
   ttsSourceProfileFromConfig,
@@ -69,8 +70,28 @@ const TTS_SOURCE_DEFAULTS: Record<TTSSource, { baseUrl: string; model: string }>
     baseUrl: "https://api.x.ai/v1",
     model: "grok-tts",
   },
+  audio_cpp: {
+    baseUrl: "http://localhost:8081/v1",
+    model: "fish_audio",
+  },
+  fish_audio: {
+    baseUrl: "https://api.fish.audio",
+    model: "s2-pro",
+  },
+  sglang_omni: {
+    baseUrl: "http://localhost:8000",
+    model: "bosonai/higgs-audio-v3-tts-4b",
+  },
 };
-const TTS_SOURCES: readonly TTSSource[] = ["openai", "elevenlabs", "pockettts", "xai"];
+const TTS_SOURCES: readonly TTSSource[] = [
+  "openai",
+  "elevenlabs",
+  "pockettts",
+  "xai",
+  "audio_cpp",
+  "fish_audio",
+  "sglang_omni",
+];
 
 const ELEVENLABS_NON_TTS_MODELS = new Set(["eleven_ttv_v3", "eleven_multilingual_ttv_v2"]);
 const ELEVENLABS_TTS_MODEL_ALIASES: Record<string, string> = {
@@ -435,7 +456,12 @@ function configuredBaseUrl(cfg: TTSConfig) {
 }
 
 function allowLocalTtsUrl(cfg: TTSConfig) {
-  return cfg.source === "pockettts" || isTtsLocalUrlsEnabled();
+  return (
+    cfg.source === "pockettts" ||
+    cfg.source === "audio_cpp" ||
+    cfg.source === "sglang_omni" ||
+    isTtsLocalUrlsEnabled()
+  );
 }
 
 function elevenLabsApiRoot(baseUrl: string) {
@@ -656,6 +682,14 @@ function optionalBearerHeaders(apiKey: string) {
   return headers;
 }
 
+/** Fish Audio expects the model as a literal `model` header, not a body field. */
+function fishAudioHeaders(apiKey: string, model: string) {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+  if (model) headers["model"] = model;
+  return headers;
+}
+
 function openAiModelSupportsSpeechInstructions(model: string) {
   return /^gpt-4o/i.test(model.trim());
 }
@@ -850,6 +884,26 @@ async function buildCloneFormData(text: string, cfg: TTSConfig): Promise<FormDat
   }
 
   return form;
+}
+
+/**
+ * SGLang-Omni's `references[].audio_path` accepts a data URL, so the reference
+ * clip already uploaded for OpenAI-style cloning can be reused as-is — no
+ * shared filesystem path or network reachability between the two servers required.
+ */
+async function buildSglangOmniReferences(
+  cfg: TTSConfig,
+): Promise<Array<{ audio_path: string; text: string }> | undefined> {
+  if (!cfg.cloneReferenceAudioFile) return undefined;
+  try {
+    const filePath = cloneReferencePath(cfg.cloneReferenceAudioFile);
+    if (!existsSync(filePath)) return undefined;
+    const buffer = await readFile(filePath);
+    const mime = CLONE_REFERENCE_MIME_BY_EXT[extname(filePath).toLowerCase()] ?? "application/octet-stream";
+    return [{ audio_path: `data:${mime};base64,${buffer.toString("base64")}`, text: cfg.cloneReferenceText ?? "" }];
+  } catch {
+    return undefined;
+  }
 }
 
 export async function fetchAllElevenLabsVoiceOptions(baseUrl: string, apiKey: string): Promise<VoiceOption[]> {
@@ -1198,6 +1252,18 @@ export async function ttsRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: "xAI API key is not configured" });
     }
 
+    if (cfg.source === "audio_cpp" && !cfg.audioCppVoiceRefPath) {
+      return reply.status(400).send({ error: "audio.cpp voice reference path is not configured" });
+    }
+
+    if (cfg.source === "fish_audio" && !cfg.apiKey) {
+      return reply.status(400).send({ error: "Fish Audio API key is not configured" });
+    }
+
+    if (cfg.source === "fish_audio" && !cfg.fishAudioReferenceId) {
+      return reply.status(400).send({ error: "Fish Audio voice reference ID is not configured" });
+    }
+
     const requestVoice = resolveTTSRequestVoice(cfg.voice, voice);
 
     if (cfg.source === "elevenlabs" && !requestVoice) {
@@ -1215,6 +1281,9 @@ export async function ttsRoutes(app: FastifyInstance) {
     const pocketTtsApiMode = usePocketTtsSpeech ? await detectPocketTtsApiMode(cfg) : null;
     const useOfficialPocketTtsSpeech = pocketTtsApiMode === "official";
     const useXaiSpeech = cfg.source === "xai";
+    const useAudioCppSpeech = cfg.source === "audio_cpp";
+    const useFishAudioSpeech = cfg.source === "fish_audio";
+    const useSglangOmniSpeech = cfg.source === "sglang_omni";
     const configuredModel = (cfg.model || TTS_SOURCE_DEFAULTS[cfg.source].model).trim();
     const model = useNanoGptSpeech
       ? normalizeNanoGptTtsModelId(configuredModel)
@@ -1252,7 +1321,11 @@ export async function ttsRoutes(app: FastifyInstance) {
             ? `${base}/tts`
             : cfg.source === "elevenlabs"
               ? `${elevenLabsApiRoot(base)}/v1/text-to-speech/${encodeURIComponent(requestVoice)}?output_format=mp3_44100_128`
-              : `${base}/audio/speech`;
+              : useFishAudioSpeech
+                ? `${base}/v1/tts`
+                : useSglangOmniSpeech
+                  ? `${base}/v1/audio/speech`
+                  : `${base}/audio/speech`;
     const providerText = cfg.source === "elevenlabs" ? buildElevenLabsTextInput(text, tone) : text;
     const elevenLabsLanguageCode = cfg.elevenLabsLanguageCode?.trim();
     const includeSpeakerInstructions = cfg.source !== "elevenlabs";
@@ -1270,6 +1343,7 @@ export async function ttsRoutes(app: FastifyInstance) {
     let providerRes: Response;
     try {
       const cloneForm = useOpenAiClone ? await buildCloneFormData(providerText, cfg) : null;
+      const sglangOmniReferences = useSglangOmniSpeech ? await buildSglangOmniReferences(cfg) : undefined;
 
       providerRes = await safeFetch(url, {
         method: "POST",
@@ -1281,7 +1355,9 @@ export async function ttsRoutes(app: FastifyInstance) {
               ? elevenLabsHeaders(cfg.apiKey)
               : useOpenAiClone || useOfficialPocketTtsSpeech
                 ? optionalBearerHeaders(cfg.apiKey)
-                : openAiHeaders(cfg.apiKey),
+                : useFishAudioSpeech
+                  ? fishAudioHeaders(cfg.apiKey, model)
+                  : openAiHeaders(cfg.apiKey),
         body: cloneForm
           ? cloneForm
           : useNanoGptSpeech
@@ -1317,14 +1393,38 @@ export async function ttsRoutes(app: FastifyInstance) {
                 })
               : useOfficialPocketTtsSpeech
                 ? pocketTtsForm
-                : JSON.stringify({
-                    model,
-                    input: providerText,
-                    voice: requestVoice || (usePocketTtsSpeech ? "alba" : ""),
-                    ...(includeSpeed ? { speed: cfg.speed } : {}),
-                    response_format: audioFormat,
-                    ...(speechInstructions ? { instructions: speechInstructions } : {}),
-                  }),
+                : useAudioCppSpeech
+                  ? JSON.stringify({
+                      model,
+                      input: providerText,
+                      // audio.cpp's own example used 96 for a ~70-char input; scale from that
+                      // ratio with headroom so longer chunks don't get cut off mid-sentence.
+                      max_tokens: Math.min(4096, Math.max(96, Math.ceil(providerText.length * 1.5))),
+                      voice_ref: { type: "path", path: cfg.audioCppVoiceRefPath },
+                      reference_text: cfg.cloneReferenceText,
+                    })
+                  : useFishAudioSpeech
+                    ? JSON.stringify({
+                        text: providerText,
+                        reference_id: cfg.fishAudioReferenceId,
+                        format: audioFormat,
+                      })
+                    : useSglangOmniSpeech
+                      ? JSON.stringify({
+                          model,
+                          voice: requestVoice || "default",
+                          input: providerText,
+                          response_format: audioFormat,
+                          ...(sglangOmniReferences ? { references: sglangOmniReferences } : {}),
+                        })
+                      : JSON.stringify({
+                      model,
+                      input: providerText,
+                      voice: requestVoice || (usePocketTtsSpeech ? "alba" : ""),
+                      ...(includeSpeed ? { speed: cfg.speed } : {}),
+                      response_format: audioFormat,
+                      ...(speechInstructions ? { instructions: speechInstructions } : {}),
+                    }),
         signal: AbortSignal.timeout(60_000),
         policy: {
           allowLocal: allowLocalTtsUrl(cfg),
@@ -1369,5 +1469,69 @@ export async function ttsRoutes(app: FastifyInstance) {
     reply.header("Content-Type", responseContentType);
     reply.header("Content-Length", String(audioBuffer.byteLength));
     return reply.send(Buffer.from(audioBuffer));
+  });
+
+  /**
+   * POST /api/tts/speak-stream
+   * SGLang-Omni only: relays raw PCM audio bytes to the browser as the vocoder
+   * emits them, instead of waiting for the whole clip — lets Call Mode start
+   * playing a line before its synthesis has finished. Every other source only
+   * supports the request/response shape of /speak above.
+   */
+  app.post("/speak-stream", async (req, reply) => {
+    const { text, voice } = speakSchema.parse(req.body);
+    const cfg = await loadConfig(storage);
+
+    if (!cfg.enabled) {
+      return reply.status(400).send({ error: "TTS is not enabled" });
+    }
+    if (cfg.source !== "sglang_omni") {
+      return reply.status(400).send({ error: "Streaming speech requires the SGLang Omni source" });
+    }
+
+    const base = configuredBaseUrl(cfg);
+    const model = (cfg.model || TTS_SOURCE_DEFAULTS[cfg.source].model).trim();
+    const requestVoice = resolveTTSRequestVoice(cfg.voice, voice);
+    const references = await buildSglangOmniReferences(cfg);
+
+    let providerRes: Response;
+    try {
+      providerRes = await safeFetch(`${base}/v1/audio/speech`, {
+        method: "POST",
+        headers: openAiHeaders(cfg.apiKey),
+        body: JSON.stringify({
+          model,
+          voice: requestVoice || "default",
+          input: text,
+          stream: true,
+          response_format: "pcm",
+          ...(references ? { references } : {}),
+        }),
+        signal: AbortSignal.timeout(60_000),
+        policy: {
+          allowLocal: allowLocalTtsUrl(cfg),
+          allowedProtocols: ["https:", "http:"],
+          flagName: "TTS_LOCAL_URLS_ENABLED",
+        },
+        maxResponseBytes: MAX_TTS_AUDIO_BYTES,
+        bufferResponse: false,
+      });
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error && err.name === "TimeoutError" ? "TTS request timed out" : "TTS provider unreachable";
+      req.log.error(err, "TTS streaming provider request failed");
+      return reply.status(502).send({ error: msg });
+    }
+
+    if (!providerRes.ok || !providerRes.body) {
+      const body = await providerRes.text().catch(() => "");
+      return reply
+        .status(502)
+        .send({ error: `TTS provider returned ${providerRes.status}`, detail: readProviderErrorDetail(body) });
+    }
+
+    reply.header("Content-Type", "audio/pcm");
+    reply.header("X-Sample-Rate", providerRes.headers.get("x-sample-rate") ?? "24000");
+    return reply.send(Readable.fromWeb(providerRes.body as import("stream/web").ReadableStream<Uint8Array>));
   });
 }

@@ -13,6 +13,8 @@ export interface TTSVoiceRequest {
   tone?: string;
   voice?: string;
   pauseAfterMs?: number;
+  /** SGLang-Omni only: play via progressive PCM streaming instead of a single buffered clip. */
+  streamProviderSynthesis?: boolean;
 }
 
 export interface CachedTTSVoiceRequest extends TTSVoiceRequest {
@@ -353,6 +355,47 @@ export function splitTTSChunks(value: string): string[] {
     .flatMap((chunk) => splitCleanTTSInputIntoChunks(chunk));
 }
 
+const STREAMING_SENTENCE_END_RE = /[.!?…。！？]+["')\]}»”’]*(?=\s)/g;
+
+export interface ReadyTTSSpeech {
+  /** Newly-complete sentence(s) since `spokenUpTo`, ready to speak now. */
+  readyText: string;
+  /** Updated cursor — pass this back in as `spokenUpTo` on the next call. */
+  nextCursor: number;
+}
+
+/**
+ * Finds newly-complete sentence(s) in a message that's still streaming in,
+ * so Call Mode / autoplay can start speaking before the whole message
+ * finishes generating. Only trusts a sentence boundary that already has more
+ * text after it in the live buffer — the trailing, still-growing fragment
+ * (including the message's final sentence, which never gets that
+ * confirmation until the stream ends) is deliberately left for the caller to
+ * speak once streaming completes, rather than guessed at early.
+ *
+ * Bails out (returns null) for text containing `<speaker="...">` tags: their
+ * multi-speaker/dialogue extraction in `buildTTSVoiceRequests` depends on
+ * seeing the whole message and isn't safe to run against a partial stream
+ * that might be mid-tag.
+ */
+export function extractReadyTTSSpeech(fullText: string, spokenUpTo: number): ReadyTTSSpeech | null {
+  if (/<speaker="[^"]*">/i.test(fullText)) return null;
+
+  const unspoken = fullText.slice(spokenUpTo);
+  if (!unspoken.trim()) return null;
+
+  let lastEnd = -1;
+  for (const match of unspoken.matchAll(STREAMING_SENTENCE_END_RE)) {
+    const end = match.index + match[0].length;
+    if (end < unspoken.length) lastEnd = end;
+  }
+  if (lastEnd <= 0) return null;
+
+  const readyText = unspoken.slice(0, lastEnd);
+  if (!readyText.trim()) return null;
+  return { readyText, nextCursor: spokenUpTo + lastEnd };
+}
+
 export function buildTTSVoiceRequests(
   text: string,
   config: TTSConfig,
@@ -387,6 +430,7 @@ export function buildTTSVoiceRequests(
       speaker,
       tone: utterance.tone,
       voice,
+      ...(config.source === "sglang_omni" ? { streamProviderSynthesis: true } : {}),
       ...(config.dialogueOnly &&
       utteranceIndex < utterances.length - 1 &&
       chunkIndex === chunks.length - 1 &&

@@ -3,6 +3,7 @@
 // ──────────────────────────────────────────────
 import { TTS_DIALOGUE_PAUSE_MAX_SECONDS } from "@marinara-engine/shared";
 import { getOrCreateCachedTTSAudioBlob } from "./tts-audio-cache";
+import { playPcmStream, type TTSPcmStreamPlayer } from "./tts-pcm-stream-player";
 
 export type TTSState = "idle" | "loading" | "playing" | "paused" | "error";
 
@@ -29,12 +30,23 @@ export interface TTSSpeakRequest {
   cacheKey?: string;
   cacheAliases?: string[];
   activeId?: string | null;
+  /** SGLang-Omni only: play via progressive PCM streaming instead of a single buffered clip. */
+  streamProviderSynthesis?: boolean;
 }
 
 export interface TTSSpeakSequenceOptions extends Pick<TTSSpeakOptions, "signal" | "throwOnError" | "volume" | "muted"> {
   progressive?: boolean;
   onChunkStart?: (request: TTSSpeakRequest, index: number) => void;
   onChunkEnd?: (request: TTSSpeakRequest, index: number) => void;
+}
+
+export interface TTSStreamingSequenceHandle {
+  /** Queue newly-available request(s) for playback, in order. */
+  push(requests: TTSSpeakRequest[]): void;
+  /** Signal that no more requests will be pushed; playback finishes normally once the queue drains. */
+  finish(): void;
+  /** Stop playback and drop any unplayed queued requests immediately. */
+  abort(): void;
 }
 
 function clampPlaybackVolume(volume: number | undefined): number {
@@ -67,6 +79,22 @@ function waitForBlobWithAbort(promise: Promise<Blob>, signal?: AbortSignal): Pro
 
 function playbackAbortError(): DOMException {
   return new DOMException("TTS playback aborted", "AbortError");
+}
+
+export async function readTTSApiError(res: Response): Promise<string> {
+  const fallback = `TTS request failed (${res.status})`;
+  const raw = await res.text().catch(() => "");
+  if (!raw.trim()) return fallback;
+
+  try {
+    const data = JSON.parse(raw) as Record<string, unknown>;
+    const error = typeof data.error === "string" ? data.error : "";
+    const detail = typeof data.detail === "string" ? data.detail : "";
+    const message = typeof data.message === "string" ? data.message : "";
+    return [error || message || fallback, detail].filter(Boolean).join(": ");
+  } catch {
+    return `${fallback}: ${raw.slice(0, 500)}`;
+  }
 }
 
 export function normalizeTTSPlaybackDelayMs(delayMs: number | undefined): number {
@@ -169,6 +197,7 @@ class TTSService {
   private listeners = new Set<StateListener>();
   private livePlaybackVolume: number | null = null;
   private livePlaybackMuted: boolean | null = null;
+  private currentPcmPlayer: TTSPcmStreamPlayer | null = null;
 
   // ── Listeners ─────────────────────────────────
 
@@ -196,19 +225,7 @@ class TTSService {
   }
 
   private async readError(res: Response): Promise<string> {
-    const fallback = `TTS request failed (${res.status})`;
-    const raw = await res.text().catch(() => "");
-    if (!raw.trim()) return fallback;
-
-    try {
-      const data = JSON.parse(raw) as Record<string, unknown>;
-      const error = typeof data.error === "string" ? data.error : "";
-      const detail = typeof data.detail === "string" ? data.detail : "";
-      const message = typeof data.message === "string" ? data.message : "";
-      return [error || message || fallback, detail].filter(Boolean).join(": ");
-    } catch {
-      return `${fallback}: ${raw.slice(0, 500)}`;
-    }
+    return readTTSApiError(res);
   }
 
   private isCurrentSequence(sequence: number): boolean {
@@ -236,6 +253,7 @@ class TTSService {
   setCurrentPlaybackVolume(volume: number, muted = false): void {
     this.livePlaybackVolume = clampPlaybackVolume(volume);
     this.livePlaybackMuted = muted;
+    this.currentPcmPlayer?.setVolume(volume, muted);
     if (!this.audio) return;
     this.applyPlaybackOptions(this.audio, { volume, muted });
   }
@@ -594,6 +612,279 @@ class TTSService {
     this.setState("idle");
   }
 
+  /**
+   * Like speakSequence, but the request list can keep growing after playback
+   * has already started — for speaking a message's completed sentences as
+   * they stream in instead of waiting for the whole message to finish.
+   * Unlike speakSequence's `progressive` mode, chunks are fetched only once
+   * dequeued (no one-ahead prefetch), trading a small per-chunk gap for a
+   * much simpler dynamic-queue implementation.
+   */
+  startStreamingSequence(id?: string, options: TTSSpeakSequenceOptions = {}): TTSStreamingSequenceHandle {
+    this.stop();
+    this.beginPlaybackOptions(options);
+    const sequence = ++this.sequence;
+    this.lastError = null;
+    this.setState("loading", id ?? null);
+
+    const abortController = new AbortController();
+    this.abortController = abortController;
+    const abortFromCaller = () => abortController.abort();
+    const detachAbortSignal = () => options.signal?.removeEventListener("abort", abortFromCaller);
+    if (options.signal?.aborted) {
+      abortController.abort();
+    } else {
+      options.signal?.addEventListener("abort", abortFromCaller, { once: true });
+    }
+
+    const pending: TTSSpeakRequest[] = [];
+    let finished = false;
+    let wake: (() => void) | null = null;
+
+    const waitForWork = (): Promise<boolean> =>
+      new Promise((resolve) => {
+        if (abortController.signal.aborted || pending.length > 0 || finished) {
+          resolve(pending.length > 0);
+          return;
+        }
+        wake = () => resolve(pending.length > 0);
+      });
+
+    const push = (requests: TTSSpeakRequest[]) => {
+      if (finished || abortController.signal.aborted) return;
+      const playable = requests.filter((request) => request.text.trim().length > 0);
+      if (playable.length === 0) return;
+      pending.push(...playable);
+      wake?.();
+      wake = null;
+    };
+    const finish = () => {
+      finished = true;
+      wake?.();
+      wake = null;
+    };
+    const abort = () => abortController.abort();
+
+    const fetchChunk = async (request: TTSSpeakRequest, index: number) => {
+      try {
+        const blob = await this.getAudioBlob(request.text, {
+          speaker: request.speaker,
+          tone: request.tone,
+          voice: request.voice,
+          signal: abortController.signal,
+          cacheKey: request.cacheKey,
+          cacheAliases: request.cacheAliases,
+        });
+        return { ok: true as const, blob, request, index };
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error("TTS request failed");
+        return { ok: false as const, error, request, index };
+      }
+    };
+
+    const playBlob = async (blob: Blob, request: TTSSpeakRequest, index: number): Promise<void> => {
+      if (!this.isCurrentSequence(sequence)) return;
+      this.cleanup();
+
+      const objectUrl = URL.createObjectURL(blob);
+      if (!this.isCurrentSequence(sequence)) {
+        URL.revokeObjectURL(objectUrl);
+        return;
+      }
+      this.currentObjectUrl = objectUrl;
+
+      const audio = new Audio(objectUrl);
+      this.applyPlaybackOptions(audio, options);
+      this.audio = audio;
+      const runChunkStart = () => {
+        try {
+          options.onChunkStart?.(request, index);
+        } catch (err) {
+          console.warn("[TTS] Chunk start callback failed:", err);
+        }
+      };
+      const runChunkEnd = () => {
+        try {
+          options.onChunkEnd?.(request, index);
+        } catch (err) {
+          console.warn("[TTS] Chunk end callback failed:", err);
+        }
+      };
+
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const settle = (callback: () => void) => {
+          if (settled) return;
+          settled = true;
+          abortController.signal.removeEventListener("abort", onAbort);
+          callback();
+        };
+        const onAbort = () => {
+          try {
+            audio.pause();
+          } catch {
+            /* ignore interrupted playback cleanup */
+          }
+          settle(resolve);
+        };
+        const fail = (error: Error) => {
+          if (!this.isCurrentSequence(sequence) || this.audio !== audio) return;
+          settle(() => {
+            this.cleanup();
+            this.lastError = error.message;
+            this.setState("error");
+            reject(error);
+          });
+        };
+
+        abortController.signal.addEventListener("abort", onAbort, { once: true });
+        audio.onended = () => {
+          if (!this.isCurrentSequence(sequence) || this.audio !== audio) return;
+          settle(() => {
+            try {
+              runChunkEnd();
+            } finally {
+              this.cleanup();
+              resolve();
+            }
+          });
+        };
+        audio.onerror = () => {
+          try {
+            runChunkEnd();
+          } finally {
+            fail(new Error("Audio playback failed"));
+          }
+        };
+
+        void playWhenAvailable(audio, abortController.signal)
+          .then(() => {
+            if (!this.isCurrentSequence(sequence) || this.audio !== audio) return;
+            runChunkStart();
+            this.setState("playing", request.activeId ?? id ?? null);
+          })
+          .catch((err) => fail(err instanceof Error ? err : new Error("Browser blocked audio playback")));
+      });
+    };
+
+    const playStreamingChunk = async (request: TTSSpeakRequest, index: number): Promise<void> => {
+      if (!this.isCurrentSequence(sequence)) return;
+      this.cleanup();
+      const runChunkStart = () => {
+        try {
+          options.onChunkStart?.(request, index);
+        } catch (err) {
+          console.warn("[TTS] Chunk start callback failed:", err);
+        }
+      };
+      const runChunkEnd = () => {
+        try {
+          options.onChunkEnd?.(request, index);
+        } catch (err) {
+          console.warn("[TTS] Chunk end callback failed:", err);
+        }
+      };
+
+      try {
+        await playPcmStream(request.text, {
+          voice: request.voice,
+          speaker: request.speaker,
+          tone: request.tone,
+          signal: abortController.signal,
+          volume: this.livePlaybackVolume ?? options.volume,
+          muted: this.livePlaybackMuted ?? options.muted,
+          onFirstAudio: () => {
+            if (!this.isCurrentSequence(sequence)) return;
+            runChunkStart();
+            this.setState("playing", request.activeId ?? id ?? null);
+          },
+          onPlayerReady: (player) => {
+            this.currentPcmPlayer = player;
+          },
+        });
+        this.currentPcmPlayer = null;
+        if (!abortController.signal.aborted) runChunkEnd();
+      } catch (err) {
+        this.currentPcmPlayer = null;
+        if (err instanceof Error && err.name === "AbortError") return;
+        if (!this.isCurrentSequence(sequence)) return;
+        this.lastError = err instanceof Error ? err.message : "TTS streaming playback failed";
+        this.setState("error");
+        throw err instanceof Error ? err : new Error("TTS streaming playback failed");
+      }
+    };
+
+    void (async () => {
+      let index = 0;
+      let played = 0;
+      const fetchErrors: Error[] = [];
+
+      for (;;) {
+        const hasWork = await waitForWork();
+        if (!this.isCurrentSequence(sequence) || abortController.signal.aborted) break;
+        if (!hasWork) break; // finished() was called and the queue is drained
+
+        const request = pending.shift()!;
+        const currentIndex = index;
+        index += 1;
+
+        if (request.streamProviderSynthesis) {
+          try {
+            await playStreamingChunk(request, currentIndex);
+            await waitForPlaybackDelay(request.pauseAfterMs, abortController.signal);
+            played += 1;
+          } catch (err) {
+            if (err instanceof Error && err.name === "AbortError") break;
+            detachAbortSignal();
+            if (this.abortController === abortController) this.abortController = null;
+            return;
+          }
+          if (!this.isCurrentSequence(sequence)) break;
+          continue;
+        }
+
+        const result = await fetchChunk(request, currentIndex);
+        if (!this.isCurrentSequence(sequence)) break;
+
+        if (!result.ok) {
+          if (result.error.name === "AbortError") break;
+          fetchErrors.push(result.error);
+          continue;
+        }
+
+        try {
+          await playBlob(result.blob, result.request, result.index);
+          await waitForPlaybackDelay(result.request.pauseAfterMs, abortController.signal);
+          played += 1;
+        } catch (err) {
+          if (err instanceof Error && err.name === "AbortError") break;
+          detachAbortSignal();
+          if (this.abortController === abortController) this.abortController = null;
+          return;
+        }
+        if (!this.isCurrentSequence(sequence)) break;
+      }
+
+      detachAbortSignal();
+      if (this.abortController === abortController) this.abortController = null;
+      if (!this.isCurrentSequence(sequence)) return;
+      if (fetchErrors.length > 0) {
+        console.warn("[TTS] Skipped failed audio chunks:", fetchErrors);
+        this.lastError =
+          fetchErrors.length === 1
+            ? fetchErrors[0]!.message
+            : `${fetchErrors.length} TTS chunks failed; first error: ${fetchErrors[0]!.message}`;
+      }
+      if (played === 0 && fetchErrors.length > 0 && fetchErrors.length === index) {
+        this.setState("error");
+        return;
+      }
+      this.setState("idle");
+    })();
+
+    return { push, finish, abort };
+  }
+
   /** Stop any in-progress fetch or playback. */
   stop(): void {
     this.sequence += 1;
@@ -606,6 +897,10 @@ class TTSService {
       this.audio.onended = null;
       this.audio.onerror = null;
       this.audio = null;
+    }
+    if (this.currentPcmPlayer) {
+      this.currentPcmPlayer.stop();
+      this.currentPcmPlayer = null;
     }
 
     this.cleanup();

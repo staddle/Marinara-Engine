@@ -69,6 +69,7 @@ import {
   type GeneratedSceneVideo,
   type SpritePlacement,
   type SpriteSide,
+  type TTSConfig,
   type WeekSchedule,
 } from "@marinara-engine/shared";
 import { resolveLiveConversationStatus } from "../../lib/conversation-presence-status";
@@ -80,9 +81,14 @@ import { useEncounter } from "../../hooks/use-encounter";
 import { useScene } from "../../hooks/use-scene";
 import { useEncounterStore } from "../../stores/encounter.store";
 import { useTranslationStore } from "../../stores/translation.store";
-import { ttsService } from "../../lib/tts-service";
+import { ttsService, type TTSStreamingSequenceHandle } from "../../lib/tts-service";
 import { useTTSConfig } from "../../hooks/use-tts";
-import { buildTTSVoiceRequests, normalizeTTSCharacterName, withTTSVoiceRequestCacheKeys } from "../../lib/tts-dialogue";
+import {
+  buildTTSVoiceRequests,
+  extractReadyTTSSpeech,
+  normalizeTTSCharacterName,
+  withTTSVoiceRequestCacheKeys,
+} from "../../lib/tts-dialogue";
 import {
   findLatestTTSAutoplayMessage,
   getTTSAutoplayRevision,
@@ -254,6 +260,11 @@ function resolveExpressionAvatarSpriteUrl(sprites: SpriteInfo[] | undefined, exp
 
 function suppressBuiltInProfessorMariForMode(mode: string | undefined): boolean {
   return mode === "game" || mode === "roleplay";
+}
+
+function shouldAutoplayTTSForMode(cfg: TTSConfig | null | undefined, mode: string | undefined): boolean {
+  if (!cfg?.enabled) return false;
+  return mode === "roleplay" ? cfg.autoplayRP : mode === "game" ? false : cfg.autoplayConvo;
 }
 
 const INTUITIVE_SWIPE_MIN_DISTANCE = 56;
@@ -2481,6 +2492,13 @@ export const ChatArea = memo(function ChatArea() {
     beforeRevision: string | null;
     failed: boolean;
   } | null>(null);
+  // How much of the streaming message's live text has already been sent to
+  // TTS, plus the in-progress playback sequence it's being spoken into (if
+  // any) — lets autoplay start on the first finished sentence instead of
+  // waiting for the whole message to generate.
+  const incrementalTTSCursorRef = useRef(0);
+  const incrementalTTSHandleRef = useRef<TTSStreamingSequenceHandle | null>(null);
+  const streamBuffer = useChatStore((s) => s.streamBuffer);
   useEffect(() => {
     const handleGenerationError = (event: Event) => {
       const chatId = (event as CustomEvent<{ chatId?: string }>).detail?.chatId;
@@ -2513,20 +2531,30 @@ export const ChatArea = memo(function ChatArea() {
             failed: false,
           }
         : null;
+      incrementalTTSHandleRef.current?.abort();
+      incrementalTTSHandleRef.current = null;
+      incrementalTTSCursorRef.current = 0;
       return;
     }
     if (!wasStreaming || isStreaming) return; // only fire on true → false transition
 
     const generation = ttsGenerationRef.current;
     ttsGenerationRef.current = null;
-    if (!activeChatId || generation?.chatId !== activeChatId) return;
+    const incrementalHandle = incrementalTTSHandleRef.current;
+    incrementalTTSHandleRef.current = null;
+    const spokenUpTo = incrementalTTSCursorRef.current;
+    incrementalTTSCursorRef.current = 0;
+    if (!activeChatId || generation?.chatId !== activeChatId) {
+      incrementalHandle?.abort();
+      return;
+    }
 
     const cfg = ttsConfigRef.current;
-    if (!cfg?.enabled) return;
-
     const mode = chatModeRef.current;
-    const shouldAutoplay = mode === "roleplay" ? cfg.autoplayRP : mode === "game" ? false : cfg.autoplayConvo;
-    if (!shouldAutoplay) return;
+    if (!shouldAutoplayTTSForMode(cfg, mode)) {
+      incrementalHandle?.abort();
+      return;
+    }
 
     const msgs = messagesRef.current ?? [];
     const lastMsg = findLatestTTSAutoplayMessage(msgs);
@@ -2537,8 +2565,10 @@ export const ChatArea = memo(function ChatArea() {
         message: lastMsg,
         generationFailed: generation.failed,
       })
-    )
+    ) {
+      incrementalHandle?.abort();
       return;
+    }
 
     const fallbackSpeaker =
       lastMsg.role === "narrator"
@@ -2546,20 +2576,82 @@ export const ChatArea = memo(function ChatArea() {
         : lastMsg.characterId
           ? characterMap.get(lastMsg.characterId)?.name
           : undefined;
+    // Speak only what the incremental effect below hasn't already sent — its
+    // conservatively-held-back trailing fragment (always at least the final
+    // sentence, which never gets "more text after it" to confirm it's done
+    // until the stream ends), or the whole message if incremental speech
+    // never started for it (disabled, dialogue-tagged, or config change).
+    const remainingText = lastMsg.content.slice(spokenUpTo);
+    if (!remainingText.trim()) {
+      incrementalHandle?.finish();
+      return;
+    }
     const ttsRequests = buildTTSVoiceRequests(
-      lastMsg.content,
-      cfg,
+      remainingText,
+      cfg!,
       fallbackSpeaker,
       lastMsg.characterId,
       resolveTTSCharacterId,
     );
+    if (ttsRequests.length === 0) {
+      incrementalHandle?.finish();
+      return;
+    }
+
+    const requestsWithCacheKeys = withTTSVoiceRequestCacheKeys(ttsRequests, cfg!, lastMsg.id);
+    if (incrementalHandle) {
+      incrementalHandle.push(requestsWithCacheKeys);
+      incrementalHandle.finish();
+    } else {
+      void ttsService.speakSequence(requestsWithCacheKeys, lastMsg.id, {
+        progressive: cfg!.progressivePlayback,
+        volume: ttsLineVolume / 100,
+      });
+    }
+  }, [activeChatId, characterMap, isStreaming, resolveTTSCharacterId, ttsLineVolume]);
+
+  // Incremental TTS — speak each sentence as it finishes streaming in,
+  // instead of waiting for the whole message. Runs alongside the effect
+  // above, which picks up whatever trailing fragment this one held back.
+  useEffect(() => {
+    if (!isStreaming || !activeChatId) return;
+    const generation = ttsGenerationRef.current;
+    if (!generation || generation.chatId !== activeChatId) return;
+
+    const cfg = ttsConfigRef.current;
+    if (!shouldAutoplayTTSForMode(cfg, chatModeRef.current)) return;
+    // Multi-speaker/dialogue extraction needs the full message; leave those
+    // entirely to the end-of-stream effect above.
+    if (cfg!.dialogueOnly) return;
+
+    const ready = extractReadyTTSSpeech(streamBuffer, incrementalTTSCursorRef.current);
+    if (!ready) return;
+
+    const msgs = messagesRef.current ?? [];
+    const streamingMsg = findLatestTTSAutoplayMessage(msgs);
+    const fallbackSpeaker =
+      streamingMsg?.role === "narrator"
+        ? "Narrator"
+        : streamingMsg?.characterId
+          ? characterMap.get(streamingMsg.characterId)?.name
+          : undefined;
+    const ttsRequests = buildTTSVoiceRequests(
+      ready.readyText,
+      cfg!,
+      fallbackSpeaker,
+      streamingMsg?.characterId,
+      resolveTTSCharacterId,
+    );
+    incrementalTTSCursorRef.current = ready.nextCursor;
     if (ttsRequests.length === 0) return;
 
-    void ttsService.speakSequence(withTTSVoiceRequestCacheKeys(ttsRequests, cfg, lastMsg.id), lastMsg.id, {
-      progressive: cfg.progressivePlayback,
-      volume: ttsLineVolume / 100,
-    });
-  }, [activeChatId, characterMap, isStreaming, resolveTTSCharacterId, ttsLineVolume]);
+    if (!incrementalTTSHandleRef.current) {
+      incrementalTTSHandleRef.current = ttsService.startStreamingSequence(streamingMsg?.id, {
+        volume: ttsLineVolume / 100,
+      });
+    }
+    incrementalTTSHandleRef.current.push(ttsRequests);
+  }, [activeChatId, characterMap, isStreaming, resolveTTSCharacterId, streamBuffer, ttsLineVolume]);
 
   const newestMsgId = msgData?.pages[0]?.[msgData.pages[0].length - 1]?.id;
   const newestMsgSwipeIndex = msgData?.pages[0]?.[msgData.pages[0].length - 1]?.activeSwipeIndex;
