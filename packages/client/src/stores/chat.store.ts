@@ -212,6 +212,12 @@ interface ChatState {
   streamBuffer: string;
   /** Per-chat stream text for active generations, so switching chats does not lose in-flight UI state. */
   streamBuffers: Map<string, string>;
+  /**
+   * Chat with an active Call Mode voice session, or null. Lets the TTS autoplay
+   * effects speak replies during a call regardless of the per-mode autoplay
+   * toggles, which govern typed chatting only.
+   */
+  activeCallChatId: string | null;
   /** Chat IDs whose live stream has been replaced by the saved message while agents continue. */
   committedStreamChatIds: Set<string>;
   /** Persisted assistant row currently represented by each chat's live streaming row. */
@@ -285,6 +291,7 @@ interface ChatState {
   appendStreamBuffer: (text: string, chatId?: string) => void;
   setStreamBuffer: (text: string, chatId?: string) => void;
   clearStreamBuffer: (chatId?: string) => void;
+  setActiveCallChatId: (chatId: string | null) => void;
   appendThinkingBuffer: (text: string, chatId?: string) => void;
   setThinkingBuffer: (text: string, chatId?: string) => void;
   clearThinkingBuffer: (chatId?: string) => void;
@@ -369,6 +376,7 @@ export const useChatStore = create<ChatState>()(
     mariPhaseByChatId: new Map(),
     streamBuffer: "",
     streamBuffers: new Map(),
+    activeCallChatId: null,
     committedStreamChatIds: new Set(),
     streamedMessageIds: new Map(),
     thinkingBuffer: "",
@@ -605,6 +613,7 @@ export const useChatStore = create<ChatState>()(
           ...(state.activeChatId === targetChatId ? { streamBuffer: "" } : {}),
         };
       }),
+    setActiveCallChatId: (chatId) => set({ activeCallChatId: chatId }),
     appendThinkingBuffer: (text, chatId) =>
       set((state) => {
         const targetChatId = chatId ?? state.streamingChatId ?? state.activeChatId ?? "";
@@ -1049,6 +1058,7 @@ export const useChatStore = create<ChatState>()(
         mariPhaseByChatId: new Map(),
         streamBuffer: "",
         streamBuffers: new Map(),
+        activeCallChatId: null,
         committedStreamChatIds: new Set(),
         streamedMessageIds: new Map(),
         thinkingBuffer: "",

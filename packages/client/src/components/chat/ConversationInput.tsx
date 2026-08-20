@@ -392,6 +392,7 @@ export function ConversationInput({
   const currentInputFrameRef = useRef<number | null>(null);
   const pendingCurrentInputRef = useRef("");
   const activeChatId = useChatStore((s) => s.activeChatId);
+  const setActiveCallChatId = useChatStore((s) => s.setActiveCallChatId);
   const mariChips = useAgentStore((s) => s.mariChips);
   const mariChipsChatId = useAgentStore((s) => s.mariChipsChatId);
   const clearMariChips = useAgentStore((s) => s.clearMariChips);
@@ -1316,7 +1317,8 @@ export function ConversationInput({
   const callVoiceSession = useCallVoiceSession({
     onUtterance: handleCallUtterance,
     onError: handleCallVoiceError,
-    paused: callPhase !== "listening" || callMuted,
+    paused: callPhase !== "listening",
+    muted: callMuted,
     silenceMs: callModeSilenceMs,
   });
   const { start: startCallVoiceSession, stop: stopCallVoiceSession } = callVoiceSession;
@@ -1326,6 +1328,15 @@ export function ConversationInput({
     void startCallVoiceSession();
     return () => stopCallVoiceSession();
   }, [callActive, startCallVoiceSession, stopCallVoiceSession]);
+
+  // Publish the active call so the TTS autoplay effects speak replies during a
+  // call regardless of the per-mode autoplay toggles. Keyed on callActive so
+  // ending the call, switching chats, and unmounting all clear it.
+  useEffect(() => {
+    if (!callActive || !activeChatId) return;
+    setActiveCallChatId(activeChatId);
+    return () => setActiveCallChatId(null);
+  }, [activeChatId, callActive, setActiveCallChatId]);
 
   useEffect(() => {
     if (!callActive || !cameraEnabled) {

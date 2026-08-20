@@ -262,8 +262,15 @@ function suppressBuiltInProfessorMariForMode(mode: string | undefined): boolean 
   return mode === "game" || mode === "roleplay";
 }
 
-function shouldAutoplayTTSForMode(cfg: TTSConfig | null | undefined, mode: string | undefined): boolean {
+function shouldAutoplayTTSForMode(
+  cfg: TTSConfig | null | undefined,
+  mode: string | undefined,
+  callActive = false,
+): boolean {
   if (!cfg?.enabled) return false;
+  // The per-mode autoplay toggles govern typed chatting. During a voice call,
+  // silent replies are never what the user wants, so a call always speaks.
+  if (callActive) return true;
   return mode === "roleplay" ? cfg.autoplayRP : mode === "game" ? false : cfg.autoplayConvo;
 }
 
@@ -2486,6 +2493,9 @@ export const ChatArea = memo(function ChatArea() {
   messagesRef.current = messages;
   const chatModeRef = useRef(chatMode);
   chatModeRef.current = chatMode;
+  const callActiveForChat = useChatStore((s) => s.activeCallChatId !== null && s.activeCallChatId === s.activeChatId);
+  const callActiveRef = useRef(callActiveForChat);
+  callActiveRef.current = callActiveForChat;
   const prevIsStreamingRef = useRef(false);
   const ttsGenerationRef = useRef<{
     chatId: string;
@@ -2551,7 +2561,7 @@ export const ChatArea = memo(function ChatArea() {
 
     const cfg = ttsConfigRef.current;
     const mode = chatModeRef.current;
-    if (!shouldAutoplayTTSForMode(cfg, mode)) {
+    if (!shouldAutoplayTTSForMode(cfg, mode, callActiveRef.current)) {
       incrementalHandle?.abort();
       return;
     }
@@ -2619,7 +2629,7 @@ export const ChatArea = memo(function ChatArea() {
     if (!generation || generation.chatId !== activeChatId) return;
 
     const cfg = ttsConfigRef.current;
-    if (!shouldAutoplayTTSForMode(cfg, chatModeRef.current)) return;
+    if (!shouldAutoplayTTSForMode(cfg, chatModeRef.current, callActiveRef.current)) return;
     // Multi-speaker/dialogue extraction needs the full message; leave those
     // entirely to the end-of-stream effect above.
     if (cfg!.dialogueOnly) return;

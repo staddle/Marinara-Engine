@@ -7,6 +7,9 @@ import { playPcmStream, type TTSPcmStreamPlayer } from "./tts-pcm-stream-player"
 
 export type TTSState = "idle" | "loading" | "playing" | "paused" | "error";
 
+/** Cap on merged provider-streamed request text; POST /api/tts/speak accepts at most 4096 chars. */
+const MAX_COALESCED_STREAM_CHARS = 2000;
+
 type StateListener = (state: TTSState, activeId: string | null) => void;
 
 export interface TTSSpeakOptions {
@@ -665,6 +668,45 @@ class TTSService {
     };
     const abort = () => abortController.abort();
 
+    /**
+     * Take the next request, merging any immediately-following compatible ones.
+     *
+     * Sentences are enqueued eagerly, the moment each one finishes streaming in, to keep
+     * time-to-first-audio low. But a fast model can finish the whole message while the first
+     * sentence is still synthesizing, leaving a queue of one-sentence requests — and sending
+     * those separately pays the provider's per-request startup latency once per sentence,
+     * audible as a gap before every sentence. Merging the backlog means the first sentence
+     * still goes out immediately and alone, then everything already available follows as one
+     * continuous stream.
+     *
+     * Restricted to provider-streamed requests: those bypass the audio cache (so merging
+     * cannot mismatch per-chunk cache keys against their text) and play as a continuous
+     * stream, which a longer request only makes smoother.
+     */
+    const dequeueCoalesced = (): TTSSpeakRequest | null => {
+      const first = pending.shift() ?? null;
+      if (!first?.streamProviderSynthesis || first.pauseAfterMs) return first;
+
+      let text = first.text;
+      while (pending.length > 0) {
+        const next = pending[0]!;
+        if (
+          !next.streamProviderSynthesis ||
+          next.voice !== first.voice ||
+          next.speaker !== first.speaker ||
+          next.tone !== first.tone ||
+          text.length + next.text.length + 1 > MAX_COALESCED_STREAM_CHARS
+        ) {
+          break;
+        }
+        pending.shift();
+        text = `${text} ${next.text}`;
+        // A queued pause is a deliberate dialogue gap — stop merging so it survives.
+        if (next.pauseAfterMs) return { ...first, text, pauseAfterMs: next.pauseAfterMs };
+      }
+      return text === first.text ? first : { ...first, text };
+    };
+
     const fetchChunk = async (request: TTSSpeakRequest, index: number) => {
       try {
         const blob = await this.getAudioBlob(request.text, {
@@ -824,7 +866,8 @@ class TTSService {
         if (!this.isCurrentSequence(sequence) || abortController.signal.aborted) break;
         if (!hasWork) break; // finished() was called and the queue is drained
 
-        const request = pending.shift()!;
+        const request = dequeueCoalesced();
+        if (!request) continue;
         const currentIndex = index;
         index += 1;
 
