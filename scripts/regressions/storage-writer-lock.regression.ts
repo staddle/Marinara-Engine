@@ -132,6 +132,39 @@ try {
     }
   }
 
+  // A container's minimal init cycles through the same handful of low PIDs
+  // across restarts, so a fresh process can land on the exact PID a prior,
+  // unrelated, definitely-exited process recorded in a stale lease. That
+  // self-pid match alone must not be read as "still alive" (`kill(pid, 0)`
+  // trivially succeeds against yourself) — the token proves the record was
+  // never ours, so it is still reclaimed like any other exited-PID lease.
+  {
+    const dir = useTempStorage("writer-lock-recycled-pid");
+    const seed = await createFileNativeDB();
+    const leaseTemplate = readJson<LeaseRecord>(ownerPath(dir));
+    await seed._fileStore.close();
+
+    if (leaseTemplate.hostId) {
+      mkdirSync(leasePath(dir));
+      writeFileSync(
+        ownerPath(dir),
+        JSON.stringify({
+          ...leaseTemplate,
+          pid: process.pid,
+          token: "foreign-token-under-our-own-recycled-pid",
+          acquiredAt: "2026-08-13T00:00:00.000Z",
+        }),
+      );
+      const afterRecycledPid = await createFileNativeDB();
+      assert.notEqual(
+        readJson<LeaseRecord>(ownerPath(dir)).token,
+        "foreign-token-under-our-own-recycled-pid",
+        "a lease recorded under our own recycled PID is reclaimed once its token proves it isn't ours",
+      );
+      await afterRecycledPid._fileStore.close();
+    }
+  }
+
   // Closing rejects new writes, waits for a transaction that already started,
   // and lets that transaction finish while the lease is still held.
   {

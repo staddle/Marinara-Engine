@@ -19,6 +19,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { chmod, copyFile, open, rename, unlink, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { hostname, networkInterfaces } from "node:os";
@@ -977,24 +978,92 @@ function writerLeaseOwnerPath(path: string) {
 }
 
 const CURRENT_HOSTNAME = hostname();
-const CURRENT_HOST_ID = (() => {
-  const machineId = ["/etc/machine-id", "/var/lib/dbus/machine-id"].flatMap((path) => {
+
+// Deliberately excluded from CURRENT_HOST_ID below: on macOS, os.hostname()
+// (the machine's mDNS/Bonjour name, e.g. "*.fritz.box") can change between
+// process launches on the same physical machine — observed firsthand as a
+// same-host stale-lease reclaim silently failing even though nothing about
+// the hardware changed. It's kept only as informational metadata on the
+// lease record, never as part of the identity hash.
+
+/**
+ * A persistent, OS-assigned machine identifier that survives reboots:
+ * Linux's /etc/machine-id, macOS's hardware IOPlatformUUID, or Windows'
+ * installation MachineGuid. Preferred over everything else below because,
+ * unlike a boot id or network MACs, it doesn't change on its own.
+ */
+function readPersistentMachineId(): string | undefined {
+  for (const path of ["/etc/machine-id", "/var/lib/dbus/machine-id"]) {
     try {
-      return [readFileSync(path, "utf8").trim()];
+      const value = readFileSync(path, "utf8").trim();
+      if (value) return value;
     } catch {
-      return [];
+      // Try the next candidate.
     }
-  })[0];
+  }
+  try {
+    if (process.platform === "darwin") {
+      const output = execFileSync("ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"], {
+        encoding: "utf8",
+        timeout: 2000,
+      });
+      const match = /"IOPlatformUUID"\s*=\s*"([^"]+)"/.exec(output);
+      if (match?.[1]) return match[1];
+    } else if (process.platform === "win32") {
+      const output = execFileSync("reg", ["query", "HKLM\\SOFTWARE\\Microsoft\\Cryptography", "/v", "MachineGuid"], {
+        encoding: "utf8",
+        timeout: 2000,
+      });
+      const match = /MachineGuid\s+REG_SZ\s+([0-9a-fA-F-]+)/.exec(output);
+      if (match?.[1]) return match[1].trim();
+    }
+  } catch {
+    // Fall through to the weaker identifiers below.
+  }
+  return undefined;
+}
+
+// A container's virtual NIC can be reassigned a new MAC on every restart of
+// the same container (observed on Docker's default bridge network) even
+// though the underlying host kernel never rebooted, which silently defeats
+// the same-host stale-lease reclaim below every time. The kernel's boot_id
+// is stable for the life of a boot and visible from inside containers that
+// share that kernel, so prefer it over MAC addresses when no persistent
+// machine id is available (e.g. a minimal container image).
+function readBootId(): string | undefined {
+  try {
+    return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const CURRENT_HOST_ID = (() => {
+  const persistentId = readPersistentMachineId();
+  if (persistentId) {
+    return createHash("sha256").update(["persistent-id", persistentId].join("\n")).digest("hex");
+  }
+  const bootId = readBootId();
+  if (bootId) {
+    return createHash("sha256").update(["boot-id", bootId].join("\n")).digest("hex");
+  }
   const macs = Object.values(networkInterfaces())
     .flatMap((entries) => entries ?? [])
     .map((entry) => entry.mac.toLowerCase())
     .filter((mac) => mac !== "00:00:00:00:00:00")
     .sort();
-  if (!machineId && macs.length === 0) return null;
-  return createHash("sha256")
-    .update([CURRENT_HOSTNAME, machineId ?? "", ...macs].join("\n"))
-    .digest("hex");
+  if (macs.length === 0) return null;
+  return createHash("sha256").update(["macs", ...macs].join("\n")).digest("hex");
 })();
+
+// PIDs get reused quickly by a container's minimal init (observed cycling
+// through the same handful of low numbers across restarts), so a lease's
+// recorded PID matching our own doesn't by itself mean the recorded owner
+// is us — it can equally be a distinct, definitely-exited earlier process
+// that happened to get recycled the same number. Tokens we ourselves wrote
+// disambiguate the two: a self-pid match is only genuinely "still ours" if
+// we recognize its token.
+const OWN_PROCESS_LEASE_TOKENS = new Set<string>();
 
 class WriterLeasePendingError extends Error {}
 
@@ -1361,6 +1430,7 @@ class FileTableStore {
           flag: "wx",
           mode: PRIVATE_FILE_MODE,
         });
+        OWN_PROCESS_LEASE_TOKENS.add(token);
         this.writerLease = { path, token };
         return;
       } catch (err) {
@@ -1386,7 +1456,9 @@ class FileTableStore {
         throw err;
       }
       const sameHost = Boolean(CURRENT_HOST_ID && existing.record.hostId === CURRENT_HOST_ID);
-      if (!sameHost || !pidDefinitelyExited(existing.record.pid)) {
+      const isRecycledSelfPid = existing.record.pid === process.pid && !OWN_PROCESS_LEASE_TOKENS.has(existing.record.token);
+      const priorOwnerGone = isRecycledSelfPid || pidDefinitelyExited(existing.record.pid);
+      if (!sameHost || !priorOwnerGone) {
         throw new StorageWriterLeaseError(
           `Another Marinara Engine process (PID ${existing.record.pid}, host ${existing.record.hostname}) may be using ${this.rootDir}. ` +
             `Close it before retrying. If it no longer exists, verify every process is stopped and remove only ${path}.`,
