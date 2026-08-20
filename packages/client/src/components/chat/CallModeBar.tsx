@@ -42,10 +42,12 @@ export function CallModeBar({
 }: CallModeBarProps) {
   const { t: localizeUi } = useUiTranslation();
   const [pushToTalkHeld, setPushToTalkHeld] = useState(false);
-  const pulsing = !muted && phase === "listening" && (voiceState === "speech-detected" || pushToTalkHeld);
+  const pulsing = phase === "listening" && (pushToTalkHeld || (!muted && voiceState === "speech-detected"));
   const thinking = phase === "thinking";
   const speaking = phase === "speaking";
-  const pushToTalkDisabled = muted || phase !== "listening";
+  // Muting opts out of automatic detection, which is precisely when holding to
+  // speak is most useful — so muted must not disable push-to-talk.
+  const pushToTalkDisabled = phase !== "listening";
 
   const releasePushToTalk = () => {
     if (!pushToTalkHeld) return;
@@ -58,7 +60,7 @@ export function CallModeBar({
       <span
         className={cn(
           "flex h-10 w-10 shrink-0 items-center justify-center rounded-full transition-all",
-          muted
+          muted && !pushToTalkHeld
             ? "bg-foreground/10 text-foreground/40"
             : speaking
               ? "bg-sky-400/25 text-sky-300"
@@ -69,7 +71,11 @@ export function CallModeBar({
                   : "bg-sky-400/15 text-sky-400",
         )}
       >
-        {muted ? <MicOff size="1.125rem" /> : <Mic size="1.125rem" className={cn(pulsing && "animate-pulse")} />}
+        {muted && !pushToTalkHeld ? (
+          <MicOff size="1.125rem" />
+        ) : (
+          <Mic size="1.125rem" className={cn(pulsing && "animate-pulse")} />
+        )}
       </span>
 
       {cameraEnabled && (

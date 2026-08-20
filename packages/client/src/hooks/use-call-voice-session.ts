@@ -30,12 +30,18 @@ interface UseCallVoiceSessionOptions {
   onError?: (message: string) => void;
   /** While true, the session stays open but does not record or emit utterances (e.g. while the assistant is responding). */
   paused: boolean;
+  /**
+   * While true, automatic voice-activity detection does not record or emit, but push-to-talk
+   * still does. Muting is how a user opts out of auto-detection specifically — that is exactly
+   * when holding the button to speak is most wanted — so unlike `paused` it must not block it.
+   */
+  muted?: boolean;
   /** Milliseconds of silence before an utterance is considered finished and sent. Defaults to DEFAULT_SILENCE_MS; raise it to tolerate longer mid-sentence thinking pauses. */
   silenceMs?: number;
 }
 
 /** Continuous mic session that opens the microphone once and segments speech into per-utterance clips via simple volume-based voice activity detection. */
-export function useCallVoiceSession({ onUtterance, onError, paused, silenceMs }: UseCallVoiceSessionOptions) {
+export function useCallVoiceSession({ onUtterance, onError, paused, muted, silenceMs }: UseCallVoiceSessionOptions) {
   const { t: localizeUi } = useUiTranslation();
   const [state, setState] = useState<CallVoiceState>("idle");
   const streamRef = useRef<MediaStream | null>(null);
@@ -46,6 +52,7 @@ export function useCallVoiceSession({ onUtterance, onError, paused, silenceMs }:
   const chunksRef = useRef<Blob[]>([]);
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pausedRef = useRef(paused);
+  const mutedRef = useRef(muted ?? false);
   const utteranceStartRef = useRef(0);
   const speechMsRef = useRef(0);
   const lastSpeechAtRef = useRef(0);
@@ -61,6 +68,9 @@ export function useCallVoiceSession({ onUtterance, onError, paused, silenceMs }:
   useEffect(() => {
     pausedRef.current = paused;
   }, [paused]);
+  useEffect(() => {
+    mutedRef.current = muted ?? false;
+  }, [muted]);
   useEffect(() => {
     onUtteranceRef.current = onUtterance;
   }, [onUtterance]);
@@ -106,6 +116,15 @@ export function useCallVoiceSession({ onUtterance, onError, paused, silenceMs }:
     if (pausedRef.current) {
       if (recorderRef.current) stopCurrentRecorder(false);
       manualTurnActiveRef.current = false;
+      setState("paused");
+      return;
+    }
+
+    // Muted suppresses only automatic detection: an in-progress push-to-talk
+    // recording keeps running and falls through to the loop below (whose
+    // silence cutoff is already suppressed for manual turns).
+    if (mutedRef.current && !manualTurnActiveRef.current) {
+      if (recorderRef.current) stopCurrentRecorder(false);
       setState("paused");
       return;
     }
@@ -197,7 +216,10 @@ export function useCallVoiceSession({ onUtterance, onError, paused, silenceMs }:
 
   useEffect(() => stop, [stop]);
 
-  /** Push-to-talk: hold to speak regardless of the automatic silence timeout, as a fallback when VAD misjudges a pause. */
+  /**
+   * Push-to-talk: hold to speak regardless of the automatic silence timeout, as a fallback when
+   * VAD misjudges a pause. Deliberately allowed while muted — see the `muted` option.
+   */
   const beginManualTurn = useCallback(() => {
     if (pausedRef.current) return;
     manualTurnActiveRef.current = true;
