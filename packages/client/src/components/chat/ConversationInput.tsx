@@ -1312,10 +1312,12 @@ export function ConversationInput({
     setCallActive(false);
   }, []);
 
+  const callModeSilenceMs = useUIStore((s) => s.callModeSilenceMs);
   const callVoiceSession = useCallVoiceSession({
     onUtterance: handleCallUtterance,
     onError: handleCallVoiceError,
     paused: callPhase !== "listening" || callMuted,
+    silenceMs: callModeSilenceMs,
   });
   const { start: startCallVoiceSession, stop: stopCallVoiceSession } = callVoiceSession;
 
@@ -2204,6 +2206,8 @@ export function ConversationInput({
           cameraEnabled={cameraEnabled}
           onToggleCamera={handleToggleCallCamera}
           cameraVideoRef={cameraSession.videoRef}
+          onPushToTalkStart={callVoiceSession.beginManualTurn}
+          onPushToTalkEnd={callVoiceSession.endManualTurn}
         />
       ) : (
         <>

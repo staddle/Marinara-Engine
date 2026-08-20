@@ -1,5 +1,5 @@
-import type { RefObject } from "react";
-import { Mic, MicOff, PhoneOff, Video, VideoOff } from "lucide-react";
+import { useState, type RefObject } from "react";
+import { Hand, Mic, MicOff, PhoneOff, Video, VideoOff } from "lucide-react";
 import { cn } from "../../lib/utils";
 import type { CallVoiceState } from "../../hooks/use-call-voice-session";
 import { useTranslation as useUiTranslation } from "react-i18next";
@@ -15,6 +15,9 @@ interface CallModeBarProps {
   cameraEnabled: boolean;
   onToggleCamera: () => void;
   cameraVideoRef: RefObject<HTMLVideoElement | null>;
+  /** Push-to-talk: hold to speak regardless of the automatic pause-tolerance timeout, as a fallback when voice detection misjudges a pause. */
+  onPushToTalkStart: () => void;
+  onPushToTalkEnd: () => void;
 }
 
 function callStatusLabel(phase: CallModePhase, voiceState: CallVoiceState, muted: boolean): string {
@@ -34,11 +37,21 @@ export function CallModeBar({
   cameraEnabled,
   onToggleCamera,
   cameraVideoRef,
+  onPushToTalkStart,
+  onPushToTalkEnd,
 }: CallModeBarProps) {
   const { t: localizeUi } = useUiTranslation();
-  const pulsing = !muted && phase === "listening" && voiceState === "speech-detected";
+  const [pushToTalkHeld, setPushToTalkHeld] = useState(false);
+  const pulsing = !muted && phase === "listening" && (voiceState === "speech-detected" || pushToTalkHeld);
   const thinking = phase === "thinking";
   const speaking = phase === "speaking";
+  const pushToTalkDisabled = muted || phase !== "listening";
+
+  const releasePushToTalk = () => {
+    if (!pushToTalkHeld) return;
+    setPushToTalkHeld(false);
+    onPushToTalkEnd();
+  };
 
   return (
     <div className="flex items-center gap-3 rounded-2xl border border-sky-400/20 bg-gradient-to-br from-sky-400/10 to-blue-500/10 px-4 py-3">
@@ -70,7 +83,11 @@ export function CallModeBar({
       )}
 
       <div className="min-w-0 flex-1">
-        <div className="text-sm font-medium text-foreground/90">{callStatusLabel(phase, voiceState, muted)}</div>
+        <div className="text-sm font-medium text-foreground/90">
+          {pushToTalkHeld
+            ? localizeUi("ui.chat.callmodebar.recordingReleaseToSend")
+            : callStatusLabel(phase, voiceState, muted)}
+        </div>
         <div className="text-[0.6875rem] text-foreground/50">
           {localizeUi("ui.chat.callmodebar.callModeChatHistoryStaysInteractiveAbove")}
         </div>
@@ -91,6 +108,32 @@ export function CallModeBar({
         aria-pressed={muted}
       >
         {muted ? <MicOff size="1rem" /> : <Mic size="1rem" />}
+      </button>
+
+      <button
+        type="button"
+        disabled={pushToTalkDisabled}
+        onPointerDown={(e) => {
+          if (pushToTalkDisabled) return;
+          e.currentTarget.setPointerCapture(e.pointerId);
+          setPushToTalkHeld(true);
+          onPushToTalkStart();
+        }}
+        onPointerUp={releasePushToTalk}
+        onPointerCancel={releasePushToTalk}
+        onContextMenu={(e) => e.preventDefault()}
+        className={cn(
+          "flex h-10 w-10 shrink-0 touch-none select-none items-center justify-center rounded-full transition-colors",
+          pushToTalkDisabled
+            ? "text-foreground/20"
+            : pushToTalkHeld
+              ? "bg-sky-400/30 text-sky-300"
+              : "text-foreground/40 hover:bg-foreground/10 hover:text-foreground/70",
+        )}
+        title={localizeUi("ui.chat.callmodebar.holdToTalk")}
+        aria-pressed={pushToTalkHeld}
+      >
+        <Hand size="1rem" />
       </button>
 
       <button

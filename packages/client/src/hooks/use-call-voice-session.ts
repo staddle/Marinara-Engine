@@ -8,7 +8,7 @@ import { classifyMicAccessError } from "../lib/mic-access-error";
 export type CallVoiceState = "idle" | "listening" | "speech-detected" | "paused";
 
 const POLL_INTERVAL_MS = 100;
-const SILENCE_MS = 900;
+const DEFAULT_SILENCE_MS = 1700;
 const MIN_SPEECH_MS = 300;
 const MAX_UTTERANCE_MS = 30_000;
 const RMS_SPEECH_THRESHOLD = 0.02;
@@ -30,10 +30,12 @@ interface UseCallVoiceSessionOptions {
   onError?: (message: string) => void;
   /** While true, the session stays open but does not record or emit utterances (e.g. while the assistant is responding). */
   paused: boolean;
+  /** Milliseconds of silence before an utterance is considered finished and sent. Defaults to DEFAULT_SILENCE_MS; raise it to tolerate longer mid-sentence thinking pauses. */
+  silenceMs?: number;
 }
 
 /** Continuous mic session that opens the microphone once and segments speech into per-utterance clips via simple volume-based voice activity detection. */
-export function useCallVoiceSession({ onUtterance, onError, paused }: UseCallVoiceSessionOptions) {
+export function useCallVoiceSession({ onUtterance, onError, paused, silenceMs }: UseCallVoiceSessionOptions) {
   const { t: localizeUi } = useUiTranslation();
   const [state, setState] = useState<CallVoiceState>("idle");
   const streamRef = useRef<MediaStream | null>(null);
@@ -50,6 +52,11 @@ export function useCallVoiceSession({ onUtterance, onError, paused }: UseCallVoi
   const hasSpokenRef = useRef(false);
   const onUtteranceRef = useRef(onUtterance);
   const onErrorRef = useRef(onError);
+  const silenceMsRef = useRef(silenceMs ?? DEFAULT_SILENCE_MS);
+  /** While true, a push-to-talk press is driving the current recording: the
+   * silence-based auto-stop below is suppressed and only releasing the
+   * button (endManualTurn) finalizes the utterance. */
+  const manualTurnActiveRef = useRef(false);
 
   useEffect(() => {
     pausedRef.current = paused;
@@ -60,15 +67,18 @@ export function useCallVoiceSession({ onUtterance, onError, paused }: UseCallVoi
   useEffect(() => {
     onErrorRef.current = onError;
   }, [onError]);
+  useEffect(() => {
+    silenceMsRef.current = silenceMs ?? DEFAULT_SILENCE_MS;
+  }, [silenceMs]);
 
-  const stopCurrentRecorder = useCallback((emit: boolean) => {
+  const stopCurrentRecorder = useCallback((emit: boolean, bypassMinDuration = false) => {
     const recorder = recorderRef.current;
     if (!recorder) return;
     recorderRef.current = null;
     recorder.onstop = () => {
       const blob = new Blob(chunksRef.current, { type: recorder.mimeType || "audio/webm" });
       chunksRef.current = [];
-      if (emit && speechMsRef.current >= MIN_SPEECH_MS && blob.size > 0) {
+      if (emit && (bypassMinDuration || speechMsRef.current >= MIN_SPEECH_MS) && blob.size > 0) {
         onUtteranceRef.current(blob);
       }
     };
@@ -95,6 +105,7 @@ export function useCallVoiceSession({ onUtterance, onError, paused }: UseCallVoi
   const poll = useCallback(() => {
     if (pausedRef.current) {
       if (recorderRef.current) stopCurrentRecorder(false);
+      manualTurnActiveRef.current = false;
       setState("paused");
       return;
     }
@@ -120,7 +131,11 @@ export function useCallVoiceSession({ onUtterance, onError, paused }: UseCallVoi
 
     const silentFor = now - lastSpeechAtRef.current;
     const utteranceAge = now - utteranceStartRef.current;
-    if ((hasSpokenRef.current && silentFor > SILENCE_MS) || utteranceAge > MAX_UTTERANCE_MS) {
+    // The hard utterance-length cap always applies; the silence-based cutoff
+    // is suppressed during a push-to-talk press so a natural pause while
+    // still holding the button doesn't end the turn early.
+    const silenceCutoff = !manualTurnActiveRef.current && hasSpokenRef.current && silentFor > silenceMsRef.current;
+    if (silenceCutoff || utteranceAge > MAX_UTTERANCE_MS) {
       stopCurrentRecorder(true);
       // Next poll tick starts a fresh recorder for the following utterance.
     }
@@ -131,6 +146,7 @@ export function useCallVoiceSession({ onUtterance, onError, paused }: UseCallVoi
       clearInterval(pollTimerRef.current);
       pollTimerRef.current = null;
     }
+    manualTurnActiveRef.current = false;
     if (recorderRef.current) {
       const recorder = recorderRef.current;
       recorderRef.current = null;
@@ -181,5 +197,19 @@ export function useCallVoiceSession({ onUtterance, onError, paused }: UseCallVoi
 
   useEffect(() => stop, [stop]);
 
-  return { state, start, stop };
+  /** Push-to-talk: hold to speak regardless of the automatic silence timeout, as a fallback when VAD misjudges a pause. */
+  const beginManualTurn = useCallback(() => {
+    if (pausedRef.current) return;
+    manualTurnActiveRef.current = true;
+    if (!recorderRef.current) startNewRecorder();
+  }, [startNewRecorder]);
+
+  /** Release the push-to-talk button: finalize and send immediately, bypassing the minimum-speech-duration guard. */
+  const endManualTurn = useCallback(() => {
+    if (!manualTurnActiveRef.current) return;
+    manualTurnActiveRef.current = false;
+    stopCurrentRecorder(true, true);
+  }, [stopCurrentRecorder]);
+
+  return { state, start, stop, beginManualTurn, endManualTurn };
 }

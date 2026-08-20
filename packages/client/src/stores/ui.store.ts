@@ -771,6 +771,8 @@ interface UIState {
   conversationCallVoiceVolume: number;
   /** When true, mute character voices in Conversation Calls. */
   conversationCallVoiceMuted: boolean;
+  /** Milliseconds of silence Call Mode's mic VAD waits before treating an utterance as finished. Higher tolerates longer thinking pauses at the cost of reply latency. */
+  callModeSilenceMs: number;
   /** Mobile floating-widget collapsed state, shared by the Spotify, YouTube, and local-music players despite the spotify-prefixed name. */
   spotifyMobileWidgetCollapsed: boolean;
   /** Mobile floating-widget position in viewport pixels, shared by the Spotify, YouTube, and local-music players despite the spotify-prefixed name. */
@@ -1076,6 +1078,7 @@ interface UIState {
   setLocalMusicPlayerVolume: (v: number) => void;
   setConversationCallVoiceVolume: (v: number) => void;
   setConversationCallVoiceMuted: (v: boolean) => void;
+  setCallModeSilenceMs: (v: number) => void;
   setSpotifyMobileWidgetCollapsed: (v: boolean) => void;
   setSpotifyMobileWidgetPosition: (position: FloatingWidgetPosition) => void;
   setIntuitiveSwipeNavigation: (v: boolean) => void;
@@ -1288,6 +1291,7 @@ export function pickSyncedSettings(state: UIState) {
     localMusicPlayerVolume: state.localMusicPlayerVolume,
     conversationCallVoiceVolume: state.conversationCallVoiceVolume,
     conversationCallVoiceMuted: state.conversationCallVoiceMuted,
+    callModeSilenceMs: state.callModeSilenceMs,
     spotifyMobileWidgetCollapsed: state.spotifyMobileWidgetCollapsed,
     spotifyMobileWidgetPosition: state.spotifyMobileWidgetPosition,
     intuitiveSwipeNavigation: state.intuitiveSwipeNavigation,
@@ -1493,6 +1497,7 @@ export const useUIStore = create<UIState>()(
       localMusicPlayerVolume: 70,
       conversationCallVoiceVolume: 100,
       conversationCallVoiceMuted: false,
+      callModeSilenceMs: 1700,
       spotifyMobileWidgetCollapsed: true,
       spotifyMobileWidgetPosition: { x: 16, y: 96 },
       intuitiveSwipeNavigation: false,
@@ -2288,6 +2293,7 @@ export const useUIStore = create<UIState>()(
       setConversationCallVoiceVolume: (v) =>
         set({ conversationCallVoiceVolume: Math.max(0, Math.min(100, Math.round(v))) }),
       setConversationCallVoiceMuted: (v) => set({ conversationCallVoiceMuted: v }),
+      setCallModeSilenceMs: (v) => set({ callModeSilenceMs: Math.max(700, Math.min(4000, Math.round(v))) }),
       setSpotifyMobileWidgetCollapsed: (v) => set({ spotifyMobileWidgetCollapsed: v }),
       setSpotifyMobileWidgetPosition: (position) =>
         set({
@@ -3212,6 +3218,7 @@ export const useUIStore = create<UIState>()(
         youtubePlayerVolume: state.youtubePlayerVolume,
         localMusicPlayerVolume: state.localMusicPlayerVolume,
         conversationCallVoiceVolume: state.conversationCallVoiceVolume,
+        callModeSilenceMs: state.callModeSilenceMs,
         conversationCallVoiceMuted: state.conversationCallVoiceMuted,
         spotifyMobileWidgetCollapsed: state.spotifyMobileWidgetCollapsed,
         spotifyMobileWidgetPosition: state.spotifyMobileWidgetPosition,

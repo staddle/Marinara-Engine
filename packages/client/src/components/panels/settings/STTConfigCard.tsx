@@ -11,6 +11,7 @@ import { STT_API_KEY_MASK } from "@marinara-engine/shared";
 import { HelpTooltip } from "../../ui/HelpTooltip";
 import { SettingsSwitch } from "./SettingControls";
 import { useTranslation as useUiTranslation } from "react-i18next";
+import { useUIStore } from "../../../stores/ui.store";
 
 function FieldRow({ label, help, children }: { label: string; help?: string; children: React.ReactNode }) {
   return (
@@ -30,6 +31,8 @@ export function STTConfigCard() {
   const { t: localizeUi } = useUiTranslation();
   const { data: savedConfig, isLoading } = useSTTConfig();
   const updateConfig = useUpdateSTTConfig();
+  const callModeSilenceMs = useUIStore((s) => s.callModeSilenceMs);
+  const setCallModeSilenceMs = useUIStore((s) => s.setCallModeSilenceMs);
 
   const [enabled, setEnabled] = useState(false);
   const [baseUrl, setBaseUrl] = useState("");
@@ -218,6 +221,31 @@ export function STTConfigCard() {
           <p className="rounded-lg border border-dashed border-sky-400/20 bg-sky-400/5 px-2.5 py-2 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
             {localizeUi("ui.panels.sttconfigcard.onceEnabledAMicButtonAppearsInTheRoleplay")}
           </p>
+
+          <label className="flex flex-col gap-1.5">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-medium text-[var(--foreground)]">
+                {localizeUi("ui.panels.sttconfigcard.callModePauseTolerance")}
+              </span>
+              <span className="text-xs tabular-nums text-[var(--muted-foreground)]">
+                {localizeUi("ui.panels.sttconfigcard.value1S", { value1: (callModeSilenceMs / 1000).toFixed(1) })}
+              </span>
+              <HelpTooltip text={localizeUi("ui.panels.sttconfigcard.howLongASilentPauseCanLastMidSentenceDuringACall")} />
+            </div>
+            <input
+              type="range"
+              min={700}
+              max={4000}
+              step={100}
+              value={callModeSilenceMs}
+              onChange={(e) => setCallModeSilenceMs(Number(e.target.value))}
+              className="w-full accent-sky-400"
+            />
+            <div className="flex justify-between text-[0.625rem] text-[var(--muted-foreground)]">
+              <span>{localizeUi("ui.panels.sttconfigcard.snappierReplies")}</span>
+              <span>{localizeUi("ui.panels.sttconfigcard.fewerMidSentenceCutoffs")}</span>
+            </div>
+          </label>
 
           <div className="flex items-center gap-2 pt-1">
             <div className="flex-1" />
