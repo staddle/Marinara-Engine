@@ -6258,6 +6258,116 @@ export function ChatSettingsDrawer({
                       </div>
                     )}
 
+                    {isConversationCommandToggleEnabled(conversationCommandToggles, "haptic") && (
+                      <div
+                        className={cn(
+                          "space-y-3 rounded-xl px-3 py-2.5 transition-all",
+                          metadata.enableHapticFeedback
+                            ? "border border-[var(--primary)]/30 bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
+                            : AGENT_SETTINGS_SURFACE_CLASS,
+                        )}
+                      >
+                        <div className="flex items-start gap-2">
+                          <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[var(--secondary)] text-[var(--muted-foreground)]">
+                            {renderRoleplayAgentMenuIcon("haptic")}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <span className="block text-xs font-medium text-[var(--foreground)]">
+                              {hapticAgentMeta.name}
+                            </span>
+                            <p className="text-[0.625rem] leading-snug text-[var(--muted-foreground)]">
+                              {hapticAgentMeta.description}
+                            </p>
+                          </div>
+                        </div>
+
+                        <AgentSettingsToggle
+                          label={localizeUi("ui.chat.hapticsetupfields.hapticFeedback")}
+                          description={
+                            metadata.enableHapticFeedback
+                              ? localizeUi("ui.chat.hapticsetupfields.touchCuesAreEnabledForThisChat")
+                              : localizeUi("ui.chat.hapticsetupfields.allowThisAgentToSendTouchCuesDuringThe")
+                          }
+                          enabled={metadata.enableHapticFeedback}
+                          onToggle={() =>
+                            updateMeta.mutate({ id: chat.id, enableHapticFeedback: !metadata.enableHapticFeedback })
+                          }
+                        />
+                        {metadata.enableHapticFeedback && (
+                          <>
+                            <div className="space-y-2 rounded-lg bg-[var(--background)]/75 p-2.5 ring-1 ring-[var(--border)]">
+                              <div className="space-y-1">
+                                <span className="text-[0.6875rem] font-semibold text-[var(--foreground)]">
+                                  {localizeUi("ui.chat.chatsettingsdrawer.touchSensitivity")}
+                                </span>
+                                <div className="grid grid-cols-3 gap-1 rounded-lg bg-[var(--background)]/35 p-1">
+                                  {HAPTIC_SENSITIVITY_OPTIONS.map((option) => (
+                                    <button
+                                      key={option.id}
+                                      type="button"
+                                      onClick={() => updateMeta.mutate({ id: chat.id, hapticSensitivity: option.id })}
+                                      className={cn(
+                                        "rounded-md px-2 py-1.5 text-[0.625rem] font-semibold transition-colors",
+                                        hapticSensitivity === option.id
+                                          ? "bg-[var(--accent)] text-[var(--foreground)] ring-1 ring-[var(--border)]"
+                                          : "text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]",
+                                      )}
+                                      title={option.description}
+                                    >
+                                      {option.label}
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  updateMeta.mutate({
+                                    id: chat.id,
+                                    hapticIncidentalContact: metadata.hapticIncidentalContact !== true,
+                                  })
+                                }
+                                className="flex w-full items-center justify-between gap-3 rounded-md px-2 py-1.5 text-left text-[0.6875rem] text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+                                aria-pressed={metadata.hapticIncidentalContact === true}
+                              >
+                                <span className="min-w-0">
+                                  <span className="block font-medium text-[var(--foreground)]">
+                                    {localizeUi("ui.chat.chatsettingsdrawer.incidentalContact")}
+                                  </span>
+                                  <span className="block text-[0.5625rem] leading-snug text-[var(--muted-foreground)]">
+                                    {localizeUi("ui.chat.hapticsetupfields.tinyTapsForAccidentalBrushesAndBumps")}
+                                  </span>
+                                </span>
+                                <span
+                                  className={cn(
+                                    "h-5 w-9 shrink-0 rounded-full p-0.5 transition-colors",
+                                    metadata.hapticIncidentalContact === true
+                                      ? "bg-[var(--primary)]"
+                                      : "bg-[var(--muted-foreground)]/50",
+                                  )}
+                                >
+                                  <span
+                                    className={cn(
+                                      "block h-4 w-4 rounded-full bg-white shadow-sm transition-transform",
+                                      metadata.hapticIncidentalContact === true && "translate-x-3.5",
+                                    )}
+                                  />
+                                </span>
+                              </button>
+                            </div>
+                            <HapticConnectionPanel
+                              intifaceUrl={
+                                typeof metadata.hapticIntifaceUrl === "string" ? metadata.hapticIntifaceUrl : undefined
+                              }
+                              onIntifaceUrlChange={(hapticIntifaceUrl) =>
+                                updateMeta.mutate({ id: chat.id, hapticIntifaceUrl })
+                              }
+                            />
+                          </>
+                        )}
+                      </div>
+                    )}
+
                     {callsPackage ? (
                       <div className="min-w-0">
                         <CapabilityElement
@@ -8020,14 +8130,9 @@ export function ChatSettingsDrawer({
                               {chatMode === "roleplay" && (
                                 <div className="space-y-2 rounded-lg bg-[var(--background)]/75 p-2.5 ring-1 ring-[var(--border)]">
                                   <div className="space-y-1">
-                                    <div className="flex items-center justify-between gap-2">
-                                      <span className="text-[0.6875rem] font-semibold text-[var(--foreground)]">
-                                        {localizeUi("ui.chat.chatsettingsdrawer.touchSensitivity")}
-                                      </span>
-                                      <span className="text-[0.5625rem] text-[var(--muted-foreground)]">
-                                        {localizeUi("ui.chat.hapticsetupfields.roleplayOnly")}
-                                      </span>
-                                    </div>
+                                    <span className="text-[0.6875rem] font-semibold text-[var(--foreground)]">
+                                      {localizeUi("ui.chat.chatsettingsdrawer.touchSensitivity")}
+                                    </span>
                                     <div className="grid grid-cols-3 gap-1 rounded-lg bg-[var(--background)]/35 p-1">
                                       {HAPTIC_SENSITIVITY_OPTIONS.map((option) => (
                                         <button
