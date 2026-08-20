@@ -106,21 +106,34 @@ export class TTSPcmStreamPlayer {
   }
 }
 
-export interface PlayPcmStreamOptions {
+export interface PcmChunkStreamOptions {
   voice?: string;
   speaker?: string;
   tone?: string;
   signal?: AbortSignal;
-  volume?: number;
-  muted?: boolean;
-  /** Fired once the first chunk is scheduled, so callers can flip UI state to "playing". */
+  /** Fired once this chunk's first bytes are scheduled, so callers can flip UI state to "playing". */
   onFirstAudio?: () => void;
-  /** Fired with the live player so callers can push volume/mute changes mid-playback. */
-  onPlayerReady?: (player: TTSPcmStreamPlayer) => void;
 }
 
-/** Streams `/api/tts/speak-stream` and plays it back progressively. Resolves once playback fully drains. */
-export async function playPcmStream(text: string, options: PlayPcmStreamOptions = {}): Promise<void> {
+/**
+ * Streams one chunk of text onto `getPlayer`'s timeline. Resolves once this chunk's bytes have
+ * all been received and scheduled — deliberately *not* once they've finished playing.
+ *
+ * That distinction is the point: a caller can start the next chunk's synthesis the moment this
+ * one's network transfer ends, overlapping it with this chunk's still-ongoing playback, instead of
+ * leaving the GPU idle until playback catches up (audible as a several-second gap between
+ * sentences on a single-node inference server). Passing the same `getPlayer` across consecutive
+ * chunks of one utterance keeps them on a single continuous AudioContext timeline, so this overlap
+ * produces gapless audio rather than two independently-clocked streams.
+ *
+ * `getPlayer` receives the stream's actual sample rate the first time a player is needed; give it
+ * a function that creates-or-returns a shared player instance.
+ */
+export async function streamPcmChunk(
+  getPlayer: (sampleRate: number) => TTSPcmStreamPlayer,
+  text: string,
+  options: PcmChunkStreamOptions = {},
+): Promise<void> {
   const res = await fetch("/api/tts/speak-stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -138,14 +151,10 @@ export async function playPcmStream(text: string, options: PlayPcmStreamOptions 
   }
 
   const sampleRate = Number(res.headers.get("x-sample-rate")) || DEFAULT_SAMPLE_RATE;
-  const player = new TTSPcmStreamPlayer(sampleRate, options.volume, options.muted);
-  options.onPlayerReady?.(player);
+  const player = getPlayer(sampleRate);
 
   const reader = res.body.getReader();
-  const onAbort = () => {
-    player.stop();
-    void reader.cancel().catch(() => undefined);
-  };
+  const onAbort = () => void reader.cancel().catch(() => undefined);
   options.signal?.addEventListener("abort", onAbort, { once: true });
 
   let firstChunkSeen = false;
@@ -169,22 +178,4 @@ export async function playPcmStream(text: string, options: PlayPcmStreamOptions 
       /* already released */
     }
   }
-
-  if (options.signal?.aborted) {
-    player.stop();
-    return;
-  }
-
-  const remainingMs = player.remainingSeconds() * 1000;
-  if (remainingMs > 0) {
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, remainingMs);
-      const onLateAbort = () => {
-        clearTimeout(timer);
-        resolve();
-      };
-      options.signal?.addEventListener("abort", onLateAbort, { once: true });
-    });
-  }
-  player.stop();
 }

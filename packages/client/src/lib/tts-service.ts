@@ -3,7 +3,7 @@
 // ──────────────────────────────────────────────
 import { TTS_DIALOGUE_PAUSE_MAX_SECONDS } from "@marinara-engine/shared";
 import { getOrCreateCachedTTSAudioBlob } from "./tts-audio-cache";
-import { playPcmStream, type TTSPcmStreamPlayer } from "./tts-pcm-stream-player";
+import { streamPcmChunk, TTSPcmStreamPlayer } from "./tts-pcm-stream-player";
 
 export type TTSState = "idle" | "loading" | "playing" | "paused" | "error";
 
@@ -809,9 +809,16 @@ class TTSService {
       });
     };
 
-    const playStreamingChunk = async (request: TTSSpeakRequest, index: number): Promise<void> => {
+    /**
+     * Synthesizes one chunk onto the session's shared PCM player and resolves once its bytes are
+     * received and scheduled — not once they've finished playing. The caller (the loop below)
+     * relies on that: it moves on to the next queued chunk immediately, so that chunk's synthesis
+     * runs on the GPU while this one is still audible, instead of the GPU going idle until
+     * playback catches up. All chunks in a session share one player/AudioContext (created lazily
+     * on the first chunk) so they queue onto a single continuous timeline.
+     */
+    const streamChunk = async (request: TTSSpeakRequest, index: number): Promise<void> => {
       if (!this.isCurrentSequence(sequence)) return;
-      this.cleanup();
       const runChunkStart = () => {
         try {
           options.onChunkStart?.(request, index);
@@ -828,31 +835,74 @@ class TTSService {
       };
 
       try {
-        await playPcmStream(request.text, {
-          voice: request.voice,
-          speaker: request.speaker,
-          tone: request.tone,
-          signal: abortController.signal,
-          volume: this.livePlaybackVolume ?? options.volume,
-          muted: this.livePlaybackMuted ?? options.muted,
-          onFirstAudio: () => {
-            if (!this.isCurrentSequence(sequence)) return;
-            runChunkStart();
-            this.setState("playing", request.activeId ?? id ?? null);
+        await streamPcmChunk(
+          (sampleRate) => {
+            if (!this.currentPcmPlayer) {
+              this.currentPcmPlayer = new TTSPcmStreamPlayer(
+                sampleRate,
+                this.livePlaybackVolume ?? options.volume,
+                this.livePlaybackMuted ?? options.muted,
+              );
+            }
+            return this.currentPcmPlayer;
           },
-          onPlayerReady: (player) => {
-            this.currentPcmPlayer = player;
+          request.text,
+          {
+            voice: request.voice,
+            speaker: request.speaker,
+            tone: request.tone,
+            signal: abortController.signal,
+            onFirstAudio: () => {
+              if (!this.isCurrentSequence(sequence)) return;
+              runChunkStart();
+              this.setState("playing", request.activeId ?? id ?? null);
+            },
           },
-        });
-        this.currentPcmPlayer = null;
+        );
+        // "End" here means this chunk's synthesis is done and queued, not that it has finished
+        // playing — nothing downstream currently depends on the stricter timing, and the whole
+        // point of the shared timeline is that chunk boundaries no longer produce a real gap.
         if (!abortController.signal.aborted) runChunkEnd();
       } catch (err) {
-        this.currentPcmPlayer = null;
         if (err instanceof Error && err.name === "AbortError") return;
         if (!this.isCurrentSequence(sequence)) return;
         this.lastError = err instanceof Error ? err.message : "TTS streaming playback failed";
         this.setState("error");
         throw err instanceof Error ? err : new Error("TTS streaming playback failed");
+      }
+    };
+
+    /** Waits for the shared PCM player's queued audio to actually finish playing, then releases it. */
+    const drainPcmPlayer = async (): Promise<void> => {
+      const player = this.currentPcmPlayer;
+      if (!player) return;
+      // An already-fired abort won't retrigger a freshly-added "abort" listener below, so it
+      // must be checked up front — otherwise cancelling mid-sequence would wait out the full
+      // remaining playback instead of stopping immediately.
+      if (abortController.signal.aborted) {
+        if (this.currentPcmPlayer === player) {
+          player.stop();
+          this.currentPcmPlayer = null;
+        }
+        return;
+      }
+      const remainingMs = player.remainingSeconds() * 1000;
+      if (remainingMs > 0) {
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, remainingMs);
+          abortController.signal.addEventListener(
+            "abort",
+            () => {
+              clearTimeout(timer);
+              resolve();
+            },
+            { once: true },
+          );
+        });
+      }
+      if (this.currentPcmPlayer === player) {
+        player.stop();
+        this.currentPcmPlayer = null;
       }
     };
 
@@ -873,13 +923,22 @@ class TTSService {
 
         if (request.streamProviderSynthesis) {
           try {
-            await playStreamingChunk(request, currentIndex);
-            await waitForPlaybackDelay(request.pauseAfterMs, abortController.signal);
+            await streamChunk(request, currentIndex);
             played += 1;
+            if (request.pauseAfterMs) {
+              // Unreachable today — dialogue pauses only come from the non-incremental
+              // multi-speaker extraction path, which never feeds this queue — but if that
+              // changes, drain the shared timeline first so the requested silence is actually
+              // audible instead of swallowed by audio still catching up to real time.
+              await drainPcmPlayer();
+              await waitForPlaybackDelay(request.pauseAfterMs, abortController.signal);
+            }
           } catch (err) {
             if (err instanceof Error && err.name === "AbortError") break;
             detachAbortSignal();
             if (this.abortController === abortController) this.abortController = null;
+            this.currentPcmPlayer?.stop();
+            this.currentPcmPlayer = null;
             return;
           }
           if (!this.isCurrentSequence(sequence)) break;
@@ -910,6 +969,8 @@ class TTSService {
 
       detachAbortSignal();
       if (this.abortController === abortController) this.abortController = null;
+      if (!this.isCurrentSequence(sequence)) return;
+      await drainPcmPlayer();
       if (!this.isCurrentSequence(sequence)) return;
       if (fetchErrors.length > 0) {
         console.warn("[TTS] Skipped failed audio chunks:", fetchErrors);
