@@ -2253,7 +2253,7 @@ export function ConversationInput({
               ))}
             </div>
           )}
-    
+
           {/* :emoji: autocomplete */}
           {emojiCompletions.length > 0 && (
             <div className="absolute bottom-full left-0 right-0 mb-1 max-h-56 overflow-y-auto rounded-lg border border-foreground/10 bg-[var(--card)] shadow-lg sm:left-[2%] sm:right-[2%]">
@@ -2286,7 +2286,7 @@ export function ConversationInput({
               ))}
             </div>
           )}
-    
+
           {/* Multipurpose picker sheet — Emoji / GIFs / Stickers / Tools */}
           {mobilePickerOpen && (
             <ConversationMediaPickerPanel
@@ -2301,14 +2301,14 @@ export function ConversationInput({
               toolsContent={mediaPickerToolsContent}
             />
           )}
-    
+
           {/* Feedback toast */}
           {feedback && (
             <div className="absolute bottom-full left-3 right-3 z-50 mb-2">
               <SlashCommandFeedback feedback={feedback} onDismiss={() => setFeedback(null)} />
             </div>
           )}
-    
+
           {/* Attachment preview */}
           {(attachments.length > 0 || isReadingAttachments) && (
             <div className="mb-2 flex flex-wrap gap-2">
@@ -2343,7 +2343,7 @@ export function ConversationInput({
               )}
             </div>
           )}
-    
+
           {chipRowHint && (
             <p className="mb-1 flex items-center gap-1.5 px-0.5 text-xs text-[var(--muted-foreground)]">
               <Sparkles size="0.75rem" className="shrink-0 text-[var(--primary)]" />
@@ -2351,7 +2351,7 @@ export function ConversationInput({
             </p>
           )}
           <MariSuggestionChips chips={chipRowChips} onSelect={handleMariChipSelect} disabled={isSendBlocked} />
-    
+
           {/* Input bar */}
           <div
             ref={inputBarRef}
@@ -2399,7 +2399,7 @@ export function ConversationInput({
             >
               <Paperclip size="1rem" />
             </button>
-    
+
             {/* Quick Switchers — desktop: inline, mobile: chevron */}
             <div className="hidden shrink-0 items-center gap-1 sm:flex">
               <QuickConnectionSwitcher contextBudget={showContextUsage ? contextBudget : null} />
@@ -2408,9 +2408,9 @@ export function ConversationInput({
             <div className="flex shrink-0 sm:hidden">
               <QuickSwitcherMobile contextBudget={showContextUsage ? contextBudget : null} />
             </div>
-    
+
             {/* Textarea */}
-    
+
             <textarea
               ref={textareaRef}
               data-chat-composer="true"
@@ -2425,7 +2425,7 @@ export function ConversationInput({
               }}
               className="max-h-[12.5rem] min-h-9 min-w-0 flex-1 resize-none bg-transparent px-1 py-2 text-[1rem] leading-tight text-foreground outline-none placeholder:text-foreground/30 sm:min-h-0 sm:px-0 sm:py-0 sm:leading-normal"
             />
-    
+
             {/* Right actions */}
             <div className="ml-0 flex shrink-0 flex-nowrap items-center justify-end gap-0 sm:ml-auto sm:gap-0.5">
               {/* Mobile: one multipurpose button → Emoji/GIFs/Stickers/Tools sheet */}
@@ -2460,7 +2460,7 @@ export function ConversationInput({
               >
                 {mobilePickerOpen ? <Keyboard size="1.25rem" /> : <Smile size="1.25rem" />}
               </button>
-    
+
               <div className="relative hidden sm:block">
                 <button
                   type="button"
@@ -2493,7 +2493,7 @@ export function ConversationInput({
                   />
                 )}
               </div>
-    
+
               {showDraftTranslateButton && (
                 <button
                   type="button"
@@ -2510,7 +2510,7 @@ export function ConversationInput({
                   {isTranslatingDraft ? <Loader2 size="1rem" className="animate-spin" /> : <Languages size="1rem" />}
                 </button>
               )}
-    
+
               {speechToTextEnabled && (
                 <SpeechToTextButton
                   disabled={!activeChatId}
@@ -2544,20 +2544,22 @@ export function ConversationInput({
                   <Phone size={16} />
                 </button>
               )}
-    
+
               {showQuickRepliesMenu && quickReplyActions.length > 0 && (
                 <div className="hidden sm:block">
                   <QuickReplyMenu actions={quickReplyActions} disabled={!activeChatId || isReadingAttachments} />
                 </div>
               )}
-    
+
               <button
                 onClick={
                   isActuallyGenerating
                     ? () => useChatStore.getState().stopGeneration(activeChatId ?? undefined)
                     : handleSend
                 }
-                disabled={!isActuallyGenerating && (isSendBlocked || isReadingAttachments || !activeChatId || !canSubmit)}
+                disabled={
+                  !isActuallyGenerating && (isSendBlocked || isReadingAttachments || !activeChatId || !canSubmit)
+                }
                 aria-label={sendButtonTitle}
                 className={cn(
                   "flex h-9 w-9 items-center justify-center rounded-xl transition-all duration-200 sm:h-8 sm:w-8",

@@ -2021,7 +2021,9 @@ export const ChatInput = memo(function ChatInput({
                       : "text-foreground/70 hover:bg-foreground/5",
                   )}
                 >
-                  <span className="shrink-0 whitespace-nowrap font-mono font-semibold text-foreground/80">/{cmd.name}</span>
+                  <span className="shrink-0 whitespace-nowrap font-mono font-semibold text-foreground/80">
+                    /{cmd.name}
+                  </span>
                   <span className="min-w-0 flex-1 text-xs leading-snug opacity-60 [overflow-wrap:anywhere]">
                     {cmd.description}
                   </span>
@@ -2029,10 +2031,12 @@ export const ChatInput = memo(function ChatInput({
               ))}
             </div>
           )}
-    
+
           {/* Feedback toast */}
-          {feedback && <SlashCommandFeedback feedback={feedback} onDismiss={() => setFeedback(null)} className="mb-2" />}
-    
+          {feedback && (
+            <SlashCommandFeedback feedback={feedback} onDismiss={() => setFeedback(null)} className="mb-2" />
+          )}
+
           {hierarchicalMapsActive && activeChatId ? (
             <CapabilityElement
               packageId="hierarchical-maps"
@@ -2054,7 +2058,7 @@ export const ChatInput = memo(function ChatInput({
               }}
             />
           ) : null}
-    
+
           {showRoleplayAgentActions && (
             <div className="flex flex-wrap justify-center gap-2 py-1">
               {narrativeDirectorActive && (
@@ -2142,7 +2146,7 @@ export const ChatInput = memo(function ChatInput({
               )}
             </div>
           )}
-    
+
           {/* Attachment previews */}
           {(attachments.length > 0 || isReadingAttachments) && (
             <div className="mb-2 flex flex-wrap gap-2">
@@ -2179,7 +2183,7 @@ export const ChatInput = memo(function ChatInput({
               )}
             </div>
           )}
-    
+
           {chipRowHint && (
             <p className="mb-1 flex items-center gap-1.5 px-0.5 text-xs text-[var(--muted-foreground)]">
               <Sparkles size="0.75rem" className="shrink-0 text-[var(--primary)]" />
@@ -2187,7 +2191,7 @@ export const ChatInput = memo(function ChatInput({
             </p>
           )}
           <MariSuggestionChips chips={chipRowChips} onSelect={handleMariChipSelect} disabled={isInputBusy} />
-    
+
           {/* Main input container */}
           <div
             ref={inputBarRef}
@@ -2233,14 +2237,17 @@ export const ChatInput = memo(function ChatInput({
             >
               <Paperclip size="1rem" />
             </button>
-    
+
             {/* Quick Switchers — desktop: inline, mobile: chevron */}
-            <QuickConnectionSwitcher className="hidden sm:flex" contextBudget={showContextUsage ? contextBudget : null} />
+            <QuickConnectionSwitcher
+              className="hidden sm:flex"
+              contextBudget={showContextUsage ? contextBudget : null}
+            />
             <QuickPersonaSwitcher className="hidden sm:flex" />
             <div className="sm:hidden">
               <QuickSwitcherMobile contextBudget={showContextUsage ? contextBudget : null} />
             </div>
-    
+
             {/* Text input */}
             <textarea
               ref={textareaRef}
@@ -2260,7 +2267,7 @@ export const ChatInput = memo(function ChatInput({
               autoCorrect="on"
               className="mari-chat-input-textarea max-h-[12.5rem] min-w-0 flex-1 resize-none bg-transparent py-0 text-sm leading-normal text-foreground/90 placeholder:text-foreground/30 outline-none disabled:cursor-not-allowed disabled:opacity-40"
             />
-    
+
             {/* Emoji picker */}
             <div className="relative hidden shrink-0 sm:block">
               <button
@@ -2285,7 +2292,7 @@ export const ChatInput = memo(function ChatInput({
                 containerRef={inputBarRef}
               />
             </div>
-    
+
             {/* Character picker — shown in group chats for manual response triggering */}
             {showCharPicker && (
               <button
@@ -2308,7 +2315,7 @@ export const ChatInput = memo(function ChatInput({
                 <Users size="1rem" />
               </button>
             )}
-    
+
             {showDraftTranslateButton && (
               <button
                 type="button"
@@ -2325,7 +2332,7 @@ export const ChatInput = memo(function ChatInput({
                 {isTranslatingDraft ? <Loader2 size="0.9375rem" className="animate-spin" /> : <Languages size="1rem" />}
               </button>
             )}
-    
+
             {speechToTextEnabled && (
               <SpeechToTextButton
                 disabled={!activeChatId || isInputBusy}
@@ -2359,18 +2366,28 @@ export const ChatInput = memo(function ChatInput({
                 <Phone size={16} />
               </button>
             )}
-    
+
             {showQuickRepliesMenu && quickReplyActions.length > 0 && (
-              <QuickReplyMenu actions={quickReplyActions} disabled={!activeChatId || isInputBusy || isReadingAttachments} />
+              <QuickReplyMenu
+                actions={quickReplyActions}
+                disabled={!activeChatId || isInputBusy || isReadingAttachments}
+              />
             )}
-    
+
             {/* Send / Stop button */}
-    
+
             <button
-              onClick={isStreaming ? () => useChatStore.getState().stopGeneration(activeChatId ?? undefined) : handleSend}
+              onClick={
+                isStreaming ? () => useChatStore.getState().stopGeneration(activeChatId ?? undefined) : handleSend
+              }
               disabled={
                 (!isStreaming && (isInputBusy || isReadingAttachments)) ||
-                (!hasInput && !attachments.length && !canSubmitSpatialMove && !isStreaming && !canRetry && !canContinue) ||
+                (!hasInput &&
+                  !attachments.length &&
+                  !canSubmitSpatialMove &&
+                  !isStreaming &&
+                  !canRetry &&
+                  !canContinue) ||
                 !activeChatId
               }
               className={cn(
@@ -2394,7 +2411,7 @@ export const ChatInput = memo(function ChatInput({
               )}
             </button>
           </div>
-    
+
           {/* Character picker dropdown (portal) */}
           {charPickerOpen &&
             showCharPicker &&
@@ -2403,7 +2420,9 @@ export const ChatInput = memo(function ChatInput({
                 ref={charPickerMenuRef}
                 className="fixed z-[9999] flex min-w-[220px] max-w-[280px] max-h-[320px] flex-col overflow-hidden rounded-xl border border-foreground/10 bg-[var(--card)] shadow-2xl"
                 style={
-                  charPickerPos ? { left: charPickerPos.left, top: charPickerPos.top } : { visibility: "hidden" as const }
+                  charPickerPos
+                    ? { left: charPickerPos.left, top: charPickerPos.top }
+                    : { visibility: "hidden" as const }
                 }
               >
                 <div className="flex items-center justify-center border-b border-foreground/10 px-3 py-2 text-[0.6875rem] font-semibold">

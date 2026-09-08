@@ -2637,6 +2637,7 @@ export const useUIStore = create<UIState>()(
         setConversationCallVoiceVolume: (v) =>
           set({ conversationCallVoiceVolume: Math.max(0, Math.min(100, Math.round(v))) }),
         setConversationCallVoiceMuted: (v) => set({ conversationCallVoiceMuted: v }),
+        setCallModeSilenceMs: (v) => set({ callModeSilenceMs: Math.max(700, Math.min(4000, Math.round(v))) }),
         setSpotifyMobileWidgetCollapsed: (v) => set({ spotifyMobileWidgetCollapsed: v }),
         setSpotifyMobileWidgetPosition: (position) =>
           set({
