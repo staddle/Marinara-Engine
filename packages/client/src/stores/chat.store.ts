@@ -211,6 +211,17 @@ interface ChatState {
   /** Per-chat stream text for active generations, so switching chats does not lose in-flight UI state. */
   streamBuffers: Map<string, string>;
   /**
+   * Raw generated text as it actually arrives from the model, independent of `streamBuffer`.
+   * Conversation mode intentionally withholds the raw stream from `streamBuffer` (it reveals
+   * replies in staged bubble parts instead), which left incremental TTS with nothing to read
+   * from until the whole message was saved. This buffer always tracks true token arrival so
+   * TTS can start speaking finished sentences early in every mode, without changing what the
+   * chat surface itself renders.
+   */
+  ttsStreamBuffer: string;
+  /** Per-chat mirror of `ttsStreamBuffer`, so switching chats does not lose in-flight state. */
+  ttsStreamBuffers: Map<string, string>;
+  /**
    * Chat with an active Call Mode voice session, or null. Lets the TTS autoplay
    * effects speak replies during a call regardless of the per-mode autoplay
    * toggles, which govern typed chatting only.
@@ -282,6 +293,8 @@ interface ChatState {
   appendStreamBuffer: (text: string, chatId?: string) => void;
   setStreamBuffer: (text: string, chatId?: string) => void;
   clearStreamBuffer: (chatId?: string) => void;
+  appendTTSStreamBuffer: (text: string, chatId?: string) => void;
+  clearTTSStreamBuffer: (chatId?: string) => void;
   setActiveCallChatId: (chatId: string | null) => void;
   appendThinkingBuffer: (text: string, chatId?: string) => void;
   setThinkingBuffer: (text: string, chatId?: string) => void;
@@ -362,6 +375,8 @@ export const useChatStore = create<ChatState>()(
     mariPhaseByChatId: new Map(),
     streamBuffer: "",
     streamBuffers: new Map(),
+    ttsStreamBuffer: "",
+    ttsStreamBuffers: new Map(),
     activeCallChatId: null,
     streamedMessageIds: new Map(),
     thinkingBuffer: "",
@@ -445,7 +460,8 @@ export const useChatStore = create<ChatState>()(
         // Clearing it would cause a black flash and wipe the background for new chats.
         // Restore per-chat typing/delayed indicators for the newly active chat
         if (id) {
-          const { perChatTyping, perChatDelayed, abortControllers, streamBuffers, thinkingBuffers } = get();
+          const { perChatTyping, perChatDelayed, abortControllers, streamBuffers, ttsStreamBuffers, thinkingBuffers } =
+            get();
           const typing = perChatTyping.get(id) ?? null;
           const delayed = perChatDelayed.get(id) ?? null;
           // If this chat has an active generation, restore streaming state so the
@@ -457,6 +473,7 @@ export const useChatStore = create<ChatState>()(
             isStreaming: hasActiveGeneration,
             streamingChatId: hasActiveGeneration ? id : null,
             streamBuffer: hasActiveGeneration ? (streamBuffers.get(id) ?? "") : "",
+            ttsStreamBuffer: hasActiveGeneration ? (ttsStreamBuffers.get(id) ?? "") : "",
             thinkingBuffer: hasActiveGeneration ? (thinkingBuffers.get(id) ?? "") : "",
           });
         } else {
@@ -466,6 +483,7 @@ export const useChatStore = create<ChatState>()(
             isStreaming: false,
             streamingChatId: null,
             streamBuffer: "",
+            ttsStreamBuffer: "",
             thinkingBuffer: "",
           });
         }
@@ -576,6 +594,29 @@ export const useChatStore = create<ChatState>()(
         return {
           streamBuffers: buffers,
           ...(state.activeChatId === targetChatId ? { streamBuffer: "" } : {}),
+        };
+      }),
+    appendTTSStreamBuffer: (text, chatId) =>
+      set((state) => {
+        const targetChatId = chatId ?? state.streamingChatId ?? state.activeChatId ?? "";
+        if (!targetChatId) return { ttsStreamBuffer: state.ttsStreamBuffer + text };
+        const nextText = (state.ttsStreamBuffers.get(targetChatId) ?? "") + text;
+        const buffers = new Map(state.ttsStreamBuffers);
+        buffers.set(targetChatId, nextText);
+        return {
+          ttsStreamBuffers: buffers,
+          ...(state.activeChatId === targetChatId ? { ttsStreamBuffer: nextText } : {}),
+        };
+      }),
+    clearTTSStreamBuffer: (chatId) =>
+      set((state) => {
+        const targetChatId = chatId ?? state.streamingChatId ?? state.activeChatId ?? "";
+        if (!targetChatId) return { ttsStreamBuffer: "", ttsStreamBuffers: new Map() };
+        const buffers = new Map(state.ttsStreamBuffers);
+        buffers.delete(targetChatId);
+        return {
+          ttsStreamBuffers: buffers,
+          ...(state.activeChatId === targetChatId ? { ttsStreamBuffer: "" } : {}),
         };
       }),
     setActiveCallChatId: (chatId) => set({ activeCallChatId: chatId }),
@@ -1012,6 +1053,8 @@ export const useChatStore = create<ChatState>()(
         mariPhaseByChatId: new Map(),
         streamBuffer: "",
         streamBuffers: new Map(),
+        ttsStreamBuffer: "",
+        ttsStreamBuffers: new Map(),
         activeCallChatId: null,
         streamedMessageIds: new Map(),
         thinkingBuffer: "",

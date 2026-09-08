@@ -2523,6 +2523,11 @@ export const ChatArea = memo(function ChatArea() {
   const incrementalTTSCursorRef = useRef(0);
   const incrementalTTSHandleRef = useRef<TTSStreamingSequenceHandle | null>(null);
   const streamBuffer = useChatStore((s) => s.streamBuffer);
+  // Conversation mode withholds the raw stream from `streamBuffer` (it reveals
+  // replies in staged bubble parts instead), so ttsStreamBuffer carries the same
+  // true token arrival there instead. The two are mutually exclusive per mode —
+  // whichever the current generation is actually populating wins.
+  const ttsStreamBuffer = useChatStore((s) => s.ttsStreamBuffer);
   useEffect(() => {
     const handleGenerationError = (event: Event) => {
       const chatId = (event as CustomEvent<{ chatId?: string }>).detail?.chatId;
@@ -2706,7 +2711,7 @@ export const ChatArea = memo(function ChatArea() {
     if (cfg!.dialogueOnly) return;
     if (chatModeRef.current === "roleplay" && cfg!.roleplaySpeakerExtractorEnabled) return;
 
-    const ready = extractReadyTTSSpeech(streamBuffer, incrementalTTSCursorRef.current);
+    const ready = extractReadyTTSSpeech(streamBuffer || ttsStreamBuffer, incrementalTTSCursorRef.current);
     if (!ready) return;
 
     const msgs = messagesRef.current ?? [];
@@ -2733,7 +2738,7 @@ export const ChatArea = memo(function ChatArea() {
       });
     }
     incrementalTTSHandleRef.current.push(ttsRequests);
-  }, [activeChatId, characterMap, isStreaming, resolveTTSCharacterId, streamBuffer, ttsLineVolume]);
+  }, [activeChatId, characterMap, isStreaming, resolveTTSCharacterId, streamBuffer, ttsStreamBuffer, ttsLineVolume]);
 
   const newestMsgId = msgData?.pages[0]?.[msgData.pages[0].length - 1]?.id;
   const newestMsgSwipeIndex = msgData?.pages[0]?.[msgData.pages[0].length - 1]?.activeSwipeIndex;

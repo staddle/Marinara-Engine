@@ -1149,6 +1149,8 @@ export function useGenerate() {
   const setStreamBuffer = useChatStore((s) => s.setStreamBuffer);
   const setStreamedMessageId = useChatStore((s) => s.setStreamedMessageId);
   const clearStreamBuffer = useChatStore((s) => s.clearStreamBuffer);
+  const appendTTSStreamBuffer = useChatStore((s) => s.appendTTSStreamBuffer);
+  const clearTTSStreamBuffer = useChatStore((s) => s.clearTTSStreamBuffer);
   const appendThinkingBuffer = useChatStore((s) => s.appendThinkingBuffer);
   const clearThinkingBuffer = useChatStore((s) => s.clearThinkingBuffer);
   const setRegenerateMessageId = useChatStore((s) => s.setRegenerateMessageId);
@@ -1261,6 +1263,7 @@ export function useGenerate() {
         // Otherwise the old buffer can render beneath the new user message until
         // the first token of the new response arrives.
         clearStreamBuffer(params.chatId);
+        clearTTSStreamBuffer(params.chatId);
         setStreaming(true, params.chatId);
         clearThoughtBubbles();
         clearCyoaChoices();
@@ -1452,6 +1455,10 @@ export function useGenerate() {
           startTypewriter();
         } else {
           fullBuffer = normalizeLineBreakSpacing(fullBuffer + normalizedChunk);
+          // Modes that withhold the raw stream from the visible bubble (Conversation)
+          // still need incremental TTS fed from true token arrival, not the eventual
+          // staged reveal — mirror the raw text here without touching what renders.
+          if (streamingEnabled) appendTTSStreamBuffer(normalizedChunk, params.chatId);
         }
       };
       const flushLeadingSpeakerPrefix = () => {
@@ -2385,6 +2392,7 @@ export function useGenerate() {
                   setStreaming(false);
                 }
                 clearStreamBuffer(params.chatId);
+                clearTTSStreamBuffer(params.chatId);
                 setStreamedMessageId(params.chatId, null);
                 useChatStore.getState().setAbortController(params.chatId, null);
                 if (isActiveChat()) {
@@ -3141,6 +3149,7 @@ export function useGenerate() {
               await refreshMessagesAuthoritatively(qc, params.chatId, persistedForRefresh);
               setStreaming(false);
               clearStreamBuffer(params.chatId);
+              clearTTSStreamBuffer(params.chatId);
             } else {
               if (receivedContent && persistedForRefresh.length === 0) {
                 await refreshMessagesAuthoritatively(qc, params.chatId, persistedForRefresh);
@@ -3151,6 +3160,7 @@ export function useGenerate() {
               // React never renders an empty frame or the wrong full response.
               setStreaming(false);
               clearStreamBuffer(params.chatId);
+              clearTTSStreamBuffer(params.chatId);
               if (persistedForRefresh.length > 0) refreshMessagesInBackground();
             }
           } else {
@@ -3161,6 +3171,7 @@ export function useGenerate() {
               refreshMessagesInBackground();
             }
             clearStreamBuffer(params.chatId);
+            clearTTSStreamBuffer(params.chatId);
           }
           setStreamedMessageId(params.chatId, null);
           if (isActiveChat()) {
@@ -3288,6 +3299,8 @@ export function useGenerate() {
       setStreamBuffer,
       setStreamedMessageId,
       clearStreamBuffer,
+      appendTTSStreamBuffer,
+      clearTTSStreamBuffer,
       appendThinkingBuffer,
       clearThinkingBuffer,
       setRegenerateMessageId,
