@@ -2,7 +2,7 @@
 // Game: HUD Widget Setup Editor
 // ──────────────────────────────────────────────
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Download, Plus, Trash2, Upload } from "lucide-react";
+import { Copy, Download, Plus, Trash2, Upload } from "lucide-react";
 import { toast } from "sonner";
 import {
   normalizeTextForMatch,
@@ -13,6 +13,7 @@ import {
 import { cn } from "../../lib/utils";
 import { translate } from "../../localization/i18n";
 import { DraftNumberInput } from "../ui/DraftNumberInput";
+import { AgentSettingsActionButton } from "../chat/AgentSettingsControls";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
 export const MAX_GAME_SETUP_WIDGETS = 4;
@@ -197,7 +198,7 @@ function normalizeConfig(
       ...source,
       max,
       value,
-      startingValue: parseNumber(source.startingValue ?? value, value, 0),
+      startingValue: Math.min(max, parseNumber(source.startingValue ?? value, value, 0)),
     };
   }
 
@@ -445,6 +446,13 @@ export function GameWidgetSetupEditor({ widgets, onChange, disabled, className }
     );
   };
 
+  const replaceWidgetId = (widgetId: string, value: string) => {
+    const otherWidgets = normalizedWidgets.filter((widget) => widget.id !== widgetId);
+    const normalizedId = nextWidgetId(value, otherWidgets);
+    replaceWidget(widgetId, { id: normalizedId });
+    return normalizedId;
+  };
+
   const updateWidgetConfig = (widgetId: string, patch: Partial<HudWidgetConfig>) => {
     onChange(
       normalizedWidgets.map((widget) =>
@@ -458,6 +466,20 @@ export function GameWidgetSetupEditor({ widgets, onChange, disabled, className }
   const addWidget = () => {
     if (!canAddWidget || disabled) return;
     onChange([...normalizedWidgets, createDefaultGameHudWidget(newWidgetType, normalizedWidgets)]);
+  };
+
+  const duplicateWidget = (widget: HudWidget) => {
+    if (!canAddWidget || disabled) return;
+    const label = widget.label.trim() || formatWidgetTypeLabel(widget.type);
+    onChange([
+      ...normalizedWidgets,
+      {
+        ...widget,
+        id: nextWidgetId(`${label} copy`, normalizedWidgets),
+        label: `${label} copy`,
+        config: structuredClone(widget.config),
+      },
+    ]);
   };
 
   return (
@@ -479,15 +501,15 @@ export function GameWidgetSetupEditor({ widgets, onChange, disabled, className }
               </option>
             ))}
           </select>
-          <button
+          <AgentSettingsActionButton
             type="button"
+            variant="primary"
             onClick={addWidget}
             disabled={disabled || !canAddWidget}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-1.5 text-xs font-medium text-[var(--primary-foreground)] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Plus size="0.75rem" />
             <span>{localizeUi("ui.characters.metadatatab.add")}</span>
-          </button>
+          </AgentSettingsActionButton>
         </div>
       </div>
 
@@ -540,20 +562,50 @@ export function GameWidgetSetupEditor({ widgets, onChange, disabled, className }
                     ))}
                   </select>
                 </label>
-                <button
-                  type="button"
-                  onClick={() => onChange(normalizedWidgets.filter((entry) => entry.id !== widget.id))}
-                  disabled={disabled}
-                  className="inline-flex h-9 items-center justify-center rounded-lg border border-[var(--destructive)]/25 px-3 text-[var(--destructive)] transition-colors hover:bg-[var(--destructive)]/10 disabled:opacity-50"
-                  aria-label={localizeUi("ui.game.gamewidgetsetupeditor.removeValue1", {
-                    value1: widget.label.trim() || formatWidgetTypeLabel(widget.type),
-                  })}
-                >
-                  <Trash2 size="0.875rem" />
-                </button>
+                <div className="flex gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => duplicateWidget(widget)}
+                    disabled={disabled || !canAddWidget}
+                    className="inline-flex h-9 items-center justify-center rounded-lg border border-[var(--border)] px-3 text-[var(--foreground)] transition-colors hover:bg-[var(--accent)] disabled:opacity-50"
+                    aria-label={localizeUi("ui.game.gamewidgetsetupeditor.duplicateValue1", {
+                      value1: widget.label.trim() || formatWidgetTypeLabel(widget.type),
+                    })}
+                  >
+                    <Copy size="0.875rem" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onChange(normalizedWidgets.filter((entry) => entry.id !== widget.id))}
+                    disabled={disabled}
+                    className="inline-flex h-9 items-center justify-center rounded-md border border-[var(--marinara-chat-chrome-accent)]/25 px-3 text-[var(--marinara-chat-chrome-accent)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg)] disabled:opacity-50"
+                    aria-label={localizeUi("ui.game.gamewidgetsetupeditor.removeValue1", {
+                      value1: widget.label.trim() || formatWidgetTypeLabel(widget.type),
+                    })}
+                  >
+                    <Trash2 size="0.875rem" />
+                  </button>
+                </div>
               </div>
 
-              <div className="mt-2 grid gap-2 sm:grid-cols-2">
+              <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                <label className="space-y-1">
+                  <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
+                    {localizeUi("ui.game.gamewidgetsetupeditor.id")}
+                  </span>
+                  <input
+                    key={widget.id}
+                    defaultValue={widget.id}
+                    disabled={disabled}
+                    onBlur={(event) => {
+                      event.currentTarget.value = replaceWidgetId(widget.id, event.currentTarget.value);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") event.currentTarget.blur();
+                    }}
+                    className="w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2.5 py-2 text-xs text-[var(--foreground)]"
+                  />
+                </label>
                 <label className="space-y-1">
                   <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
                     {localizeUi("ui.game.gamewidgetsetupeditor.side")}
@@ -697,7 +749,7 @@ function WidgetConfigFields({
               type="button"
               onClick={() => onConfigChange({ stats: stats.filter((_, entryIndex) => entryIndex !== index) })}
               disabled={disabled}
-              className="inline-flex h-9 items-center justify-center rounded-lg border border-[var(--destructive)]/25 px-3 text-[var(--destructive)] transition-colors hover:bg-[var(--destructive)]/10 disabled:opacity-50"
+              className="inline-flex h-9 items-center justify-center rounded-md border border-[var(--marinara-chat-chrome-accent)]/25 px-3 text-[var(--marinara-chat-chrome-accent)] transition-colors hover:bg-[var(--marinara-chat-chrome-highlight-bg)] disabled:opacity-50"
               aria-label={localizeUi("ui.game.widgetconfigfields.removeStat")}
             >
               <Trash2 size="0.75rem" />

@@ -78,6 +78,7 @@ export type ResolveGenerationToolsArgs = {
   resolvedAgents: ResolvedAgent[];
   enabledConfigs: any[];
   promptCharacterIds: string[];
+  lorebookCharacterIds?: string[];
   personaId: string | null;
   activeLorebookIds: string[];
   excludedLorebookIds: string[];
@@ -99,6 +100,13 @@ export type ResolvedGenerationTools = {
   baseToolExecutionContext: ToolExecutionContext;
   updateChatMetadataForTools: (patchOrUpdater: MetadataPatchInput) => Promise<MetadataPatch>;
 };
+
+export function resolveToolLorebookCharacterIds(
+  promptCharacterIds: string[],
+  lorebookCharacterIds?: string[],
+): string[] {
+  return lorebookCharacterIds ?? promptCharacterIds;
+}
 
 const AGENT_ONLY_TOOL_NAMES = new Set([
   "save_lorebook_entry",
@@ -521,7 +529,19 @@ function createLorebookEntryWriter(
     ) as any;
     const keys = Array.from(new Set(entry.keys.map((key) => key.trim()).filter(Boolean)));
 
-    if (!existing || entry.mode === "create") {
+    if (existing && entry.mode === "create") {
+      return {
+        applied: false,
+        action: "exists",
+        lorebookId: writableLorebookId,
+        lorebookName: (targetLorebook as any).name,
+        entryId: existing.id,
+        name: entry.name,
+        sourceAgentId: agent.id,
+      };
+    }
+
+    if (!existing) {
       const created = await lorebooksStore.createEntry({
         lorebookId: writableLorebookId,
         name: entry.name,
@@ -635,6 +655,7 @@ async function resolveToolRuntime(
     resolvedAgents,
     enabledConfigs,
     promptCharacterIds,
+    lorebookCharacterIds,
     personaId,
     activeLorebookIds,
     excludedLorebookIds,
@@ -731,7 +752,7 @@ async function resolveToolRuntime(
   const searchLorebookForTools = async (query: string, category?: string | null) => {
     const entries = await lorebooksStore.listActiveEntries({
       chatId,
-      characterIds: promptCharacterIds,
+      characterIds: resolveToolLorebookCharacterIds(promptCharacterIds, lorebookCharacterIds),
       personaId,
       activeLorebookIds,
       excludedLorebookIds,

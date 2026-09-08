@@ -9,7 +9,6 @@ import { createPortal } from "react-dom";
 import {
   MapPin,
   Users,
-  Package,
   Backpack,
   Scroll,
   Sparkles,
@@ -28,9 +27,15 @@ import { WorldClockIcon, WorldThermometerIcon } from "../ui/WorldStateInstrument
 import { useGameStateStore } from "../../stores/game-state.store";
 import { useAgentStore, EMPTY_AGENT_TYPES, EMPTY_AGENT_FAILURES } from "../../stores/agent.store";
 import { useAgentConfigs, useCustomAgentRuns, type AgentConfigRow } from "../../hooks/use-agents";
+import { useUpdateMessageExtra } from "../../hooks/use-chats";
 import { discardPendingGameStatePatch, useGameStatePatcher } from "../../hooks/use-game-state-patcher";
 import { useUIStore } from "../../stores/ui.store";
 import { useReducedAmbientEffects } from "../../hooks/use-reduced-ambient-effects";
+import {
+  partitionTrackerCapabilityPackages,
+  useInstalledCapabilityPackages,
+} from "../../hooks/use-capability-packages";
+import { CapabilityElement } from "../capabilities/CapabilityElement";
 import {
   classifyWorldWeather,
   getLocationPinColor,
@@ -39,7 +44,7 @@ import {
   getWorldTimeDisplay,
   type WorldWeatherFamily,
 } from "../../lib/world-state-helpers";
-import { TrackerLockProvider } from "../../features/tracker-panel/components/TrackerLockContext";
+import { TrackerLockProvider, useTrackerLockContext } from "../../features/tracker-panel/components/TrackerLockContext";
 import { buildInventoryTrackerEditPatch } from "../../features/tracker-panel/lib/inventory-tracker-edit";
 import { useTrackerFieldLockUpdater } from "../../features/tracker-panel/hooks/use-tracker-field-lock-updater";
 import { NEUTRAL_PANEL_SCROLL_AREA, NEUTRAL_PANEL_SHELL } from "../ui/neutral-surface-styles";
@@ -52,7 +57,6 @@ import type {
   GameState,
   PresentCharacter,
   CharacterStat,
-  InventoryItem,
   InventoryTrackerGroup,
   InventoryTrackerRow,
   QuestProgress,
@@ -62,17 +66,14 @@ import type {
   TrackerHiddenFields,
 } from "@marinara-engine/shared";
 import {
-  inventoryItemTrackerLockPrefix,
   normalizeTrackerFieldLocksForState,
   normalizeTrackerHiddenFields,
-  removeTrackerFieldLockPrefix,
   toggleTrackerFieldLock,
 } from "@marinara-engine/shared";
 import type { TrackerTemperatureUnit } from "../../stores/ui.store";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
 const ACTIONS_DROPDOWN_WIDTH_PX = 288;
-const EMPTY_INVENTORY: InventoryItem[] = [];
 const EMPTY_AGENT_TYPE_SET = new Set<string>();
 
 interface RoleplayHUDProps {
@@ -101,9 +102,6 @@ const PersonaStatsPanel = lazy(async () =>
 );
 const CharactersPanel = lazy(async () =>
   import("./RoleplayHUDPanels").then((module) => ({ default: module.CharactersPanel })),
-);
-const InventoryPanel = lazy(async () =>
-  import("./RoleplayHUDPanels").then((module) => ({ default: module.InventoryPanel })),
 );
 const RoleplayInventoryTrackerPanel = lazy(async () =>
   import("./RoleplayHUDPanels").then((module) => ({ default: module.RoleplayInventoryTrackerPanel })),
@@ -137,6 +135,19 @@ export function RoleplayHUD({
 
   const { data: agentConfigs } = useAgentConfigs();
   const enabledAgentTypes = enabledAgentTypesProp ?? EMPTY_AGENT_TYPE_SET;
+  const { data: installedCapabilities = [] } = useInstalledCapabilityPackages();
+  const roleplayTrackerPackages = installedCapabilities.filter(
+    (item) =>
+      item.status === "active" &&
+      enabledAgentTypes.has(item.id) &&
+      Boolean(item.manifest.entrypoints.client) &&
+      item.manifest.contributions?.slots?.includes("roleplay-tracker"),
+  );
+  const {
+    memoryNag: memoryNagTrackerPackages,
+    beholder: beholderTrackerPackages,
+    other: otherRoleplayTrackerPackages,
+  } = partitionTrackerCapabilityPackages(roleplayTrackerPackages);
 
   const thoughtBubbles = useAgentStore((s) => s.thoughtBubbles);
   const isAgentProcessing = useAgentStore((s) => s.processingChatIds.includes(chatId));
@@ -149,6 +160,7 @@ export function RoleplayHUD({
   const dismissThoughtBubble = useAgentStore((s) => s.dismissThoughtBubble);
   const clearThoughtBubbles = useAgentStore((s) => s.clearThoughtBubbles);
   const resetAgentStore = useAgentStore((s) => s.reset);
+  const updateMessageExtra = useUpdateMessageExtra(chatId);
   const trackerPanelEnabled = useUIStore((s) => s.trackerPanelEnabled);
   const trackerPanelOpen = useUIStore((s) => s.trackerPanelOpen);
   const trackerPanelHideHudWidgets = useUIStore((s) => s.trackerPanelHideHudWidgets);
@@ -220,12 +232,18 @@ export function RoleplayHUD({
     api.patch(`/chats/${chatId}/game-state`, { ...cleared, manual: true, clearOverrides: true }).catch(() => {});
     // Clear committed agent runs & memory from DB + reset client state
     api.delete(`/agents/runs/${chatId}`).catch(() => {});
+    const latestAssistantMessage = [...(injectionSourceMessages ?? [])]
+      .reverse()
+      .find((message) => message.role === "assistant");
+    if (latestAssistantMessage) {
+      updateMessageExtra.mutate({ messageId: latestAssistantMessage.id, extra: { cyoaChoices: [] } });
+    }
     resetAgentStore();
-  }, [chatId, setGameState, resetAgentStore]);
-  const stopAgents = useCallback(
-    () => api.post("/generate/abort", { chatId, agentsOnly: true }).then(() => undefined),
-    [chatId],
-  );
+  }, [chatId, injectionSourceMessages, resetAgentStore, setGameState, updateMessageExtra]);
+  const stopAgents = useCallback(async () => {
+    const result = await api.post<{ aborted: boolean }>("/generate/abort", { chatId, agentsOnly: true });
+    if (!result.aborted) throw new Error("No active agent run was found");
+  }, [chatId]);
 
   const date = gameState?.date ?? null;
   const time = gameState?.time ?? null;
@@ -237,7 +255,6 @@ export function RoleplayHUD({
   const personaStatBars = gameState?.personaStats ?? [];
   const playerStats = gameState?.playerStats ?? null;
   const personaStatus = playerStats?.status ?? "";
-  const inventory = playerStats?.inventory ?? EMPTY_INVENTORY;
   const activeQuests = playerStats?.activeQuests ?? [];
   const customTrackerFields = playerStats?.customTrackerFields ?? [];
   const inventoryTrackerCurrencies = playerStats?.inventoryTrackerCurrencies ?? [];
@@ -260,19 +277,6 @@ export function RoleplayHUD({
     },
     [chatId, hiddenTrackerFields, patchField],
   );
-  const updateInventoryItems = useCallback(
-    (items: InventoryItem[]) => patchPlayerStats("inventory", items),
-    [patchPlayerStats],
-  );
-  const removeInventoryItem = useCallback(
-    (index: number) => {
-      updateInventoryItems(inventory.filter((_, itemIndex) => itemIndex !== index));
-      updateFieldLocks((locks) =>
-        removeTrackerFieldLockPrefix(locks, inventoryItemTrackerLockPrefix(inventory[index]!, index)),
-      );
-    },
-    [inventory, updateFieldLocks, updateInventoryItems],
-  );
   const toggleFieldLock = useCallback(
     (key: string) => {
       updateFieldLocks((locks) => toggleTrackerFieldLock(locks, key));
@@ -286,6 +290,8 @@ export function RoleplayHUD({
     enabledAgentTypes.has("quest") ||
     enabledAgentTypes.has("custom-tracker");
   const hasInventoryTracker = enabledAgentTypes.has("inventory-tracker");
+  const hasMobilePlayerTrackerSections =
+    hasPlayerTrackerSections || hasInventoryTracker || memoryNagTrackerPackages.length > 0;
 
   // If mobileCompact, widgets are even narrower and action buttons are not cut off
 
@@ -303,6 +309,17 @@ export function RoleplayHUD({
         {trackerPanelEnabled && !trackerPanelOpen && (
           <TrackerPanelToggleButton onToggle={() => toggleTrackerPanel(chatId)} />
         )}
+
+        {beholderTrackerPackages.map((item) => (
+          <RoleplayTrackerCapability
+            key={`${item.id}-beholder-launcher`}
+            packageId={item.id}
+            chatId={chatId}
+            compact={mobileCompact}
+            onRerunSingleTracker={onRerunSingleTracker}
+            isTrackerRetryBusy={isTrackerBusy}
+          />
+        ))}
 
         {/* Actions (Agents + Clear) */}
         <ActionsGroup
@@ -355,11 +372,14 @@ export function RoleplayHUD({
               />
             )}
 
-            {hasPlayerTrackerSections && (
+            {hasMobilePlayerTrackerSections && (
               <CombinedPlayerWidget
                 showPersona={hasPersonaStatsTracker}
                 showCharacters={enabledAgentTypes.has("character-tracker")}
                 showQuests={enabledAgentTypes.has("quest")}
+                showInventory={hasInventoryTracker}
+                memoryNagPackageIds={memoryNagTrackerPackages.map((item) => item.id)}
+                chatId={chatId}
                 showCustomTracker={enabledAgentTypes.has("custom-tracker")}
                 personaStats={personaStatBars}
                 onUpdatePersonaStats={(bars) => patchField("personaStats", bars)}
@@ -367,11 +387,14 @@ export function RoleplayHUD({
                 onUpdatePersonaStatus={(status) => patchPlayerStats("status", status)}
                 characters={presentCharacters}
                 onUpdateCharacters={(chars) => patchField("presentCharacters", chars)}
-                inventory={inventory}
-                onUpdateInventory={updateInventoryItems}
-                onRemoveInventoryItem={removeInventoryItem}
                 quests={activeQuests}
                 onUpdateQuests={(q) => patchPlayerStats("activeQuests", q)}
+                inventoryCurrencies={inventoryTrackerCurrencies}
+                inventoryEquipped={inventoryTrackerEquipped}
+                inventory={inventoryTrackerInventory}
+                onUpdateInventoryCurrencies={(rows) => editInventoryTracker("currencies", rows)}
+                onUpdateInventoryEquipped={(rows) => editInventoryTracker("equipped", rows)}
+                onUpdateInventory={(rows) => editInventoryTracker("inventory", rows)}
                 customTrackerFields={customTrackerFields}
                 onUpdateCustomTracker={(fields) => patchPlayerStats("customTrackerFields", fields)}
                 onRerunSingleTracker={onRerunSingleTracker}
@@ -379,18 +402,16 @@ export function RoleplayHUD({
               />
             )}
 
-            {hasInventoryTracker && (
-              <InventoryTrackerWidget
-                currencies={inventoryTrackerCurrencies}
-                equipped={inventoryTrackerEquipped}
-                inventory={inventoryTrackerInventory}
-                onUpdateCurrencies={(rows) => editInventoryTracker("currencies", rows)}
-                onUpdateEquipped={(rows) => editInventoryTracker("equipped", rows)}
-                onUpdateInventory={(rows) => editInventoryTracker("inventory", rows)}
+            {otherRoleplayTrackerPackages.map((item) => (
+              <RoleplayTrackerCapability
+                key={`${item.id}-roleplay-tracker-mobile`}
+                packageId={item.id}
+                chatId={chatId}
+                compact
                 onRerunSingleTracker={onRerunSingleTracker}
                 isTrackerRetryBusy={isTrackerBusy}
               />
-            )}
+            ))}
 
             {/* Manual tracker trigger button (mobile) */}
             {manualTrackers && onRetriggerTrackers && (
@@ -456,23 +477,10 @@ export function RoleplayHUD({
               />
             )}
 
-            {hasPersonaStatsTracker && (
-              <InventoryWidget items={inventory} onUpdate={updateInventoryItems} onRemoveItem={removeInventoryItem} />
-            )}
-
             {enabledAgentTypes.has("quest") && (
               <QuestsWidget
                 quests={activeQuests}
                 onUpdate={(q) => patchPlayerStats("activeQuests", q)}
-                onRerunSingleTracker={onRerunSingleTracker}
-                isTrackerRetryBusy={isTrackerBusy}
-              />
-            )}
-
-            {enabledAgentTypes.has("custom-tracker") && (
-              <CustomTrackerWidget
-                fields={customTrackerFields}
-                onUpdate={(fields) => patchPlayerStats("customTrackerFields", fields)}
                 onRerunSingleTracker={onRerunSingleTracker}
                 isTrackerRetryBusy={isTrackerBusy}
               />
@@ -490,6 +498,35 @@ export function RoleplayHUD({
                 isTrackerRetryBusy={isTrackerBusy}
               />
             )}
+
+            {memoryNagTrackerPackages.map((item) => (
+              <RoleplayTrackerCapability
+                key={`${item.id}-roleplay-tracker`}
+                packageId={item.id}
+                chatId={chatId}
+                onRerunSingleTracker={onRerunSingleTracker}
+                isTrackerRetryBusy={isTrackerBusy}
+              />
+            ))}
+
+            {enabledAgentTypes.has("custom-tracker") && (
+              <CustomTrackerWidget
+                fields={customTrackerFields}
+                onUpdate={(fields) => patchPlayerStats("customTrackerFields", fields)}
+                onRerunSingleTracker={onRerunSingleTracker}
+                isTrackerRetryBusy={isTrackerBusy}
+              />
+            )}
+
+            {otherRoleplayTrackerPackages.map((item) => (
+              <RoleplayTrackerCapability
+                key={`${item.id}-roleplay-tracker`}
+                packageId={item.id}
+                chatId={chatId}
+                onRerunSingleTracker={onRerunSingleTracker}
+                isTrackerRetryBusy={isTrackerBusy}
+              />
+            ))}
 
             {/* Manual tracker trigger button (desktop) */}
             {manualTrackers && onRetriggerTrackers && (
@@ -523,6 +560,44 @@ export function RoleplayHUD({
 /** Common mobile HUD button sizing – used by all four strip buttons */
 const HUD_ICON_BUTTON = getChatToolbarButtonClass({ compact: true });
 const MOBILE_HUD_BTN = cn(HUD_ICON_BUTTON, CHAT_TOOLBAR_MOBILE_OVERFLOW_HEIGHT_CLASS, "cursor-pointer select-none");
+
+function RoleplayTrackerCapability({
+  packageId,
+  chatId,
+  compact = false,
+  onRerunSingleTracker,
+  isTrackerRetryBusy,
+}: {
+  packageId: string;
+  chatId: string;
+  compact?: boolean;
+  onRerunSingleTracker?: (agentType: string) => void;
+  isTrackerRetryBusy?: boolean;
+}) {
+  const { lockMode, onSetLockMode } = useTrackerLockContext();
+  return (
+    <span className="contents [&_button>svg]:!text-inherit">
+      <CapabilityElement
+        packageId={packageId}
+        view="toolbar"
+        capabilityProps={{
+          chatId,
+          chatMode: "roleplay",
+          mobileCompact: compact,
+          onRerunTracker: onRerunSingleTracker ? () => onRerunSingleTracker(packageId) : undefined,
+          trackerRetryBusy: isTrackerRetryBusy,
+          lockMode,
+          onToggleLockMode: onSetLockMode ? () => onSetLockMode(!lockMode) : undefined,
+          toolbarButtonClass: getChatToolbarButtonClass({
+            compact,
+            className: compact ? CHAT_TOOLBAR_MOBILE_OVERFLOW_HEIGHT_CLASS : undefined,
+          }),
+        }}
+        className="contents"
+      />
+    </span>
+  );
+}
 
 function DeferredHUDPanelFallback({ label }: { label: string }) {
   return <div className="px-3 py-4 text-center text-[0.625rem] text-[var(--muted-foreground)]/60">{label}</div>;
@@ -615,7 +690,11 @@ function ActionsGroup({
     const aboveTop = rect.top - dropdownHeight - 4;
     const preferredTop = belowTop + dropdownHeight > window.innerHeight - 8 ? aboveTop : belowTop;
     const top = Math.max(8, Math.min(preferredTop, window.innerHeight - dropdownHeight - 8));
-    const left = Math.max(8, Math.min(rect.left, window.innerWidth - dropdownWidth - 8));
+    // Center with layout coordinates: the panel's entrance animation owns transform.
+    const left =
+      window.innerWidth < 768
+        ? Math.max(8, Math.round((window.innerWidth - dropdownWidth) / 2))
+        : Math.max(8, Math.min(rect.left, window.innerWidth - dropdownWidth - 8));
     return { top, left };
   }, []);
 
@@ -758,13 +837,16 @@ function ActionsGroup({
 
 // ═══════════════════════════════════════════════
 // Combined Player Widget — merges Persona, Chars,
-// Inventory, and Quests into a single expandable panel
+// Quests, and custom fields into a single expandable panel
 // ═══════════════════════════════════════════════
 
 function CombinedPlayerWidget({
   showPersona,
   showCharacters,
   showQuests,
+  showInventory,
+  memoryNagPackageIds,
+  chatId,
   showCustomTracker,
   personaStats,
   onUpdatePersonaStats,
@@ -772,11 +854,14 @@ function CombinedPlayerWidget({
   onUpdatePersonaStatus,
   characters,
   onUpdateCharacters,
-  inventory,
-  onUpdateInventory,
-  onRemoveInventoryItem,
   quests,
   onUpdateQuests,
+  inventoryCurrencies,
+  inventoryEquipped,
+  inventory,
+  onUpdateInventoryCurrencies,
+  onUpdateInventoryEquipped,
+  onUpdateInventory,
   customTrackerFields,
   onUpdateCustomTracker,
   onRerunSingleTracker,
@@ -785,6 +870,9 @@ function CombinedPlayerWidget({
   showPersona: boolean;
   showCharacters: boolean;
   showQuests: boolean;
+  showInventory: boolean;
+  memoryNagPackageIds: string[];
+  chatId: string;
   showCustomTracker: boolean;
   personaStats: CharacterStat[];
   onUpdatePersonaStats: (bars: CharacterStat[]) => void;
@@ -792,11 +880,14 @@ function CombinedPlayerWidget({
   onUpdatePersonaStatus: (status: string) => void;
   characters: PresentCharacter[];
   onUpdateCharacters: (chars: PresentCharacter[]) => void;
-  inventory: InventoryItem[];
-  onUpdateInventory: (items: InventoryItem[]) => void;
-  onRemoveInventoryItem?: (index: number) => void;
   quests: QuestProgress[];
   onUpdateQuests: (quests: QuestProgress[]) => void;
+  inventoryCurrencies: InventoryTrackerRow[];
+  inventoryEquipped: InventoryTrackerRow[];
+  inventory: InventoryTrackerRow[];
+  onUpdateInventoryCurrencies: (rows: InventoryTrackerRow[]) => void;
+  onUpdateInventoryEquipped: (rows: InventoryTrackerRow[]) => void;
+  onUpdateInventory: (rows: InventoryTrackerRow[]) => void;
   customTrackerFields: CustomTrackerField[];
   onUpdateCustomTracker: (fields: CustomTrackerField[]) => void;
   onRerunSingleTracker?: (agentType: string) => void;
@@ -833,6 +924,9 @@ function CombinedPlayerWidget({
             showPersona={showPersona}
             showCharacters={showCharacters}
             showQuests={showQuests}
+            showInventory={showInventory}
+            memoryNagPackageIds={memoryNagPackageIds}
+            chatId={chatId}
             showCustomTracker={showCustomTracker}
             personaStats={personaStats}
             onUpdatePersonaStats={onUpdatePersonaStats}
@@ -840,11 +934,14 @@ function CombinedPlayerWidget({
             onUpdatePersonaStatus={onUpdatePersonaStatus}
             characters={characters}
             onUpdateCharacters={onUpdateCharacters}
-            inventory={inventory}
-            onUpdateInventory={onUpdateInventory}
-            onRemoveInventoryItem={onRemoveInventoryItem}
             quests={quests}
             onUpdateQuests={onUpdateQuests}
+            inventoryCurrencies={inventoryCurrencies}
+            inventoryEquipped={inventoryEquipped}
+            inventory={inventory}
+            onUpdateInventoryCurrencies={onUpdateInventoryCurrencies}
+            onUpdateInventoryEquipped={onUpdateInventoryEquipped}
+            onUpdateInventory={onUpdateInventory}
             customTrackerFields={customTrackerFields}
             onUpdateCustomTracker={onUpdateCustomTracker}
             onClose={() => setOpen(false)}
@@ -978,22 +1075,7 @@ function CharactersWidget({
         className={WIDGET}
         title={localizeUi("ui.chat.characterswidget.presentCharacters")}
       >
-        {characters.length > 0 ? (
-          <div className="flex items-center -space-x-0.5">
-            {characters.slice(0, 3).map((c, i) => (
-              <span key={i} className="text-xs max-md:text-[0.5625rem] leading-none">
-                {c.emoji || "👤"}
-              </span>
-            ))}
-            {characters.length > 3 && (
-              <span className="text-[0.4375rem] text-[var(--muted-foreground)]/60 ml-0.5">
-                +{characters.length - 3}
-              </span>
-            )}
-          </div>
-        ) : (
-          <Users size="0.875rem" className="transition-colors max-md:h-3.5 max-md:w-3.5" />
-        )}
+        <Users size="0.875rem" className="transition-colors max-md:h-3.5 max-md:w-3.5" />
       </button>
 
       <WidgetPopover
@@ -1184,91 +1266,6 @@ function CustomTrackerWidget({
   );
 }
 
-// ── Inventory Widget ─────────────────────────
-
-function InventoryWidget({
-  items,
-  onUpdate,
-  onRemoveItem,
-}: {
-  items: InventoryItem[];
-  onUpdate: (items: InventoryItem[]) => void;
-  onRemoveItem?: (index: number) => void;
-}) {
-  const { t: localizeUi } = useUiTranslation();
-  const reduceAmbientEffects = useReducedAmbientEffects();
-  const [open, setOpen] = useState(false);
-  const buttonRef = useRef<HTMLButtonElement>(null);
-  const [cycleIdx, setCycleIdx] = useState(0);
-  const [animKey, setAnimKey] = useState(0);
-
-  // Cycle through items every 3 seconds
-  useEffect(() => {
-    if (reduceAmbientEffects || items.length <= 1) return;
-    const timer = setInterval(() => {
-      setCycleIdx((prev) => (prev + 1) % items.length);
-      setAnimKey((k) => k + 1);
-    }, 3000);
-    return () => clearInterval(timer);
-  }, [items.length, reduceAmbientEffects]);
-
-  // Reset index if items shrink
-  useEffect(() => {
-    if (cycleIdx >= items.length) setCycleIdx(0);
-  }, [items.length, cycleIdx]);
-
-  const currentItem = items[cycleIdx];
-
-  // Auto-shrink font so the longest word fits on one line within ~36px usable width
-  const itemLabel = currentItem
-    ? currentItem.quantity > 1
-      ? `${currentItem.name} ×${currentItem.quantity}`
-      : currentItem.name
-    : "";
-  const longestWord = itemLabel.split(/\s+/).reduce((max, w) => Math.max(max, w.length), 0);
-  // ~0.6em per char at a given font size; widget inner ≈ 36px → fontSize ≤ 60/longestWord
-  const itemFontSize = Math.max(3.5, Math.min(6, 60 / Math.max(longestWord, 1)));
-
-  return (
-    <div className="relative">
-      <button
-        ref={buttonRef}
-        onClick={() => setOpen(!open)}
-        className={WIDGET}
-        title={localizeUi("ui.chat.inventorywidget.inventory")}
-      >
-        {items.length > 0 && currentItem ? (
-          <span
-            key={animKey}
-            className={cn(
-              "w-full px-0.5 text-center font-semibold leading-[1.2]",
-              !reduceAmbientEffects && "animate-[inventory-cycle_0.4s_ease-out]",
-            )}
-            style={{ fontSize: `${itemFontSize}px` }}
-          >
-            {itemLabel}
-          </span>
-        ) : (
-          <Package size="0.875rem" className="max-md:h-3 max-md:w-3" />
-        )}
-      </button>
-
-      <WidgetPopover
-        open={open}
-        onClose={() => setOpen(false)}
-        anchorRef={buttonRef}
-        className="w-64 max-h-80 overflow-y-auto"
-      >
-        <Suspense
-          fallback={<DeferredHUDPanelFallback label={localizeUi("ui.chat.inventorywidget.loadingInventory")} />}
-        >
-          <InventoryPanel items={items} onUpdate={onUpdate} onRemoveItem={onRemoveItem} />
-        </Suspense>
-      </WidgetPopover>
-    </div>
-  );
-}
-
 function InventoryTrackerWidget({
   currencies,
   equipped,
@@ -1300,8 +1297,11 @@ function InventoryTrackerWidget({
         className={WIDGET}
         title={localizeUi("ui.chat.inventoryTracker.title")}
       >
-        <Backpack size="0.875rem" className="max-md:h-3 max-md:w-3" />
-        {total > 0 && <span className="text-[0.5rem] font-semibold tabular-nums">{total}</span>}
+        {total > 0 ? (
+          <span className="text-[0.625rem] font-semibold tabular-nums">{total}</span>
+        ) : (
+          <Backpack size="0.875rem" className="max-md:h-3 max-md:w-3" />
+        )}
       </button>
       <WidgetPopover
         open={open}
@@ -1451,6 +1451,9 @@ function CombinedWorldWidget({
     weatherFamily === "atmosphere" && !weather ? "text-[var(--muted-foreground)]/70" : weatherStyle.color;
   const temperatureDisplay = getTemperatureGaugeDisplay(temperature, trackerTemperatureUnit);
   const tempColor = temperatureDisplay.color;
+  const hasWorldState =
+    [location, date, time, weather, temperature].some((value) => value.trim().length > 0) ||
+    worldCustomFields.some((field) => field.name.trim().length > 0 || field.value.trim().length > 0);
 
   return (
     <div className="relative">
@@ -1464,43 +1467,53 @@ function CombinedWorldWidget({
             className: CHAT_TOOLBAR_MOBILE_OVERFLOW_HEIGHT_CLASS,
           }),
           "cursor-pointer select-none",
-          "w-auto min-w-8 gap-1 px-2",
+          hasWorldState ? "w-auto min-w-8 gap-1 px-2" : "group flex-col gap-0 overflow-hidden",
         )}
         title={localizeUi("ui.panels.appearancesettings.worldState")}
       >
-        {/* Location pin */}
-        <MapPin size="0.9375rem" className={cn("shrink-0 drop-shadow-sm", pinColor)} />
+        {!hasWorldState ? (
+          <MapPin size="0.875rem" className="shrink-0 max-md:h-3.5 max-md:w-3.5" />
+        ) : (
+          <>
+            {/* Location pin */}
+            <MapPin size="0.9375rem" className="shrink-0 drop-shadow-sm" />
 
-        {/* Mini calendar with day number */}
-        <WorldCalendarIcon
-          day={dateDisplay.day}
-          className={cn("h-4 w-4 shrink-0 drop-shadow-sm", dateDisplay.iconColor)}
-        />
+            {/* Mini calendar with day number */}
+            <WorldCalendarIcon
+              day={dateDisplay.day}
+              className={cn("h-4 w-4 shrink-0 drop-shadow-sm", dateDisplay.iconColor)}
+            />
 
-        <WorldClockIcon
-          display={timeDisplay}
-          variant="monochrome"
-          className={cn("h-4 w-4 shrink-0 drop-shadow-sm", timeColor)}
-        />
+            <WorldClockIcon
+              display={timeDisplay}
+              variant="monochrome"
+              className={cn("h-4 w-4 shrink-0 drop-shadow-sm", timeColor)}
+            />
 
-        {/* Weather emoji */}
-        <span
-          className={cn(
-            "text-sm leading-none shrink-0 drop-shadow-sm [text-shadow:0_0_8px_currentColor]",
-            weatherColor,
-          )}
-        >
-          {weatherEmoji}
-        </span>
+            {/* Weather emoji */}
+            <span
+              className={cn(
+                "text-sm leading-none shrink-0 drop-shadow-sm [text-shadow:0_0_8px_currentColor]",
+                weatherColor,
+              )}
+            >
+              {weatherEmoji}
+            </span>
 
-        <WorldThermometerIcon display={temperatureDisplay} variant="solid-bulb" className="h-4 w-[0.625rem] shrink-0" />
-        {temperatureDisplay.isPure && (
-          <span
-            className="shrink-0 text-[0.5rem] font-bold leading-none md:text-[0.5625rem]"
-            style={{ color: tempColor }}
-          >
-            {temperatureDisplay.label}
-          </span>
+            <WorldThermometerIcon
+              display={temperatureDisplay}
+              variant="solid-bulb"
+              className="h-4 w-[0.625rem] shrink-0"
+            />
+            {temperatureDisplay.isPure && (
+              <span
+                className="shrink-0 text-[0.5rem] font-bold leading-none md:text-[0.5625rem]"
+                style={{ color: tempColor }}
+              >
+                {temperatureDisplay.label}
+              </span>
+            )}
+          </>
         )}
       </button>
 

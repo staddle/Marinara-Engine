@@ -546,6 +546,45 @@ export function applySegmentEdits(
   return anyApplied ? output.join("\n\n") : content;
 }
 
+function collectSegmentOverlays(chatMeta: Record<string, unknown>) {
+  const editsByMessage = new Map<string, Record<number, SegmentEditValue>>();
+  const deletesByMessage = new Map<string, Set<number>>();
+  for (const [key, value] of Object.entries(chatMeta)) {
+    const isEdit = key.startsWith("segmentEdit:");
+    const isDelete = key.startsWith("segmentDelete:");
+    if (!isEdit && !isDelete) continue;
+    if (isDelete && value !== true && value !== "true") continue;
+    const parts = key.slice(isEdit ? "segmentEdit:".length : "segmentDelete:".length);
+    const lastColon = parts.lastIndexOf(":");
+    if (lastColon < 0) continue;
+    const messageId = parts.slice(0, lastColon);
+    const segmentIndex = Number.parseInt(parts.slice(lastColon + 1), 10);
+    if (Number.isNaN(segmentIndex)) continue;
+
+    if (isEdit) {
+      const edit = normalizeSegmentEditValue(value);
+      if (!edit) continue;
+      const edits = editsByMessage.get(messageId) ?? {};
+      edits[segmentIndex] = edit;
+      editsByMessage.set(messageId, edits);
+    } else {
+      const deleted = deletesByMessage.get(messageId) ?? new Set<number>();
+      deleted.add(segmentIndex);
+      deletesByMessage.set(messageId, deleted);
+    }
+  }
+  return { editsByMessage, deletesByMessage };
+}
+
+export function applyMessageSegmentEdits(
+  content: string,
+  chatMeta: Record<string, unknown>,
+  messageId: string,
+): string {
+  const { editsByMessage, deletesByMessage } = collectSegmentOverlays(chatMeta);
+  return applySegmentEdits(content, editsByMessage.get(messageId) ?? {}, deletesByMessage.get(messageId) ?? new Set());
+}
+
 /**
  * Collect segment edit overlays from chat metadata and apply them to the
  * corresponding messages.
@@ -559,41 +598,7 @@ export function applyAllSegmentEdits(
   chatMeta: Record<string, unknown>,
   allDbMessages: Array<{ id: string; role: string }>,
 ): void {
-  // Collect edits grouped by messageId
-  const editsByMessage = new Map<string, Record<number, SegmentEditValue>>();
-  const deletesByMessage = new Map<string, Set<number>>();
-  for (const [key, value] of Object.entries(chatMeta)) {
-    const isEdit = key.startsWith("segmentEdit:");
-    const isDelete = key.startsWith("segmentDelete:");
-    if (!isEdit && !isDelete) continue;
-    if (isDelete && value !== true && value !== "true") continue;
-    // Format: segment(Edit|Delete):messageId:segmentIndex
-    const parts = key.slice(isEdit ? "segmentEdit:".length : "segmentDelete:".length);
-    const lastColon = parts.lastIndexOf(":");
-    if (lastColon < 0) continue;
-    const messageId = parts.slice(0, lastColon);
-    const segIdx = parseInt(parts.slice(lastColon + 1), 10);
-    if (isNaN(segIdx)) continue;
-
-    if (isEdit) {
-      const edit = normalizeSegmentEditValue(value);
-      if (!edit) continue;
-      let edits = editsByMessage.get(messageId);
-      if (!edits) {
-        edits = {};
-        editsByMessage.set(messageId, edits);
-      }
-      edits[segIdx] = edit;
-      continue;
-    }
-
-    let deleted = deletesByMessage.get(messageId);
-    if (!deleted) {
-      deleted = new Set<number>();
-      deletesByMessage.set(messageId, deleted);
-    }
-    deleted.add(segIdx);
-  }
+  const { editsByMessage, deletesByMessage } = collectSegmentOverlays(chatMeta);
 
   if (editsByMessage.size === 0 && deletesByMessage.size === 0) return;
 

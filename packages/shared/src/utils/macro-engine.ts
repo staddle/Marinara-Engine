@@ -48,6 +48,8 @@ export interface MacroContext {
   personaReferences?: Record<string, string>;
   /** Activated lorebook Outlet content keyed by its exact, case-sensitive name */
   outlets?: Record<string, string>;
+  /** Per-lorebook total entry counts, keyed by lorebook ID (for {{lorebooksize::ID}}) */
+  lorebookEntryCounts?: Record<string, number>;
   /** Current character card fields used by macros like {{description}} */
   characterFields?: {
     phoneticName?: string;
@@ -444,9 +446,14 @@ export const SUPPORTED_MACROS: readonly SupportedMacroDefinition[] = [
     description: "Activated lorebook entries assigned to the exact, case-sensitive Outlet name",
   },
   {
+    category: "Lorebooks",
+    syntax: "{{lorebooksize::ID}}",
+    description: "Total number of entries in the lorebook with the given ID",
+  },
+  {
     category: "Game",
     syntax: "{{gameStoryboardKeyframeCount}}",
-    description: "Current Game Mode Keyframes per Turn target (1-6, default 3)",
+    description: "Current Game Mode Keyframes per Turn target (1-200, default 3)",
   },
   { category: "Time", syntax: "{{date}}", description: "Current real date in the user's timezone" },
   { category: "Time", syntax: "{{time}}", description: "Current real time in the user's timezone" },
@@ -493,6 +500,11 @@ export const SUPPORTED_MACROS: readonly SupportedMacroDefinition[] = [
     category: "Formatting",
     syntax: '{{#if char == "Name" || "Other"}}...{{else}}...{{/if}}',
     description: "Conditional block with ||, &&, parentheses, else branches, and straight or typographic quotes",
+  },
+  {
+    category: "Formatting",
+    syntax: '{{#if character != "Maukie"}}...{{/if}}',
+    description: 'Negated comparison; "is not", "not contains", and "not includes" are also supported',
   },
   { category: "Formatting", syntax: "{{noop}}", description: "No-op placeholder removed from output" },
   { category: "Formatting", syntax: "{{// comment}}", description: "Inline author comment removed from output" },
@@ -575,9 +587,10 @@ export function resolveCharacterScopedMacros(
   const scopedContext = macroContextForCharacterProfile(profile, baseContext);
   const scoped = resolveConditionalBlocks(stripMacroComments(template), scopedContext, {});
   return scoped
-    .replace(/\{\{\s*char(?:Name)?\s*\}\}/gi, profile.name)
-    .replace(/\{\{\s*char(?:Name)?Phonetic\s*\}\}/gi, profile.phoneticName ?? profile.name)
-    .replace(/\{\{\s*group\s*\}\}/gi, resolveGroupCharacters(scopedContext))
+    .replace(/\{\{\s*original\s*\}\}/gi, "")
+    .replace(/\{\{\s*char(?:Name)?\s*\}\}/gi, () => profile.name)
+    .replace(/\{\{\s*char(?:Name)?Phonetic\s*\}\}/gi, () => profile.phoneticName ?? profile.name)
+    .replace(/\{\{\s*group\s*\}\}/gi, () => resolveGroupCharacters(scopedContext))
     .replace(/\{\{\s*description\s*\}\}/gi, () =>
       resolveCharacterFieldValue(profile, "description", depth, baseContext),
     )
@@ -1827,6 +1840,62 @@ function resolveConditionalBlocks(input: string, ctx: MacroContext, options: Res
   return result;
 }
 
+const AGENT_CONDITIONAL_ENTITY_REPLACEMENTS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/&quot;|&#34;|&#x22;/gi, '"'],
+  [/&apos;|&#39;|&#x27;/gi, "'"],
+  [/&lt;|&#60;|&#x3c;/gi, "<"],
+  [/&gt;|&#62;|&#x3e;/gi, ">"],
+  [/&amp;|&#38;|&#x26;/gi, "&"],
+];
+
+function decodeAgentConditionalTextEntities(input: string): string {
+  return AGENT_CONDITIONAL_ENTITY_REPLACEMENTS.reduce(
+    (value, [pattern, replacement]) => value.replace(pattern, replacement),
+    input,
+  );
+}
+
+function decodeAgentConditionalEntities(input: string): string {
+  return replaceBalancedMacros(input, (body) => {
+    if (parseIfCondition(body) === null && parseElseIfCondition(body) === null) return undefined;
+    return `{{${decodeAgentConditionalTextEntities(body)}}}`;
+  });
+}
+
+/**
+ * Remove conditional control syntax from agent-bound text while keeping every
+ * authored branch. Agent calls need the prose as context, not the main prompt's
+ * character-specific control flow.
+ */
+export function flattenAgentConditionalMacros(input: string): string {
+  return flattenAgentConditionalMacrosInner(input, false);
+}
+
+function flattenAgentConditionalMacrosInner(input: string, decodeTextEntities: boolean): string {
+  const normalized = decodeAgentConditionalEntities(
+    decodeTextEntities ? decodeAgentConditionalTextEntities(input) : input,
+  );
+  let result = "";
+  let index = 0;
+
+  while (index < normalized.length) {
+    const start = findConditionalStart(normalized, index);
+    if (!start) return result + normalized.slice(index);
+    const block = findConditionalBranches(normalized, start.end, start.condition);
+    if (!block) return result + normalized.slice(index);
+
+    result += normalized.slice(index, start.start);
+    result += block.branches
+      .map((branch) =>
+        flattenAgentConditionalMacrosInner(normalized.slice(branch.contentStart, branch.contentEnd), true),
+      )
+      .join("");
+    index = block.endEnd;
+  }
+
+  return result;
+}
+
 function splitTopLevelDoubleColon(input: string): string[] {
   const parts: string[] = [];
   let current = "";
@@ -2018,6 +2087,7 @@ function formatMacroDateTime(now: Date, requestedTimeZone?: string): MacroDateTi
  *  - {{lastGenerationType}} — current generation type label
  *  - {{idle_duration}} — time since the last chat activity
  *  - {{outlet::name}} — activated lorebook entries assigned to a named Outlet
+ *  - {{lorebooksize::ID}} — total number of entries in the lorebook with the given ID
  *  - {{gameStoryboardKeyframeCount}} — current Game Mode Keyframes per Turn target
  *  - {{// comment}} — removed (author comments)
  *  - {{trim}} — remove surrounding whitespace
@@ -2103,7 +2173,8 @@ export function resolveMacros(template: string, ctx: MacroContext, options: Reso
   result = resolveConditionalBlocks(result, ctx, options);
 
   // ── No-op & banned ──
-  result = result.replace(/\{\{noop\}\}/gi, "");
+  // SillyTavern's original instruction has no counterpart in preset-owned prompts.
+  result = result.replace(/\{\{\s*(?:noop|original)\s*\}\}/gi, "");
   result = replaceBalancedMacros(result, (body) => (/^banned(?:\s+[\s\S]*)?$/i.test(body.trim()) ? "" : undefined));
 
   // ── Static substitutions ──
@@ -2134,18 +2205,18 @@ export function resolveMacros(template: string, ctx: MacroContext, options: Reso
   result = result.replace(/\{\{personaScenario\}\}/gi, () =>
     resolveNestedFieldMacros(ctx.personaFields?.scenario ?? ""),
   );
-  result = result.replace(/\{\{char(?:Name)?\}\}/gi, characterReplacement("char"));
-  result = result.replace(/\{\{char(?:Name)?Phonetic\}\}/gi, characterReplacement("charPhonetic"));
-  result = result.replace(/\{\{characters\}\}/gi, ctx.characters.join(", "));
-  result = result.replace(/\{\{group\}\}/gi, characterReplacement("group"));
-  result = result.replace(/\{\{description\}\}/gi, characterReplacement("description"));
-  result = result.replace(/\{\{personality\}\}/gi, characterReplacement("personality"));
-  result = result.replace(/\{\{backstory\}\}/gi, characterReplacement("backstory"));
-  result = result.replace(/\{\{appearance\}\}/gi, characterReplacement("appearance"));
-  result = result.replace(/\{\{scenario\}\}/gi, characterReplacement("scenario"));
-  result = result.replace(/\{\{example\}\}/gi, characterReplacement("example"));
-  result = result.replace(/\{\{charSysInfo\}\}/gi, characterReplacement("systemPrompt"));
-  result = result.replace(/\{\{charPostHistory\}\}/gi, characterReplacement("postHistoryInstructions"));
+  result = result.replace(/\{\{char(?:Name)?\}\}/gi, () => characterReplacement("char"));
+  result = result.replace(/\{\{char(?:Name)?Phonetic\}\}/gi, () => characterReplacement("charPhonetic"));
+  result = result.replace(/\{\{characters\}\}/gi, () => ctx.characters.join(", "));
+  result = result.replace(/\{\{group\}\}/gi, () => characterReplacement("group"));
+  result = result.replace(/\{\{description\}\}/gi, () => characterReplacement("description"));
+  result = result.replace(/\{\{personality\}\}/gi, () => characterReplacement("personality"));
+  result = result.replace(/\{\{backstory\}\}/gi, () => characterReplacement("backstory"));
+  result = result.replace(/\{\{appearance\}\}/gi, () => characterReplacement("appearance"));
+  result = result.replace(/\{\{scenario\}\}/gi, () => characterReplacement("scenario"));
+  result = result.replace(/\{\{example\}\}/gi, () => characterReplacement("example"));
+  result = result.replace(/\{\{charSysInfo\}\}/gi, () => characterReplacement("systemPrompt"));
+  result = result.replace(/\{\{charPostHistory\}\}/gi, () => characterReplacement("postHistoryInstructions"));
   // Conversation-mode-only macros. `convoFields` is set only by the convo prompt
   // branch, so these are "" in every other mode.
   result = result.replace(/\{\{convo_display\}\}/gi, () =>
@@ -2280,6 +2351,14 @@ export function resolveMacros(template: string, ctx: MacroContext, options: Reso
     if (!match) return undefined;
     const name = (match[1] ?? "").trim();
     return name && ctx.outlets && Object.prototype.hasOwnProperty.call(ctx.outlets, name) ? ctx.outlets[name]! : "";
+  });
+
+  // ── Lorebook entry count ──
+  // Resolves {{lorebooksize::ID}} to the total number of entries in the
+  // referenced lorebook. Unknown IDs resolve to 0.
+  result = result.replace(/\{\{lorebooksize::([\w-]+)\}\}/gi, (_, id) => {
+    const counts = ctx.lorebookEntryCounts;
+    return counts && Object.prototype.hasOwnProperty.call(counts, id) ? String(counts[id]) : "0";
   });
 
   if (options.trimResult !== false) {

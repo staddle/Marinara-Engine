@@ -265,6 +265,9 @@ function postProcessSegment(seg: SceneSegmentEffect, ctx: PostProcessContext): S
       out.sfx = matched;
     }
   }
+  const loopCount = Number(out.sfxLoopCount);
+  out.sfxLoopCount =
+    out.sfx?.length && Number.isFinite(loopCount) ? Math.max(1, Math.min(5, Math.floor(loopCount))) : undefined;
   // Music is never a free-text prompt anymore (#5161): segment music strings
   // are dropped outright — deterministic scoring owns every music decision.
   out.music = undefined;

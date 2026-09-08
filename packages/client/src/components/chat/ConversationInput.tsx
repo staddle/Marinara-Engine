@@ -23,6 +23,7 @@ import { useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { useChatStore } from "../../stores/chat.store";
 import { useAgentStore } from "../../stores/agent.store";
 import { useUIStore } from "../../stores/ui.store";
+import { useSidecarStore } from "../../stores/sidecar.store";
 import { useConversationGamesStore } from "../../stores/conversation-games.store";
 import { useGenerate } from "../../hooks/use-generate";
 import { useApplyRegex } from "../../hooks/use-apply-regex";
@@ -31,6 +32,7 @@ import { useCallVoiceSession } from "../../hooks/use-call-voice-session";
 import { useCallCameraSession } from "../../hooks/use-call-camera-session";
 import { ttsService } from "../../lib/tts-service";
 import { useCreateMessage, useDeleteMessage, useUpdateMessageExtra, useChat, chatKeys } from "../../hooks/use-chats";
+import { useConnections } from "../../hooks/use-connections";
 import { characterKeys } from "../../hooks/use-characters";
 import {
   matchSlashCommand,
@@ -49,7 +51,7 @@ import { translateDraftText } from "../../lib/draft-translation";
 import { prepareImageAttachment } from "../../lib/chat-attachment-images";
 import { isFileDrag } from "../../lib/chat-resource-drag";
 import { CARD_ASSET_INSERT_EVENT, type CardAssetInsertDetail } from "../../lib/card-asset-links";
-import { isGenerationSendBlocked } from "../../lib/generation-stream-policy";
+import { isGenerationSendBlocked, isIosWebKitBrowser } from "../../lib/generation-stream-policy";
 import { requestChatScrollToBottom } from "../../lib/chat-scroll-events";
 import { searchStandardEmojiShortcodes, type StandardEmojiShortcode } from "../../lib/emoji-shortcodes";
 import { QuickConnectionSwitcher } from "./QuickConnectionSwitcher";
@@ -64,6 +66,7 @@ import { SlashCommandFeedback } from "./SlashCommandFeedback";
 import { QuickReplyMenu, type QuickReplyAction } from "./QuickReplyMenu";
 import { getChatInputShellClass } from "./chat-input-styles";
 import { MariSuggestionChips } from "./MariSuggestionChips";
+import { resolveChatContextBudget } from "../../lib/professor-mari-context-budget";
 import {
   ConversationMediaPickerPanel,
   type ConversationMediaPickerTab,
@@ -346,7 +349,7 @@ interface ConversationInputProps {
     conversationActivity?: string;
   }>;
   onPeekPrompt?: () => void;
-  onIllustrate?: () => void | Promise<void>;
+  onIllustrate?: (prompt?: string) => void | Promise<void>;
   onGenerateSelfie?: (characterId?: string) => void | Promise<void>;
 }
 
@@ -395,9 +398,11 @@ export function ConversationInput({
   const setActiveCallChatId = useChatStore((s) => s.setActiveCallChatId);
   const mariChips = useAgentStore((s) => s.mariChips);
   const mariChipsChatId = useAgentStore((s) => s.mariChipsChatId);
-  const clearMariChips = useAgentStore((s) => s.clearMariChips);
   const professorMariSuggestionsEnabled = useUIStore((s) => s.professorMariSuggestionsEnabled);
   const { data: activeChat } = useChat(activeChatId);
+  const { data: contextConnections = [] } = useConnections();
+  const sidecarMaxContext = useSidecarStore((state) => state.config.contextSize);
+  const showContextUsage = useUIStore((s) => s.showContextUsage);
   const { data: installedCapabilities = [] } = useInstalledCapabilityPackages();
   const availableCapabilityIds = useMemo(
     () => new Set(installedCapabilities.filter((item) => item.status === "active").map((item) => item.id)),
@@ -525,6 +530,11 @@ export function ConversationInput({
     });
   }, [activeChatId, qc]);
   const messagesData = qc.getQueryData<InfiniteData<Message[]>>(chatKeys.messages(activeChatId ?? ""));
+  const contextMessages = useMemo(() => [...(messagesData?.pages ?? [])].reverse().flat(), [messagesData]);
+  const contextBudget = useMemo(
+    () => resolveChatContextBudget(contextMessages, activeChat?.connectionId, contextConnections, sidecarMaxContext),
+    [activeChat?.connectionId, contextConnections, contextMessages, sidecarMaxContext],
+  );
   const isProfessorMariChat = activeChatCharacters?.some((character) => character.id === PROFESSOR_MARI_ID) ?? false;
   const hasMessages = (messagesData?.pages ?? []).some((page) => page.length > 0);
   const visibleMariChips =
@@ -663,12 +673,6 @@ export function ConversationInput({
     },
     [activeChatId, setInputDraft, syncInputState, guidedPlanStep, recordMariPlanAnswer, clearMariPlan],
   );
-  useEffect(() => {
-    if (professorMariSuggestionsEnabled) return;
-    clearMariChips();
-    clearMariPlan();
-  }, [clearMariChips, clearMariPlan, professorMariSuggestionsEnabled]);
-
   useEffect(() => {
     const handleCardAssetInsert = (event: Event) => {
       const detail = (event as CustomEvent<CardAssetInsertDetail>).detail;
@@ -1073,6 +1077,7 @@ export function ConversationInput({
           requestChatScrollToBottom({ chatId: activeChatId, behavior: "auto" });
         },
         invalidate: () => qc.invalidateQueries({ queryKey: chatKeys.all }),
+        invalidateCharacter: (characterId) => qc.invalidateQueries({ queryKey: characterKeys.detail(characterId) }),
         characterNames: activeCharacterNames,
         characters: activeChatCharacters?.map((character) => ({ id: character.id, name: character.name })),
         latestAssistantMessageId: latestAssistantMessage?.id ?? null,
@@ -1396,6 +1401,7 @@ export function ConversationInput({
           requestChatScrollToBottom({ chatId: submittingChatId, behavior: "auto" });
         },
         invalidate: () => qc.invalidateQueries({ queryKey: chatKeys.all }),
+        invalidateCharacter: (characterId) => qc.invalidateQueries({ queryKey: characterKeys.detail(characterId) }),
         characterNames: activeCharacterNames,
         characters: activeChatCharacters?.map((character) => ({ id: character.id, name: character.name })),
         latestAssistantMessageId: latestAssistantMessage?.id ?? null,
@@ -2045,6 +2051,7 @@ export function ConversationInput({
 
   const ensureInputVisible = useCallback(() => {
     if (typeof window === "undefined" || !window.matchMedia("(max-width: 767px)").matches) return;
+    if (isIosWebKitBrowser(navigator.userAgent, navigator.platform, navigator.maxTouchPoints)) return;
     const scroll = () => {
       const inputBar = inputBarRef.current;
       const viewport = window.visualViewport;
@@ -2225,46 +2232,6 @@ export function ConversationInput({
         />
       ) : (
         <>
-          {/* Slash command autocomplete */}
-          {completions.length > 0 && (
-            <div className="absolute bottom-full left-3 right-3 z-40 mb-1 max-h-[min(18rem,45dvh)] overflow-y-auto rounded-lg border border-foreground/10 bg-[var(--card)] shadow-lg [-webkit-overflow-scrolling:touch]">
-              {completions.map((cmd, i) => (
-                <button
-                  key={cmd.key}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    if (textareaRef.current) {
-                      textareaRef.current.value = cmd.insertValue;
-                      textareaRef.current.setSelectionRange(cmd.cursor, cmd.cursor);
-                      syncInputState(cmd.insertValue);
-                      if (activeChatId) setInputDraft(activeChatId, cmd.insertValue);
-                      setCompletions([]);
-                      textareaRef.current.focus();
-                    }
-                  }}
-                  className={cn(
-                    "flex w-full min-w-0 items-start gap-2 px-3 py-2.5 text-left text-sm transition-colors",
-                    i === selectedCompletion ? "bg-foreground/10 text-foreground" : "hover:bg-foreground/10",
-                  )}
-                >
-                  <span
-                    className={cn(
-                      "shrink-0 whitespace-nowrap text-xs",
-                      cmd.kind === "character" ? "font-medium" : "font-mono",
-                    )}
-                  >
-                    {cmd.label}
-                  </span>
-                  {cmd.description && (
-                    <span className="min-w-0 flex-1 text-[0.6875rem] leading-snug text-foreground/45 [overflow-wrap:anywhere]">
-                      {cmd.description}
-                    </span>
-                  )}
-                </button>
-              ))}
-            </div>
-          )}
-
           {/* @mention autocomplete */}
           {mentionCompletions.length > 0 && (
             <div className="absolute bottom-full left-0 right-0 mb-1 overflow-hidden rounded-lg border border-foreground/10 bg-[var(--card)] shadow-lg">
@@ -2286,7 +2253,7 @@ export function ConversationInput({
               ))}
             </div>
           )}
-
+    
           {/* :emoji: autocomplete */}
           {emojiCompletions.length > 0 && (
             <div className="absolute bottom-full left-0 right-0 mb-1 max-h-56 overflow-y-auto rounded-lg border border-foreground/10 bg-[var(--card)] shadow-lg sm:left-[2%] sm:right-[2%]">
@@ -2319,7 +2286,7 @@ export function ConversationInput({
               ))}
             </div>
           )}
-
+    
           {/* Multipurpose picker sheet — Emoji / GIFs / Stickers / Tools */}
           {mobilePickerOpen && (
             <ConversationMediaPickerPanel
@@ -2334,14 +2301,14 @@ export function ConversationInput({
               toolsContent={mediaPickerToolsContent}
             />
           )}
-
+    
           {/* Feedback toast */}
           {feedback && (
             <div className="absolute bottom-full left-3 right-3 z-50 mb-2">
               <SlashCommandFeedback feedback={feedback} onDismiss={() => setFeedback(null)} />
             </div>
           )}
-
+    
           {/* Attachment preview */}
           {(attachments.length > 0 || isReadingAttachments) && (
             <div className="mb-2 flex flex-wrap gap-2">
@@ -2376,7 +2343,7 @@ export function ConversationInput({
               )}
             </div>
           )}
-
+    
           {chipRowHint && (
             <p className="mb-1 flex items-center gap-1.5 px-0.5 text-xs text-[var(--muted-foreground)]">
               <Sparkles size="0.75rem" className="shrink-0 text-[var(--primary)]" />
@@ -2384,7 +2351,7 @@ export function ConversationInput({
             </p>
           )}
           <MariSuggestionChips chips={chipRowChips} onSelect={handleMariChipSelect} disabled={isSendBlocked} />
-
+    
           {/* Input bar */}
           <div
             ref={inputBarRef}
@@ -2432,18 +2399,18 @@ export function ConversationInput({
             >
               <Paperclip size="1rem" />
             </button>
-
+    
             {/* Quick Switchers — desktop: inline, mobile: chevron */}
             <div className="hidden shrink-0 items-center gap-1 sm:flex">
-              <QuickConnectionSwitcher />
+              <QuickConnectionSwitcher contextBudget={showContextUsage ? contextBudget : null} />
               <QuickPersonaSwitcher />
             </div>
             <div className="flex shrink-0 sm:hidden">
-              <QuickSwitcherMobile />
+              <QuickSwitcherMobile contextBudget={showContextUsage ? contextBudget : null} />
             </div>
-
+    
             {/* Textarea */}
-
+    
             <textarea
               ref={textareaRef}
               data-chat-composer="true"
@@ -2458,7 +2425,7 @@ export function ConversationInput({
               }}
               className="max-h-[12.5rem] min-h-9 min-w-0 flex-1 resize-none bg-transparent px-1 py-2 text-[1rem] leading-tight text-foreground outline-none placeholder:text-foreground/30 sm:min-h-0 sm:px-0 sm:py-0 sm:leading-normal"
             />
-
+    
             {/* Right actions */}
             <div className="ml-0 flex shrink-0 flex-nowrap items-center justify-end gap-0 sm:ml-auto sm:gap-0.5">
               {/* Mobile: one multipurpose button → Emoji/GIFs/Stickers/Tools sheet */}
@@ -2493,7 +2460,7 @@ export function ConversationInput({
               >
                 {mobilePickerOpen ? <Keyboard size="1.25rem" /> : <Smile size="1.25rem" />}
               </button>
-
+    
               <div className="relative hidden sm:block">
                 <button
                   type="button"
@@ -2526,7 +2493,7 @@ export function ConversationInput({
                   />
                 )}
               </div>
-
+    
               {showDraftTranslateButton && (
                 <button
                   type="button"
@@ -2543,7 +2510,7 @@ export function ConversationInput({
                   {isTranslatingDraft ? <Loader2 size="1rem" className="animate-spin" /> : <Languages size="1rem" />}
                 </button>
               )}
-
+    
               {speechToTextEnabled && (
                 <SpeechToTextButton
                   disabled={!activeChatId}
@@ -2577,22 +2544,20 @@ export function ConversationInput({
                   <Phone size={16} />
                 </button>
               )}
-
+    
               {showQuickRepliesMenu && quickReplyActions.length > 0 && (
                 <div className="hidden sm:block">
                   <QuickReplyMenu actions={quickReplyActions} disabled={!activeChatId || isReadingAttachments} />
                 </div>
               )}
-
+    
               <button
                 onClick={
                   isActuallyGenerating
                     ? () => useChatStore.getState().stopGeneration(activeChatId ?? undefined)
                     : handleSend
                 }
-                disabled={
-                  !isActuallyGenerating && (isSendBlocked || isReadingAttachments || !activeChatId || !canSubmit)
-                }
+                disabled={!isActuallyGenerating && (isSendBlocked || isReadingAttachments || !activeChatId || !canSubmit)}
                 aria-label={sendButtonTitle}
                 className={cn(
                   "flex h-9 w-9 items-center justify-center rounded-xl transition-all duration-200 sm:h-8 sm:w-8",

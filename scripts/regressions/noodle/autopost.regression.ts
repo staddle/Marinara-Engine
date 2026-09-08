@@ -43,11 +43,19 @@ assert.equal(
   false,
 );
 resetConnectionAdmissionForTests();
+const foregroundStartedAt = Date.now();
 const releaseForeground = beginForegroundConnection("connection-1");
 assert.equal(tryBackgroundConnection("connection-1", new Date()).acquired, false);
 releaseForeground();
-assert.equal(tryBackgroundConnection("connection-1", new Date(Date.now() + 29_999)).acquired, false);
-const admitted = tryBackgroundConnection("connection-1", new Date(Date.now() + 30_001));
+assert.equal(
+  tryBackgroundConnection("connection-1", new Date(foregroundStartedAt + BACKGROUND_CONNECTION_IDLE_MS - 5_000))
+    .acquired,
+  false,
+);
+const admitted = tryBackgroundConnection(
+  "connection-1",
+  new Date(foregroundStartedAt + BACKGROUND_CONNECTION_IDLE_MS + 5_000),
+);
 assert.equal(admitted.acquired, true);
 if (admitted.acquired) admitted.release();
 
@@ -118,7 +126,8 @@ const start = new Date("2026-07-29T10:00:00.000Z");
 try {
   const db = (await createFileNativeDB()) as unknown as DB;
   const noodle = createNoodleStorage(db);
-  const { createCharactersStorage } = await import("../../../packages/server/src/services/storage/characters.storage.js");
+  const { createCharactersStorage } =
+    await import("../../../packages/server/src/services/storage/characters.storage.js");
   const characters = createCharactersStorage(db);
   const sourcePersona = await characters.createPersona("Reserve Persona", "A source persona", undefined, {
     personality: "Quiet",
@@ -411,7 +420,10 @@ try {
 
   await characters.removePersona(sourcePersona.id);
   assert.equal(await noodle.publishDueNoodlerPreparedPosts(new Date("2026-10-15T10:00:00.000Z")), 0);
-  assert.equal((await noodle.listNoodlerPreparedPosts()).find((item) => item.id === deletedSourcePreparedId)?.state, "discarded");
+  assert.equal(
+    (await noodle.listNoodlerPreparedPosts()).find((item) => item.id === deletedSourcePreparedId)?.state,
+    "discarded",
+  );
 
   await (db as unknown as { _fileStore: { close(): Promise<void> } })._fileStore.close();
 } finally {

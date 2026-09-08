@@ -187,7 +187,7 @@ export function ContextInjectionPanel({
                 <span className="truncate text-[0.625rem] font-semibold text-[var(--popover-foreground)]">
                   {localizeUi("ui.agents.contextinjectionpanel.narrativeDirector")}
                 </span>
-                <span className="shrink-0 rounded-full bg-[var(--primary)]/15 px-1.5 py-px text-[0.5rem] font-semibold text-[var(--primary)] ring-1 ring-[var(--primary)]/25">
+                <span className="shrink-0 rounded-md bg-[var(--primary)]/15 px-1.5 py-px text-[0.5rem] font-semibold text-[var(--primary)] ring-1 ring-[var(--primary)]/25">
                   {localizeUi("ui.agents.contextinjectionpanel.pushStory")}
                 </span>
               </div>

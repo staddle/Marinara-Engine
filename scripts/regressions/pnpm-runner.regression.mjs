@@ -36,12 +36,39 @@ assert.deepEqual(
 
 assert.deepEqual(
   resolvePnpmRunner({
+    platform: "win32",
+    execPath: windowsNode,
+    environment: {
+      ComSpec: windowsComSpec,
+      npm_config_user_agent: "pnpm/10.34.5 npm/? node/v24.15.0 win32 x64",
+      npm_execpath: "C:\\Users\\runner\\AppData\\Local\\pnpm\\.tools\\@pnpm+exe\\10.34.5\\node_modules\\@pnpm\\exe\\pnpm.exe",
+    },
+  }),
+  { command: windowsComSpec, args: ["/d", "/s", "/c", "pnpm"] },
+  "Standalone Windows pnpm installs expose a native pnpm.exe as npm_execpath; Node cannot execute that binary, so fall back to ComSpec.",
+);
+
+assert.deepEqual(
+  resolvePnpmRunner({
     platform: "linux",
     execPath: "/usr/local/bin/node",
     environment: { npm_config_user_agent: "pnpm/10.34.5 npm/? node/v24.15.0 linux x64" },
   }),
   { command: "pnpm", args: [] },
   "POSIX keeps the direct pnpm fallback.",
+);
+
+assert.deepEqual(
+  resolvePnpmRunner({
+    platform: "linux",
+    execPath: "/usr/local/bin/node",
+    environment: {
+      npm_config_user_agent: "pnpm/10.34.5 npm/? node/v24.15.0 linux x64",
+      npm_execpath: "/opt/pnpm/pnpm",
+    },
+  }),
+  { command: "/usr/local/bin/node", args: ["/opt/pnpm/pnpm"] },
+  "POSIX must keep reusing an extensionless pnpm CLI path with the current Node process.",
 );
 
 assert.deepEqual(

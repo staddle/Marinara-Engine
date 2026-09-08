@@ -105,10 +105,8 @@ export function buildRuntimeAgentSectionEligibleTypes(input: {
     if (!activeAgentIds.has(agent.id)) continue;
     if (input.chatMode && !isAgentAvailableInChatMode(input.chatMode, agent.id)) continue;
     if (agent.phase !== "pre_generation") continue;
-    if (
-      resolveAgentResultType({ type: agent.id, settings: getDefaultBuiltInAgentSettings(agent.id) }) !==
-      "context_injection"
-    ) {
+    const resultType = resolveAgentResultType({ type: agent.id, settings: getDefaultBuiltInAgentSettings(agent.id) });
+    if (resultType !== "context_injection" && resultType !== "director_event") {
       continue;
     }
     eligible.add(agent.id);
@@ -117,9 +115,13 @@ export function buildRuntimeAgentSectionEligibleTypes(input: {
   for (const agent of input.configuredAgents ?? []) {
     if (!activeAgentIds.has(agent.type)) continue;
     if (input.chatMode && !isAgentAvailableInChatMode(input.chatMode, agent.type)) continue;
-    if (agent.phase !== "pre_generation") continue;
     const settings = parseRuntimeAgentSettings(agent.settings);
-    if (resolveAgentResultType({ type: agent.type, settings }) !== "context_injection") continue;
+    const resultType = resolveAgentResultType({ type: agent.type, settings });
+    const isRuntimeInjection =
+      agent.phase === "pre_generation" && (resultType === "context_injection" || resultType === "director_event");
+    const isPersistentAgentSection =
+      agent.phase === "post_processing" && resultType === "memory_nag" && settings.injectAsSection === true;
+    if (!isRuntimeInjection && !isPersistentAgentSection) continue;
     eligible.add(agent.type);
   }
 
@@ -175,7 +177,8 @@ export function splitRuntimeHandledAgentInjections(
     const tokens = tokenMap.get(injection.agentType);
     const handledByPresetSection = tokens !== undefined && replaceRuntimeAgentSection(messages, tokens, injection.text);
     if (!handledByPresetSection) {
-      if (options.omitUnmatched) omittedInjections.push(injection);
+      // Push Story is an explicit instruction for this turn, even without a preset marker.
+      if (options.omitUnmatched && injection.agentType !== "director") omittedInjections.push(injection);
       else fallbackInjections.push(injection);
     }
   }

@@ -85,42 +85,51 @@ const semanticSummaryEntries = [
   {
     id: "manual-anchor",
     origin: "manual",
-    content: "Mari wrote down the permanent relationship anchor.",
+    content: "Mari wrote down an unrelated relationship anchor.",
     enabled: true,
     createdAt: "2026-07-01T08:00:00.000Z",
     updatedAt: "2026-07-01T08:00:00.000Z",
   },
   {
-    id: "relevant-old-summary",
-    origin: "automated",
+    id: "relevant-manual-summary",
+    origin: "manual",
     content: "The dragon pact was sealed beneath the red moon.",
     enabled: true,
     createdAt: "2026-07-02T08:00:00.000Z",
     updatedAt: "2026-07-02T08:00:00.000Z",
   },
   {
+    id: "relevant-backfill-summary",
+    origin: "manual",
+    sourceMode: "range",
+    content: "The dragon pact requires a silver offering at dawn.",
+    enabled: true,
+    createdAt: "2026-07-03T08:00:00.000Z",
+    updatedAt: "2026-07-03T08:00:00.000Z",
+  },
+  {
     id: "irrelevant-old-summary",
     origin: "automated",
     content: "They spent a quiet afternoon baking bread.",
     enabled: true,
-    createdAt: "2026-07-03T08:00:00.000Z",
-    updatedAt: "2026-07-03T08:00:00.000Z",
+    createdAt: "2026-07-04T08:00:00.000Z",
+    updatedAt: "2026-07-04T08:00:00.000Z",
   },
   {
     id: "recent-summary-one",
     origin: "automated",
     content: "They reached the mountain pass.",
     enabled: true,
-    createdAt: "2026-07-04T08:00:00.000Z",
-    updatedAt: "2026-07-04T08:00:00.000Z",
+    createdAt: "2026-07-05T08:00:00.000Z",
+    updatedAt: "2026-07-05T08:00:00.000Z",
   },
   {
     id: "recent-summary-two",
     origin: "automated",
     content: "A storm forced them into the same shelter.",
     enabled: true,
-    createdAt: "2026-07-05T08:00:00.000Z",
-    updatedAt: "2026-07-05T08:00:00.000Z",
+    createdAt: "2026-07-06T08:00:00.000Z",
+    updatedAt: "2026-07-06T08:00:00.000Z",
   },
 ];
 const semanticSummaryMetadata = {
@@ -151,12 +160,12 @@ const selectedSemanticSummary = await resolveRoleplayChatSummaryForPrompt({
 assert.equal(
   selectedSemanticSummary,
   [
-    semanticSummaryEntries[0]!.content,
     semanticSummaryEntries[1]!.content,
-    semanticSummaryEntries[3]!.content,
+    semanticSummaryEntries[2]!.content,
     semanticSummaryEntries[4]!.content,
+    semanticSummaryEntries[5]!.content,
   ].join("\n\n"),
-  "semantic Roleplay summaries must retain manual and recent entries while retrieving only relevant older automatic entries",
+  "semantic Roleplay summaries must retrieve relevant manual and backfilled entries while retaining recent entries",
 );
 assert.equal(
   await resolveRoleplayChatSummaryForPrompt({
@@ -309,10 +318,9 @@ try {
   assert.deepEqual(retainedSwipeExtra.conversationStartForCharacterIds, ["new-character"]);
   assert.deepEqual(retainedSwipeExtra.hiddenFromAICharacterIds, ["private-character"]);
   await chatStorage.setActiveSwipe(swipeMetadataMessage.id, 1);
-  const switchedMessageExtra = JSON.parse((await chatStorage.getMessage(swipeMetadataMessage.id))!.extra as string) as Record<
-    string,
-    unknown
-  >;
+  const switchedMessageExtra = JSON.parse(
+    (await chatStorage.getMessage(swipeMetadataMessage.id))!.extra as string,
+  ) as Record<string, unknown>;
   assert.deepEqual(switchedMessageExtra.conversationStartForCharacterIds, ["new-character"]);
   assert.deepEqual(switchedMessageExtra.hiddenFromAICharacterIds, ["private-character"]);
   assert.equal(switchedMessageExtra.isConversationStart, true);

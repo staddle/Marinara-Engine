@@ -109,6 +109,19 @@ export function useUpdateAgent() {
   });
 }
 
+/** PATCH an agent by its type, creating the config row for a built-in that has
+ *  never been configured. Used by bulk connection assignment (#5539). */
+export function useUpdateAgentByType() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ agentType, ...data }: { agentType: string } & Record<string, unknown>) =>
+      api.patch(`/agents/type/${encodeURIComponent(agentType)}`, data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: agentKeys.all });
+    },
+  });
+}
+
 export function useUploadAgentImage() {
   const qc = useQueryClient();
   return useMutation({
@@ -183,8 +196,10 @@ export function useAgentSuiteRewrite() {
 export function useUpdateAgentRunData() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, resultData }: { id: string; chatId: string; resultData: unknown }) =>
-      api.patch(`/agents/runs/${id}`, { resultData }),
+    mutationFn: ({ id, chatId, resultData }: { id: string; chatId: string; resultData: unknown }) =>
+      // chatId is the run's owning chat — the server uses it to scope the
+      // run lookup to one chat's storage instead of loading every chat's (#5615).
+      api.patch(`/agents/runs/${id}`, { resultData, chatId }),
     onSuccess: (_data, variables) => {
       qc.invalidateQueries({ queryKey: agentKeys.customRuns(variables.chatId) });
     },

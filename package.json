@@ -1,6 +1,6 @@
 {
   "name": "marinara-engine",
-  "version": "2.4.4",
+  "version": "2.4.5",
   "private": true,
   "description": "AI Chat & Roleplay Frontend — Conversation, Roleplay, Game",
   "author": "Marianna",
@@ -21,7 +21,7 @@
     "build:shared": "pnpm --filter @marinara-engine/shared build",
     "build:server": "pnpm --filter @marinara-engine/server build",
     "build:client": "pnpm build:shared && pnpm --filter @marinara-engine/client build",
-    "check": "pnpm clean:stale-client && pnpm impeccable:check && pnpm localization:check && pnpm format:check && pnpm lint && pnpm build",
+    "check": "pnpm clean:stale-client && pnpm impeccable:check && pnpm localization:check && pnpm format:check && pnpm lint && pnpm check:e2e-types && pnpm build",
     "start": "node packages/server/dist/index.js",
     "mari": "node scripts/run-mari.mjs",
     "format": "prettier --write \"packages/**/*.{ts,tsx}\"",
@@ -31,6 +31,7 @@
     "localization:check": "node ./scripts/check-locales.mjs && pnpm localization:ui-check",
     "localization:ui-check": "node ./scripts/migrate-static-jsx-localization.mjs --check --notices packages/client/src",
     "lint": "pnpm -r run lint",
+    "check:e2e-types": "tsc --noEmit -p tsconfig.json",
     "regression": "pnpm regression:node",
     "regression:node": "pnpm build:shared && node ./scripts/run-regressions.mjs",
     "regression:ui": "playwright test -c playwright.config.ts",
@@ -39,6 +40,8 @@
     "regression:extensions-security": "pnpm build:shared && node ./scripts/run-regressions.mjs --filter scripts/regressions/extension-security.regression.ts",
     "regression:professor-mari-shell-sandbox": "pnpm build:shared && node ./scripts/run-regressions.mjs --filter scripts/regressions/professor-mari/shell-sandbox.regression.ts",
     "regression:runtime-integrity": "pnpm build:shared && node ./scripts/run-regressions.mjs --filter scripts/regressions/runtime-integrity.regression.ts",
+    "regression:security": "pnpm build:shared && node ./scripts/run-regressions.mjs --filter security && node ./scripts/run-regressions.mjs --filter runtime-integrity && node ./scripts/run-regressions.mjs --filter shell-sandbox && node ./scripts/run-regressions.mjs --filter extension-ipc && node ./scripts/run-regressions.mjs --filter android-local-auth && node ./scripts/run-regressions.mjs --filter docker-proxy-auth",
+    "regression:release": "node ./scripts/regressions/release-tag-version.regression.mjs",
     "regression:static-cache": "node ./scripts/run-regressions.mjs --filter scripts/regressions/static-cache-headers.regression.ts",
     "regression:launcher-update": "node ./scripts/regressions/pnpm-runner.regression.mjs && node ./scripts/regressions/launcher/env.regression.mjs && node ./scripts/regressions/launcher/existing-server.regression.mjs && node ./scripts/regressions/launcher/update.regression.mjs && node ./scripts/regressions/dev-launcher-process.regression.mjs && node ./scripts/regressions/launcher/format-guard.regression.mjs && node ./scripts/check-windows-installer-layout.mjs",
     "regression:android-local-auth:run": "pnpm --filter @marinara-engine/server exec tsx ../../scripts/regressions/android-local-auth.regression.ts",
@@ -52,6 +55,7 @@
     "backgroundremover:install": "node ./scripts/install-backgroundremover.mjs",
     "backgroundremover:reinstall": "node ./scripts/install-backgroundremover.mjs --reinstall",
     "guard:installer-artifacts": "node ./scripts/check-tracked-installers.mjs",
+    "release:check-tag": "node ./scripts/check-release-tag.mjs",
     "release:notes": "node ./scripts/render-release-notes.mjs",
     "clean": "pnpm -r --if-present run clean && node ./scripts/clean-workspace.mjs"
   },
@@ -61,7 +65,8 @@
     "@types/node": "^24.12.2",
     "adm-zip": "^0.6.0",
     "esbuild": "^0.28.1",
-    "prettier": "^3.8.3"
+    "prettier": "^3.8.3",
+    "typescript": "^5.9.3"
   },
   "pnpm": {
     "overrides": {
@@ -72,15 +77,17 @@
       "adm-zip@0.5.17": "0.6.0",
       "body-parser": "2.3.0",
       "brace-expansion@5.0.5": "5.0.9",
-      "fast-uri@3.1.0": "3.1.5",
+      "browserslist": "4.28.7",
+      "fast-uri@>=3 <3.1.6": "3.1.6",
+      "fast-uri@>=4 <4.1.3": "4.1.3",
       "hono": "4.12.34",
       "ip-address": "10.3.1",
       "js-yaml": "4.3.1",
       "nanoid@3.3.12": "3.3.18",
-      "postcss": "8.5.23",
+      "postcss": "8.5.26",
       "protobufjs": "7.6.5",
-      "qs": "6.15.2",
-      "sharp@0.34.5": "0.35.3",
+      "qs": "6.16.0",
+      "sharp@0.34.5": "0.35.4",
       "ws": "8.21.0"
     }
   }

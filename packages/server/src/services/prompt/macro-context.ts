@@ -24,6 +24,7 @@ import { createCharactersStorage, type PersonaStorageRow } from "../storage/char
 import { createLorebooksStorage } from "../storage/lorebooks.storage.js";
 import { wrapContent } from "./format-engine.js";
 import { sanitizePromptLeaf } from "./prompt-escaping.js";
+import { logger } from "../../lib/logger.js";
 
 type PersonaFields = NonNullable<MacroContext["personaFields"]>;
 
@@ -45,6 +46,8 @@ export interface BuildPromptMacroContextInput {
   lastGenerationType?: string;
   idleDuration?: string;
   timeZone?: string;
+  /** Extra prompt templates that may contain macros outside card/persona fields. */
+  macroSources?: readonly string[];
 }
 
 export interface CharacterMacroData {
@@ -97,6 +100,14 @@ export function cloneMacroContextForPreview(macroCtx: MacroContext): MacroContex
     variables: { ...macroCtx.variables },
     localVariables: { ...macroCtx.localVariables },
   };
+}
+
+/** Apply counts discovered while scanning lorebook content before resolving its macros. */
+export function setLorebookEntryCounts(
+  macroCtx: MacroContext,
+  counts: Readonly<Record<string, number>> | undefined,
+): void {
+  macroCtx.lorebookEntryCounts = counts ? { ...counts } : {};
 }
 
 /** Resolve macros while discarding variable writes made by preview and scan-only paths. */
@@ -338,6 +349,14 @@ export async function buildReferencedPersonaContext(input: {
     },
   };
   const lorebooks = createLorebooksStorage(input.db);
+  if (referenced.some(({ persona }) => /\{\{\s*lorebooksize::/iu.test(JSON.stringify(persona) ?? ""))) {
+    try {
+      setLorebookEntryCounts(macroCtx, await lorebooks.countAllEntriesByLorebook());
+    } catch (err) {
+      logger.warn(err, "Failed to load lorebook entry counts for referenced personas; using empty counts");
+      setLorebookEntryCounts(macroCtx, undefined);
+    }
+  }
   const allLorebooks = (await lorebooks.list()) as unknown as Array<{
     id: string;
     personaId?: string | null;
@@ -369,7 +388,10 @@ export async function buildReferencedPersonaContext(input: {
             excludedSourceAgentIds: input.excludedLorebookSourceAgentIds,
             previewOnly: true,
             generationTriggers: input.generationTriggers,
-            resolveContent: (value) => resolveMacrosForPreview(value, scopedContext),
+            resolveContent: (value, lorebookEntryCounts) => {
+              setLorebookEntryCounts(scopedContext, lorebookEntryCounts);
+              return resolveMacrosForPreview(value, scopedContext);
+            },
           })
         : null;
     blocks.push(buildReferencedPersonaFields(id, persona, macroCtx, input.wrapFormat, lorebookScan));
@@ -419,6 +441,14 @@ export async function buildReferencedCharacterContext(input: {
   const references = Object.fromEntries(referenced.map(({ id, data }) => [id, data.name || "Character"]));
   const macroCtx = { ...input.macroCtx, characterReferences: references };
   const lorebooks = createLorebooksStorage(input.db);
+  if (referenced.some(({ data }) => /\{\{\s*lorebooksize::/iu.test(JSON.stringify(data) ?? ""))) {
+    try {
+      setLorebookEntryCounts(macroCtx, await lorebooks.countAllEntriesByLorebook());
+    } catch (err) {
+      logger.warn(err, "Failed to load lorebook entry counts for referenced characters; using empty counts");
+      setLorebookEntryCounts(macroCtx, undefined);
+    }
+  }
   const allLorebooks = (await lorebooks.list()) as unknown as Array<{
     id: string;
     characterId?: string | null;
@@ -449,7 +479,10 @@ export async function buildReferencedCharacterContext(input: {
             excludedSourceAgentIds: input.excludedLorebookSourceAgentIds,
             previewOnly: true,
             generationTriggers: input.generationTriggers,
-            resolveContent: (value) => resolveMacrosForPreview(value, scopedContext),
+            resolveContent: (value, lorebookEntryCounts) => {
+              setLorebookEntryCounts(scopedContext, lorebookEntryCounts);
+              return resolveMacrosForPreview(value, scopedContext);
+            },
           })
         : null;
     blocks.push(buildReferencedCharacterFields(id, data, macroCtx, input.wrapFormat, lorebookScan));
@@ -654,6 +687,26 @@ export async function buildPromptMacroContext(input: BuildPromptMacroContextInpu
     : characterMacroData;
   const variables = input.variables ?? {};
 
+  let lorebookEntryCounts: Record<string, number> = {};
+  const macroSources = [
+    ...(input.macroSources ?? []),
+    ...Object.values(variables),
+    ...Object.values(input.personaFields ?? {}),
+    ...characterMacroData.profiles.flatMap((profile) => Object.values(profile)),
+    ...groupCharacterMacroData.profiles.flatMap((profile) => Object.values(profile)),
+    input.personaDescription ?? "",
+    input.groupScenarioOverrideText ?? "",
+    input.lastInput ?? "",
+  ];
+  if (macroSources.some((source) => /\{\{\s*lorebooksize::/iu.test(source))) {
+    try {
+      lorebookEntryCounts = await createLorebooksStorage(input.db).countAllEntriesByLorebook();
+    } catch (err) {
+      logger.warn(err, "Failed to load lorebook entry counts; using empty counts");
+      // If the count fails, continue with empty counts — {{lorebooksize::ID}} resolves to 0.
+    }
+  }
+
   return {
     user: input.personaName || "User",
     userPhonetic: input.personaPhoneticName || input.personaFields?.phoneticName || input.personaName || "User",
@@ -670,6 +723,7 @@ export async function buildPromptMacroContext(input: BuildPromptMacroContextInpu
     lastGenerationType: input.lastGenerationType,
     idleDuration: input.idleDuration,
     timeZone: input.timeZone,
+    lorebookEntryCounts,
     characterFields: {
       ...(characterMacroData.primaryFields ?? {}),
       ...(input.groupScenarioOverrideText ? { scenario: input.groupScenarioOverrideText } : {}),

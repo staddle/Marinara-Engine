@@ -3,7 +3,7 @@
 // Multi-provider: ChubAI, JannyAI, CharacterTavern, Pygmalion, Wyvern, DataCat
 // With login modals for Pygmalion & CharacterTavern NSFW, PNG download for all providers
 // ──────────────────────────────────────────────
-import { useState, useCallback, useEffect, useLayoutEffect, useRef, useMemo } from "react";
+import { useState, useCallback, useEffect, useId, useLayoutEffect, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import {
   Search,
@@ -39,6 +39,13 @@ import { parsePngCharacterCard } from "../../lib/png-parser";
 import { useUIStore } from "../../stores/ui.store";
 import { toast } from "sonner";
 import { cn } from "../../lib/utils";
+import { scopeChatMessageCss } from "../../lib/chat-message-css";
+import {
+  containsChatHtml,
+  decodeEncodedChatHtmlTags,
+  extractChatStyleBlocks,
+  sanitizeChatHtml,
+} from "../../lib/chat-html";
 import {
   countLorebookEntries,
   hasLorebookEntries,
@@ -2773,14 +2780,28 @@ export function BotBrowserView() {
                       >
                         {localizeUi("ui.botBrowser.botbrowserview.previous")}
                       </button>
-                      <span className="text-xs text-[var(--muted-foreground)]">
-                        {localizeUi("ui.botBrowser.botbrowserview.page")} {page}
-                        {totalPages > 1 && totalPages < 9000 ? (
-                          <> {localizeUi("ui.botBrowser.botbrowserview.ofValue1", { value1: totalPages })}</>
-                        ) : (
-                          ""
-                        )}
-                      </span>
+                      {totalPages > 1 && totalPages < 9000 ? (
+                        <label className="flex items-center gap-1 text-xs text-[var(--muted-foreground)]">
+                          {localizeUi("ui.botBrowser.botbrowserview.page")}
+                          <select
+                            aria-label={localizeUi("ui.botBrowser.botbrowserview.page")}
+                            value={page}
+                            onChange={(event) => setPage(Number(event.target.value))}
+                            className="mari-chrome-field mari-chrome-field--compact px-2 py-1 text-xs"
+                          >
+                            {Array.from({ length: totalPages }, (_, index) => index + 1).map((pageNumber) => (
+                              <option key={pageNumber} value={pageNumber}>
+                                {pageNumber}
+                              </option>
+                            ))}
+                          </select>
+                          {localizeUi("ui.botBrowser.botbrowserview.ofValue1", { value1: totalPages })}
+                        </label>
+                      ) : (
+                        <span className="text-xs text-[var(--muted-foreground)]">
+                          {localizeUi("ui.botBrowser.botbrowserview.page")} {page}
+                        </span>
+                      )}
                       <button
                         disabled={page >= totalPages && totalPages > 1}
                         onClick={() => setPage((p) => p + 1)}
@@ -3350,6 +3371,7 @@ function DetailView({
   onDetailUpdate?: (detail: CardDetail) => void;
 }) {
   const { t: localizeUi } = useUiTranslation();
+  const [zoomed, setZoomed] = useState(false);
   const [imgError, setImgError] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const displayDetail = detail;
@@ -3437,14 +3459,30 @@ function DetailView({
                   <Hash size="2.5rem" />
                 </div>
               ) : (
-                <img
-                  src={card.avatarUrl}
-                  alt={card.name}
-                  className="h-full w-full object-cover"
-                  onError={() => setImgError(true)}
-                />
+                <button
+                  type="button"
+                  onClick={() => setZoomed(true)}
+                  className="block h-full w-full cursor-zoom-in focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
+                  title={localizeUi("ui.botBrowser.detailview.enlargeImage")}
+                  aria-label={localizeUi("ui.botBrowser.detailview.enlargeImage")}
+                >
+                  <img
+                    src={card.avatarUrl}
+                    alt={card.name}
+                    className="h-full w-full object-cover"
+                    onError={() => setImgError(true)}
+                  />
+                </button>
               )}
             </div>
+            {zoomed && card.avatarUrl ? (
+              <AvatarZoomOverlay
+                src={fullSizeAvatarUrl(card.avatarUrl)}
+                fallbackSrc={card.avatarUrl}
+                alt={card.name}
+                onClose={() => setZoomed(false)}
+              />
+            ) : null}
             <div className="flex flex-col gap-2 max-md:flex-1">
               <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/60 p-2.5">
                 <p className="mb-2 text-[0.6875rem] font-semibold text-[var(--foreground)]">
@@ -3556,6 +3594,7 @@ function DetailView({
                   <DefSection
                     title={localizeUi("ui.botBrowser.detailview.creatorSNotes")}
                     content={displayDetail.creatorNotes}
+                    allowHtml
                   />
                 )}
                 {displayDetail.description && (
@@ -3634,6 +3673,56 @@ function DetailView({
 // ════════════════════════════════════════════════
 
 /** Build a SillyTavern-compatible PNG character card with embedded V2 JSON in a tEXt chunk. */
+/**
+ * The list thumbnail is a compressed `avatar.webp`. For the enlarged view, ask
+ * the proxy for the card PNG instead — the same asset the card download uses.
+ * Providers with no larger source keep serving their single image.
+ */
+function fullSizeAvatarUrl(avatarUrl: string): string {
+  return avatarUrl.startsWith("/api/bot-browser/chub/avatar/") ? `${avatarUrl}?full=1` : avatarUrl;
+}
+
+/** Full-screen, uncropped view of a browsed card's image. Escape or a backdrop click closes it. */
+function AvatarZoomOverlay({
+  src,
+  fallbackSrc,
+  alt,
+  onClose,
+}: {
+  src: string;
+  fallbackSrc: string;
+  alt: string;
+  onClose: () => void;
+}) {
+  const { t: localizeUi } = useUiTranslation();
+  const [resolvedSrc, setResolvedSrc] = useState(src);
+  useEffect(() => {
+    const handle = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", handle);
+    return () => document.removeEventListener("keydown", handle);
+  }, [onClose]);
+
+  return createPortal(
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={localizeUi("ui.botBrowser.detailview.imagePreview")}
+      className="fixed inset-0 z-[100] flex cursor-zoom-out items-center justify-center bg-black/80 p-4 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <img
+        src={resolvedSrc}
+        alt={alt}
+        onError={() => setResolvedSrc((current) => (current === fallbackSrc ? current : fallbackSrc))}
+        className="max-h-[90vh] max-w-[90vw] rounded-lg object-contain shadow-2xl supports-[height:100dvh]:max-h-[90dvh]"
+      />
+    </div>,
+    document.body,
+  );
+}
+
 async function buildCharacterCardPng(avatarUrl: string, charData: Record<string, unknown>): Promise<Blob> {
   // Step 1: Fetch avatar and draw to canvas to get raw PNG bytes
   const img = new Image();
@@ -3763,13 +3852,35 @@ crc32.table = null as Uint32Array | null;
 // Definition Section
 // ════════════════════════════════════════════════
 
-function DefSection({ title, content }: { title: string; content: string }) {
+function DefSection({ title, content, allowHtml = false }: { title: string; content: string; allowHtml?: boolean }) {
+  const sectionId = useId();
+  const htmlScopeClass = `mari-bot-notes-${sectionId.replace(/[^a-zA-Z0-9_-]/g, "") || "content"}`;
+  const renderedHtml = useMemo(() => {
+    if (!allowHtml || !containsChatHtml(content)) return null;
+    const decoded = decodeEncodedChatHtmlTags(content);
+    const { html, css } = extractChatStyleBlocks(decoded);
+    const clean = sanitizeChatHtml(html, { allowStyle: true, allowLinks: false });
+    const scopedCss = scopeChatMessageCss(css, `.${htmlScopeClass}`);
+    return scopedCss ? `<style>${scopedCss}</style>${clean}` : clean;
+  }, [allowHtml, content, htmlScopeClass]);
+
   return (
     <div>
       <h4 className="mb-1 text-xs font-semibold text-[var(--foreground)]">{title}</h4>
-      <div className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded-lg bg-[var(--secondary)] p-2.5 text-xs leading-relaxed text-[var(--muted-foreground)]">
-        {content}
-      </div>
+      {renderedHtml !== null ? (
+        <div
+          data-bot-browser-rich-text
+          className={cn(
+            "relative max-h-40 !overflow-x-hidden overflow-y-auto whitespace-pre-wrap !contain-paint rounded-lg bg-[var(--secondary)] p-2.5 text-xs leading-relaxed text-[var(--muted-foreground)]",
+            htmlScopeClass,
+          )}
+          dangerouslySetInnerHTML={{ __html: renderedHtml }}
+        />
+      ) : (
+        <div className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded-lg bg-[var(--secondary)] p-2.5 text-xs leading-relaxed text-[var(--muted-foreground)]">
+          {content}
+        </div>
+      )}
     </div>
   );
 }

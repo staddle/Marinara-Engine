@@ -14,7 +14,7 @@ import { useTranslation as useUiTranslation } from "react-i18next";
 import { cn } from "../../../../lib/utils";
 import { InlineEdit, InlineNumber } from "../controls/InlineControls";
 import { TrackerReadabilityVeil } from "../controls/TrackerProfileChrome";
-import { AddRowButton, EmptySection, SectionHeader } from "../controls/SectionControls";
+import { AddRowButton, EmptySection, SectionHeader, TRACKER_SECTION_SHELL_CLASS } from "../controls/SectionControls";
 import { useTrackerLockContext } from "../TrackerLockContext";
 
 /**
@@ -49,7 +49,7 @@ function nextPlaceholderName(rows: InventoryTrackerRow[], base: string): string 
  * `cn` merges by Tailwind group and this is passed last, so it wins over the control's
  * own classes without touching the shared component.
  */
-const LOCK_SURFACE_RESET = "rounded-full bg-transparent ring-0";
+const LOCK_SURFACE_RESET = "rounded-sm bg-transparent ring-0";
 
 const LOCK_GLYPH = <Lock size="0.5rem" className="shrink-0 opacity-70" aria-hidden="true" />;
 
@@ -133,7 +133,7 @@ function InventoryGroup({ group, label, rows, onUpdate, deleteMode, addMode }: I
           return (
             <div
               key={`${row.name}-${index}`}
-              className="flex min-h-6 min-w-0 max-w-full items-center gap-1 rounded-full border border-[var(--tracker-profile-slot-rule)] bg-[image:var(--tracker-profile-slot-surface)] px-1.5 shadow-[inset_0_1px_2px_var(--tracker-profile-slot-shadow)] [@media(pointer:coarse)]:min-h-7"
+              className="mari-chrome-tag flex min-h-6 min-w-0 max-w-full items-center gap-1 border border-[var(--tracker-profile-slot-rule)] bg-[image:var(--tracker-profile-slot-surface)] px-1.5 text-[color:var(--tracker-profile-text)] shadow-[inset_0_1px_2px_var(--tracker-profile-slot-shadow)] [@media(pointer:coarse)]:min-h-7"
             >
               {nameLocked && LOCK_GLYPH}
               <InlineEdit
@@ -170,11 +170,11 @@ function InventoryGroup({ group, label, rows, onUpdate, deleteMode, addMode }: I
                 <button
                   type="button"
                   onClick={() => removeRow(index)}
-                  className="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full text-[var(--destructive)] ring-1 ring-[var(--border)]"
+                  className="mari-chrome-tag grid h-4 w-4 shrink-0 place-items-center p-0 leading-none text-current ring-1 ring-[color-mix(in_srgb,var(--tracker-profile-text)_28%,transparent)] transition-colors hover:bg-[color-mix(in_srgb,var(--tracker-profile-text)_8%,transparent)] focus-visible:outline-none focus-visible:ring-[color-mix(in_srgb,var(--tracker-profile-text)_48%,transparent)]"
                   title={localizeUi("ui.trackerPanel.inventoryTracker.removeItem", { item: row.name })}
                   aria-label={localizeUi("ui.trackerPanel.inventoryTracker.removeItem", { item: row.name })}
                 >
-                  <X size="0.5625rem" />
+                  <X size="0.5625rem" className="mari-rgb-static-icon block text-current" />
                 </button>
               )}
             </div>
@@ -195,6 +195,8 @@ export function InventoryTrackerPanel({
   onUpdateInventory,
   deleteMode,
   addMode,
+  header,
+  plain = false,
   collapsed = false,
   onToggleCollapsed,
 }: {
@@ -207,6 +209,8 @@ export function InventoryTrackerPanel({
   onUpdateInventory: (rows: InventoryTrackerRow[]) => void;
   deleteMode: boolean;
   addMode: boolean;
+  header?: ReactNode;
+  plain?: boolean;
   collapsed?: boolean;
   onToggleCollapsed?: () => void;
 }) {
@@ -215,17 +219,19 @@ export function InventoryTrackerPanel({
     // Own the query container rather than inheriting one. The docked sidebar provides
     // `@container`, but the HUD popover is portaled to document.body and has none — so
     // the same component used to lay itself out differently in its two hosts.
-    <section className="@container relative z-10 overflow-hidden border-b border-[var(--border)] bg-[var(--tracker-panel-section-background,color-mix(in_srgb,var(--card)_10%,transparent))]">
-      <TrackerReadabilityVeil strength="strong" />
+    <section className={cn("@container relative z-10 overflow-hidden", !plain && TRACKER_SECTION_SHELL_CLASS)}>
+      {!plain && <TrackerReadabilityVeil strength="strong" />}
       <div className="relative z-10">
-        <SectionHeader
-          icon={<Backpack size="0.6875rem" />}
-          title={localizeUi("ui.trackerPanel.inventoryTracker.title")}
-          badge={currencies.length + equipped.length + inventory.length}
-          action={action}
-          collapsed={collapsed}
-          onToggle={onToggleCollapsed}
-        />
+        {header ?? (
+          <SectionHeader
+            icon={<Backpack size="0.6875rem" />}
+            title={localizeUi("ui.trackerPanel.inventoryTracker.title")}
+            badge={currencies.length + equipped.length + inventory.length}
+            action={action}
+            collapsed={collapsed}
+            onToggle={onToggleCollapsed}
+          />
+        )}
         {!collapsed && (
           // Groups stack full-width. Splitting the panel into three columns gave the
           // longest group a third of the width and truncated its names, while a group

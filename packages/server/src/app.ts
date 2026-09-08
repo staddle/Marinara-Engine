@@ -53,6 +53,9 @@ import { hostValidationHook } from "./middleware/host-validation.js";
 import { androidLocalAuthHook, androidLocalLoginRoute } from "./middleware/android-local-auth.js";
 import { arch, platform, release } from "node:os";
 import { execFileSync } from "node:child_process";
+import { getRuntimeMemorySnapshot } from "./utils/runtime-memory.js";
+import { getLastFreeze } from "./lib/freeze-detector.js";
+import { getPreviousSessionStatus, getUncleanExitHistory } from "./lib/session-postmortem.js";
 
 const isLite = process.env.MARINARA_LITE === "true" || process.env.MARINARA_LITE === "1";
 const MAX_UPLOAD_BYTES = 256 * 1024 * 1024;
@@ -93,7 +96,7 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
       transport: getNodeEnv() !== "production" ? { target: "pino-pretty", options: { colorize: true } } : undefined,
     },
     logController: new LogController({ disableRequestLogging: isRequestLoggingDisabled() }),
-    bodyLimit: MAX_UPLOAD_BYTES, // Large profile imports can include many base64 avatars.
+    bodyLimit: MAX_UPLOAD_BYTES, // General-route default; transfer routes opt into streamed or unbounded imports.
     ...(https && { https }),
   });
 
@@ -318,6 +321,19 @@ export async function buildApp(https?: { cert: Buffer; key: Buffer }) {
       commit,
       build: getBuildLabel(),
       serverOs: SERVER_OS,
+      memory: getRuntimeMemorySnapshot(),
+      // Termux background-reliability telemetry (#5655/#5656): the launcher
+      // exports its wake-lock outcome, and the freeze detector records the
+      // most recent host-suspension it observed. Null on non-Termux hosts.
+      wakeLock: process.env.MARINARA_WAKE_LOCK_STATUS || null,
+      lastFreeze: getLastFreeze(),
+      // #5506 diagnostics: how the PREVIOUS session ended. An external kill
+      // (phantom process killer, battery manager, reboot) leaves no in-process
+      // trace, so the next startup's heartbeat postmortem is the witness.
+      // Tri-state by design: "unknown" is reported honestly rather than being
+      // collapsed into a clean shutdown nobody observed.
+      previousSession: getPreviousSessionStatus(),
+      uncleanExitCount: getUncleanExitHistory().length,
       timestamp: new Date().toISOString(),
       capabilityPackages: {
         status: capabilityPackages

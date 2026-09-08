@@ -54,7 +54,7 @@ export function resolveRoleplayChatSummary(
   return retainedEntries.length === entries.length ? summary : compileChatSummaryEntries(retainedEntries);
 }
 
-/** Keep manual and recent Roleplay summaries active while recalling only relevant older automatic entries. */
+/** Keep recent Roleplay summaries active while recalling only relevant older entries. */
 export async function resolveRoleplayChatSummaryForPrompt(args: {
   chatMode: string;
   chatMetadata: Record<string, unknown>;
@@ -77,16 +77,16 @@ export async function resolveRoleplayChatSummaryForPrompt(args: {
     normalizeChatSummaryEntries(args.chatMetadata.summaryEntries),
     args.excludeMessageIds ?? [],
   );
-  const automatedEntries = entries.filter((entry) => entry.enabled && entry.origin === "automated");
-  if (automatedEntries.length <= SEMANTIC_SUMMARY_RECENT_ENTRY_COUNT) return fallbackSummary;
+  const enabledEntries = entries.filter((entry) => entry.enabled);
+  if (enabledEntries.length <= SEMANTIC_SUMMARY_RECENT_ENTRY_COUNT) return fallbackSummary;
 
-  const newestAutomatedIds = new Set(
-    [...automatedEntries]
+  const newestEntryIds = new Set(
+    [...enabledEntries]
       .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))
       .slice(-SEMANTIC_SUMMARY_RECENT_ENTRY_COUNT)
       .map((entry) => entry.id),
   );
-  const olderEntries = automatedEntries.filter((entry) => !newestAutomatedIds.has(entry.id));
+  const olderEntries = enabledEntries.filter((entry) => !newestEntryIds.has(entry.id));
 
   try {
     const [queryEmbeddings, summaryEmbeddings] = await Promise.all([
@@ -121,9 +121,7 @@ export async function resolveRoleplayChatSummaryForPrompt(args: {
     );
 
     return compileChatSummaryEntries(
-      entries.filter(
-        (entry) => entry.origin !== "automated" || newestAutomatedIds.has(entry.id) || relevantOlderIds.has(entry.id),
-      ),
+      enabledEntries.filter((entry) => newestEntryIds.has(entry.id) || relevantOlderIds.has(entry.id)),
     );
   } catch (error) {
     logger.warn(error, "[roleplay-summary] Semantic retrieval failed; keeping all summaries in context");

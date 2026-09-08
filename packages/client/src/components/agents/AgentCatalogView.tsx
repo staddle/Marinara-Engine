@@ -27,10 +27,12 @@ import {
 import { useCustomAgentRepositories } from "../../hooks/use-custom-agent-repositories";
 import { ApiError, getPrivilegedActionErrorMessage } from "../../lib/api-client";
 import { isAgentCatalogKindBadgeVisible } from "../../lib/agent-catalog-kind-badges";
+import { AgentVersionHistory } from "./AgentVersionHistory";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { cn } from "../../lib/utils";
 import { useUIStore } from "../../stores/ui.store";
 import { AgentArtwork } from "./AgentArtwork";
+import { AgentModeFilter, type AgentModeFilterValue } from "./AgentModeFilter";
 import { CustomAgentRepositoriesModal } from "./CustomAgentRepositoriesModal";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
@@ -43,6 +45,7 @@ const CATEGORY_SECTIONS = [
 type CatalogMode = "conversation" | "roleplay" | "game";
 
 const OFFICIAL_PACKAGE_MODES: Readonly<Record<string, readonly CatalogMode[]>> = Object.freeze({
+  beholder: ["roleplay"],
   "card-evolution-auditor": ["roleplay"],
   continuity: ["roleplay"],
   "knowledge-retrieval": ["roleplay"],
@@ -53,7 +56,10 @@ const OFFICIAL_PACKAGE_MODES: Readonly<Record<string, readonly CatalogMode[]>> =
   "character-tracker": ["roleplay"],
   "custom-tracker": ["roleplay"],
   "inventory-tracker": ["roleplay"],
+  "memory-nag": ["roleplay"],
+  "long-term-memory": ["conversation", "roleplay", "game"],
   expression: ["roleplay"],
+  "gacha-forge": ["conversation", "roleplay", "game"],
   "hierarchical-maps": ["roleplay", "game"],
   "persona-stats": ["roleplay"],
   quest: ["roleplay"],
@@ -64,12 +70,13 @@ const OFFICIAL_PACKAGE_MODES: Readonly<Record<string, readonly CatalogMode[]>> =
   "conversation-calls": ["conversation"],
   cyoa: ["roleplay"],
   "echo-chamber": ["roleplay"],
-  haptic: ["conversation", "roleplay"],
+  haptic: ["conversation", "roleplay", "game"],
   illustrator: ["conversation", "roleplay", "game"],
   storyboard: ["roleplay", "game"],
   html: ["roleplay"],
   "lorebook-keeper": ["roleplay", "game"],
   noodle: ["conversation", "roleplay", "game"],
+  slurp: ["conversation", "roleplay", "game"],
   spotify: ["conversation", "roleplay", "game"],
   poker: ["conversation"],
   "rock-paper-scissors": ["conversation"],
@@ -77,19 +84,19 @@ const OFFICIAL_PACKAGE_MODES: Readonly<Record<string, readonly CatalogMode[]>> =
   uno: ["conversation"],
 });
 
-const MODE_BADGES: Record<CatalogMode, { label: string; className: string }> = {
+const MODE_BADGES: Record<CatalogMode, { labelKey: string; className: string }> = {
   conversation: {
-    label: "Conversation",
+    labelKey: "ui.agents.agentcatalogview.conversationMode",
     className:
       "border-[color-mix(in_srgb,var(--mari-logo-cyan)_55%,var(--border))] bg-[color-mix(in_srgb,var(--mari-logo-cyan)_18%,transparent)]",
   },
   roleplay: {
-    label: "Roleplay",
+    labelKey: "ui.agents.agentcatalogview.roleplayMode",
     className:
       "border-[color-mix(in_srgb,var(--mari-logo-orange)_55%,var(--border))] bg-[color-mix(in_srgb,var(--mari-logo-orange)_18%,transparent)]",
   },
   game: {
-    label: "Game",
+    labelKey: "ui.agents.agentcatalogview.gameMode",
     className:
       "border-[color-mix(in_srgb,var(--mari-logo-pink)_55%,var(--border))] bg-[color-mix(in_srgb,var(--mari-logo-pink)_18%,transparent)]",
   },
@@ -131,6 +138,7 @@ function packageModes(packageId: string): readonly CatalogMode[] {
 export function AgentCatalogView() {
   const { t: localizeUi } = useUiTranslation();
   const closeAgentCatalog = useUIStore((state) => state.closeAgentCatalog);
+  const initialPackageId = useUIStore((state) => state.agentCatalogInitialPackageId);
   const catalog = useCapabilityCatalog();
   const installed = useInstalledCapabilityPackages();
   const install = useInstallCapabilityPackage();
@@ -139,30 +147,33 @@ export function AgentCatalogView() {
   const uninstallAll = useUninstallAllCapabilityPackages();
   const customRepositories = useCustomAgentRepositories();
   const [query, setQuery] = useState("");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [mobileDetail, setMobileDetail] = useState(false);
+  const [modeFilter, setModeFilter] = useState<AgentModeFilterValue>("all");
+  const [selectedId, setSelectedId] = useState<string | null>(initialPackageId);
+  const [mobileDetail, setMobileDetail] = useState(Boolean(initialPackageId));
   const [bulkProgress, setBulkProgress] = useState<BulkActionProgress | null>(null);
   const [customRepositoriesOpen, setCustomRepositoriesOpen] = useState(false);
+  const hasActiveFilters = Boolean(query.trim()) || modeFilter !== "all";
 
   const installedById = useMemo(() => new Map((installed.data ?? []).map((item) => [item.id, item])), [installed.data]);
   const packages = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return (catalog.data?.packages ?? []).filter(
       ({ manifest, category }) =>
-        !needle ||
-        [
-          manifest.name,
-          manifest.description,
-          manifest.id,
-          category,
-          ...manifest.kind.map(kindLabel),
-          ...packageModes(manifest.id).map((mode) => MODE_BADGES[mode].label),
-        ]
-          .join(" ")
-          .toLowerCase()
-          .includes(needle),
+        (modeFilter === "all" || packageModes(manifest.id).includes(modeFilter)) &&
+        (!needle ||
+          [
+            manifest.name,
+            manifest.description,
+            manifest.id,
+            category,
+            ...manifest.kind.map(kindLabel),
+            ...packageModes(manifest.id).map((mode) => localizeUi(MODE_BADGES[mode].labelKey)),
+          ]
+            .join(" ")
+            .toLowerCase()
+            .includes(needle)),
     );
-  }, [catalog.data, query]);
+  }, [catalog.data, localizeUi, modeFilter, query]);
   const packageGroups = useMemo(
     () => [
       {
@@ -196,6 +207,7 @@ export function AgentCatalogView() {
     : 0;
 
   useEffect(() => {
+    if (packages.length === 0) return;
     if (!selectedId && packages[0]) setSelectedId(packages[0].manifest.id);
     if (selectedId && !packages.some((item) => item.manifest.id === selectedId)) {
       setSelectedId(packages[0]?.manifest.id ?? null);
@@ -407,6 +419,7 @@ export function AgentCatalogView() {
                 aria-label={localizeUi("ui.agents.agentcatalogview.searchDownloadableAgents")}
               />
             </div>
+            <AgentModeFilter className="mt-2" value={modeFilter} onChange={setModeFilter} />
             <div className="mt-2 grid grid-cols-2 gap-2">
               <button
                 type="button"
@@ -507,12 +520,12 @@ export function AgentCatalogView() {
               <div className="flex min-h-56 flex-col items-center justify-center gap-2 px-4 text-center">
                 <Sparkles size="2rem" className="text-[var(--muted-foreground)]" />
                 <p className="font-semibold">
-                  {query
+                  {hasActiveFilters
                     ? localizeUi("ui.agents.agentcatalogview.noMatchingAgents")
                     : localizeUi("ui.agents.agentcatalogview.theOfficialCatalogIsEmpty")}
                 </p>
                 <p className="text-sm text-[var(--muted-foreground)]">
-                  {query
+                  {hasActiveFilters
                     ? localizeUi("ui.noodle.noodlehome.tryADifferentSearch")
                     : localizeUi("ui.agents.agentcatalogview.publishedAgentsWillAppearHereAutomatically")}
                 </p>
@@ -551,6 +564,7 @@ export function AgentCatalogView() {
                               <div className="space-y-1">
                                 {entries.map((entry) => {
                                   const active = entry.manifest.id === selected?.manifest.id;
+                                  const modes = packageModes(entry.manifest.id);
                                   return (
                                     <button
                                       key={entry.manifest.id}
@@ -578,7 +592,7 @@ export function AgentCatalogView() {
                                         <span className="flex items-center gap-2">
                                           <span className="truncate text-sm font-semibold">{entry.manifest.name}</span>
                                           {group.id === "installed" && (
-                                            <span className="rounded-full bg-[var(--marinara-chat-chrome-highlight-bg)] px-1.5 py-0.5 text-[0.6rem] font-semibold text-[var(--marinara-chat-chrome-highlight-text)]">
+                                            <span className="mari-chrome-tag bg-[var(--marinara-chat-chrome-highlight-bg)] px-1.5 py-0.5 text-[0.6rem] font-semibold text-[var(--marinara-chat-chrome-highlight-text)]">
                                               {localizeUi("ui.agents.agentcatalogview.installed_7bb4405")}
                                             </span>
                                           )}
@@ -586,6 +600,21 @@ export function AgentCatalogView() {
                                         <span className="mt-0.5 line-clamp-2 text-xs text-[var(--muted-foreground)]">
                                           {entry.manifest.description}
                                         </span>
+                                        {modes.length > 0 && (
+                                          <span data-agent-catalog-mode-badges className="mt-1 flex flex-wrap gap-1">
+                                            {modes.map((mode) => (
+                                              <span
+                                                key={mode}
+                                                className={cn(
+                                                  "rounded-md border px-1.5 py-0.5 text-[0.5625rem] font-semibold text-[var(--foreground)]",
+                                                  MODE_BADGES[mode].className,
+                                                )}
+                                              >
+                                                {localizeUi(MODE_BADGES[mode].labelKey)}
+                                              </span>
+                                            ))}
+                                          </span>
+                                        )}
                                       </span>
                                     </button>
                                   );
@@ -634,7 +663,7 @@ export function AgentCatalogView() {
                     {selected.manifest.kind.filter(isAgentCatalogKindBadgeVisible).map((kind) => (
                       <span
                         key={kind}
-                        className="rounded-full border border-[var(--border)] px-2.5 py-1 text-[0.68rem]"
+                        className="mari-chrome-tag border border-[var(--border)] px-2.5 py-1 text-[0.68rem]"
                       >
                         {kindLabel(kind)}
                       </span>
@@ -644,11 +673,11 @@ export function AgentCatalogView() {
                         key={mode}
                         data-chat-mode={mode}
                         className={cn(
-                          "rounded-full border px-2.5 py-1 text-[0.68rem] font-semibold text-[var(--foreground)]",
+                          "mari-chrome-tag border px-2.5 py-1 text-[0.68rem] font-semibold text-[var(--foreground)]",
                           MODE_BADGES[mode].className,
                         )}
                       >
-                        {MODE_BADGES[mode].label}
+                        {localizeUi(MODE_BADGES[mode].labelKey)}
                       </span>
                     ))}
                   </div>
@@ -701,7 +730,7 @@ export function AgentCatalogView() {
               <section>
                 <h3 className="text-sm font-semibold">{localizeUi("ui.agents.agentcatalogview.permissions")}</h3>
                 {(selected.manifest.entrypoints.server || selected.manifest.entrypoints.client) && (
-                  <p className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-[var(--foreground)]">
+                  <p className="mt-2 rounded-lg border border-[var(--primary)]/30 bg-[var(--primary)]/10 px-3 py-2 text-xs leading-relaxed text-[var(--foreground)]">
                     {localizeUi("ui.agents.agentcatalogview.trustedCodeAccessNotice")}
                   </p>
                 )}
@@ -714,6 +743,8 @@ export function AgentCatalogView() {
                   ))}
                 </ul>
               </section>
+
+              <AgentVersionHistory packageId={selected.manifest.id} />
 
               <div className="mt-auto flex flex-wrap items-center gap-3 border-t border-[var(--border)] pt-5">
                 {selected.documentationUrl && (

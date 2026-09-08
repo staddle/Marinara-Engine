@@ -72,6 +72,10 @@ export interface SidecarConfig {
   customModelRepo: string | null;
   /** Whether to use the sidecar for tracker agents in roleplay mode. */
   useForTrackers: boolean;
+  /** Whether agents without an explicit connection default to the sidecar.
+   *  Takes the place of a `defaultForAgents` connection row, which the sidecar
+   *  cannot have — it is a pseudo-connection with no stored row (#5539). */
+  useAsAgentsDefault: boolean;
   /** Whether to use the sidecar for game scene analysis (backgrounds, music, weather, effects). */
   useForGameScene: boolean;
   /** Context size for the model. Default 8192. */
@@ -156,6 +160,8 @@ export interface SceneSegmentEffect {
   background?: string | null;
   music?: string | null;
   sfx?: string[];
+  /** Total sequential plays for each sound effect on this beat. Defaults to 1. */
+  sfxLoopCount?: number;
   ambient?: string | null;
   /** Rare cinematic overlays/visual effects to fire when this narration segment appears. */
   directions?: DirectionCommand[];
@@ -355,6 +361,7 @@ export const SIDECAR_DEFAULT_CONFIG: SidecarConfig = {
   quantization: null,
   customModelRepo: null,
   useForTrackers: false,
+  useAsAgentsDefault: false,
   useForGameScene: true,
   contextSize: 8192,
   maxTokens: 4096,

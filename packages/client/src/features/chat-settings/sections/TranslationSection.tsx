@@ -224,7 +224,7 @@ function TranslationLanguageField({
             ? localizeUi("ui.chatSettings.translationlanguagefield.english")
             : localizeUi("ui.chatSettings.translationlanguagefield.en")
         }
-        className="mt-0.5 w-full rounded-lg bg-[var(--secondary)] px-3 py-2 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
+        className="mari-chrome-field mt-0.5 w-full !rounded-md px-3 py-2 text-xs"
       />
     </div>
   );

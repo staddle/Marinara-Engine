@@ -113,6 +113,8 @@ export interface Chat {
   /** Groups related chats together (like ST "chat files" per character) */
   groupId: string | null;
   personaId: string | null;
+  /** Character card currently being played as the user identity. */
+  personaCharacterId: string | null;
   promptPresetId: string | null;
   connectionId: string | null;
   /** ID of a linked chat (conversation ↔ roleplay bidirectional link) */
@@ -380,10 +382,10 @@ export interface ChatMetadata {
    * How character-scoped regex scripts (those with target characters) apply at
    * display time in this chat: "exclusive" (a scoped script only transforms its
    * own character's messages) or "chat" (all scoped scripts transform every
-   * message). Defaults to "disabled" — scoped scripts are off at display unless
-   * opted in per chat. Global scripts (no target characters) are unaffected.
+   * message). Missing/null inherits the prompt preset (otherwise "disabled").
+   * Global scripts (no target characters) are unaffected.
    */
-  scopedRegexMode?: "disabled" | "exclusive" | "chat";
+  scopedRegexMode?: "disabled" | "exclusive" | "chat" | null;
   /** Legacy display scale for roleplay Expression Engine sprites. */
   spriteScale?: number;
   /** Display scale for roleplay Expression Engine expression sprites. Falls back to spriteScale. */
@@ -694,6 +696,8 @@ export interface ChatMetadata {
   summaryTailMessages?: number;
   /** When true or omitted, prior provider reasoning metadata is not replayed into future prompts. */
   excludePastReasoning?: boolean;
+  /** Most recent assistant reasoning blocks to replay when enabled. Default: 1; 0 includes all. */
+  pastReasoningLimit?: number;
 
   /** Any extra key-value data */
   [key: string]: unknown;
@@ -792,6 +796,8 @@ export interface MessageExtra {
   conversationCommandContent?: string | null;
   /** Professor Mari workspace trace shown on the home assistant transcript. */
   mariWorkspaceTimeline?: MariWorkspaceTraceItem[] | null;
+  /** True when this Mari turn deferred mutating commands behind an Accept action (#5725 Manual mode). */
+  mariDeferredMutations?: boolean | null;
   /** Per-swipe sprite expressions from the Expression Engine agent */
   spriteExpressions?: Record<string, string> | null;
   /** Per-swipe CYOA choices from the CYOA Choices agent */
@@ -808,6 +814,7 @@ export interface MessageExtra {
   /** Snapshot of the persona that was active when this message was sent (user messages only) */
   personaSnapshot?: {
     personaId: string;
+    source?: "persona" | "character";
     name: string;
     avatarUrl?: string | null;
     /** JSON-encoded AvatarCrop captured at send time so re-edits don't restyle past messages. */
@@ -862,6 +869,8 @@ export interface GenerationInfo {
   tokensCachedPrompt?: number | null;
   tokensCacheWritePrompt?: number | null;
   durationMs: number | null;
+  /** Time from generation start until reasoning yielded to visible output. */
+  reasoningDurationMs?: number | null;
   finishReason: string | null;
 }
 

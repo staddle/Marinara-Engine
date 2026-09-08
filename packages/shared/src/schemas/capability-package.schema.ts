@@ -1,6 +1,11 @@
 import { z } from "zod";
 import { agentResultTypeSchema } from "./agent.schema.js";
 
+/** Caps mirrored by the Marinara-Agents catalog build. Kept here so a hostile or
+ *  broken notes document cannot push an unbounded string into a modal. */
+export const MAX_RELEASE_NOTE_CHARACTERS = 1000;
+export const MAX_RELEASE_NOTE_VERSIONS = 20;
+
 export const capabilityPackageKindSchema = z.enum(["agent", "maps", "conversation-calls", "turn-game"]);
 export const capabilityPermissionSchema = z.enum([
   "agent-runtime",
@@ -67,6 +72,10 @@ const capabilityPackageManifestBaseSchema = z
               "home-browser-tab",
               // Mounts the package's own game UI over the narration.
               "game-surface",
+              // Compact package-owned tracker controls in Roleplay chat chrome.
+              "roleplay-tracker",
+              // Package-owned content inside the detached or docked Tracker Panel.
+              "tracker-panel",
             ]),
           )
           .optional(),
@@ -181,7 +190,14 @@ const capabilityPackageManifestBaseSchema = z
 //        to fold the Game narration box down to its handle for a cutscene beat. It
 //        never writes the player's stored preference and the engine's safety rules
 //        still force the box open when it holds something to act on.
-export const supportedCapabilityApi = Object.freeze({ major: 1, minor: 13 } as const);
+// 1.14: roleplay-tracker and tracker-panel UI contribution slots, package-aware
+//        prompt placement, and package-agent post-processing lifecycle hooks.
+// 1.15: packages can resolve their current embedding connection without reactivation.
+// 1.16: package-declared Game Master verbs — a hash-pinned `gm-verbs.json` asset the engine renders
+//        into the GM prompt, parses back out of the turn, and either writes into the package's own
+//        chat-metadata key or delivers live as a `gm_verb` event (soft seam: read from the asset
+//        regardless of declared capabilityApi; declare 1.16 only to REQUIRE it. Needs `chat-write`).
+export const supportedCapabilityApi = Object.freeze({ major: 1, minor: 16 } as const);
 
 const capabilityApiVersionSchema = z
   .object({
@@ -373,6 +389,7 @@ export const installedCapabilityPackageSchema = z.object({
   readinessError: z.string().nullable().default(null),
   legacy: z.boolean().default(false),
   previousVersion: z.string().optional(),
+  previousManifest: capabilityPackageManifestSchema.optional(),
 });
 
 export const installedCapabilityRegistrySchema = z
@@ -435,6 +452,20 @@ export const packagedAgentDefinitionsSchema = z.array(packagedAgentDefinitionSch
 export type CapabilityPackageManifest = z.infer<typeof capabilityPackageManifestSchema>;
 export type CapabilityCatalogPackage = z.infer<typeof capabilityCatalogPackageSchema>;
 export type CapabilityCatalog = z.infer<typeof capabilityCatalogSchema>;
+
+/** A catalog entry after the Engine has stamped where it came from.
+ *
+ *  `preview` marks an entry the Engine itself read from the staging preview
+ *  overlay. It is deliberately NOT part of the downloaded-entry schema above:
+ *  that schema is the contract for bytes we fetched, and accepting `preview`
+ *  there would let any published or custom catalog claim preview provenance for
+ *  its own entries. The Engine assigns it from the source URL and nowhere else,
+ *  so a value arriving on the wire is rejected by the strict entry schema and
+ *  can never reach a consumer. */
+export type StampedCapabilityCatalogPackage = CapabilityCatalogPackage & { preview?: true };
+export type StampedCapabilityCatalog = Omit<CapabilityCatalog, "packages"> & {
+  packages: StampedCapabilityCatalogPackage[];
+};
 export type InstalledCapabilityPackage = z.infer<typeof installedCapabilityPackageSchema>;
 export type PackagedAgentDefinition = z.infer<typeof packagedAgentDefinitionSchema>;
 
@@ -445,7 +476,86 @@ export interface CapabilityPackageUpdate {
   version: string;
   artifactSha256: string;
   restartRequired: boolean;
+  /** Release notes published for `version`, when the catalog ships a notes sidecar. */
+  releaseNotes?: string;
+  /** Whether the publisher marked `version` as a change the user will notice. */
+  releaseHighlight?: boolean;
 }
+
+/** Release notes live in a sidecar document next to catalog.json, never inside a
+ *  catalog entry or a package manifest.
+ *
+ *  `capabilityCatalogPackageSchema` is strict and `parseCapabilityCatalogWithCompat`
+ *  DROPS entries carrying keys it does not know. A new key on a catalog entry would
+ *  therefore empty the Agents browser on every already-shipped Engine that predates
+ *  it, not just hide the notes. A sibling document those Engines never fetch has no
+ *  such blast radius: an Engine without this feature simply never asks for it, and an
+ *  Engine with it treats a missing document as "no notes". */
+const capabilityPackageVersionNoteSchema = z
+  .object({
+    // Stricter than the manifest's version field, and deliberately so. Ordering
+    // here runs through compareCapabilityPackageVersions, which turns each
+    // component and each numeric prerelease identifier into a Number. That makes
+    // two preconditions load-bearing, and neither is checked there:
+    //   * every numeric part must stay inside the safe integer range, or two
+    //     different versions compare equal and newest-first quietly stops holding;
+    //   * numeric prerelease identifiers must be canonical, or "01" and "1"
+    //     compare as different versions while meaning the same one.
+    // Leading zeros matter for the same reason: 01.2.3 and 1.2.3 compare equal
+    // numerically but differ as strings, so the duplicate check and the lookup in
+    // attachCapabilityReleaseNotes would disagree with the ordering — two notes
+    // for one version, or a note that never attaches because the catalog spells
+    // the version differently.
+    // Nine digits is far beyond any real version, and this is canonical SemVer
+    // otherwise.
+    version: z
+      .string()
+      .max(64)
+      .regex(
+        /^(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})\.(?:0|[1-9]\d{0,8})(?:-(?:0|[1-9]\d{0,8}|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d{0,8}|\d*[A-Za-z-][0-9A-Za-z-]*))*)?$/,
+      ),
+    // Round-tripped, not just shape-matched: a plain regex accepts 2026-02-30,
+    // which would reach the UI as a date that does not exist.
+    date: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .refine((value) => new Date(`${value}T00:00:00.000Z`).toISOString().startsWith(value), {
+        message: "must be a real calendar date",
+      }),
+    /** Plain text. Rendered verbatim and never as markdown or HTML: the catalog URL
+     *  is operator-configurable, so this is untrusted remote content. */
+    notes: z.string().min(1).max(MAX_RELEASE_NOTE_CHARACTERS),
+    /** Published by the catalog build, never recomputed here. */
+    highlight: z.boolean().default(false),
+  })
+  .strict();
+
+export const capabilityReleaseNotesSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    packages: z.record(
+      z
+        .string()
+        .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
+        .max(80),
+      z
+        .object({
+          versions: z
+            .array(capabilityPackageVersionNoteSchema)
+            .max(MAX_RELEASE_NOTE_VERSIONS)
+            // A repeated version would make the two readers disagree: the update
+            // prompt takes the first match, the history sheet shows every one.
+            .refine((versions) => new Set(versions.map((note) => note.version)).size === versions.length, {
+              message: "must not list the same version twice",
+            }),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+
+export type CapabilityPackageVersionNote = z.infer<typeof capabilityPackageVersionNoteSchema>;
+export type CapabilityReleaseNotes = z.infer<typeof capabilityReleaseNotesSchema>;
 
 export interface CustomAgentRepository {
   id: string;

@@ -91,6 +91,7 @@ import {
   CUSTOM_AGENT_PERMISSIONS_EXPLICIT_SETTING,
   DEFAULT_CUSTOM_AGENT_ACTIVATION_SCAN_DEPTH,
   LOCAL_SIDECAR_CONNECTION_ID,
+  UTILITY_SIDECAR_CONNECTION_ID,
   MAX_CUSTOM_AGENT_ACTIVATION_SCAN_DEPTH,
   MIN_AGENT_MAX_TOKENS,
   getDefaultBuiltInAgentSettings,
@@ -120,6 +121,7 @@ import {
 } from "../../lib/agent-transfer";
 import { CUSTOM_AGENT_RESULT_EXAMPLES, type CustomAgentResultType } from "../../lib/custom-agent-result-examples";
 import { downloadZipFile } from "../../lib/download-zip";
+import { useSidecarStore } from "../../stores/sidecar.store";
 import { Trans, useTranslation as useUiTranslation } from "react-i18next";
 
 function parseActivationKeywordsText(value: string): string[] {
@@ -152,6 +154,8 @@ function createCustomAgentType(name: string): string {
 const LOREBOOK_WRITE_TOOL_NAME = "save_lorebook_entry";
 const MESSAGE_EDIT_TOOL_NAME = "edit_chat_message";
 const MAX_LOREBOOK_READ_BEHIND_MESSAGES = 100;
+const DEFAULT_LOREBOOK_BACKFILL_CHUNK_SIZE = 25;
+const MAX_LOREBOOK_BACKFILL_CHUNK_SIZE = 100;
 const DEFAULT_PROSE_GUARDIAN_BANNED_WORDS = "ozone";
 type MusicProvider = "spotify" | "youtube" | "custom";
 type CustomMusicSource = "game-assets" | "folder";
@@ -184,6 +188,12 @@ function normalizeLorebookReadBehindMessages(value: unknown): number {
   const numeric = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
   if (!Number.isFinite(numeric)) return 0;
   return Math.max(0, Math.min(MAX_LOREBOOK_READ_BEHIND_MESSAGES, Math.trunc(numeric)));
+}
+
+function normalizeLorebookBackfillChunkSize(value: unknown): number {
+  const numeric = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  if (!Number.isFinite(numeric)) return DEFAULT_LOREBOOK_BACKFILL_CHUNK_SIZE;
+  return Math.max(1, Math.min(MAX_LOREBOOK_BACKFILL_CHUNK_SIZE, Math.trunc(numeric)));
 }
 
 function normalizeExternalMusicFolderInput(value: unknown): string {
@@ -241,6 +251,11 @@ const CUSTOM_AGENT_CAPABILITY_META: Array<{
   label: string;
   description: string;
 }> = [
+  {
+    id: "create_characters",
+    label: "settings.agentImports.capabilities.create_characters.label",
+    description: "settings.agentImports.capabilities.create_characters.description",
+  },
   {
     id: "create_lorebooks",
     label: "Create lorebooks",
@@ -382,6 +397,12 @@ const CUSTOM_AGENT_RESULT_TYPE_OPTIONS: Array<{
     id: "context_injection",
     label: "Context Injection",
     description: "Adds text context before generation, or records informational text after generation.",
+  },
+  {
+    id: "character_card_create",
+    label: "settings.agentImports.results.character_card_create.label",
+    description: "settings.agentImports.results.character_card_create.description",
+    requiredCapability: "create_characters",
   },
   {
     id: "text_rewrite",
@@ -679,7 +700,7 @@ export function AgentEditor() {
 
   const normalizeTextConnectionOverride = useCallback((connectionId: unknown): string => {
     if (typeof connectionId !== "string" || !connectionId.trim()) return "";
-    if (connectionId === LOCAL_SIDECAR_CONNECTION_ID) {
+    if (connectionId === LOCAL_SIDECAR_CONNECTION_ID || connectionId === UTILITY_SIDECAR_CONNECTION_ID) {
       return import.meta.env.VITE_MARINARA_LITE === "true" ? "" : connectionId;
     }
     const index = connectionIndexRef.current;
@@ -744,6 +765,10 @@ export function AgentEditor() {
   const [localLorebookWriteEnabled, setLocalLorebookWriteEnabled] = useState(false);
   const [localWritableLorebookId, setLocalWritableLorebookId] = useState("");
   const [localLorebookReadBehindMessages, setLocalLorebookReadBehindMessages] = useState(0);
+  const [localLorebookBackfillEnabled, setLocalLorebookBackfillEnabled] = useState(false);
+  const [localLorebookBackfillChunkSize, setLocalLorebookBackfillChunkSize] = useState(
+    DEFAULT_LOREBOOK_BACKFILL_CHUNK_SIZE,
+  );
   const [localMusicProvider, setLocalMusicProvider] = useState<MusicProvider>("spotify");
   const [localCustomMusicSource, setLocalCustomMusicSource] = useState<CustomMusicSource>("game-assets");
   const [localCustomMusicFolder, setLocalCustomMusicFolder] = useState("music");
@@ -849,6 +874,8 @@ export function AgentEditor() {
       );
       setLocalWritableLorebookId(writableLorebookId);
       setLocalLorebookReadBehindMessages(normalizeLorebookReadBehindMessages(settings.lorebookReadBehindMessages));
+      setLocalLorebookBackfillEnabled(settings.lorebookBackfillEnabled === true);
+      setLocalLorebookBackfillChunkSize(normalizeLorebookBackfillChunkSize(settings.lorebookBackfillChunkSize));
       setLocalMusicProvider(normalizeMusicProvider(settings));
       setLocalCustomMusicSource(normalizeCustomMusicSource(settings));
       setLocalCustomMusicFolder(
@@ -961,6 +988,8 @@ export function AgentEditor() {
       setLocalLorebookWriteEnabled(false);
       setLocalWritableLorebookId("");
       setLocalLorebookReadBehindMessages(0);
+      setLocalLorebookBackfillEnabled(false);
+      setLocalLorebookBackfillChunkSize(DEFAULT_LOREBOOK_BACKFILL_CHUNK_SIZE);
       setLocalMusicProvider(normalizeMusicProvider(defaultSettings));
       setLocalCustomMusicSource(normalizeCustomMusicSource(defaultSettings));
       setLocalCustomMusicFolder(
@@ -1016,6 +1045,8 @@ export function AgentEditor() {
       setLocalLorebookWriteEnabled(false);
       setLocalWritableLorebookId("");
       setLocalLorebookReadBehindMessages(0);
+      setLocalLorebookBackfillEnabled(false);
+      setLocalLorebookBackfillChunkSize(DEFAULT_LOREBOOK_BACKFILL_CHUNK_SIZE);
       setLocalMusicProvider("spotify");
       setLocalCustomMusicSource("game-assets");
       setLocalCustomMusicFolder("music");
@@ -1176,6 +1207,39 @@ export function AgentEditor() {
       | Array<{ id: string; name: string; provider: string; defaultForAgents?: boolean | string }>
       | undefined) ?? [];
 
+  /**
+   * Whether the engine's utility model slot holds a model for this agent.
+   *
+   * Offered as a connection only when it exists: a picker entry that cannot answer is
+   * worse than no entry, and this slot is optional — most engines will not have one.
+   */
+  const utilityAgentType = dbConfig?.type ?? builtIn?.id ?? agentDetailId;
+  const [utilitySlotServesThisAgent, setUtilitySlotServesThisAgent] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    if (!utilityAgentType || import.meta.env.VITE_MARINARA_LITE === "true") {
+      setUtilitySlotServesThisAgent(false);
+      return;
+    }
+    void (async () => {
+      try {
+        const res = await fetch("/api/utility-sidecar/status", {
+          credentials: "same-origin",
+          headers: { Accept: "application/json" },
+        });
+        if (!res.ok) throw new Error(String(res.status));
+        const status = (await res.json()) as { models?: Record<string, unknown> };
+        if (!cancelled) setUtilitySlotServesThisAgent(!!status?.models?.[utilityAgentType]);
+      } catch {
+        // An engine without the utility slot simply does not offer the option.
+        if (!cancelled) setUtilitySlotServesThisAgent(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [utilityAgentType]);
+
   const llmConnections = allConnections.filter(
     (conn) => conn.provider !== "image_generation" && conn.provider !== "video_generation" && conn.provider !== "audio",
   );
@@ -1188,6 +1252,10 @@ export function AgentEditor() {
       c.provider !== "audio" &&
       (c.defaultForAgents === true || c.defaultForAgents === "true"),
   );
+  // The sidecar can be the agents default without owning a connection row
+  // (#5539); while available it takes precedence over a row default, matching
+  // the server's resolveAgentsDefaultConnectionId.
+  const sidecarIsAgentsDefault = useSidecarStore((state) => state.config.useAsAgentsDefault && state.modelDownloaded);
 
   const defaultAgentImageConn = imageConnections.find(
     (c) => c.defaultForAgents === true || c.defaultForAgents === "true",
@@ -1230,6 +1298,9 @@ export function AgentEditor() {
     const lorebookReadBehindEnabled =
       isEditingCustomAgent &&
       customLorebookReadBehindEnabled(savedPhase, lorebookWriterEnabled, localResultType, customCapabilities);
+    const lorebookTargetEnabled =
+      (lorebookWriterEnabled || (lorebookReadBehindEnabled && customCapabilities.edit_lorebooks === true)) &&
+      writableLorebookId.length > 0;
     if (lorebookWriterEnabled && !writableLorebookId) {
       setSaveError("Select a target lorebook before enabling lorebook writing for this agent.");
       return;
@@ -1308,14 +1379,20 @@ export function AgentEditor() {
             }
           : {}),
         enabledTools: isMusicAgent && localMusicProvider !== "spotify" ? [] : effectiveEnabledTools,
-        ...(lorebookWriterEnabled
+        ...(lorebookTargetEnabled
           ? {
-              lorebookWriteEnabled: true,
+              ...(lorebookWriterEnabled ? { lorebookWriteEnabled: true } : {}),
               writableLorebookId,
               writableLorebookIds: [writableLorebookId],
             }
           : {}),
         ...(lorebookReadBehindEnabled ? { lorebookReadBehindMessages: localLorebookReadBehindMessages } : {}),
+        ...(lorebookReadBehindEnabled
+          ? {
+              lorebookBackfillEnabled: localLorebookBackfillEnabled,
+              lorebookBackfillChunkSize: localLorebookBackfillChunkSize,
+            }
+          : {}),
         ...(localSpotifyClientId ? { spotifyClientId: localSpotifyClientId } : {}),
         ...(isKnowledgeRetrievalAgent ||
         isKnowledgeRouterAgent ||
@@ -1410,6 +1487,8 @@ export function AgentEditor() {
     localLorebookWriteEnabled,
     localWritableLorebookId,
     localLorebookReadBehindMessages,
+    localLorebookBackfillEnabled,
+    localLorebookBackfillChunkSize,
     localMusicProvider,
     localCustomMusicSource,
     localCustomMusicFolder,
@@ -1478,6 +1557,9 @@ export function AgentEditor() {
     const lorebookReadBehindEnabled =
       isEditingCustomAgent &&
       customLorebookReadBehindEnabled(savedPhase, lorebookWriterEnabled, localResultType, customCapabilities);
+    const lorebookTargetEnabled =
+      (lorebookWriterEnabled || (lorebookReadBehindEnabled && customCapabilities.edit_lorebooks === true)) &&
+      writableLorebookId.length > 0;
     const effectiveEnabledTools = Array.from(
       new Set(
         lorebookWriterEnabled
@@ -1516,14 +1598,20 @@ export function AgentEditor() {
           }
         : {}),
       enabledTools: exportingMusicAgent && localMusicProvider !== "spotify" ? [] : effectiveEnabledTools,
-      ...(lorebookWriterEnabled
+      ...(lorebookTargetEnabled
         ? {
-            lorebookWriteEnabled: true,
+            ...(lorebookWriterEnabled ? { lorebookWriteEnabled: true } : {}),
             writableLorebookId,
             writableLorebookIds: [writableLorebookId],
           }
         : {}),
       ...(lorebookReadBehindEnabled ? { lorebookReadBehindMessages: localLorebookReadBehindMessages } : {}),
+      ...(lorebookReadBehindEnabled
+        ? {
+            lorebookBackfillEnabled: localLorebookBackfillEnabled,
+            lorebookBackfillChunkSize: localLorebookBackfillChunkSize,
+          }
+        : {}),
       ...(localSpotifyClientId ? { spotifyClientId: localSpotifyClientId } : {}),
       ...(isKnowledgeRetrievalAgent ||
       isKnowledgeRouterAgent ||
@@ -1741,6 +1829,8 @@ export function AgentEditor() {
     localResultType,
     localCustomCapabilities,
   );
+  const canConfigureLorebookTarget =
+    localCustomCapabilities.edit_lorebooks === true && (localLorebookWriteEnabled || canConfigureLorebookReadBehind);
   const visibleBuiltInTools = useMemo(
     () =>
       BUILT_IN_TOOLS.filter(
@@ -2182,7 +2272,7 @@ export function AgentEditor() {
                   {allLorebooks && allLorebooks.length > 0 ? (
                     <select
                       value={localWritableLorebookId}
-                      disabled={!localLorebookWriteEnabled || localCustomCapabilities.edit_lorebooks !== true}
+                      disabled={!canConfigureLorebookTarget}
                       onChange={(event) => {
                         setLocalWritableLorebookId(event.target.value);
                         markDirty();
@@ -2224,6 +2314,40 @@ export function AgentEditor() {
                     {localizeUi("ui.agents.agenteditor.customLorebookReadBehindDescription")}
                   </span>
                 </label>
+
+                <EditorSwitchRow
+                  label={localizeUi("ui.agents.agenteditor.enableChunkedBackfill")}
+                  checked={localLorebookBackfillEnabled}
+                  disabled={!canConfigureLorebookReadBehind}
+                  onChange={() => {
+                    if (!canConfigureLorebookReadBehind) return;
+                    setLocalLorebookBackfillEnabled((value) => !value);
+                    markDirty();
+                  }}
+                  description={localizeUi("ui.agents.agenteditor.enableChunkedBackfillDescription")}
+                />
+
+                <label className="flex min-w-0 flex-col gap-1.5 text-[0.6875rem] text-[var(--muted-foreground)]">
+                  <span className="font-medium text-[var(--foreground)]">
+                    {localizeUi("ui.agents.agenteditor.backfillChunkSize")}
+                  </span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={MAX_LOREBOOK_BACKFILL_CHUNK_SIZE}
+                    step={1}
+                    value={localLorebookBackfillChunkSize}
+                    disabled={!canConfigureLorebookReadBehind || !localLorebookBackfillEnabled}
+                    onChange={(event) => {
+                      setLocalLorebookBackfillChunkSize(normalizeLorebookBackfillChunkSize(event.target.value));
+                      markDirty();
+                    }}
+                    className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm text-[var(--foreground)] ring-1 ring-[var(--border)] disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
+                  />
+                  <span className="text-[0.625rem] leading-relaxed">
+                    {localizeUi("ui.agents.agenteditor.backfillChunkSizeDescription")}
+                  </span>
+                </label>
               </div>
             </FieldGroup>
           )}
@@ -2243,15 +2367,31 @@ export function AgentEditor() {
               className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 text-sm ring-1 ring-[var(--border)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
             >
               <option value="">
-                {defaultAgentConn
-                  ? localizeUi("ui.agents.agenteditor.agentDefaultValue1", { value1: defaultAgentConn.name })
-                  : localizeUi("ui.agents.agenteditor.useChatConnection")}
+                {sidecarIsAgentsDefault
+                  ? localizeUi("ui.agents.agenteditor.agentDefaultValue1", {
+                      value1: localizeUi("ui.agents.agenteditor.localModelSidecar"),
+                    })
+                  : defaultAgentConn
+                    ? localizeUi("ui.agents.agenteditor.agentDefaultValue1", { value1: defaultAgentConn.name })
+                    : localizeUi("ui.agents.agenteditor.useChatConnection")}
               </option>
               {import.meta.env.VITE_MARINARA_LITE !== "true" && (
                 <option value={LOCAL_SIDECAR_CONNECTION_ID}>
                   {localizeUi("ui.agents.agenteditor.localModelSidecar")}
                 </option>
               )}
+              {/* Only offered once a model is installed for this agent: an option that
+                  cannot answer is worse than no option at all. The exception is a
+                  selection already saved — dropping that option would leave the select
+                  with no match and silently hide that the saved choice cannot serve. */}
+              {import.meta.env.VITE_MARINARA_LITE !== "true" &&
+                (utilitySlotServesThisAgent || localConnectionId === UTILITY_SIDECAR_CONNECTION_ID) && (
+                  <option value={UTILITY_SIDECAR_CONNECTION_ID}>
+                    {utilitySlotServesThisAgent
+                      ? localizeUi("ui.agents.agenteditor.utilityModelSidecar")
+                      : localizeUi("ui.agents.agenteditor.utilityModelSidecarUnavailable")}
+                  </option>
+                )}
               {llmConnections.map((conn) => (
                 <option key={conn.id} value={conn.id}>
                   {conn.name} ({conn.provider})
@@ -2616,11 +2756,19 @@ export function AgentEditor() {
                       if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
                       e.preventDefault();
                       const delta = e.key === "ArrowUp" ? 1 : -1;
-                      setLocalRunInterval(stepCadenceValue(localRunInterval, delta, customRunIntervalMeta.max));
+                      setLocalRunInterval(
+                        stepCadenceValue(localRunInterval, delta, customRunIntervalMeta.max, customRunIntervalMeta.min),
+                      );
                       markDirty();
                     }}
                     onChange={(e) => {
-                      setLocalRunInterval(parseOptionalCadenceInputValue(e.target.value, customRunIntervalMeta.max));
+                      setLocalRunInterval(
+                        parseOptionalCadenceInputValue(
+                          e.target.value,
+                          customRunIntervalMeta.max,
+                          customRunIntervalMeta.min,
+                        ),
+                      );
                       markDirty();
                     }}
                     className="w-full rounded-xl bg-[var(--secondary)] px-3 py-2.5 pr-8 text-sm tabular-nums ring-1 ring-[var(--border)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]"
@@ -2630,7 +2778,9 @@ export function AgentEditor() {
                       type="button"
                       aria-label={localizeUi("ui.agents.agenteditor.increaseTriggerCadence")}
                       onClick={() => {
-                        setLocalRunInterval(stepCadenceValue(localRunInterval, 1, customRunIntervalMeta.max));
+                        setLocalRunInterval(
+                          stepCadenceValue(localRunInterval, 1, customRunIntervalMeta.max, customRunIntervalMeta.min),
+                        );
                         markDirty();
                       }}
                       className="flex h-4 w-5 items-center justify-center text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
@@ -2641,7 +2791,9 @@ export function AgentEditor() {
                       type="button"
                       aria-label={localizeUi("ui.agents.agenteditor.decreaseTriggerCadence")}
                       onClick={() => {
-                        setLocalRunInterval(stepCadenceValue(localRunInterval, -1, customRunIntervalMeta.max));
+                        setLocalRunInterval(
+                          stepCadenceValue(localRunInterval, -1, customRunIntervalMeta.max, customRunIntervalMeta.min),
+                        );
                         markDirty();
                       }}
                       className="flex h-4 w-5 items-center justify-center text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
@@ -2857,12 +3009,12 @@ export function AgentEditor() {
               <div className="flex items-center gap-3">
                 <input
                   type="number"
-                  min={1}
+                  min={0}
                   max={100}
                   value={localRunInterval}
                   onChange={(e) => {
                     const v = e.target.value;
-                    setLocalRunInterval(v === "" ? "" : Math.max(1, Math.min(100, parseInt(v) || 1)));
+                    setLocalRunInterval(v === "" ? "" : Math.max(0, Math.min(100, parseInt(v) || 0)));
                     markDirty();
                   }}
                   placeholder="5"
@@ -2874,6 +3026,9 @@ export function AgentEditor() {
               </div>
               <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
                 {localizeUi("ui.agents.agenteditor.theIllustratorCanOnlyCreateANewImageOnce")}
+              </p>
+              <p className="mt-1 text-[0.625rem] text-[var(--muted-foreground)]">
+                {localizeUi("agents.illustrator.manualOnlyIntervalHelp")}
               </p>
             </FieldGroup>
           )}
@@ -2922,8 +3077,9 @@ export function AgentEditor() {
                         key={provider}
                         type="button"
                         onClick={() => handleMusicProviderChange(provider)}
+                        aria-pressed={active}
                         className={cn(
-                          "rounded-lg px-3 py-2 text-xs font-medium transition-all",
+                          "rounded-md px-3 py-2 text-xs font-medium transition-all",
                           active
                             ? "bg-white/12 text-white shadow-sm"
                             : "text-white/45 hover:bg-white/8 hover:text-white/75",

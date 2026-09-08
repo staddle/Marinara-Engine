@@ -56,10 +56,12 @@ type SharedSceneSettingsProps = {
 type DeleteDialogProps = {
   messageId: string | null;
   canDeleteSwipe: boolean;
+  canDeleteOtherSwipes: boolean;
   activeSwipeIndex: number;
   swipeCount: number;
   onConfirm: () => void;
   onDeleteSwipe: () => void;
+  onDeleteOtherSwipes: () => void;
   onDeleteMore: () => void;
   onClose: () => void;
 };
@@ -69,10 +71,12 @@ const DELETE_DIALOG_ACTION_CLASS = "mari-chrome-control min-h-10 w-full justify-
 function DeleteConfirmationDialog({
   messageId,
   canDeleteSwipe,
+  canDeleteOtherSwipes,
   activeSwipeIndex,
   swipeCount,
   onConfirm,
   onDeleteSwipe,
+  onDeleteOtherSwipes,
   onDeleteMore,
   onClose,
 }: DeleteDialogProps) {
@@ -99,6 +103,12 @@ function DeleteConfirmationDialog({
                 total: swipeCount,
               })}
             </span>
+          </button>
+        )}
+        {canDeleteOtherSwipes && (
+          <button type="button" onClick={onDeleteOtherSwipes} className={DELETE_DIALOG_ACTION_CLASS}>
+            <Layers size="0.8rem" />
+            <span>{t("chat.delete.dialog.otherSwipes")}</span>
           </button>
         )}
         <button type="button" onClick={onConfirm} className={DELETE_DIALOG_ACTION_CLASS}>
@@ -145,7 +155,7 @@ function MultiSelectBar({
       data-component="MessageMultiSelectBar"
       className={cn(
         NEUTRAL_PANEL_SHELL,
-        "mari-chrome-token-scope fixed bottom-[max(1rem,env(safe-area-inset-bottom))] left-1/2 z-50 flex w-[min(30rem,calc(100vw-1.5rem))] -translate-x-1/2 flex-col gap-2 p-3",
+        "mari-chrome-token-scope fixed bottom-[max(1rem,var(--mari-safe-area-inset-bottom,env(safe-area-inset-bottom)))] left-1/2 z-50 flex w-[min(30rem,calc(100vw-1.5rem))] -translate-x-1/2 flex-col gap-2 p-3",
       )}
     >
       <span className="text-center text-xs font-medium text-[var(--marinara-chat-chrome-panel-muted)]">
@@ -218,7 +228,7 @@ function ChatSettingsLoadingFallback({ anchor }: { anchor: ChatFloatingPanelAnch
   return (
     <div
       data-chat-floating-panel
-      className="mari-chrome-token-scope fixed bottom-3 right-[calc(var(--mari-chat-ui-inset-right,0px)+0.75rem)] top-14 z-[70] flex w-[min(34rem,calc(100vw-var(--mari-chat-ui-inset-left,0px)-var(--mari-chat-ui-inset-right,0px)-1.5rem))] flex-col overflow-hidden rounded-xl border border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-panel-bg)] text-[var(--marinara-chat-chrome-panel-text)] shadow-2xl shadow-black/40 backdrop-blur-md max-md:inset-x-2 max-md:bottom-[calc(0.75rem+env(safe-area-inset-bottom))] max-md:top-[calc(3.5rem+env(safe-area-inset-top))] max-md:w-auto"
+      className="mari-chrome-token-scope fixed bottom-3 right-[calc(var(--mari-chat-ui-inset-right,0px)+0.75rem)] top-14 z-[70] flex w-[min(34rem,calc(100vw-var(--mari-chat-ui-inset-left,0px)-var(--mari-chat-ui-inset-right,0px)-1.5rem))] flex-col overflow-hidden rounded-xl border border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-panel-bg)] text-[var(--marinara-chat-chrome-panel-text)] shadow-2xl shadow-black/40 backdrop-blur-md max-md:inset-x-2 max-md:bottom-[calc(0.75rem+var(--mari-safe-area-inset-bottom,env(safe-area-inset-bottom)))] max-md:top-[calc(3.5rem+env(safe-area-inset-top))] max-md:w-auto"
       style={panelStyle}
     >
       <div className="mari-chrome-text-strong flex shrink-0 items-center gap-2 border-b border-[var(--marinara-chat-chrome-panel-divider)] px-4 py-3 text-sm font-semibold">
@@ -243,6 +253,7 @@ type ChatCommonOverlaysProps = {
   peekPromptData: PeekPromptData | null;
   deleteDialogMessageId: string | null;
   deleteDialogCanDeleteSwipe: boolean;
+  deleteDialogCanDeleteOtherSwipes: boolean;
   deleteDialogActiveSwipeIndex: number;
   deleteDialogSwipeCount: number;
   multiSelectMode: boolean;
@@ -271,6 +282,7 @@ type ChatCommonOverlaysProps = {
   onClosePeekPrompt: () => void;
   onDeleteConfirm: () => void;
   onDeleteSwipe: () => void;
+  onDeleteOtherSwipes: () => void;
   onDeleteMore: () => void;
   onCloseDeleteDialog: () => void;
   onBulkDelete: () => void;
@@ -291,6 +303,7 @@ export function ChatCommonOverlays({
   peekPromptData,
   deleteDialogMessageId,
   deleteDialogCanDeleteSwipe,
+  deleteDialogCanDeleteOtherSwipes,
   deleteDialogActiveSwipeIndex,
   deleteDialogSwipeCount,
   multiSelectMode,
@@ -312,6 +325,7 @@ export function ChatCommonOverlays({
   onClosePeekPrompt,
   onDeleteConfirm,
   onDeleteSwipe,
+  onDeleteOtherSwipes,
   onDeleteMore,
   onCloseDeleteDialog,
   onBulkDelete,
@@ -371,10 +385,12 @@ export function ChatCommonOverlays({
       <DeleteConfirmationDialog
         messageId={deleteDialogMessageId}
         canDeleteSwipe={deleteDialogCanDeleteSwipe}
+        canDeleteOtherSwipes={deleteDialogCanDeleteOtherSwipes}
         activeSwipeIndex={deleteDialogActiveSwipeIndex}
         swipeCount={deleteDialogSwipeCount}
         onConfirm={onDeleteConfirm}
         onDeleteSwipe={onDeleteSwipe}
+        onDeleteOtherSwipes={onDeleteOtherSwipes}
         onDeleteMore={onDeleteMore}
         onClose={onCloseDeleteDialog}
       />

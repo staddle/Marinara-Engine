@@ -37,8 +37,10 @@ function parseJsonishObject(value: string): Record<string, unknown> | null {
 /**
  * Gemma 4 uses <|"|>string value<|"|> as a string delimiter instead of "string value".
  * Normalize these to standard double-quoted strings so JSON parsing can succeed.
+ * Also used by the agent executor's JSON extraction (#5537), so the same model
+ * quirk cannot fail structured agent responses that the tool-call path tolerates.
  */
-function normalizeGemma4Delimiters(content: string): string {
+export function normalizeGemma4Delimiters(content: string): string {
   return content.replace(/<\|"\|>(.*?)<\|"\|>/gs, (_, inner: string) => JSON.stringify(inner));
 }
 

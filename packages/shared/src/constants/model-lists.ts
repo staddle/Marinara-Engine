@@ -28,6 +28,7 @@ export function isClaudeAdaptiveOnlyNoSamplingModel(model: string): boolean {
 export function supportsXhighReasoningEffort(model: string): boolean {
   const normalized = model.toLowerCase();
   return (
+    isOpenAIGpt6AstraModel(normalized) ||
     normalized.startsWith("gpt-5.6") ||
     normalized.startsWith("gpt-5.5") ||
     normalized.startsWith("gpt-5.4") ||
@@ -38,6 +39,10 @@ export function supportsXhighReasoningEffort(model: string): boolean {
 
 export function isOpenAIGpt56Model(model: string): boolean {
   return model.toLowerCase().startsWith("gpt-5.6");
+}
+
+export function isOpenAIGpt6AstraModel(model: string): boolean {
+  return /^gpt-6-astra(?:$|-)/i.test(model);
 }
 
 export function isOpenAIGpt56SolProAlias(model: string): boolean {
@@ -69,7 +74,8 @@ export function resolveProviderReasoningEffort(args: {
     (providerLower === "anthropic" || providerLower === "claude_subscription") &&
     isClaudeAdaptiveOnlyNoSamplingModel(modelLower);
   const supportsXhigh = supportsXhighReasoningEffort(modelLower);
-  const supportsMax = isOpenAIGpt56Model(modelLower) || isNativeAnthropicAdaptiveOnly;
+  const supportsMax =
+    isOpenAIGpt6AstraModel(modelLower) || isOpenAIGpt56Model(modelLower) || isNativeAnthropicAdaptiveOnly;
 
   if (args.reasoningEffort === "maximum") {
     return supportsMax ? "max" : supportsXhigh ? "xhigh" : "high";
@@ -102,6 +108,8 @@ export const OPENAI_MODELS: KnownModel[] = [
   { id: "gpt-5.6-sol-pro", name: "gpt-5.6-sol-pro (Sol with pro mode)", context: 1050000, maxOutput: 128000 },
   { id: "gpt-5.6-terra", name: "gpt-5.6-terra", context: 1050000, maxOutput: 128000 },
   { id: "gpt-5.6-luna", name: "gpt-5.6-luna", context: 1050000, maxOutput: 128000 },
+  // GPT-6 Astra
+  { id: "gpt-6-astra", name: "gpt-6-astra", context: 1050000, maxOutput: 128000 },
   // GPT-5.5
   { id: "gpt-5.5", name: "gpt-5.5", context: 1050000, maxOutput: 128000 },
   { id: "gpt-5.5-2026-04-23", name: "gpt-5.5-2026-04-23", context: 1050000, maxOutput: 128000 },
@@ -204,7 +212,9 @@ export const OPENAI_MODELS: KnownModel[] = [
 export const ANTHROPIC_MODELS: KnownModel[] = [
   { id: "claude-opus-5", name: "claude-opus-5", context: 1000000, maxOutput: 128000 },
   { id: "claude-sonnet-5", name: "claude-sonnet-5", context: 1000000, maxOutput: 128000 },
+  { id: "claude-fable-5-1", name: "claude-fable-5-1", context: 1000000, maxOutput: 128000 },
   { id: "claude-fable-5", name: "claude-fable-5", context: 1000000, maxOutput: 128000 },
+  { id: "claude-mythos-5-1", name: "claude-mythos-5-1 (limited access)", context: 1000000, maxOutput: 128000 },
   { id: "claude-mythos-5", name: "claude-mythos-5 (limited access)", context: 1000000, maxOutput: 128000 },
   { id: "claude-opus-4-8", name: "claude-opus-4-8", context: 1000000, maxOutput: 128000 },
   { id: "claude-opus-4-7", name: "claude-opus-4-7", context: 1000000, maxOutput: 128000 },
@@ -883,9 +893,12 @@ const IMAGE_GEN_MODELS: KnownModel[] = [
   ...ZAI_IMAGE_MODELS,
   ...ATLAS_CLOUD_IMAGE_MODELS,
   // NovelAI
-  { id: "nai-diffusion-4-curated-preview", name: "NAI Diffusion 4 Curated", context: 0, maxOutput: 0 },
-  { id: "nai-diffusion-4-5-full", name: "NAI Diffusion 4.5 Full", context: 0, maxOutput: 0 },
   { id: "nai-diffusion-3", name: "NAI Diffusion 3 (Anime V3)", context: 0, maxOutput: 0 },
+  { id: "nai-diffusion-4-curated-preview", name: "NAI Diffusion 4 Curated", context: 0, maxOutput: 0 },
+  { id: "nai-diffusion-4-5-curated", name: "NAI Diffusion 4.5 Curated", context: 0, maxOutput: 0 },
+  { id: "nai-diffusion-4-5-full", name: "NAI Diffusion 4.5 Full", context: 0, maxOutput: 0 },
+  { id: "nai-diffusion-5-curated", name: "NAI Diffusion 5 Curated", context: 0, maxOutput: 0 },
+  { id: "nai-diffusion-5-full", name: "NAI Diffusion 5 Full", context: 0, maxOutput: 0 },
   // Pollinations (model-free, but include as placeholder)
   { id: "pollinations", name: "Pollinations (Auto)", context: 0, maxOutput: 0 },
 ];

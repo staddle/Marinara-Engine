@@ -24,8 +24,18 @@ type RateLimitRule = {
 
 const DEFAULT_RULE: RateLimitRule = { key: "default", limit: 600, windowMs: 60_000 };
 
+export const UPDATE_CHANNEL_RATE_LIMIT = {
+  max: 30,
+  timeWindow: 60_000,
+} as const satisfies MarinaraRouteRateLimit;
+
 export const AVATAR_STORAGE_RATE_LIMIT = {
   max: 20,
+  timeWindow: 60_000,
+} as const satisfies MarinaraRouteRateLimit;
+
+export const SPRITE_RENAME_RATE_LIMIT = {
+  max: 60,
   timeWindow: 60_000,
 } as const satisfies MarinaraRouteRateLimit;
 
@@ -34,7 +44,30 @@ export const ADMIN_RESTART_RATE_LIMIT = {
   timeWindow: 60_000,
 } as const satisfies MarinaraRouteRateLimit;
 
+/**
+ * Operator corrections to Beholder's physical state.
+ *
+ * A person fixing slots clicks Apply a handful of times a minute; this is far above
+ * that and still bounds an authorized write to the state the next prompt is built from.
+ */
+export const BEHOLDER_STATE_RATE_LIMIT = {
+  max: 60,
+  timeWindow: 60_000,
+} as const satisfies MarinaraRouteRateLimit;
+
 export const BACKUP_RATE_LIMIT = {
+  max: 60,
+  timeWindow: 60_000,
+} as const satisfies MarinaraRouteRateLimit;
+
+/**
+ * The utility model slot's API.
+ *
+ * Generous enough for the UI to poll status and routing while a page is open, tight
+ * enough that install and start — which spawn processes and download hundreds of
+ * megabytes — cannot be hammered.
+ */
+export const UTILITY_SIDECAR_RATE_LIMIT = {
   max: 60,
   timeWindow: 60_000,
 } as const satisfies MarinaraRouteRateLimit;
@@ -65,6 +98,14 @@ const ROUTE_RULES: Array<{ pattern: RegExp; rule: RateLimitRule }> = [
   },
   { pattern: /^\/api\/updates\/apply(?:\?|$)/, rule: { key: "updates-apply", limit: 5, windowMs: 60_000 } },
   {
+    pattern: /^\/api\/updates\/channel(?:\?|$)/,
+    rule: {
+      key: "updates-channel",
+      limit: UPDATE_CHANNEL_RATE_LIMIT.max,
+      windowMs: UPDATE_CHANNEL_RATE_LIMIT.timeWindow,
+    },
+  },
+  {
     pattern: /^\/api\/sidecar\/(?:runtime\/install|reinstall|download|model|speech\/download|speech\/model)(?:\/|\?|$)/,
     rule: { key: "sidecar-privileged", limit: 20, windowMs: 60_000 },
   },
@@ -81,6 +122,16 @@ const ROUTE_RULES: Array<{ pattern: RegExp; rule: RateLimitRule }> = [
   {
     pattern: /^\/api\/game\/[^/]+\/experience-generation(?:\?|$)/,
     rule: { key: "game-experience-generation", limit: 20, windowMs: 60_000 },
+  },
+  // Same class for the experience-save transfer verbs (#5405): export serializes the
+  // chat's whole experience namespace (up to ~100 x 256K) and import rewrites it row by
+  // row, so both are heavy compared with the ordinary GET/PUT save. A package loop must
+  // hit a dedicated wall rather than the 600/min default. The GET/PUT save pair and the
+  // namespace DELETE share a path this pattern cannot separate by method, so they stay
+  // in the default class — they are the cheap, per-turn verbs.
+  {
+    pattern: /^\/api\/game\/[^/]+\/experience-state\/(?:export|import)(?:\?|$)/,
+    rule: { key: "game-experience-save-transfer", limit: 20, windowMs: 60_000 },
   },
   // Cap on extension routes so an XSS-driven mass install / spam can't
   // exploit the persistent storage path. 60/min covers React Query

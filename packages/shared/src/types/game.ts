@@ -4,6 +4,7 @@
 import type { GenerationParameters } from "./prompt.js";
 import type { CombatItemEffect, CombatMechanic, CombatDialogueCue } from "./combat-encounter.js";
 import type { SpotifySourceType } from "./spotify.js";
+import type { SpatialMapDraftSize, SpatialMapGroundingMode } from "./spatial-context.js";
 
 /** The four main states a game can be in during a session. */
 export type GameActiveState = "exploration" | "dialogue" | "combat" | "travel_rest";
@@ -23,6 +24,24 @@ export type GameSessionStatus = "setup" | "active" | "concluded";
 
 /** Which system owns the campaign-scale map when a new game begins. */
 export type GameWorldMapMode = "standard" | "hierarchical";
+
+export const GAME_SPATIAL_MAP_DRAFT_PRESET_TARGETS: Readonly<Record<SpatialMapDraftSize, number>> = {
+  small: 8,
+  medium: 16,
+  large: 28,
+};
+
+/** Keep the exact target authoritative while preserving the matching draft-size bucket. */
+export function resolveGameSpatialMapDraftOptions(
+  size: SpatialMapDraftSize | undefined,
+  targetLocationCount: number | undefined,
+): { size: SpatialMapDraftSize; targetLocationCount: number } {
+  const target = targetLocationCount ?? GAME_SPATIAL_MAP_DRAFT_PRESET_TARGETS[size ?? "medium"];
+  return {
+    size: target <= 8 ? "small" : target <= 16 ? "medium" : "large",
+    targetLocationCount: target,
+  };
+}
 
 /** Spotify source constraints for Game Mode DJ selection. */
 export type GameSpotifySourceType = SpotifySourceType;
@@ -189,6 +208,12 @@ export interface GameSetupConfig {
   spatialMapInstructions?: string;
   /** Campaign-scale map authority selected during New Game. Older saves default to "standard". */
   gameWorldMapMode?: GameWorldMapMode;
+  /** Size bucket selected for the initial World Maps AI draft. */
+  spatialMapDraftSize?: SpatialMapDraftSize;
+  /** Exact number of places requested for the initial World Maps AI draft. */
+  spatialMapTargetLocationCount?: number;
+  /** Sources the initial World Maps AI draft may use. */
+  spatialMapGroundingMode?: SpatialMapGroundingMode;
   /** Character ID to use as GM (only when gmMode is "character") */
   gmCharacterId?: string | null;
   /** Party member IDs; library character IDs or `npc:<slug>` tracked-NPC IDs. */
@@ -207,6 +232,8 @@ export interface GameSetupConfig {
   experienceConfig?: Record<string, unknown>;
   /** Enable installed agents and agent-driven Game Mode features for this game. */
   enableAgents?: boolean;
+  /** Let the GM offer timed reaction prompts. Defaults to true. */
+  enableQuickTimeEvents?: boolean;
   /** Enable automatic sprite generation for characters using image model */
   enableSpriteGeneration?: boolean;
   /** Ask the configured prompt model to rewrite Game Illustrator prompts before image generation. */
@@ -265,6 +292,9 @@ export interface GameSetupConfig {
   enableLorebookKeeper?: boolean;
   /** Language for all narration and dialogue (e.g. "English", "Japanese", "Spanish") */
   language?: string;
+  /** Translate displayed narration from the first completed game turn. */
+  autoTranslate?: boolean;
+  translationOutputTargetLang?: string;
   /** Optional generation parameter overrides applied from the moment the game is created. */
   generationParameters?: Partial<GenerationParameters>;
   /** Prompt preset whose Game prompt should drive the GM instruction block. */

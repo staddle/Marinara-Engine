@@ -100,7 +100,10 @@ import { LorebookEntryRow } from "./LorebookEntryRow";
 import { LorebookFolderRow } from "./LorebookFolderRow";
 import { ExpandableTextarea, estimateTokens } from "./LorebookFormFields";
 import { ExportFormatDialog, type ExportFormatChoice } from "../ui/ExportFormatDialog";
-import { EditorTabRail } from "../ui/EditorTabRail";
+import { EditorTabNavigation } from "../ui/EditorTabNavigation";
+import { useEditorSections } from "../../hooks/use-editor-sections";
+import { useEditorLeaveSave } from "../../hooks/use-editor-leave-save";
+import { leaveWithoutSaving } from "../../lib/editor-leave";
 import { Modal } from "../ui/Modal";
 
 // ──────────────────────────────────────────────
@@ -351,6 +354,7 @@ const BATCH_EDITABLE_ENTRY_FIELDS = [
   "generationTriggerFilters",
   "additionalMatchingSources",
   "position",
+  "outletName",
   "depth",
   "order",
   "role",
@@ -492,6 +496,13 @@ export function LorebookEditor() {
     () => (useUIStore.getState().lorebookDetailInitialTab as TabId | null) ?? "overview",
   );
   const [expandedEntryId, setExpandedEntryId] = useState<string | null>(null);
+  const newlyCreatedEntryRef = useRef<string | null>(null);
+  const { contentRef, scrollToSection } = useEditorSections(
+    lorebookId,
+    !isLoading,
+    (useUIStore.getState().lorebookDetailInitialTab as TabId | null) ?? "overview",
+    setActiveTab,
+  );
   const [lorebookDirty, setLorebookDirty] = useState(false);
   const formRevisionRef = useRef(0);
   const saveInFlightRef = useRef<Promise<boolean> | null>(null);
@@ -501,8 +512,16 @@ export function LorebookEditor() {
     setEditorDirty(lorebookDirty);
   }, [lorebookDirty, setEditorDirty]);
   const [saving, setSaving] = useState(false);
-  const [showUnsavedWarning, setShowUnsavedWarning] = useState(false);
+
   const [entrySearch, setEntrySearch] = useState("");
+  useEffect(() => {
+    const id = newlyCreatedEntryRef.current;
+    if (!id) return;
+    const row = contentRef.current?.querySelector<HTMLElement>(`[data-lorebook-entry-row-id="${CSS.escape(id)}"]`);
+    if (!row) return;
+    row.scrollIntoView({ block: "start" });
+    newlyCreatedEntryRef.current = null;
+  }, [entries, expandedEntryId, contentRef]);
   const [entrySort, setEntrySort] = useState<EntrySortKey>("order");
   // Keyword-test panel state. The panel is collapsed by default so it doesn't
   // crowd the editor for users who don't need it. We debounce the text input
@@ -1561,6 +1580,8 @@ export function LorebookEditor() {
     localizeUi,
   ]);
 
+  useEditorLeaveSave(`lorebookDetailId:${lorebookId}`, lorebookDirty, handleSaveLorebook, saving);
+
   const handleAddEntry = useCallback(async () => {
     if (!lorebookId) return;
     const result = await createEntry.mutateAsync({
@@ -1572,19 +1593,16 @@ export function LorebookEditor() {
     });
     if (result && typeof result === "object" && "id" in result) {
       // Auto-expand the new entry's drawer so the user can fill it in.
+      newlyCreatedEntryRef.current = (result as LorebookEntry).id;
+      setEntrySearch("");
       setExpandedEntryId((result as LorebookEntry).id);
-      setActiveTab("entries");
     }
   }, [lorebookId, createEntry]);
 
   const handleClose = useCallback(() => {
     if (saving) return;
-    if (lorebookDirty) {
-      setShowUnsavedWarning(true);
-    } else {
-      closeDetail();
-    }
-  }, [lorebookDirty, saving, closeDetail]);
+    closeDetail();
+  }, [saving, closeDetail]);
 
   // If the editor is opened with a `lorebookId` that no longer resolves on
   // the server (a stale pointer carried over from another Marinara
@@ -1596,7 +1614,7 @@ export function LorebookEditor() {
     if (!lorebookId) return;
     if (isError) {
       toast.error(localizeUi("ui.lorebooks.lorebookeditor.lorebookNotFoundItMayHaveBeenDeleted"));
-      closeDetail();
+      leaveWithoutSaving(closeDetail);
     }
   }, [lorebookId, isError, closeDetail, localizeUi]);
 
@@ -1615,7 +1633,7 @@ export function LorebookEditor() {
       return;
     }
     await deleteLorebook.mutateAsync(lorebookId);
-    closeDetail();
+    leaveWithoutSaving(closeDetail);
   }, [closeDetail, deleteLorebook, lorebook?.name, lorebookId, localizeUi]);
 
   // ── Loading ──
@@ -1687,6 +1705,25 @@ export function LorebookEditor() {
           onDragEnd={() => {
             resetFolderDragState();
             resetEntryDragState();
+          }}
+          selectionMode={entrySelectionMode}
+          allSelected={
+            entrySelectionMode &&
+            (entriesByContainer.get(folder.id) ?? []).length > 0 &&
+            (entriesByContainer.get(folder.id) ?? []).every((entry) => selectedEntryIds.has(entry.id))
+          }
+          onToggleSelectAll={() => {
+            const folderEntries = entriesByContainer.get(folder.id) ?? [];
+            const allSelected =
+              folderEntries.length > 0 && folderEntries.every((entry) => selectedEntryIds.has(entry.id));
+            setSelectedEntryIds((current) => {
+              const next = new Set(current);
+              for (const entry of folderEntries) {
+                if (allSelected) next.delete(entry.id);
+                else next.add(entry.id);
+              }
+              return next;
+            });
           }}
         />
         {!isCollapsed && (
@@ -1875,67 +1912,48 @@ export function LorebookEditor() {
         </div>
       </Modal>
 
-      {/* Unsaved warning banner */}
-      {showUnsavedWarning && (
-        <div className="flex items-center gap-3 bg-[var(--warning)]/10 px-4 py-2.5 text-xs">
-          <AlertTriangle size="0.875rem" className="text-[var(--warning)]" />
-          <span className="flex-1 text-[var(--warning)]">
-            {localizeUi("ui.lorebooks.lorebookeditor.youHaveUnsavedChanges")}
-          </span>
-          <button
-            onClick={() => setShowUnsavedWarning(false)}
-            className="mari-editor-action mari-editor-action--compact px-3 py-1 text-[0.6875rem]"
-          >
-            {localizeUi("ui.lorebooks.lorebookeditor.keepEditing")}
-          </button>
-          <button
-            onClick={() => {
-              setShowUnsavedWarning(false);
-              setLorebookDirty(false);
-              closeDetail();
-            }}
-            disabled={saving}
-            className="rounded-lg px-3 py-1 text-[0.6875rem] font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] disabled:opacity-50"
-          >
-            {localizeUi("ui.lorebooks.lorebookeditor.discardClose")}
-          </button>
-          <button
-            onClick={async () => {
-              const saved = await handleSaveLorebook();
-              if (!saved) return;
-              setShowUnsavedWarning(false);
-              closeDetail();
-            }}
-            disabled={saving}
-            className="mari-editor-action mari-editor-action--primary mari-editor-action--compact px-3 py-1 text-[0.6875rem] disabled:opacity-50"
-          >
-            {localizeUi("ui.lorebooks.lorebookeditor.saveClose")}
-          </button>
-        </div>
-      )}
-
       {/* Header */}
-      <div className="mari-editor-header">
-        <button onClick={handleClose} disabled={saving} className="mari-editor-action inline-flex disabled:opacity-50">
-          <ArrowLeft size="1rem" />
-        </button>
-        <div className="mari-editor-icon-tile">
-          <BookOpen size="1.125rem" />
+      <div className="mari-editor-header mari-editor-header--with-nav">
+        <div className="mari-editor-header-main">
+          <button
+            onClick={handleClose}
+            disabled={saving}
+            className="mari-editor-action inline-flex disabled:opacity-50"
+          >
+            <ArrowLeft size="1rem" />
+          </button>
+          <div className="mari-editor-icon-tile">
+            <BookOpen size="1.125rem" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="mari-editor-title truncate">{lorebook.name}</h2>
+            <p className="mari-editor-meta">
+              {entries.length} {localizeUi("ui.lorebooks.lorebookeditor.entries")} {lorebook.category}
+            </p>
+          </div>
         </div>
-        <div className="min-w-0 flex-1">
-          <h2 className="mari-editor-title truncate">{lorebook.name}</h2>
-          <p className="mari-editor-meta">
-            {entries.length} {localizeUi("ui.lorebooks.lorebookeditor.entries")} {lorebook.category}
-          </p>
-        </div>
+
+        <EditorTabNavigation
+          tabs={TABS}
+          activeId={activeTab}
+          onChange={scrollToSection}
+          getBadge={(tabId) => (tabId === "entries" ? entries.length : null)}
+        />
+
         <div className="mari-editor-actions flex">
           <button
             onClick={handleSaveLorebook}
             disabled={!lorebookDirty || saving}
             className="mari-editor-action mari-editor-action--primary inline-flex disabled:opacity-50"
+            aria-label={
+              saving ? localizeUi("chat.settings.inlineEditor.saving") : localizeUi("ui.noodle.noodlehome.save")
+            }
+            title={saving ? localizeUi("chat.settings.inlineEditor.saving") : localizeUi("ui.noodle.noodlehome.save")}
           >
             <Save size="0.8125rem" />
-            {saving ? localizeUi("chat.settings.inlineEditor.saving") : localizeUi("ui.noodle.noodlehome.save")}
+            <span className="mari-editor-save-label">
+              {saving ? localizeUi("chat.settings.inlineEditor.saving") : localizeUi("ui.noodle.noodlehome.save")}
+            </span>
           </button>
           <button
             onClick={() => setExportDialogOpen(true)}
@@ -1963,19 +1981,12 @@ export function LorebookEditor() {
         </div>
       </div>
 
-      {/* Body: Side-tabs + Content */}
-      <div className="mari-editor-body @max-5xl:flex-col">
-        <EditorTabRail
-          tabs={TABS}
-          activeId={activeTab}
-          onChange={setActiveTab}
-          getBadge={(tabId) => (tabId === "entries" ? entries.length : null)}
-        />
-
+      {/* Body */}
+      <div className="mari-editor-body">
         {/* Tab Content */}
-        <div className="mari-editor-content @max-5xl:p-4">
+        <div ref={contentRef} className="mari-editor-content @max-5xl:p-4">
           <div className="mari-editor-content-inner mari-editor-content-inner--wide">
-            {activeTab === "overview" && (
+            <section data-editor-section="overview">
               <div className="space-y-4">
                 {/* Name */}
                 <div className="mari-editor-panel p-3">
@@ -2104,12 +2115,14 @@ export function LorebookEditor() {
                       return (
                         <button
                           key={opt.value}
+                          type="button"
                           onClick={() => {
                             setFormCategory(opt.value);
                             markLorebookDirty();
                           }}
+                          aria-pressed={formCategory === opt.value}
                           className={cn(
-                            "flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-medium transition-all",
+                            "flex items-center gap-1.5 rounded-md px-3 py-2 text-xs font-medium transition-all",
                             formCategory === opt.value
                               ? "mari-chrome-accent-surface mari-accent-animated"
                               : "mari-editor-action text-[var(--marinara-editor-muted)]",
@@ -2424,9 +2437,8 @@ export function LorebookEditor() {
                   }}
                 />
               </div>
-            )}
-
-            {activeTab === "entries" && (
+            </section>
+            <section data-editor-section="entries">
               <div className="space-y-3">
                 {/* Keyword test — collapsible authoring aid (issue #816).
                     Paste sample chat text or a paragraph and the editor
@@ -2898,7 +2910,7 @@ export function LorebookEditor() {
                   </div>
                 )}
               </div>
-            )}
+            </section>
           </div>
         </div>
       </div>

@@ -60,6 +60,16 @@ Each mode has its own getting-started guide. Start with the mode you want, then 
 
 Open a Conversation and choose **Schedule timezone** in Chat Settings, or choose it while creating schedules in the Conversation setup flow. Marinara starts with the timezone reported by your device, but you can select any supported IANA timezone or choose **Use device** to reset it. This is one global preference for all Conversation chats, including server-side autonomous messages, and it syncs to other devices connected to the same Marinara server.
 
+## Does each Conversation chat have its own schedule?
+
+No. A schedule belongs to the character, and every Conversation chat with that character uses the same one. Edit it in **Character Editor -> Convo -> Weekly schedule**, or from the schedule controls in Chat Settings; either way the change applies everywhere.
+
+To get instant replies in one chat, open its Chat Settings and turn **Conversation schedules** off. That switch is per chat. The character stays available in that chat, keeps its schedule, and your other chats do not change. An active manual status override still takes precedence and applies in that chat, including an override such as **dnd**.
+
+Existing chats that never used schedules stay off until you turn them on. New chats you start with a character that has a schedule use it from the start.
+
+A manual status override also belongs to the character. If you set a character to **online** in one chat, the character is online in every chat. Use **clear** to remove the override.
+
 ## Do I need an API key to use Marinara?
 
 Almost always, yes. A **connection** is a saved link that tells Marinara how to reach one AI service: which provider, which model, and your login for it. An **API key** is a secret code, a bit like a password. You get it from an AI provider so Marinara can talk to that provider for you.
@@ -112,11 +122,11 @@ For the full feature, see [Lorebooks](lorebooks/overview.md).
 
 ## What is an agent?
 
-An **agent** is an optional AI helper that runs during a chat to do a focused job. Examples include tracking the current scene, watching writing quality, adding maps or calls, or running a Conversation table game. Fresh installations have no optional agents. Open the **Agents** panel, click **Download Agents**, read an item's details, and install it. Then enable compatible agents per chat in **Chat Settings**. When an installed official package has a compatible update, Marinara asks before downloading it. Choosing **No** keeps the current version and leaves **Update** available in Download Agents for later. If the host is offline or verification fails, the installed version keeps working. The catalog also handles complete package removal. See [Agents](agents/agents-overview.md) and the public [Marinara-Agents repository](https://github.com/Pasta-Devs/Marinara-Agents).
+An **agent** is an optional AI helper that runs during a chat to do a focused job. Examples include tracking the current scene, watching writing quality, adding maps or calls, or running a Conversation table game. Fresh installations have no optional agents. Open the **Agents** panel, click **Download Agents**, read an item's details, and install it. Then enable compatible agents per chat in **Chat Settings**. When an installed official package has a compatible update, Marinara asks before downloading it and lists what each update changed when the package publishes release notes. A dot marks a version the publisher flagged as a change you will notice. Choosing **No** keeps the current version and leaves **Update** available in Download Agents for later. If the host is offline or verification fails, the installed version keeps working. The catalog also handles complete package removal. See [Agents](agents/agents-overview.md) and the public [Marinara-Agents repository](https://github.com/Pasta-Devs/Marinara-Agents).
 
 ## How do I set up Noodle?
 
-Noodle is Marinara's local, fictional social network for your characters. First open **Agents** → **Download Agents** and install **Noodle & NoodleR**, then restart Marinara when prompted. Open **Home** → **Noodle**, enter its **Settings**, invite characters or character folders, choose a generation connection under **Refresh**, then select **Refresh now** to generate the first activity. You can also set automatic refresh times, image generation, random users, and carryover into your chats.
+Noodle is Marinara's local, fictional social network for your characters. First open **Agents** → **Download Agents** and install **Noodle**, then restart Marinara when prompted. Open **Home** → **Noodle**, enter its **Settings**, invite characters or character folders, choose a generation connection under **Refresh**, then select **Refresh now** to generate the first activity. You can also set automatic refresh times, image generation, random users, and carryover into your chats.
 
 See [Noodle: The In-App Social Timeline](noodle/overview.md) and [Noodle Settings and Chat Carryover](noodle/settings.md) for the full guides.
 

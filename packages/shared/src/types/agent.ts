@@ -47,6 +47,7 @@ export const AGENT_RESULT_TYPE_VALUES = [
   "director_event",
   "lorebook_update",
   "character_card_update",
+  "character_card_create",
   "background_change",
   "character_tracker_update",
   "persona_stats_update",
@@ -66,6 +67,7 @@ export const AGENT_RESULT_TYPE_VALUES = [
   "character_activity_update",
   "frontend_theme_update",
   "about_me_update",
+  "memory_nag",
 ] as const;
 
 /** The result type an agent can produce. */
@@ -274,7 +276,7 @@ export interface AgentResult {
   error: string | null;
 }
 
-export type AgentWriteApprovalKind = "lorebook_update" | "summary_update";
+export type AgentWriteApprovalKind = "character_card_create" | "lorebook_update" | "summary_update";
 
 export interface AgentWriteApprovalProposal {
   kind: AgentWriteApprovalKind;
@@ -328,8 +330,31 @@ export interface AgentCallDebugEvent {
   batchedAgentTypes?: string[];
 }
 
+/** Content-free progress for the normal Agents menu, independent of prompt/debug logging. */
+export interface AgentTaskProgress {
+  callId: string;
+  agents: Array<{ id: string; type: string; name: string; phase: string }>;
+  stage: "waiting" | "streaming" | "received" | "error" | "stopped";
+  receivedChunks: number;
+  receivedCharacters: number;
+  /** First received text or reasoning chunk; unavailable for non-streaming calls. */
+  ttftMs?: number;
+  elapsedMs: number;
+  promptTokens?: number;
+  completionTokens?: number;
+}
+
 /** Shared context passed to every agent. */
 export interface AgentContext {
+  /**
+   * Prose to read instead of the recent messages.
+   *
+   * Set when the operator types a correction directly — "her sword is broken" — rather
+   * than waiting for the story to say it. The extractor runs on that sentence with the
+   * current state as context, so an unnamed subject still attaches to whoever is
+   * actually holding the sword.
+   */
+  narrationOverride?: string;
   chatId: string;
   chatMode: string;
   /** Prompt wrapper format selected for this generation. */
@@ -415,6 +440,8 @@ export interface AgentContext {
     id: string;
     content: string;
   }>;
+  /** Per-lorebook total entry counts (for {{lorebooksize::ID}} macro in agent prompts). */
+  lorebookEntryCounts?: Record<string, number>;
   /**
    * Semantic source material resolved for custom agents that opt into vector access.
    * The runtime keeps this out of ordinary agent prompts and injects it only for
@@ -448,6 +475,8 @@ export interface AgentContext {
   streaming?: boolean;
   /** Emits full agent call diagnostics for the client debug console. */
   agentDebug?: (event: AgentCallDebugEvent) => void;
+  /** Lightweight provider progress; never includes prompts, reasoning, or response content. */
+  agentProgress?: (event: AgentTaskProgress) => void;
   /** Abort signal — when triggered, agent execution should stop. Typed as `any` to avoid DOM/Node lib dependency. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   signal?: any;
@@ -542,6 +571,7 @@ export const MIN_AGENT_MAX_TOKENS = 128;
 export const MAX_AGENT_MAX_TOKENS = 32768;
 
 export const CUSTOM_AGENT_CAPABILITY_IDS = [
+  "create_characters",
   "create_lorebooks",
   "edit_lorebooks",
   "edit_messages",
@@ -622,6 +652,7 @@ export function createImportedAgentType(sourceType: string): string {
 const CUSTOM_AGENT_CAPABILITY_SET = new Set<string>(CUSTOM_AGENT_CAPABILITY_IDS);
 
 const CUSTOM_AGENT_RESULT_CAPABILITY: Partial<Record<AgentResultType, CustomAgentCapability>> = {
+  character_card_create: "create_characters",
   text_rewrite: "edit_messages",
   lorebook_update: "edit_lorebooks",
   character_tracker_update: "edit_trackers",

@@ -106,6 +106,7 @@ interface SidecarState {
       Pick<
         SidecarConfig,
         | "useForTrackers"
+        | "useAsAgentsDefault"
         | "useForGameScene"
         | "contextSize"
         | "maxTokens"

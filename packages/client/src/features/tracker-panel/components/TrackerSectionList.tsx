@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, type ReactNode } from "react";
 import { RefreshCw, Sparkles } from "lucide-react";
 import type {
   GameState,
@@ -64,6 +64,8 @@ export function TrackerSectionList({
   queuePersonaPortraitSave,
   flushPersonaPortraitSave,
   resolveStatIcon,
+  beforeCustomSections,
+  afterCustomSections,
 }: {
   activeChatId: string;
   activePersona: Persona | null;
@@ -99,6 +101,8 @@ export function TrackerSectionList({
   queuePersonaPortraitSave: (snapshot: PersonaPortraitSaveSnapshot) => void;
   flushPersonaPortraitSave: (personaId: string) => void;
   resolveStatIcon: StatIconLookup;
+  beforeCustomSections?: ReactNode;
+  afterCustomSections?: ReactNode;
 }) {
   const updateAgent = useUpdateAgent();
   const autoGenerateCharacterAvatars = characterTrackerSettings.autoGenerateAvatars === true;
@@ -122,7 +126,6 @@ export function TrackerSectionList({
       : null;
   const personaStats = Array.isArray(currentGameState.personaStats) ? currentGameState.personaStats : [];
   const presentCharacters = Array.isArray(currentGameState.presentCharacters) ? currentGameState.presentCharacters : [];
-  const inventory = Array.isArray(playerStats?.inventory) ? playerStats.inventory : [];
   const quests = Array.isArray(playerStats?.activeQuests) ? playerStats.activeQuests : [];
   const customFields = Array.isArray(playerStats?.customTrackerFields) ? playerStats.customTrackerFields : [];
   const inventoryTrackerCurrencies = Array.isArray(playerStats?.inventoryTrackerCurrencies)
@@ -139,25 +142,21 @@ export function TrackerSectionList({
     patchPlayerStatsMany((current) => buildInventoryTrackerEditPatch(current, group, rows));
   const {
     addCharacter,
-    addInventoryItem,
     addPersonaStat,
     addQuest,
     avatarFileInputRef,
     handleAvatarFileInputChange,
     openAvatarUpload,
     removeCharacter,
-    removeInventoryItem,
     removeQuest,
     savePersonaStatus,
     updateCharacter,
     updateCustomFields,
-    updateInventoryItem,
     updatePersonaStats,
     updateQuest,
   } = useTrackerMutations({
     activeChatId,
     customFields,
-    inventory,
     personaStats,
     presentCharacters,
     quests,
@@ -234,7 +233,6 @@ export function TrackerSectionList({
             persona={activePersona}
             status={playerStats?.status ?? ""}
             trackerPanelSide={trackerPanelSide}
-            trackerPanelSizeProfile={trackerPanelSizeProfile}
             statDisplayMode={trackerStatDisplayMode}
             resolveStatIcon={resolveStatIcon}
             spriteExpression={
@@ -243,14 +241,10 @@ export function TrackerSectionList({
                 : undefined
             }
             personaStats={personaStats}
-            inventory={inventory}
             action={renderRerunAction("persona")}
             onSaveStatus={savePersonaStatus}
             onUpdatePersonaStats={updatePersonaStats}
             onAddPersonaStat={addPersonaStat}
-            onAddInventoryItem={addInventoryItem}
-            onUpdateInventoryItem={updateInventoryItem}
-            onRemoveInventoryItem={removeInventoryItem}
             deleteMode={deleteMode}
             addMode={addMode}
             queuePersonaPortraitSave={queuePersonaPortraitSave}
@@ -316,7 +310,7 @@ export function TrackerSectionList({
             onUpdateCurrencies={(rows) => editInventoryTracker("currencies", rows)}
             onUpdateEquipped={(rows) => editInventoryTracker("equipped", rows)}
             onUpdateInventory={(rows) => editInventoryTracker("inventory", rows)}
-            deleteMode={deleteMode}
+            deleteMode
             addMode={addMode}
             collapsed={isPanelCollapsed("inventory")}
             onToggleCollapsed={() => toggleTrackerPanelSectionCollapsed("inventory")}
@@ -350,7 +344,14 @@ export function TrackerSectionList({
         className="hidden"
         onChange={handleAvatarFileInputChange}
       />
-      {orderedTrackerSections.map((section) => renderTrackerSection(section))}
+      {orderedTrackerSections.map((section) => (
+        <div key={section} className="contents">
+          {section === "custom" ? beforeCustomSections : null}
+          {renderTrackerSection(section)}
+        </div>
+      ))}
+      {!orderedTrackerSections.includes("custom") ? beforeCustomSections : null}
+      {afterCustomSections}
     </>
   );
 }

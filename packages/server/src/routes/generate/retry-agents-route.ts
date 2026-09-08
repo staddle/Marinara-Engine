@@ -33,7 +33,7 @@ import {
   type WrapFormat,
   type GenerationParameterSendMap,
 } from "@marinara-engine/shared";
-import { eq } from "../../db/file-query.js";
+import { and, eq } from "../../db/file-query.js";
 import { listCharacterSprites } from "../../services/game/sprite.service.js";
 import { DATA_DIR } from "../../utils/data-dir.js";
 import {
@@ -50,6 +50,9 @@ import { getLocalSidecarProvider, LOCAL_SIDECAR_MODEL } from "../../services/llm
 import { createLLMProvider } from "../../services/llm/provider-registry.js";
 import { withConnectionFallbackProvider } from "../../services/llm/connection-fallback-provider.js";
 import { sidecarModelService } from "../../services/sidecar/sidecar-model.service.js";
+import { utilitySidecarService } from "../../services/utility-sidecar/utility-sidecar.service.js";
+import { buildUtilitySidecarEntry } from "../../services/utility-sidecar/utility-sidecar.provider.js";
+import { UTILITY_SIDECAR_CONNECTION_ID } from "@marinara-engine/shared";
 import { buildSpotifyDjConstraints } from "../../services/spotify/spotify-dj-constraints.js";
 import { fingerprintChatSummary } from "../../services/prompt/chat-summary-fingerprint.js";
 import {
@@ -65,6 +68,7 @@ import { createAgentsStorage } from "../../services/storage/agents.storage.js";
 import { loadPriorBeholderState } from "../../services/agents/beholder-state.js";
 import { getCustomAgentImportPolicy } from "../../services/agents/custom-agent-import-policy.service.js";
 import { createCharactersStorage } from "../../services/storage/characters.storage.js";
+import { resolveChatUserIdentity } from "../../services/chat-user-identity.js";
 import { createChatsStorage } from "../../services/storage/chats.storage.js";
 import { createConnectionsStorage } from "../../services/storage/connections.storage.js";
 import { createCharacterGalleryStorage } from "../../services/storage/character-gallery.storage.js";
@@ -139,8 +143,12 @@ import {
 } from "./generate-route-utils.js";
 import {
   buildHistoricalLorebookKeeperContext,
+  CUSTOM_LOREBOOK_BACKFILL_CURSOR_KEY,
+  customAgentUsesLorebookBackfill,
   customAgentUsesLorebookReadBehind,
   customLorebookReadBehindRunKey,
+  getCustomLorebookBackfillChunk,
+  getCustomLorebookBackfillSettings,
   getCustomLorebookReadBehindMessages,
   getLorebookKeeperBackfillTargets,
   getLorebookNamingScheme,
@@ -160,6 +168,10 @@ import {
   resolveLorebookScopeExclusions,
 } from "../../services/lorebook/game-lorebook-scope.js";
 import { isDebugAgentsEnabled } from "../../config/runtime-config.js";
+import {
+  finalizeCapabilityAgentResults,
+  prepareCapabilityAgentContexts,
+} from "../../services/capability-packages/capability-agent-runtime.service.js";
 import { isSseReplyWritable, sendSseEvent, startSseKeepalive, startSseReply } from "./sse.js";
 import { buildGenerationPromptPresetCandidates } from "./prompt-preset-selection.js";
 import {
@@ -199,6 +211,8 @@ import {
   illustratorBackgroundGenerationEnabled,
   illustratorRequestedBackground,
   illustratorTrackerLocationChanged,
+  parseIllustratorBackgroundPlan,
+  previewIllustratorSceneBackground,
   resolveIllustratorImageConnectionId,
   resolveIllustratorPromptStyle,
 } from "../../services/generation/illustrator-background-generation.js";
@@ -214,9 +228,14 @@ import { resolveCustomWritableLorebookIds } from "../../services/generation/agen
 import {
   getAgentFallbackPrompt,
   musicAgentUsesSource,
+  resolveAgentsDefaultConnectionId,
   resolveEffectiveAgentSettings,
 } from "../../services/generation/agent-resolution.js";
 import { resolveAgentGenerationTools } from "../../services/generation/tool-resolution-runtime.js";
+import {
+  buildRetryAgentPersona,
+  resolveIdentityCharacterScopes,
+} from "../../services/generation/identity-context-runtime.js";
 import {
   readSpotifyPlaybackTrackUri,
   readSpotifyStringField,
@@ -225,7 +244,12 @@ import {
 } from "../../services/generation/spotify-agent-runtime.js";
 
 type PersonaContext = {
+  // Persona-store ID only. A character-backed user identity keeps this null so
+  // persona lookups, lorebooks, and persona galleries stay correct. [PR #5583]
   personaId: string | null;
+  // ID of the active user identity regardless of source (persona or character).
+  identityId: string | null;
+  identitySource: "persona" | "character" | null;
   personaName: string;
   personaDescription: string;
   personaFields: { personality?: string; scenario?: string; backstory?: string; appearance?: string };
@@ -240,6 +264,8 @@ type ResolvedRetryAgent = {
   agentProvider: any;
   agentModel: string;
 };
+
+type RetryLorebookEffectStatus = "applied" | "pending_approval" | "failed";
 
 const isBuiltInAgentType = (agentType: string) => BUILT_IN_AGENTS.some((agent) => agent.id === agentType);
 
@@ -361,6 +387,7 @@ function markRetryLorebookResultForApproval(args: {
         updates,
         preferredTargetLorebookId,
         writableLorebookIds,
+        allowTargetRouting: !isBuiltInLorebookAgent || agentContext.memory._lorebookKeeperTargetIsExplicit !== true,
         writableLorebooks,
         lorebookNamingScheme: getLorebookNamingScheme(resultAgent?.settings),
         worldName: agentContext.characters[0]?.world ?? chatName,
@@ -589,22 +616,36 @@ async function resolvePersonaContext(
 ): Promise<PersonaContext> {
   let personaName = "User";
   let personaId: string | null = null;
+  let identityId: string | null = null;
+  let identitySource: "persona" | "character" | null = null;
   let personaDescription = "";
   let personaFields: PersonaContext["personaFields"] = {};
   let personaStats: any = null;
   let rpgStats: any = null;
 
-  const allPersonas = await chars.listPersonas();
   const chatMode = ((chat as { mode?: ChatMode }).mode ?? "conversation") as ChatMode;
-  const persona =
-    (chat.personaId ? allPersonas.find((p: any) => p.id === chat.personaId) : null) ??
-    (chatMode !== "game" ? allPersonas.find((p: any) => p.isActive === "true") : null);
+  const persona = await resolveChatUserIdentity(chars, {
+    personaId: chat.personaId,
+    personaCharacterId: chat.personaCharacterId,
+    mode: chatMode,
+  });
 
   if (!persona) {
-    return { personaId, personaName, personaDescription, personaFields, personaStats, rpgStats };
+    return {
+      personaId,
+      identityId,
+      identitySource,
+      personaName,
+      personaDescription,
+      personaFields,
+      personaStats,
+      rpgStats,
+    };
   }
 
-  personaId = persona.id as string;
+  identityId = persona.id as string;
+  identitySource = persona.source;
+  personaId = persona.source === "persona" ? (persona.id as string) : null;
   personaName = persona.name;
   personaDescription = cardPromptText(persona.description);
   const personaAvatarPath = typeof persona.avatarPath === "string" ? persona.avatarPath : null;
@@ -625,7 +666,17 @@ async function resolvePersonaContext(
     }
   }
 
-  return { personaId, personaName, personaDescription, personaFields, personaAvatarPath, personaStats, rpgStats };
+  return {
+    personaId,
+    identityId,
+    identitySource,
+    personaName,
+    personaDescription,
+    personaFields,
+    personaAvatarPath,
+    personaStats,
+    rpgStats,
+  };
 }
 
 export function resolveRetryAgentContextPolicy(resolvedAgents: readonly ResolvedAgent[]): {
@@ -703,6 +754,10 @@ export function resolveRetryAgentPhaseToolInputs(args: {
 async function buildRetryAgentContext(args: {
   cyoaAgentWillRun: boolean;
   chatId: string;
+  /** Prose Beholder should read instead of the chat, when the operator typed a correction. */
+  beholderDirective?: string;
+  /** Set when the retry targets a specific earlier message rather than the latest turn. */
+  historicalAnchorId?: string | null;
   db: Parameters<typeof buildPromptMacroContext>[0]["db"];
   chat: any;
   chatMeta: Record<string, unknown>;
@@ -711,6 +766,7 @@ async function buildRetryAgentContext(args: {
   resolvedAgents: ResolvedAgent[];
   lastAssistant: any;
   chars: ReturnType<typeof createCharactersStorage>;
+  personaContext: PersonaContext;
   gameStateStore: ReturnType<typeof createGameStateStorage>;
   lorebooksStore: ReturnType<typeof createLorebooksStorage>;
   streaming: boolean;
@@ -738,6 +794,7 @@ async function buildRetryAgentContext(args: {
     resolvedAgents,
     lastAssistant,
     chars,
+    personaContext,
     gameStateStore,
     lorebooksStore,
     streaming,
@@ -788,7 +845,12 @@ async function buildRetryAgentContext(args: {
     });
   }
 
-  const personaContext = await resolvePersonaContext(chars, chat);
+  const lorebookCharacterIds =
+    personaContext.identitySource === "character" &&
+    personaContext.identityId &&
+    !characterIds.includes(personaContext.identityId)
+      ? [...characterIds, personaContext.identityId]
+      : characterIds;
   const initialMacroVariables = normalizeChatMacroVariables(chatMeta.macroVariables);
   const retryMacroVariables = { ...initialMacroVariables };
   const promptMacroContext = await buildPromptMacroContext({
@@ -807,6 +869,10 @@ async function buildRetryAgentContext(args: {
     chatId,
     lastGenerationType: "retry_agents",
     idleDuration: resolvePromptIdleDuration(recentMessages),
+    macroSources: [
+      ...recentMessages.map((message: any) => (typeof message.content === "string" ? message.content : "")),
+      ...resolvedAgents.map((agent) => JSON.stringify(agent.settings)),
+    ],
   });
   const historyMacroProfilesById = (await resolveCharacterMacroData(db, allCharacterIds)).profilesById;
   const resolveHistoryMessageMacros = <T extends { content: string; characterId?: string | null }>(
@@ -838,6 +904,7 @@ async function buildRetryAgentContext(args: {
     })),
   );
   const retryCommittedSnapshots = await gameStateStore.getCommittedForMessages(
+    chatId,
     agentSlice.filter((message: any) => message.role === "assistant"),
   );
   const retryVisibleAnchor =
@@ -963,6 +1030,8 @@ async function buildRetryAgentContext(args: {
     chatId,
     chatMode,
     wrapFormat,
+    // Only ever set for a directive; every other run reads the story.
+    narrationOverride: args.beholderDirective,
     recentMessages: agentSlice.map((message: any, index: number) => {
       const resolved = resolvedAgentSlice[index];
       const nextMessage: AgentContext["recentMessages"][number] = {
@@ -994,19 +1063,17 @@ async function buildRetryAgentContext(args: {
     gameState: null,
     characters: charInfo,
     characterTrackerHistory: characterTrackerHistory as unknown as AgentContext["characterTrackerHistory"],
-    persona:
-      personaContext.personaName !== "User"
-        ? {
-            name: personaContext.personaName,
-            description: resolvePersonaPromptText(personaContext.personaDescription) ?? "",
-            personality: resolvePersonaPromptText(personaContext.personaFields.personality) || undefined,
-            backstory: resolvePersonaPromptText(personaContext.personaFields.backstory) || undefined,
-            appearance: resolvePersonaPromptText(personaContext.personaFields.appearance) || undefined,
-            scenario: resolvePersonaPromptText(personaContext.personaFields.scenario) || undefined,
-            ...(personaContext.personaStats ? { personaStats: personaContext.personaStats } : {}),
-            ...(personaContext.rpgStats ? { rpgStats: personaContext.rpgStats } : {}),
-          }
-        : null,
+    persona: buildRetryAgentPersona(
+      {
+        identityId: personaContext.identityId,
+        name: personaContext.personaName,
+        description: personaContext.personaDescription,
+        ...personaContext.personaFields,
+        personaStats: personaContext.personaStats,
+        rpgStats: personaContext.rpgStats,
+      },
+      resolvePersonaPromptText,
+    ),
     writableLorebookIds: null,
     chatSummary: activeChatSummary,
     authorNotes:
@@ -1024,6 +1091,7 @@ async function buildRetryAgentContext(args: {
       : {}),
     streaming,
     memory: {},
+    lorebookEntryCounts: promptMacroContext.lorebookEntryCounts,
   };
 
   const previousBeholderState = await loadPriorBeholderState({
@@ -1032,7 +1100,24 @@ async function buildRetryAgentContext(args: {
     chatMode,
     activeAgentIds: resolvedAgentTypes,
     chatEnableAgents: isChatAgentsEnabled(chatMeta),
-    excludeMessageId: typeof lastAssistant?.id === "string" ? lastAssistant.id : null,
+    // A retry re-runs a message, so it starts from the state as it was BEFORE that
+    // message and re-derives. A directive does not replace a turn — it states a fact on
+    // top of what is there now — so excluding the last message would silently discard
+    // everything that turn established. Observed: a directive about one character wiped
+    // every other character from the panel.
+    // A retry re-runs a message, so it starts from the state as it was BEFORE that
+    // message and re-derives it. A directive does not replace a turn — it states a fact
+    // on top of what is there now — so excluding the last message would silently discard
+    // everything that turn established. Observed: a directive about one character wiped
+    // every other character from the panel.
+    //
+    // But only when the directive is about the current turn. With a historical anchor
+    // the run IS a re-run of an earlier message, and dropping the exclusion there let it
+    // be seeded from a message after the one being redone.
+    excludeMessageId:
+      (args.beholderDirective && !args.historicalAnchorId) || typeof lastAssistant?.id !== "string"
+        ? null
+        : lastAssistant.id,
   });
   if (previousBeholderState) agentContext.memory._beholderState = previousBeholderState;
 
@@ -1042,6 +1127,10 @@ async function buildRetryAgentContext(args: {
   }
   if (personaContext.personaId) {
     agentContext.memory._personaId = personaContext.personaId;
+  }
+  if (personaContext.identityId) {
+    agentContext.memory._userIdentityId = personaContext.identityId;
+    agentContext.memory._userIdentitySource = personaContext.identitySource;
     agentContext.memory._personaAvatarPath = personaContext.personaAvatarPath ?? null;
   }
 
@@ -1051,13 +1140,15 @@ async function buildRetryAgentContext(args: {
       await resolveLorebookKeeperTarget({
         lorebooksStore,
         chatId,
-        characterIds,
+        characterIds: lorebookCharacterIds,
         personaId: personaContext.personaId,
         activeLorebookIds,
         preferredTargetLorebookId: lorebookKeeperSettings.targetLorebookId,
       });
     agentContext.writableLorebookIds = writableLorebookIds;
     agentContext.memory._writableLorebooks = writableLorebooks;
+    agentContext.memory._lorebookKeeperTargetIsExplicit =
+      !!targetLorebookId && targetLorebookId === lorebookKeeperSettings.targetLorebookId;
     if (targetLorebookId) {
       agentContext.memory._lorebookKeeperTargetLorebookId = targetLorebookId;
     }
@@ -1154,16 +1245,20 @@ async function buildRetryAgentContext(args: {
         if (spriteCharacter) perChar.push(spriteCharacter);
       }
       const includePersonaSprite =
-        !!personaContext.personaId &&
+        !!personaContext.identityId &&
         (hasPersonaExpressionSource ||
           !restrictToSelectedSprites ||
-          selectedSpriteIds.has(personaContext.personaId) ||
+          selectedSpriteIds.has(personaContext.identityId) ||
           chatMeta.expressionAvatarsEnabled === true);
-      if (personaContext.personaId && includePersonaSprite) {
-        const sprites = listCharacterSprites(personaContext.personaId);
+      if (
+        personaContext.identityId &&
+        includePersonaSprite &&
+        !perChar.some((entry) => entry.characterId === personaContext.identityId)
+      ) {
+        const sprites = listCharacterSprites(personaContext.identityId);
         if (sprites) {
           const spritePersona = buildAvailableSpriteCharacter(
-            personaContext.personaId,
+            personaContext.identityId,
             personaContext.personaName,
             sprites,
             spriteDisplayModes,
@@ -1174,14 +1269,14 @@ async function buildRetryAgentContext(args: {
       const expressionTargetIds = new Set<string>();
       if (lastAssistant?.characterId && typeof lastAssistant.characterId === "string") {
         expressionTargetIds.add(lastAssistant.characterId);
-      } else if (lastAssistant?.role === "user" && personaContext.personaId) {
-        expressionTargetIds.add(personaContext.personaId);
+      } else if (lastAssistant?.role === "user" && personaContext.identityId) {
+        expressionTargetIds.add(personaContext.identityId);
       }
       if (
-        personaContext.personaId &&
+        personaContext.identityId &&
         agentContext.recentMessages.some((message) => message.role === "user" && message.content.trim())
       ) {
-        expressionTargetIds.add(personaContext.personaId);
+        expressionTargetIds.add(personaContext.identityId);
       }
       const targetedSprites =
         expressionTargetIds.size > 0
@@ -1555,9 +1650,18 @@ async function resolveRetryAgents(args: {
   const resolvedAgents: ResolvedRetryAgent[] = [];
   const skippedLocalSidecarAgents: string[] = [];
   const defaultAgentConnectionAgents: string[] = [];
+  /** Agents this run routed to the utility slot, so the UI can say which model answered. */
+  const utilitySidecarAgents: string[] = [];
   // Explicit per-agent sidecar selection is valid independently of the global
   // tracker default; the provider starts the configured model on demand.
   const localSidecarAvailableForTrackers = sidecarModelService.getConfiguredModelRef() !== null;
+  // Mirrors resolveAgentPipelineAgents: retries must honor the same agents
+  // default as first runs, or a retried agent silently changes backend (#5539).
+  const defaultAgentConnectionId = resolveAgentsDefaultConnectionId({
+    useLocalSidecarAsAgentsDefault: sidecarModelService.getConfig().useAsAgentsDefault,
+    localSidecarAvailable: localSidecarAvailableForTrackers,
+    rowDefaultConnectionId: (defaultAgentConn?.id as string | undefined) ?? null,
+  });
   const unavailableConnectionWarnings = new Map<
     string,
     { reason: string; connectionName?: string; agentNames: string[] }
@@ -1616,6 +1720,44 @@ async function resolveRetryAgents(args: {
     retryAgentConnectionCache.set(connectionId, resolution);
     return resolution;
   };
+  /**
+   * The utility slot outranks the agent's configured connection.
+   *
+   * When an agent has a purpose-trained model installed in the utility slot and that
+   * slot is answering, the run goes there — that model is the reason it was installed.
+   * When the slot is off, missing, or serving a different agent, this returns the
+   * resolution untouched and the agent's own connection is used.
+   *
+   * Deliberately additive: it never mutates the main sidecar's config or provider, and
+   * an agent with no utility model installed takes exactly the path it did before.
+   */
+  const applyUtilitySidecarOverride = async (
+    agentType: string,
+    resolution: RetryAgentConnectionResolution,
+    requestedConnectionId?: string | null,
+  ): Promise<RetryAgentConnectionResolution> => {
+    const utilityEntry = await buildUtilitySidecarEntry(agentType);
+    if (!utilityEntry) {
+      // An operator who explicitly picked the local model must not be silently answered
+      // by a different one: the two need different prompts, and the wrong pairing looks
+      // like a broken model rather than a wrong setting.
+      if (requestedConnectionId === UTILITY_SIDECAR_CONNECTION_ID) {
+        return {
+          entry: null,
+          unavailableReason: "the local model slot is not serving this agent",
+        };
+      }
+      return resolution;
+    }
+    utilitySidecarAgents.push(agentType);
+    return {
+      entry: {
+        ...utilityEntry,
+        provider: wrapRetryAgentProvider(utilityEntry.provider, utilityEntry.connectionId),
+      },
+    };
+  };
+
   const defaultAgentConnection = defaultAgentConn
     ? await resolveRetryAgentConnection(defaultAgentConn.id as string)
     : null;
@@ -1624,12 +1766,14 @@ async function resolveRetryAgents(args: {
     const effectiveConnectionId = resolveRetryAgentConnectionRequest({
       agentType: cfg.type as string,
       configuredConnectionId: cfg.connectionId as string | null,
-      defaultAgentConnectionId: defaultAgentConn?.id ?? null,
+      defaultAgentConnectionId,
       chatMeta,
       localSidecarAvailable: localSidecarAvailableForTrackers,
     });
 
-    if (effectiveConnectionId === "skip-local-sidecar") {
+    // The utility slot outranks this skip: if it serves this agent it can answer even
+    // though the main sidecar — the connection the agent asked for — is unavailable.
+    if (effectiveConnectionId === "skip-local-sidecar" && !utilitySidecarService.servesAgent(cfg.type as string)) {
       skippedLocalSidecarAgents.push(cfg.name ?? cfg.type);
       logger.warn(
         "[retry-agents] Skipping agent %s because Local Model was requested but the sidecar is unavailable",
@@ -1638,7 +1782,11 @@ async function resolveRetryAgents(args: {
       continue;
     }
 
-    const agentConnection = await resolveRetryAgentConnection(effectiveConnectionId);
+    const agentConnection = await applyUtilitySidecarOverride(
+      cfg.type as string,
+      await resolveRetryAgentConnection(effectiveConnectionId),
+      effectiveConnectionId,
+    );
     if (!agentConnection.entry) {
       addUnavailableConnectionWarning(cfg.name ?? cfg.type, agentConnection);
       logger.warn(
@@ -1648,7 +1796,13 @@ async function resolveRetryAgents(args: {
       );
       continue;
     }
-    if (defaultAgentConn && effectiveConnectionId === defaultAgentConn.id) {
+    // Not when the utility slot took the run: warning about billing a paid default
+    // connection that was never called is worse than saying nothing.
+    if (
+      defaultAgentConn &&
+      effectiveConnectionId === defaultAgentConn.id &&
+      !utilitySidecarService.servesAgent(cfg.type as string)
+    ) {
       defaultAgentConnectionAgents.push(cfg.name ?? cfg.type);
     }
 
@@ -1674,7 +1828,8 @@ async function resolveRetryAgents(args: {
         isCustomAgent: !BUILT_IN_AGENTS.some((agent) => agent.id === cfg.type),
         phase: normalizeAgentPhaseValue(cfg.phase),
         promptTemplate: selectedPromptTemplate,
-        connectionId: effectiveConnectionId,
+        // The connection that actually answered; the override may have replaced it.
+        connectionId: agentConnection.entry.connectionId ?? effectiveConnectionId,
         settings,
         customParameters: agentConnection.entry.customParameters,
         temperature: agentConnection.entry.temperature,
@@ -1693,18 +1848,24 @@ async function resolveRetryAgents(args: {
     });
   }
 
+  if (utilitySidecarAgents.length > 0) {
+    // Recorded because the slot silently outranks the configured connection; without
+    // this a run that went somewhere unexpected leaves no trace of where.
+    logger.info("[retry-agents] Utility model slot answered for: %s", utilitySidecarAgents.join(", "));
+  }
+
   const warnings: AgentConnectionWarning[] = [];
 
   for (const builtIn of builtInFallbackConfigs) {
     const builtInConnectionId = resolveRetryAgentConnectionRequest({
       agentType: builtIn.id,
       configuredConnectionId: null,
-      defaultAgentConnectionId: defaultAgentConn?.id ?? null,
+      defaultAgentConnectionId,
       chatMeta,
       localSidecarAvailable: localSidecarAvailableForTrackers,
     });
 
-    if (builtInConnectionId === "skip-local-sidecar") {
+    if (builtInConnectionId === "skip-local-sidecar" && !utilitySidecarService.servesAgent(builtIn.id)) {
       skippedLocalSidecarAgents.push(builtIn.name);
       logger.warn(
         "[retry-agents] Skipping built-in agent %s because Local Model was requested but the sidecar is unavailable",
@@ -1713,10 +1874,13 @@ async function resolveRetryAgents(args: {
       continue;
     }
 
-    const builtInConnection =
-      defaultAgentConn && builtInConnectionId === defaultAgentConn.id
+    const builtInConnection = await applyUtilitySidecarOverride(
+      builtIn.id,
+      (defaultAgentConn && builtInConnectionId === defaultAgentConn.id
         ? defaultAgentConnection
-        : await resolveRetryAgentConnection(builtInConnectionId);
+        : await resolveRetryAgentConnection(builtInConnectionId)) ?? { entry: null },
+      builtInConnectionId,
+    );
     if (!builtInConnection?.entry) {
       addUnavailableConnectionWarning(builtIn.name, builtInConnection ?? {});
       logger.warn(
@@ -1726,7 +1890,11 @@ async function resolveRetryAgents(args: {
       );
       continue;
     }
-    if (defaultAgentConn && builtInConnectionId === defaultAgentConn.id)
+    if (
+      defaultAgentConn &&
+      builtInConnectionId === defaultAgentConn.id &&
+      !utilitySidecarService.servesAgent(builtIn.id)
+    )
       defaultAgentConnectionAgents.push(builtIn.name);
 
     const settings = resolveEffectiveAgentSettings({
@@ -2152,6 +2320,7 @@ async function executeRetryBatches(
   chatMode?: ChatMode,
   chatMeta?: Record<string, unknown>,
   customLorebookReadBehindContexts: ReadonlyMap<string, AgentContext> = new Map(),
+  preparedCapabilityContexts: Map<string, AgentContext> = new Map(),
 ) {
   const retryAgents = mergeRetryPairedBuiltInRewriteAgents(resolvedAgents);
   const effectiveChatMode: ChatMode = chatMode ?? (agentContext.chatMode as ChatMode);
@@ -2229,6 +2398,10 @@ async function executeRetryBatches(
     jobGroups,
     AGENT_PHASE_MAX_CONCURRENT_GROUPS,
     async (group) => {
+      const groupAgents = group.agents.map((agent) => agent.resolved);
+      const preparedGroupContext = await prepareCapabilityAgentContexts(groupAgents, group.context);
+      for (const agent of groupAgents) preparedCapabilityContexts.set(agent.id, preparedGroupContext);
+
       const toolAgents = group.agents.filter((agent) => shouldUseToolsDuringAgentExecution(agent.resolved));
       const batchAgents = group.agents.filter((agent) => !shouldUseToolsDuringAgentExecution(agent.resolved));
       const imagePromptAgents = batchAgents.filter(isImagePromptRetryAgent);
@@ -2237,14 +2410,14 @@ async function executeRetryBatches(
 
       if (regularBatchAgents.length > 0) {
         const configs = regularBatchAgents.map((agent) => agent.resolved);
-        const batchResults = await executeAgentBatch(configs, group.context, group.provider, group.model);
+        const batchResults = await executeAgentBatch(configs, preparedGroupContext, group.provider, group.model);
         for (const result of batchResults) {
           const entry = regularBatchAgents.find(
             (agent) => agent.resolved.id === result.agentId || agent.resolved.type === result.agentType,
           );
           groupResults.push(
             entry?.resolved.type === "spotify"
-              ? await validateSpotifyRetryPlayback(entry, result, group.context)
+              ? await validateSpotifyRetryPlayback(entry, result, preparedGroupContext)
               : result,
           );
         }
@@ -2253,7 +2426,7 @@ async function executeRetryBatches(
       for (const entry of imagePromptAgents) {
         const imagePromptContext = await resolveRetryImagePromptContext({
           entry,
-          context: group.context,
+          context: preparedGroupContext,
           conns,
           chatMode,
           chatMeta,
@@ -2271,8 +2444,8 @@ async function executeRetryBatches(
 
       for (const entry of toolAgents) {
         const toolContext = isImagePromptRetryAgent(entry)
-          ? await resolveRetryImagePromptContext({ entry, context: group.context, conns, chatMode, chatMeta })
-          : group.context;
+          ? await resolveRetryImagePromptContext({ entry, context: preparedGroupContext, conns, chatMode, chatMeta })
+          : preparedGroupContext;
         const result = await executeAgent(
           entry.resolved,
           toolContext,
@@ -2280,7 +2453,7 @@ async function executeRetryBatches(
           group.model,
           entry.resolved.toolContext,
         );
-        groupResults.push(await validateSpotifyRetryPlayback(entry, result, group.context));
+        groupResults.push(await validateSpotifyRetryPlayback(entry, result, preparedGroupContext));
       }
 
       return groupResults;
@@ -2429,6 +2602,7 @@ async function executeLorebookKeeperRetries(args: {
             chatName,
             preferredTargetLorebookId,
             writableLorebookIds: retryContext.writableLorebookIds,
+            allowTargetRouting: retryContext.memory._lorebookKeeperTargetIsExplicit !== true,
             writableLorebooks: Array.isArray(retryContext.memory._writableLorebooks)
               ? (retryContext.memory._writableLorebooks as Array<{ id: string; name: string }>)
               : undefined,
@@ -2491,6 +2665,7 @@ async function applyRetryResultEffects(args: {
   debugMode: boolean;
   secretPlotRerollMode?: "full" | "turn_only";
   signal: AbortSignal;
+  onLorebookEffectStatus?: (agentId: string, status: RetryLorebookEffectStatus) => void;
 }) {
   const {
     app,
@@ -2516,6 +2691,7 @@ async function applyRetryResultEffects(args: {
     debugMode,
     secretPlotRerollMode,
     signal,
+    onLorebookEffectStatus,
   } = args;
   const assertRetryActive = () => signal.throwIfAborted();
   assertRetryActive();
@@ -2604,7 +2780,7 @@ async function applyRetryResultEffects(args: {
       assertRetryActive();
       return projectGameSnapshotLocation(created, retryOwnerSpatialProjection);
     }
-    const existing = await gameStateStore.getByMessage(retryMessageId, retrySwipeIndex);
+    const existing = await gameStateStore.getByChatAndMessage(chatId, retryMessageId, retrySwipeIndex);
     assertRetryActive();
     if (existing) return projectGameSnapshotLocation(existing, retryOwnerSpatialProjection);
     const updateOptions = await buildSnapshotUpdateOptions();
@@ -2880,19 +3056,15 @@ async function applyRetryResultEffects(args: {
         const psData = result.data as Record<string, unknown>;
         const hasStats = Array.isArray(psData.stats);
         const hasStatus = typeof psData.status === "string";
-        const hasInventory = Array.isArray(psData.inventory);
         const bars = hasStats ? (psData.stats as any[]) : [];
         const status = hasStatus ? (psData.status as string) : "";
-        const inventory = hasInventory ? (psData.inventory as any[]) : [];
         const latest = await loadRetryTargetGameStateSnapshot();
         assertRetryActive();
         const personaPatch = buildLockedPersonaTrackerPatch({
           stats: bars,
           status,
-          inventory,
           hasStats,
           hasStatus,
-          hasInventory,
           snapshot: latest,
           lockState: latest ? parseGameStateRow(latest as Record<string, unknown>) : null,
         });
@@ -2902,7 +3074,7 @@ async function applyRetryResultEffects(args: {
             await app.db
               .update(gameStateSnapshotsTable)
               .set(personaPatch.updates)
-              .where(eq(gameStateSnapshotsTable.id, latest.id));
+              .where(and(eq(gameStateSnapshotsTable.chatId, chatId), eq(gameStateSnapshotsTable.id, latest.id)));
             assertRetryActive();
           }
         }
@@ -2935,7 +3107,10 @@ async function applyRetryResultEffects(args: {
 
     if (result.success && result.type === "lorebook_update" && result.data && typeof result.data === "object") {
       try {
-        if (isAgentWriteApprovalEnvelope(result.data)) continue;
+        if (isAgentWriteApprovalEnvelope(result.data)) {
+          onLorebookEffectStatus?.(result.agentId, "pending_approval");
+          continue;
+        }
         const resultAgent = findRetryResultAgent(result, resolvedAgents);
         const isBuiltInLorebookAgent = isBuiltInAgentType(result.agentType);
         const customCanEditLorebooks =
@@ -2944,7 +3119,10 @@ async function applyRetryResultEffects(args: {
         const customCanCreateLorebooks =
           isBuiltInLorebookAgent ||
           (resultAgent ? customAgentHasCapability(resultAgent.settings, "create_lorebooks") : false);
-        if (!customCanEditLorebooks && !customCanCreateLorebooks) continue;
+        if (!customCanEditLorebooks && !customCanCreateLorebooks) {
+          onLorebookEffectStatus?.(result.agentId, "failed");
+          continue;
+        }
 
         const lkData = result.data as Record<string, unknown>;
         const retryUpdates = (lkData.updates as any[]) ?? [];
@@ -2961,6 +3139,7 @@ async function applyRetryResultEffects(args: {
                 ? (agentContext.memory._lorebookKeeperTargetLorebookId as string)
                 : null;
           if (!customCanCreateLorebooks && !preferredTargetLorebookId && !writableLorebookIds?.length) {
+            onLorebookEffectStatus?.(result.agentId, "failed");
             continue;
           }
           assertRetryActive();
@@ -2970,6 +3149,7 @@ async function applyRetryResultEffects(args: {
             chatName: (chat as any).name,
             preferredTargetLorebookId,
             writableLorebookIds,
+            allowTargetRouting: !isBuiltInLorebookAgent || agentContext.memory._lorebookKeeperTargetIsExplicit !== true,
             writableLorebooks: Array.isArray(agentContext.memory._writableLorebooks)
               ? (agentContext.memory._writableLorebooks as Array<{ id: string; name: string }>)
               : undefined,
@@ -2980,8 +3160,10 @@ async function applyRetryResultEffects(args: {
           });
           assertRetryActive();
         }
+        onLorebookEffectStatus?.(result.agentId, "applied");
       } catch (err) {
         assertRetryActive();
+        onLorebookEffectStatus?.(result.agentId, "failed");
         logger.error(err, "[retry-agents] Failed to apply lorebook update");
       }
     }
@@ -3022,7 +3204,7 @@ async function applyRetryResultEffects(args: {
               await app.db
                 .update(gameStateSnapshotsTable)
                 .set({ playerStats: JSON.stringify(questTrackerPatch.playerStats) })
-                .where(eq(gameStateSnapshotsTable.id, snap.id));
+                .where(and(eq(gameStateSnapshotsTable.chatId, chatId), eq(gameStateSnapshotsTable.id, snap.id)));
               assertRetryActive();
             }
             assertRetryActive();
@@ -3083,7 +3265,7 @@ async function applyRetryResultEffects(args: {
           await app.db
             .update(gameStateSnapshotsTable)
             .set({ playerStats: JSON.stringify(inventoryTrackerPatch.playerStats) })
-            .where(eq(gameStateSnapshotsTable.id, snap.id));
+            .where(and(eq(gameStateSnapshotsTable.chatId, chatId), eq(gameStateSnapshotsTable.id, snap.id)));
           assertRetryActive();
         }
         if (inventoryTrackerPatch.changed) {
@@ -3121,7 +3303,7 @@ async function applyRetryResultEffects(args: {
             await app.db
               .update(gameStateSnapshotsTable)
               .set({ playerStats: JSON.stringify(customTrackerPatch.playerStats) })
-              .where(eq(gameStateSnapshotsTable.id, snap.id));
+              .where(and(eq(gameStateSnapshotsTable.chatId, chatId), eq(gameStateSnapshotsTable.id, snap.id)));
             assertRetryActive();
           }
           if (customTrackerPatch.changed) {
@@ -3245,52 +3427,83 @@ async function applyRetryResultEffects(args: {
 
             // Collect optional character visual context. Prefer avatar portraits
             // for references, then fall back to full-body sprites.
+            const subjectOnly = illustratorPromptReviewOverride?.subjectOnly === true;
             const useAvatarRefs =
-              usesChatIllustratorSettings && typeof chatMeta.illustratorUseAvatarReferences === "boolean"
+              !subjectOnly &&
+              (usesChatIllustratorSettings && typeof chatMeta.illustratorUseAvatarReferences === "boolean"
                 ? chatMeta.illustratorUseAvatarReferences
-                : imagePromptAgent?.resolved.settings?.useAvatarReferences === true;
+                : imagePromptAgent?.resolved.settings?.useAvatarReferences === true);
             const includeCharacterAppearance =
-              usesChatIllustratorSettings && typeof chatMeta.illustratorIncludeCharacterAppearance === "boolean"
+              !subjectOnly &&
+              (usesChatIllustratorSettings && typeof chatMeta.illustratorIncludeCharacterAppearance === "boolean"
                 ? chatMeta.illustratorIncludeCharacterAppearance
-                : imagePromptAgent?.resolved.settings?.includeCharacterAppearance === true;
-            const spatialLocationReferenceImage = await resolveSpatialLocationReferenceImage({
-              db: app.db,
-              chatId,
-              projection: retryOwnerSpatialProjection?.ownerMode === "roleplay" ? retryOwnerSpatialProjection : null,
-            });
+                : imagePromptAgent?.resolved.settings?.includeCharacterAppearance === true);
+            const spatialLocationReferenceImage = subjectOnly
+              ? null
+              : await resolveSpatialLocationReferenceImage({
+                  db: app.db,
+                  chatId,
+                  projection:
+                    retryOwnerSpatialProjection?.ownerMode === "roleplay" ? retryOwnerSpatialProjection : null,
+                });
             assertRetryActive();
             let referenceImages: string[] | undefined;
-            const retryPersonaId =
-              typeof agentContext.memory._personaId === "string" ? agentContext.memory._personaId : null;
+            const retryIdentityId =
+              typeof agentContext.memory._userIdentityId === "string" ? agentContext.memory._userIdentityId : null;
+            const retryIdentitySource =
+              agentContext.memory._userIdentitySource === "persona" ||
+              agentContext.memory._userIdentitySource === "character"
+                ? agentContext.memory._userIdentitySource
+                : null;
+            const retryPersonaId = retryIdentitySource === "persona" ? retryIdentityId : null;
             const retryPersonaReference = retryPersonaId ? await chars.getPersona(retryPersonaId) : null;
             assertRetryActive();
+            const retryCharacterIdentity =
+              retryIdentitySource === "character" && retryIdentityId && agentContext.persona
+                ? {
+                    id: retryIdentityId,
+                    name: agentContext.persona.name,
+                    avatarPath:
+                      typeof agentContext.memory._personaAvatarPath === "string"
+                        ? agentContext.memory._personaAvatarPath
+                        : null,
+                    appearance: agentContext.persona.appearance,
+                  }
+                : null;
             const referenceResolution = await resolveIllustratorCharacterReferences({
               charactersStore: chars,
               characterGallery: createCharacterGalleryStorage(app.db),
               personaGallery: createPersonaGalleryStorage(app.db),
-              chatCharacters: agentContext.characters.map((character) => ({
-                id: character.id,
-                name: character.name,
-                appearance: character.appearance,
-              })),
-              persona: agentContext.persona
-                ? {
-                    id: retryPersonaId,
-                    name: agentContext.persona.name,
-                    avatarPath:
-                      typeof retryPersonaReference?.avatarPath === "string"
-                        ? retryPersonaReference.avatarPath
-                        : typeof agentContext.memory._personaAvatarPath === "string"
-                          ? agentContext.memory._personaAvatarPath
+              chatCharacters: [
+                ...agentContext.characters.map((character) => ({
+                  id: character.id,
+                  name: character.name,
+                  appearance: character.appearance,
+                })),
+                ...(retryCharacterIdentity &&
+                !agentContext.characters.some((character) => character.id === retryCharacterIdentity.id)
+                  ? [retryCharacterIdentity]
+                  : []),
+              ],
+              persona:
+                retryIdentitySource === "persona" && agentContext.persona
+                  ? {
+                      id: retryPersonaId,
+                      name: agentContext.persona.name,
+                      avatarPath:
+                        typeof retryPersonaReference?.avatarPath === "string"
+                          ? retryPersonaReference.avatarPath
+                          : typeof agentContext.memory._personaAvatarPath === "string"
+                            ? agentContext.memory._personaAvatarPath
+                            : null,
+                      appearance: agentContext.persona.appearance,
+                      characterSheetImageId:
+                        typeof retryPersonaReference?.characterSheetImageId === "string"
+                          ? retryPersonaReference.characterSheetImageId
                           : null,
-                    appearance: agentContext.persona.appearance,
-                    characterSheetImageId:
-                      typeof retryPersonaReference?.characterSheetImageId === "string"
-                        ? retryPersonaReference.characterSheetImageId
-                        : null,
-                    useCharacterSheetAsReference: retryPersonaReference?.useCharacterSheetAsReference === "true",
-                  }
-                : null,
+                      useCharacterSheetAsReference: retryPersonaReference?.useCharacterSheetAsReference === "true",
+                    }
+                  : null,
               requestedNames: illCharacters.filter((name): name is string => typeof name === "string"),
               promptText: [
                 [...agentContext.recentMessages].reverse().find((message) => message.role === "user")?.content ?? "",
@@ -3656,10 +3869,15 @@ async function applyRetryResultEffects(args: {
       const spriteData = result.data as { expressions?: Array<{ characterId: string; expression: string }> };
       const exprMap: Record<string, string> = {};
       const personaExprMap: Record<string, string> = {};
-      const personaId = typeof agentContext.memory._personaId === "string" ? agentContext.memory._personaId : null;
+      const userIdentityId =
+        typeof agentContext.memory._userIdentityId === "string" ? agentContext.memory._userIdentityId : null;
       if (Array.isArray(spriteData.expressions)) {
         for (const e of spriteData.expressions) {
-          if (personaId && e.characterId === personaId) {
+          if (
+            userIdentityId &&
+            e.characterId === userIdentityId &&
+            !agentContext.characters.some((character) => character.id === e.characterId)
+          ) {
             personaExprMap[e.characterId] = e.expression;
           } else {
             exprMap[e.characterId] = e.expression;
@@ -3710,7 +3928,6 @@ async function applyRetryResultEffects(args: {
   if (
     illustratorResult &&
     illustratorEntry &&
-    !illustratorPromptReviewOverride &&
     shouldRetryIllustratorTarget(illustratorRetryTargets, "background") &&
     (isManualIllustratorBackgroundRequest ||
       illustratorBackgroundGenerationEnabled((chat as { mode?: unknown }).mode, chatMeta))
@@ -3757,11 +3974,11 @@ async function applyRetryResultEffects(args: {
           latestGameState?.location,
         );
       }
-      const generated = await generateIllustratorSceneBackground({
+      const backgroundArgs = {
         db: app.db,
         chatId,
         chatName: chat.name,
-        chatMode: (chat as { mode?: unknown }).mode === "game" ? "game" : "roleplay",
+        chatMode: ((chat as { mode?: unknown }).mode === "game" ? "game" : "roleplay") as "game" | "roleplay",
         chatMetadata: freshMeta,
         currentBackground:
           backgroundBeforeGeneration ??
@@ -3773,7 +3990,38 @@ async function applyRetryResultEffects(args: {
         recentMessages: agentContext.recentMessages,
         force: isManualIllustratorBackgroundRequest,
         signal: agentContext.signal,
-        debugLog: (message, ...values) => logDebugOverride(debugMode || isDebugAgentsEnabled(), message, ...values),
+        debugLog: (message: string, ...values: unknown[]) =>
+          logDebugOverride(debugMode || isDebugAgentsEnabled(), message, ...values),
+      };
+      if (isManualIllustratorBackgroundRequest && reviewImagePromptsBeforeSend && !illustratorPromptReviewOverride) {
+        const preview = await previewIllustratorSceneBackground(backgroundArgs);
+        assertRetryActive();
+        sendSseEvent(reply, {
+          type: "image_prompt_review",
+          data: {
+            chatId,
+            item: {
+              id: "roleplay-scene-background",
+              kind: "background",
+              title: "Scene background",
+              prompt: preview.prompt,
+              ...(preview.negativePrompt ? { negativePrompt: preview.negativePrompt } : {}),
+              width: preview.width,
+              height: preview.height,
+            },
+            resultData: { ...illData, generateBackground: true, backgroundPlan: preview.plan },
+          },
+        });
+        return;
+      }
+
+      const generated = await generateIllustratorSceneBackground({
+        ...backgroundArgs,
+        planOverride: illustratorPromptReviewOverride
+          ? (parseIllustratorBackgroundPlan(illData.backgroundPlan) ?? undefined)
+          : undefined,
+        promptOverride: illustratorPromptReviewOverride?.prompt,
+        negativePromptOverride: illustratorPromptReviewOverride?.negativePrompt,
       });
       assertRetryActive();
 
@@ -3840,7 +4088,14 @@ async function applyRetryResultEffects(args: {
   }
 }
 
-export type ActiveAgentRun = { abortController: AbortController; backendUrl: string | null };
+export type ActiveAgentRun = {
+  abortController: AbortController;
+  /** Cancels only agent work when the main response shares this run. */
+  agentAbortController?: AbortController;
+  backendUrl: string | null;
+  messageId: string | null;
+  swipeIndex: number | null;
+};
 
 export async function runRetrySetupPhase<T>(signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
   signal.throwIfAborted();
@@ -3884,8 +4139,18 @@ export async function registerRetryAgentsRoute(
       /** Force image generation for retried custom image agents' results (snapshot button, #4682). */
       forceImageGeneration?: boolean;
       lorebookKeeperBackfill?: boolean;
+      customLorebookBackfill?: boolean;
       /** When set, scope history and game state to this assistant message (as at original generation), not the latest turn. */
       forMessageId?: string;
+      /**
+       * Prose for Beholder to read instead of the chat's recent messages.
+       *
+       * The operator typing a correction — "her sword is broken" — rather than waiting
+       * for the story to say it. Runs through this route rather than a route of its own
+       * so it inherits connection resolution, the local model slot, prompt selection and
+       * the state merge, all of which would otherwise have to be duplicated.
+       */
+      beholderDirective?: string;
       musicPlayerSource?: "spotify" | "youtube" | "custom";
       musicPlayerEnabled?: boolean;
       /** Secret Plot re-run mode: full = refresh arc+turn data, turn_only = preserve arc and refresh only turn guidance. */
@@ -3905,7 +4170,9 @@ export async function registerRetryAgentsRoute(
       illustratorRetryTargets: rawIllustratorRetryTargets,
       forceImageGeneration = false,
       lorebookKeeperBackfill = false,
+      customLorebookBackfill = false,
       forMessageId,
+      beholderDirective,
       musicPlayerSource = "spotify",
       musicPlayerEnabled = true,
       secretPlotRerollMode,
@@ -3926,6 +4193,15 @@ export async function registerRetryAgentsRoute(
     if (illustratorRetryTargets && !agentTypes.includes("illustrator")) {
       return reply.status(400).send({ error: "Illustrator retry targets require an Illustrator retry" });
     }
+    // Trimmed and bounded once, here, so neither call site has to remember to.
+    const sanitisedDirective =
+      typeof beholderDirective === "string" && beholderDirective.trim()
+        ? beholderDirective.trim().slice(0, 2000)
+        : undefined;
+
+    if (customLorebookBackfill && (agentTypes.length !== 1 || lorebookKeeperBackfill || forMessageId)) {
+      return reply.status(400).send({ error: "Custom lorebook backfill requires exactly one custom agent" });
+    }
     const isManualIllustratorBackgroundRequest = isExclusiveIllustratorRetryTarget(
       illustratorRetryTargets,
       "background",
@@ -3934,16 +4210,22 @@ export async function registerRetryAgentsRoute(
 
     startSseReply(reply, { "X-Accel-Buffering": "no" });
 
-    // Abort in-flight agent LLM calls when the client disconnects, and stop
-    // writing to a closed socket. Mirrors the main /generate handler so a dropped
-    // retry tab does not leak upstream provider requests to completion.
+    // Illustrator saves its output to the chat even if the mobile tab disappears.
+    // Explicit Stop still cancels through activeAgentRuns; other retries retain
+    // their existing disconnect cancellation.
+    const preserveIllustratorOnDisconnect = agentTypes.every((agentType) => agentType === "illustrator");
     const abortController = new AbortController();
     const assertRetrySetupActive = () => abortController.signal.throwIfAborted();
     const notifyFallback = createReplyFallbackNotifier(reply);
     const onFallback: typeof notifyFallback = (notice) => {
       if (!abortController.signal.aborted) notifyFallback(notice);
     };
-    const activeAgentRun: ActiveAgentRun = { abortController, backendUrl: null };
+    const activeAgentRun: ActiveAgentRun = {
+      abortController,
+      backendUrl: null,
+      messageId: null,
+      swipeIndex: null,
+    };
     const runs = activeAgentRuns.get(chatId) ?? new Set<ActiveAgentRun>();
     runs.add(activeAgentRun);
     activeAgentRuns.set(chatId, runs);
@@ -3953,7 +4235,7 @@ export async function registerRetryAgentsRoute(
     const stopSseKeepalive = startSseKeepalive(reply);
     const onClientClose = () => {
       clientDisconnected = true;
-      abortController.abort();
+      if (!preserveIllustratorOnDisconnect) abortController.abort();
     };
     reply.raw.on("close", onClientClose);
 
@@ -4004,6 +4286,8 @@ export async function registerRetryAgentsRoute(
         };
       }
 
+      const unfilteredRecentMessages = recentMessages;
+
       const supportsHiddenFromAI = chat.mode === "conversation" || chat.mode === "roleplay";
       if (supportsHiddenFromAI) {
         recentMessages = recentMessages.filter((message: any) => !isMessageHiddenFromAI(message));
@@ -4025,8 +4309,10 @@ export async function registerRetryAgentsRoute(
           swipeIndex: preGenerationLastAssistant.activeSwipeIndex ?? 0,
         };
       }
-      const retryMessageId = lastAssistant?.id ?? "";
-      const retrySwipeIndex = lastAssistant?.activeSwipeIndex ?? 0;
+      let retryMessageId = lastAssistant?.id ?? "";
+      let retrySwipeIndex = lastAssistant?.activeSwipeIndex ?? 0;
+      activeAgentRun.messageId = retryMessageId || null;
+      activeAgentRun.swipeIndex = retryMessageId ? retrySwipeIndex : null;
 
       const activeMusicPlayerSource =
         musicPlayerEnabled === false
@@ -4049,6 +4335,56 @@ export async function registerRetryAgentsRoute(
           onFallback,
         }),
       );
+      let customLorebookBackfillTarget: { agentConfigId: string; messageId: string; swipeIndex: number } | null = null;
+      if (customLorebookBackfill) {
+        const entry = resolvedAgents[0];
+        if (!entry || resolvedAgents.length !== 1 || !customAgentUsesLorebookBackfill(entry.resolved)) {
+          throw new Error("This custom agent is not configured for lorebook history backfill");
+        }
+        const settings = getCustomLorebookBackfillSettings(entry.resolved.settings);
+        const memory = await runRetrySetupPhase(abortController.signal, () =>
+          agentsStore.getMemory(entry.resolved.id, chatId),
+        );
+        const cursor =
+          typeof memory[CUSTOM_LOREBOOK_BACKFILL_CURSOR_KEY] === "string"
+            ? (memory[CUSTOM_LOREBOOK_BACKFILL_CURSOR_KEY] as string)
+            : null;
+        const chunk = getCustomLorebookBackfillChunk(
+          recentMessages,
+          getCustomLorebookReadBehindMessages(entry.resolved.settings),
+          cursor,
+          settings.chunkSize,
+          unfilteredRecentMessages,
+        );
+        if (!chunk) {
+          sendSseEvent(reply, {
+            type: "custom_lorebook_backfill_empty",
+            data: { agentType: entry.resolved.type },
+          });
+          sendSseEvent(reply, { type: "done", data: "" });
+          return;
+        }
+        const runKey = customLorebookReadBehindRunKey(chatId, entry.resolved.id, chunk.target.id);
+        if (!tryClaimCustomLorebookReadBehindRun(activeCustomLorebookReadBehindRuns, runKey)) {
+          throw new Error("This custom agent backfill chunk is already running");
+        }
+        customLorebookReadBehindRunKeys.add(runKey);
+        recentMessages = chunk.messages;
+        lastAssistant = chunk.target;
+        retryMessageId = chunk.target.id;
+        retrySwipeIndex = chunk.target.activeSwipeIndex ?? 0;
+        activeAgentRun.messageId = retryMessageId;
+        activeAgentRun.swipeIndex = retrySwipeIndex;
+        historicalGameStateAnchor = resolveLorebookKeeperRetryAnchor(chunk.target);
+        entry.resolved.settings = {
+          ...entry.resolved.settings,
+          contextSize: Math.max(1, chunk.messages.length),
+        };
+        customLorebookBackfillTarget = {
+          agentConfigId: entry.resolved.id,
+          ...resolveLorebookKeeperRetryAnchor(chunk.target),
+        };
+      }
       const chatMode = ((chat as { mode?: ChatMode }).mode ?? "conversation") as ChatMode;
       const retryWrapFormat = await runRetrySetupPhase(abortController.signal, () =>
         resolveRetryAgentWrapFormat({
@@ -4071,10 +4407,15 @@ export async function registerRetryAgentsRoute(
         };
       }
       const cyoaAgentWillRun = resolvedAgents.some((e) => e.resolved.type === "cyoa");
+      const retryPersonaContext = await runRetrySetupPhase(abortController.signal, () =>
+        resolvePersonaContext(chars, chat),
+      );
       const agentContextResult = await runRetrySetupPhase(abortController.signal, () =>
         buildRetryAgentContext({
           cyoaAgentWillRun,
           chatId,
+          beholderDirective: sanitisedDirective,
+          historicalAnchorId: forMessageId ?? null,
           db: app.db,
           chat,
           chatMeta,
@@ -4083,6 +4424,7 @@ export async function registerRetryAgentsRoute(
           resolvedAgents: resolvedAgents.map((entry) => entry.resolved),
           lastAssistant,
           chars,
+          personaContext: retryPersonaContext,
           gameStateStore,
           lorebooksStore,
           streaming,
@@ -4101,6 +4443,7 @@ export async function registerRetryAgentsRoute(
           ? await runRetrySetupPhase(abortController.signal, () =>
               buildRetryAgentContext({
                 cyoaAgentWillRun: false,
+                beholderDirective: sanitisedDirective,
                 chatId,
                 db: app.db,
                 chat,
@@ -4110,6 +4453,7 @@ export async function registerRetryAgentsRoute(
                 resolvedAgents: resolvedAgents.map((entry) => entry.resolved),
                 lastAssistant: null,
                 chars,
+                personaContext: retryPersonaContext,
                 gameStateStore,
                 lorebooksStore,
                 streaming,
@@ -4162,6 +4506,15 @@ export async function registerRetryAgentsRoute(
         if (entries.length === 0) return;
         const context = toolInputs.agentContext;
         const toolAgents = entries.map((entry) => entry.resolved);
+        if (customLorebookBackfill) {
+          for (const agent of toolAgents) {
+            const enabledTools = Array.isArray(agent.settings.enabledTools) ? agent.settings.enabledTools : [];
+            agent.settings = {
+              ...agent.settings,
+              enabledTools: enabledTools.filter((toolName) => toolName === "save_lorebook_entry"),
+            };
+          }
+        }
         if (activeMusicPlayerSource === null) {
           const spotifyToolNames = new Set(DEFAULT_AGENT_TOOLS.spotify ?? []);
           for (const agent of toolAgents) {
@@ -4174,6 +4527,10 @@ export async function registerRetryAgentsRoute(
             };
           }
         }
+        const characterScopes = resolveIdentityCharacterScopes(toolInputs.promptCharacterIds, {
+          id: typeof context.memory._userIdentityId === "string" ? context.memory._userIdentityId : null,
+          source: context.memory._userIdentitySource === "character" ? "character" : null,
+        });
         await resolveAgentGenerationTools({
           requestBody: toolInputs.requestBody,
           chatId,
@@ -4184,7 +4541,8 @@ export async function registerRetryAgentsRoute(
           lorebooksStore,
           resolvedAgents: toolAgents,
           enabledConfigs,
-          promptCharacterIds: toolInputs.promptCharacterIds,
+          promptCharacterIds: characterScopes.promptCharacterIds,
+          lorebookCharacterIds: characterScopes.lorebookCharacterIds,
           personaId:
             typeof context.memory._personaId === "string" && context.memory._personaId.trim()
               ? context.memory._personaId
@@ -4239,6 +4597,10 @@ export async function registerRetryAgentsRoute(
           logger.warn(error, "[retry-agents] Failed to resolve image style instruction for the prompt writer");
         }
       }
+      agentContext.agentProgress = (event) => {
+        if (!abortController.signal.aborted) sendSseEvent(reply, { type: "agent_progress", data: event });
+      };
+      if (preGenerationAgentContext) preGenerationAgentContext.agentProgress = agentContext.agentProgress;
       if (debugMode) {
         const emitRetryAgentDebug = (event: AgentCallDebugEvent) => {
           if (abortController.signal.aborted) return;
@@ -4302,6 +4664,20 @@ export async function registerRetryAgentsRoute(
       >();
       const nonLorebookAgents = resolvedAgents.filter((entry) => {
         if (entry.resolved.type === "lorebook-keeper") return false;
+        if (customLorebookBackfillTarget) {
+          const context = buildHistoricalLorebookKeeperContext(
+            agentContext,
+            recentMessages,
+            customLorebookBackfillTarget.messageId,
+          );
+          if (!context || entry.resolved.id !== customLorebookBackfillTarget.agentConfigId) return false;
+          customLorebookReadBehindTargets.set(entry.resolved.id, {
+            context,
+            messageId: customLorebookBackfillTarget.messageId,
+            swipeIndex: customLorebookBackfillTarget.swipeIndex,
+          });
+          return true;
+        }
         const readBehindMessages = getCustomLorebookReadBehindMessages(entry.resolved.settings);
         const usesCustomLorebookReadBehind = customAgentUsesLorebookReadBehind(entry.resolved);
         if (!usesCustomLorebookReadBehind) return true;
@@ -4329,6 +4705,7 @@ export async function registerRetryAgentsRoute(
       if (cyoaAgentWillRun) {
         logger.info("[retry-agents] CYOA re-roll chatId=%s assistantMessageId=%s", chatId, lastAssistant?.id ?? "none");
       }
+      const preparedCapabilityContexts = new Map<string, AgentContext>();
       const rawResults = illustratorPromptReviewOverride
         ? [
             {
@@ -4379,10 +4756,11 @@ export async function registerRetryAgentsRoute(
                   chatMode,
                   chatMeta,
                   new Map([...customLorebookReadBehindTargets].map(([agentId, target]) => [agentId, target.context])),
+                  preparedCapabilityContexts,
                 )
               : [];
       if (abortController.signal.aborted) return;
-      const results = rawResults.map(markInvalidJsonAgentResult).map((result) =>
+      let results = rawResults.map(markInvalidJsonAgentResult).map((result) =>
         requireAgentWriteApproval
           ? markRetryLorebookResultForApproval({
               result,
@@ -4392,6 +4770,14 @@ export async function registerRetryAgentsRoute(
               resolvedAgents: nonLorebookAgents,
             })
           : result,
+      );
+      results = await Promise.all(
+        results.map(async (result) => {
+          const entry = nonLorebookAgents.find((agent) => agent.resolved.id === result.agentId);
+          const preparedContext = preparedCapabilityContexts.get(result.agentId);
+          if (!entry || !preparedContext) return result;
+          return (await finalizeCapabilityAgentResults([result], [entry.resolved], preparedContext))[0] ?? result;
+        }),
       );
       let rawLorebookKeeperRunEntries: Array<{ messageId: string; swipeIndex: number; result: AgentResult }> = [];
       if (lorebookKeeperAgent) {
@@ -4462,11 +4848,11 @@ export async function registerRetryAgentsRoute(
                 [...agentContext.recentMessages]
                   .reverse()
                   .find((message) => message.role === "user" && message.content.trim())?.content ?? "";
-              const personaId =
-                typeof agentContext.memory._personaId === "string" ? agentContext.memory._personaId : "";
+              const userIdentityId =
+                typeof agentContext.memory._userIdentityId === "string" ? agentContext.memory._userIdentityId : "";
               const sourceTextByCharacterId = new Map<string, string>();
-              if (personaId && latestUserExpressionSource.trim()) {
-                sourceTextByCharacterId.set(personaId, latestUserExpressionSource);
+              if (userIdentityId && latestUserExpressionSource.trim()) {
+                sourceTextByCharacterId.set(userIdentityId, latestUserExpressionSource);
               }
               const completion = completeRequiredSpriteExpressionEntries(
                 validatedExpressions,
@@ -4568,6 +4954,7 @@ export async function registerRetryAgentsRoute(
         }
       }
       if (abortController.signal.aborted) return;
+      let customLorebookBackfillEffectStatus: RetryLorebookEffectStatus | null = null;
       await applyRetryResultEffects({
         app,
         reply,
@@ -4576,7 +4963,9 @@ export async function registerRetryAgentsRoute(
         retryMessageId,
         retrySwipeIndex,
         generationId,
-        results: permittedResults,
+        results: customLorebookBackfillTarget
+          ? permittedResults.filter((result) => result.type === "lorebook_update")
+          : permittedResults,
         agentContext,
         mainResponseRaw: (lastAssistant?.content as string) ?? "",
         lorebooksStore,
@@ -4592,7 +4981,25 @@ export async function registerRetryAgentsRoute(
         debugMode,
         secretPlotRerollMode,
         signal: abortController.signal,
+        onLorebookEffectStatus: customLorebookBackfillTarget
+          ? (agentId, status) => {
+              if (agentId === customLorebookBackfillTarget.agentConfigId) {
+                customLorebookBackfillEffectStatus = status;
+              }
+            }
+          : undefined,
       });
+
+      if (customLorebookBackfillTarget && customLorebookBackfillEffectStatus === "applied") {
+        // Backfill exposes only idempotent lorebook writes, so a cursor write
+        // failure can safely retry this chunk without duplicating effects.
+        await agentsStore.setMemory(
+          customLorebookBackfillTarget.agentConfigId,
+          chatId,
+          CUSTOM_LOREBOOK_BACKFILL_CURSOR_KEY,
+          customLorebookBackfillTarget.messageId,
+        );
+      }
 
       if (abortController.signal.aborted) return;
       sendSseEvent(reply, { type: "done", data: "" });

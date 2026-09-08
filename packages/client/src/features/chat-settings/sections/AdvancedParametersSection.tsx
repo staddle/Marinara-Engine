@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { ChevronDown, Save, Settings2 } from "lucide-react";
 import { HelpTooltip } from "../../../components/ui/HelpTooltip";
+import { AgentSettingsActionButton } from "../../../components/chat/AgentSettingsControls";
 import {
   CHAT_PARAMETER_DEFAULTS,
   GenerationParametersFields,
@@ -27,6 +28,8 @@ const EDITABLE_PARAMETER_KEYS: Array<keyof EditableGenerationParameters> = [
   "reasoningEffort",
   "verbosity",
   "serviceTier",
+  "strictRoleFormatting",
+  "singleUserMessage",
   "assistantPrefill",
   "assistantReasoningPrefill",
   "customThinkingTags",
@@ -49,6 +52,7 @@ interface AdvancedParametersSectionProps {
   onChatParametersChange: (chatParameters: Record<string, unknown>) => void;
   onContextMessageLimitChange: (value: number | null) => void;
   onExcludePastReasoningChange: (value: boolean) => void;
+  onPastReasoningLimitChange: (value: number) => void;
   onImageCaptioningChange: (patch: {
     imageCaptioningEnabled?: boolean;
     imageCaptioningConnectionId?: string | null;
@@ -67,6 +71,7 @@ export function AdvancedParametersSection({
   onChatParametersChange,
   onContextMessageLimitChange,
   onExcludePastReasoningChange,
+  onPastReasoningLimitChange,
   onImageCaptioningChange,
 }: AdvancedParametersSectionProps) {
   const { t: localizeUi } = useUiTranslation();
@@ -148,6 +153,15 @@ export function AdvancedParametersSection({
     // map even when it matches the editor fallback so an inherited preset value
     // cannot make a disabled parameter reappear in the provider request.
     sparse.enabledParameters = next.enabledParameters ?? STRICT_CONNECTION_PARAMETER_SEND_DEFAULTS;
+    if (
+      next.strictRoleFormatting !== effectiveParams.strictRoleFormatting ||
+      next.singleUserMessage !== effectiveParams.singleUserMessage ||
+      params.strictRoleFormatting !== undefined ||
+      params.singleUserMessage !== undefined
+    ) {
+      sparse.strictRoleFormatting = next.strictRoleFormatting;
+      sparse.singleUserMessage = next.singleUserMessage;
+    }
     onChatParametersChange(sparse);
   };
   const toggleExpanded = () => setExpanded((open) => !open);
@@ -159,7 +173,7 @@ export function AdvancedParametersSection({
   };
 
   return (
-    <div className="border-b border-[var(--border)]">
+    <div data-chat-settings-section="advanced-parameters" className="border-b border-[var(--border)]">
       <div
         role="button"
         tabIndex={0}
@@ -194,7 +208,7 @@ export function AdvancedParametersSection({
           </p>
           <GenerationParametersFields
             value={effectiveParams}
-            showOpenRouterServiceTier={conn?.provider === "openrouter"}
+            showServiceTier={conn?.provider === "openrouter" || conn?.provider === "nanogpt"}
             enabledParametersFallback={STRICT_CONNECTION_PARAMETER_SEND_DEFAULTS}
             onChange={setParameters}
           />
@@ -245,6 +259,25 @@ export function AdvancedParametersSection({
               )}
               labelClassName="text-xs font-medium"
             />
+            {!excludeReasoningEnabled && (
+              <label className="block space-y-1 px-1">
+                <span className="text-[0.6875rem] font-medium text-[var(--muted-foreground)]">
+                  {localizeUi("chatSettings.advanced.pastReasoningLimit")}
+                </span>
+                <DraftNumberInput
+                  ariaLabel={localizeUi("chatSettings.advanced.pastReasoningLimit")}
+                  min={0}
+                  max={9999}
+                  value={typeof metadata.pastReasoningLimit === "number" ? metadata.pastReasoningLimit : 1}
+                  onCommit={(value) => onPastReasoningLimitChange(Math.max(0, Math.min(9999, Math.floor(value))))}
+                  selectOnFocus
+                  className="w-20 rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-xs outline-none ring-1 ring-transparent transition-shadow focus:ring-[var(--primary)]/40"
+                />
+                <span className="block text-[0.625rem] text-[var(--muted-foreground)]">
+                  {localizeUi("chatSettings.advanced.pastReasoningLimitHint")}
+                </span>
+              </label>
+            )}
             <SettingsSwitch
               label={localizeUi("ui.chatSettings.advancedparameterssection.imageCaptioning")}
               description={
@@ -307,7 +340,9 @@ export function AdvancedParametersSection({
             )}
           </div>
           {canSaveConnectionDefaults && (
-            <button
+            <AgentSettingsActionButton
+              type="button"
+              variant="primary"
               onClick={() => {
                 saveDefaults.mutate({
                   id: connectionId,
@@ -318,20 +353,17 @@ export function AdvancedParametersSection({
                   },
                 });
               }}
-              className="w-full rounded-lg bg-[var(--primary)]/10 px-3 py-1.5 text-[0.625rem] font-medium text-[var(--primary)] ring-1 ring-[var(--primary)]/20 transition-colors hover:bg-[var(--primary)]/20"
+              className="w-full"
             >
               <Save size="0.625rem" className="inline mr-1 -mt-px" />
               {saveDefaults.isPending
                 ? localizeUi("chat.settings.inlineEditor.saving")
                 : localizeUi("ui.chatSettings.advancedparameterssection.saveAsConnectionDefault")}
-            </button>
+            </AgentSettingsActionButton>
           )}
-          <button
-            onClick={() => onChatParametersChange({})}
-            className="w-full rounded-lg bg-[var(--secondary)] px-3 py-1.5 text-[0.625rem] text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)]"
-          >
+          <AgentSettingsActionButton type="button" onClick={() => onChatParametersChange({})} className="w-full">
             {localizeUi("ui.chatSettings.advancedparameterssection.resetToDefaults")}
-          </button>
+          </AgentSettingsActionButton>
         </div>
       )}
     </div>

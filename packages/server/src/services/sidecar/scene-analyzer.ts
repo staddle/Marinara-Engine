@@ -332,6 +332,7 @@ export function buildSceneAnalyzerUserPrompt(
         ? "short, concrete sound-generation prompts (for example: quiet footsteps on wet stone, distant wooden door slam)"
         : "sound effects (door slam, explosion, footsteps, impact)"
     }`,
+    `   - "sfxLoopCount": optional total play count from 1 to 5 when a sound should repeat on that beat; omit it for one play`,
     `   - "directions": rare cinematic effects at the exact beat they should happen, usually paired with a meaningful sound or reveal`,
     `   - "background": a DIFFERENT background tag if the characters move to a new location at that beat. The background stays the same until the NEXT segment that changes it, so only set "background" on the beat where characters actually arrive at a new location. Do NOT repeat the current background.`,
     `   Only include segments that HAVE at least one effect — omit empty segments.`,
@@ -375,6 +376,10 @@ export function buildSceneAnalyzerUserPrompt(
     `- Cinematic directions are spice, not punctuation. Use at most 2 total directions per turn, and never more than 1 direction in any 3-beat span. Prefer none for routine dialogue.`,
     `- Use directions for real visual beats: a door slamming, a blade impact, thunder, a memory fracture, a kiss/reveal close-up, a panic spike, a scene transition, or a major emotional turn. Do not attach directions to every line.`,
     `- The background should stay the SAME as long as the characters remain in the same location. Only change it in a segment when characters physically move to a different place.`,
+    `- Within segmentEffects, directions and background are optional. Omit them unless that beat needs a visual effect or location change.`,
+    ...(generateSoundEffects || (ctx?.availableSfx?.length ?? 0) > 0
+      ? [`- sfxLoopCount is optional and means the total number of sequential plays for each sfx on that beat (1-5).`]
+      : []),
     `- Generated reusable background prompts must be world-grounded scenery. Include concrete place details and any provided setting era/genre context; exclude characters, UI, text, and modern objects unless the world context supports them.`,
     ...(canGenerateIllustrations
       ? [
@@ -425,11 +430,14 @@ export function buildSceneAnalyzerUserPrompt(
   // Build ONE segment example showing the range
   const segmentFields: string[] = [];
   segmentFields.push(`      "segment": <0-${maxSegmentIndex}>`);
-  if (sfxLine) segmentFields.push(sfxLine);
+  if (sfxLine) {
+    segmentFields.push(sfxLine);
+    segmentFields.push(`      "sfxLoopCount": <1-5>`);
+  }
   segmentFields.push(
-    `      "directions": [{"effect":"<flash|screen_shake|pulse|slow_zoom|impact_zoom|tilt|desaturate|chromatic_aberration|film_grain|rain_streaks|spotlight|focus|vignette|letterbox|color_grade>","duration":<0.4-3>,"intensity":<0-1>}]  // optional, rare`,
+    `      "directions": [{"effect":"<flash|screen_shake|pulse|slow_zoom|impact_zoom|tilt|desaturate|chromatic_aberration|film_grain|rain_streaks|spotlight|focus|vignette|letterbox|color_grade>","duration":<0.4-3>,"intensity":<0-1>}]`,
   );
-  segmentFields.push(`${bgLine}  // optional — only when characters move to a new location`);
+  segmentFields.push(bgLine);
   const segmentBody = segmentFields.join(",\n");
 
   parts.push(

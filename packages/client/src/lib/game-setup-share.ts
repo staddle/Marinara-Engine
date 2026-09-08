@@ -4,6 +4,7 @@ import {
   GAME_STORYBOARD_COMIC_ANIMATION_PROMPT_TEMPLATE_ID,
   STORYBOARD_OPTIMIZED_IMAGE_PROMPT_TEMPLATE_ID,
   generationParametersSchema,
+  resolveGameSpatialMapDraftOptions,
   type GameInitialSetupConnectionSnapshot,
   type GameInitialSetupLabels,
   type GameInitialSetupSnapshot,
@@ -199,6 +200,7 @@ function parseShareConfig(value: unknown): GameSetupConfig {
 
   const optionalBooleans = [
     "enableAgents",
+    "enableQuickTimeEvents",
     "enableSpriteGeneration",
     "gameImageDynamicPromptEnabled",
     "gameStoryboardsEnabled",
@@ -228,6 +230,31 @@ function parseShareConfig(value: unknown): GameSetupConfig {
     throw new Error("This file has an invalid world map mode.");
   }
   if (
+    value.spatialMapDraftSize !== undefined &&
+    value.spatialMapDraftSize !== "small" &&
+    value.spatialMapDraftSize !== "medium" &&
+    value.spatialMapDraftSize !== "large"
+  ) {
+    throw new Error("This file has an invalid Spatial Map Draft Size value.");
+  }
+  if (
+    value.spatialMapTargetLocationCount !== undefined &&
+    (typeof value.spatialMapTargetLocationCount !== "number" ||
+      !Number.isInteger(value.spatialMapTargetLocationCount) ||
+      value.spatialMapTargetLocationCount < 1 ||
+      value.spatialMapTargetLocationCount > 40)
+  ) {
+    throw new Error("This file has an invalid Spatial Map Target Location Count value.");
+  }
+  if (
+    value.spatialMapGroundingMode !== undefined &&
+    value.spatialMapGroundingMode !== "setup" &&
+    value.spatialMapGroundingMode !== "lore_strict" &&
+    value.spatialMapGroundingMode !== "lore_expand"
+  ) {
+    throw new Error("This file has an invalid Spatial Map Grounding Mode value.");
+  }
+  if (
     value.spotifySourceType !== undefined &&
     value.spotifySourceType !== "liked" &&
     value.spotifySourceType !== "playlist" &&
@@ -252,6 +279,10 @@ function parseShareConfig(value: unknown): GameSetupConfig {
     throw new Error("This file has invalid HUD widgets.");
   }
   const generationParameters = parseGenerationParameters(value.generationParameters);
+  const spatialMapDraftOptions =
+    value.spatialMapDraftSize !== undefined || value.spatialMapTargetLocationCount !== undefined
+      ? resolveGameSpatialMapDraftOptions(value.spatialMapDraftSize, value.spatialMapTargetLocationCount)
+      : null;
 
   return {
     ...(value as unknown as GameSetupConfig),
@@ -264,6 +295,22 @@ function parseShareConfig(value: unknown): GameSetupConfig {
     rating,
     partyCharacterIds: [...value.partyCharacterIds],
     generationParameters,
+    ...(spatialMapDraftOptions
+      ? {
+          spatialMapDraftSize: spatialMapDraftOptions.size,
+          spatialMapTargetLocationCount: spatialMapDraftOptions.targetLocationCount,
+        }
+      : {}),
+  };
+}
+
+function normalizeShareConfig(config: GameSetupConfig): GameSetupConfig {
+  if (config.spatialMapDraftSize === undefined && config.spatialMapTargetLocationCount === undefined) return config;
+  const options = resolveGameSpatialMapDraftOptions(config.spatialMapDraftSize, config.spatialMapTargetLocationCount);
+  return {
+    ...config,
+    spatialMapDraftSize: options.size,
+    spatialMapTargetLocationCount: options.targetLocationCount,
   };
 }
 
@@ -271,6 +318,7 @@ export function buildGameSetupShareFile(
   source: GameSetupShareSource,
   exportedAt = new Date().toISOString(),
 ): GameSetupShareFile {
+  const config = normalizeShareConfig(source.config);
   const labels: GameInitialSetupLabels | undefined = source.labels
     ? {
         characterNames: source.labels.characterNames ? { ...source.labels.characterNames } : undefined,
@@ -287,8 +335,8 @@ export function buildGameSetupShareFile(
     gameName: source.gameName,
     gmConnectionId: source.fallbackGmConnectionId ?? null,
     setup: {
-      config: source.config,
-      effectiveGenerationParameters: source.effectiveGenerationParameters ?? source.config.generationParameters ?? null,
+      config,
+      effectiveGenerationParameters: source.effectiveGenerationParameters ?? config.generationParameters ?? null,
       preferences: source.preferences?.trim() || null,
       connections: source.connections
         ? {
@@ -446,6 +494,11 @@ export function resolveGameSetupImport(
     warnings.push(`${describeSavedResource(sourceName, "A saved lorebook")} is unavailable and was skipped.`);
     return [];
   });
+  let spatialMapGroundingMode = sourceConfig.spatialMapGroundingMode;
+  if (spatialMapGroundingMode && spatialMapGroundingMode !== "setup" && activeLorebookIds.length === 0) {
+    warnings.push("The World map build-from lorebooks are unavailable; using Game setup instead.");
+    spatialMapGroundingMode = "setup";
+  }
 
   const promptPresetName = sourceConfig.promptPresetId
     ? labels?.promptPresetNames?.[sourceConfig.promptPresetId]
@@ -491,6 +544,7 @@ export function resolveGameSetupImport(
       videoConnectionId: videoConnectionId ?? undefined,
       audioConnectionId: audioConnectionId ?? undefined,
       activeLorebookIds: [...new Set(activeLorebookIds)],
+      spatialMapGroundingMode,
       promptPresetId,
     },
     preferences: file.setup.preferences ?? "",
@@ -605,7 +659,14 @@ function generationParameterRows(parameters: Partial<GenerationParameters> | nul
 }
 
 export function buildGameSetupSummarySections(source: GameSetupShareSource): GameSetupSummarySection[] {
-  const { config, preferences, labels, connections } = source;
+  const { preferences, labels, connections } = source;
+  const config = normalizeShareConfig(source.config);
+  const spatialMapGroundingLabel =
+    config.spatialMapGroundingMode === "lore_strict"
+      ? "Strict lore"
+      : config.spatialMapGroundingMode === "lore_expand"
+        ? "Lore + AI"
+        : "Game setup";
   const party = config.partyCharacterIds.length
     ? config.partyCharacterIds
         .map((id) => labels?.characterNames?.[id]?.trim())
@@ -632,6 +693,7 @@ export function buildGameSetupSummarySections(source: GameSetupShareSource): Gam
         { label: "Tone", value: config.tone },
         { label: "Difficulty", value: titleCaseToken(config.difficulty) },
         { label: "Combat style", value: titleCaseToken(config.combatStyle ?? "classic") },
+        { label: "Quick Time Events", value: config.enableQuickTimeEvents === false ? "Off" : "On" },
         { label: "Content rating", value: config.rating.toUpperCase() },
         { label: "Language", value: config.language?.trim() || "Default" },
         { label: "Player goals", value: config.playerGoals.trim() || "None" },
@@ -722,6 +784,19 @@ export function buildGameSetupSummarySections(source: GameSetupShareSource): Gam
       rows: [
         { label: "Active lorebooks", value: lorebooks },
         { label: "World map creation prompt", value: config.spatialMapInstructions?.trim() || "None" },
+        ...(config.gameWorldMapMode === "hierarchical"
+          ? [
+              {
+                label: "World map size",
+                value: titleCaseToken(config.spatialMapDraftSize ?? "medium"),
+              },
+              {
+                label: "World map place target",
+                value: String(config.spatialMapTargetLocationCount ?? 16),
+              },
+              { label: "World map build from", value: spatialMapGroundingLabel },
+            ]
+          : []),
         { label: "HUD widgets", value: formatWidgets(config) },
         { label: "Music DJ", value: formatMusicSource(config) },
         { label: "Lorebook Keeper", value: config.enableLorebookKeeper ? "On" : "Off" },

@@ -16,6 +16,8 @@ Marinara groups its agents into three categories in the **Agents** panel: **Writ
 
 A run interval means the agent runs once every few user and assistant messages instead of after every message. You can change a run interval in the agent's setup, up to 100.
 
+Illustrator also accepts **0** for manual-only generation: it stays available for Gallery actions but never runs automatically. Other agents keep their existing positive intervals.
+
 ## Writer agents
 
 Writer agents shape the story or the prose. They either add guidance before the reply or clean up the reply after it.
@@ -152,6 +154,18 @@ Tracks money, equipped gear, and carried items as three structured lists without
 - **Where it works**: Roleplay.
 - **Key settings**: **Add as Prompt Section** (on by default). The HUD and Tracker Panel let you edit and lock every name and quantity.
 
+### Memory Nag
+
+Keeps a short editable memory vault for each Roleplay chat. It scans the transcript in checkpointed batches, sorts memories by current and past character participants, and moves clearly settled memories to a restorable Resolved list. A memory may preserve a short dialogue line word for word when its exact wording matters.
+
+After each reply, deterministic word matching gives the tracker only the most relevant active memories for the involved characters. The tracker then decides whether the current situation actually calls for a nag and may choose only from those supplied memories; it cannot create a new memory during recall.
+
+- **Phase**: Post-Processing.
+- **Where it works**: Roleplay only.
+- **Key settings**: a separate **Vault scan connection** (default: the Agent connection), **Messages per batch** (20), **Maximum memories created per character** (10), **Maximum memories considered per character** (5), and **Maximum memories injected** (3). Use **Scan chat** for the initial backfill and **Open vault** to search, filter, add, edit, resolve, restore, or delete memories.
+- **Prompt placement**: without a preset marker, selected nags enter the next reply inside `<context><memory_nags>…</memory_nags></context>`. Add a Memory Nag Agent section to place them explicitly.
+- **Data lifecycle**: the vault belongs to one chat and remains stored if the package is disabled or uninstalled, so reinstalling can resume from the last checkpoint. Deleting a memory is permanent and always asks for confirmation.
+
 ### World Maps
 
 Adds persistent nested locations and spatial relationships to a story. You can author regions, areas, rooms, and connections, move between locations, and let the current position contribute spatial context to generation. Game Mode also gains the package's world-map view.
@@ -175,12 +189,12 @@ Simulates a live audience reacting to your scene, shown as a floating **Echo** w
 
 ### Noodle
 
-Adds an optional local social world with the Noodle public timeline and the NoodleR creator-and-fan roleplay feed. It opens in a dedicated Home tab instead of running in the normal chat-agent pipeline.
+Adds the optional local Noodle public timeline. It opens in a dedicated Home tab instead of running in the normal chat-agent pipeline.
 
 - **Integration**: Feature package; it contributes the Home tab, local routes, generation and media flows, and background schedulers.
 - **Where it works**: Home, with optional context carried in from Conversation, Roleplay, and Game chats.
-- **Key settings**: install it from **Agents → Download Agents** and restart Marinara Engine when prompted. Inside Noodle, you can configure invited accounts, text and image connections, timeline refreshes, NoodleR Creator profiles, simulated post access, and audience activity.
-- **Data lifecycle**: uninstalling removes the Home tab and stops package routes and schedulers after restart while preserving existing Noodle and NoodleR data for a later reinstall.
+- **Key settings**: install it from **Agents → Download Agents** and restart Marinara Engine when prompted. Inside Noodle, you can configure invited accounts, text and image connections, timeline refreshes, random users, and chat carryover.
+- **Data lifecycle**: uninstalling removes the Home tab and stops package routes and schedulers after restart while preserving existing Noodle data for a later reinstall.
 - **Full guide**: [Noodle: The In-App Social Timeline](../noodle/overview.md).
 
 ### Long-Term Memory

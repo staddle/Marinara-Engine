@@ -47,15 +47,20 @@ import { ResumeSessionStore, resumeScratchCwd } from "./claude-subscription/sess
 const CACHE_WRITE_COST_MULTIPLIER = 1.25;
 const CACHE_READ_COST_MULTIPLIER = 0.1;
 
-/**
- * SDK option keys the resume path owns exclusively. A connection's
- * `customParameters` must never set these: a forged `resume`/`sessionStore`
- * could inject an attacker-controlled transcript, and a forged `cwd` controls
- * where the SDK subprocess runs. They are stripped unconditionally after
- * `applyCustomParameters` and re-applied only from provider-derived values
- * (see `chat()`).
- */
-const RESERVED_SDK_OPTION_KEYS = ["resume", "cwd", "sessionStore"] as const;
+/** Model-generation SDK options that Custom Parameters may tune. Everything
+ * else owns process, tool, filesystem, environment, or session behavior and
+ * must remain under the provider's text-only isolation policy. */
+const CUSTOMIZABLE_SDK_OPTION_KEYS = [
+  "betas",
+  "effort",
+  "fallbackModel",
+  "maxBudgetUsd",
+  "maxThinkingTokens",
+  "model",
+  "outputFormat",
+  "taskBudget",
+  "thinking",
+] as const;
 
 /**
  * Lazy import wrapper. The SDK is heavy and pulls in optional native pieces;
@@ -453,20 +458,26 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
       ...(this.apiKey ? { ANTHROPIC_API_KEY: this.apiKey } : {}),
     };
 
-    const reserved = sdkOptions as Record<string, unknown>;
-    this.applyCustomParameters(reserved, options);
+    const sdkOptionRecord = sdkOptions as Record<string, unknown>;
+    const customGenerationOptions: Record<string, unknown> = {};
+    for (const key of CUSTOMIZABLE_SDK_OPTION_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(sdkOptionRecord, key)) {
+        customGenerationOptions[key] = sdkOptionRecord[key];
+      }
+    }
+    this.applyCustomParameters(customGenerationOptions, options);
+    for (const key of CUSTOMIZABLE_SDK_OPTION_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(customGenerationOptions, key)) {
+        sdkOptionRecord[key] = customGenerationOptions[key];
+      }
+    }
 
-    // RESERVED keys are load-bearing for the resume path's contract: the SDK
-    // loads the injected history from `sessionStore.load()` and resumes the
-    // session by ID. Strip any caller-supplied values unconditionally — a
-    // connection's customParameters must not reach the SDK even on the fold
-    // path and the empty-history resume sub-path, where the guard below stays
-    // closed.
-    for (const key of RESERVED_SDK_OPTION_KEYS) delete reserved[key];
+    // Resume wiring is always provider-derived. Custom Parameters are filtered
+    // above, so no caller-supplied process or session option reaches the SDK.
     if (resumeSessionId && resumeCwd && sessionStore) {
-      reserved["resume"] = resumeSessionId;
-      reserved["cwd"] = resumeCwd;
-      reserved["sessionStore"] = sessionStore;
+      sdkOptionRecord["resume"] = resumeSessionId;
+      sdkOptionRecord["cwd"] = resumeCwd;
+      sdkOptionRecord["sessionStore"] = sessionStore;
     }
 
     let inputTokens = 0;

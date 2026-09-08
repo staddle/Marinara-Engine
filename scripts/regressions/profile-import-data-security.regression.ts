@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import AdmZip from "adm-zip";
 import Fastify from "../../packages/server/node_modules/fastify/fastify.js";
+import multipart from "../../packages/server/node_modules/@fastify/multipart/index.js";
 import {
   formatProfileImportWarningDetails,
   formatProfileImportWarningSummary,
@@ -11,8 +13,10 @@ import {
 
 const warningCopy: ProfileImportWarningCopy = {
   missingAssetSummary: (count) => `${count} asset file${count === 1 ? "" : "s"} missing from the ZIP.`,
+  skippedAssetSummary: (count) => `${count} asset file${count === 1 ? "" : "s"} skipped.`,
   securityWarningSummary: (count) => `${count} import security warning${count === 1 ? "" : "s"}.`,
   missingLabel: "Missing",
+  skippedLabel: "Skipped",
   additionalPaths: (count) => `, +${count} more`,
   additionalMessages: (count) => ` +${count} more.`,
 };
@@ -20,20 +24,34 @@ const mixedWarnings = [
   { type: "missing_asset", path: "gallery/missing.png", message: "Missing asset" },
   { type: "custom_tools_quarantined", message: "1 imported executable custom tool will be disabled." },
   {
-    type: "asset_rejected",
+    type: "skipped_asset",
     path: "gallery/rejected.svg",
     message: "Rejected an unsafe profile image.",
   },
 ];
 assert.match(
   formatProfileImportWarningSummary(mixedWarnings, warningCopy),
-  /1 asset file.*2 import security warnings/su,
+  /1 asset file missing.*1 asset file skipped.*1 import security warning/su,
 );
 const mixedWarningDetails = formatProfileImportWarningDetails(mixedWarnings, warningCopy);
 assert.match(mixedWarningDetails, /Missing: gallery\/missing\.png/su);
 assert.doesNotMatch(mixedWarningDetails, /Missing:[^\n]*rejected\.svg/su);
+assert.match(mixedWarningDetails, /Skipped: Rejected an unsafe profile image/su);
 assert.match(mixedWarningDetails, /1 imported executable custom tool will be disabled/su);
-assert.match(mixedWarningDetails, /Rejected an unsafe profile image/su);
+
+function multipartUpload(filename: string, bytes: Buffer) {
+  const boundary = `marinara-${Date.now().toString(36)}`;
+  return {
+    payload: Buffer.concat([
+      Buffer.from(
+        `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: application/zip\r\n\r\n`,
+      ),
+      bytes,
+      Buffer.from(`\r\n--${boundary}--\r\n`),
+    ]),
+    headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
+  };
+}
 
 const storageRoot = await mkdtemp(join(tmpdir(), "marinara-profile-import-data-security-"));
 const previousDataDir = process.env.DATA_DIR;
@@ -54,11 +72,68 @@ try {
   const db = await dbModule.getDB();
   const app = Fastify();
   app.decorate("db", db);
+  await app.register(multipart);
   await app.register(backupModule.backupRoutes, { prefix: "/api/backup" });
   await app.ready();
 
   try {
     const timestamp = new Date(0).toISOString();
+    const validPng = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+XxY4WQAAAABJRU5ErkJggg==",
+      "base64",
+    );
+    const zipAssetPath = "gallery/global/preview-token.png";
+    const profileZip = new AdmZip();
+    profileZip.addFile(
+      "marinara-profile.json",
+      Buffer.from(
+        JSON.stringify({
+          type: "marinara_profile",
+          version: 1,
+          exportedAt: timestamp,
+          data: {
+            fileStorage: {
+              version: 1,
+              tables: {},
+              files: [{ path: zipAssetPath, size: validPng.length }],
+            },
+          },
+        }),
+      ),
+    );
+    profileZip.addFile(zipAssetPath, validPng);
+    const zipPreviewResponse = await app.inject({
+      method: "POST",
+      url: "/api/backup/import-profile?preview=true",
+      ...multipartUpload("profile.zip", profileZip.toBuffer()),
+    });
+    assert.equal(zipPreviewResponse.statusCode, 200, zipPreviewResponse.body);
+    const zipPreview = zipPreviewResponse.json();
+    assert.equal(typeof zipPreview.previewToken, "string");
+    const realDateNow = Date.now;
+    Date.now = () => realDateNow() + 31 * 60 * 1_000;
+    const zipImportResponse = await app
+      .inject({
+        method: "POST",
+        url: "/api/backup/import-profile",
+        headers: { "x-profile-preview-token": zipPreview.previewToken },
+      })
+      .finally(() => {
+        Date.now = realDateNow;
+      });
+    assert.equal(zipImportResponse.statusCode, 200, zipImportResponse.body);
+    assert.deepEqual(
+      await readFile(join(storageRoot, ...zipAssetPath.split("/"))),
+      validPng,
+      "a ZIP import must reuse its staged preview after 30 minutes without a second request body",
+    );
+    const replayedZipImport = await app.inject({
+      method: "POST",
+      url: "/api/backup/import-profile",
+      headers: { "x-profile-preview-token": zipPreview.previewToken },
+    });
+    assert.equal(replayedZipImport.statusCode, 410, "a staged profile preview token must be single-use");
+
     const sourceOverOneMiB = `/*${"x".repeat(1024 * 1024)}*/`;
     const connectionFixture = (id: string, overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
       id,
@@ -84,6 +159,31 @@ try {
       connectionFixture("changed-embedding", { embeddingBaseUrl: "https://trusted.example/embeddings" }),
     ];
     await db.insert(schema.apiConnections).values(existingFixtures as never);
+    const promptPresetFixture = (id: string, name: string) => ({
+      id,
+      name,
+      description: "",
+      imagePath: null,
+      conversationPrompt: "",
+      gamePrompt: "",
+      sectionOrder: "[]",
+      groupOrder: "[]",
+      variableGroups: "[]",
+      variableValues: "{}",
+      parameters: "{}",
+      wrapFormat: "xml",
+      defaultChoices: "{}",
+      isDefault: "false",
+      author: "Marinara",
+      systemKey: "marinara-universal-preset",
+      embedding: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+    const localStockPreset = promptPresetFixture("local-stock-preset", "Marinara's Universal Preset");
+    const importedStockCopy = promptPresetFixture("imported-stock-copy", "Marinara's Universal Preset");
+    const importedLocalStockPreset = { ...localStockPreset, systemKey: "" };
+    await db.insert(schema.promptPresets).values(localStockPreset);
     const storedConnections = (await db.select().from(schema.apiConnections)) as Array<Record<string, unknown>>;
     const storedById = new Map(storedConnections.map((row) => [row.id, row]));
     const importedConnection = (id: string, overrides: Record<string, unknown> = {}) => {
@@ -198,6 +298,7 @@ try {
           version: 1,
           tables: {
             api_connections: importedConnections,
+            prompt_presets: [importedLocalStockPreset, importedStockCopy],
             mari_instructions: [importedInstruction],
             custom_themes: [importedTheme],
             custom_tools: [importedTool],
@@ -215,7 +316,9 @@ try {
     });
     assert.equal(previewResponse.statusCode, 200, previewResponse.body);
     const preview = previewResponse.json();
+    assert.equal(typeof preview.previewToken, "string", "preview must retain one reusable server-side import input");
     assert.equal(preview.imported.connections, 6);
+    assert.equal(preview.imported.presets, 2);
     assert.equal(preview.imported.customTools, 1);
     assert.equal(preview.imported.mariInstructions, 1);
     assert.equal(preview.imported.personalExtensions, 2);
@@ -231,13 +334,24 @@ try {
     const importResponse = await app.inject({
       method: "POST",
       url: "/api/backup/import-profile",
-      payload: modernPayload,
+      headers: { "x-profile-preview-token": preview.previewToken },
     });
     assert.equal(importResponse.statusCode, 200, importResponse.body);
 
     const afterImport = (await db.select().from(schema.apiConnections)) as Array<Record<string, unknown>>;
     const afterById = new Map(afterImport.map((row) => [row.id, row]));
     const connections = connectionsModule.createConnectionsStorage(db);
+    const importedPresets = await db.select().from(schema.promptPresets);
+    assert.equal(
+      importedPresets.find((preset) => preset.id === localStockPreset.id)?.systemKey,
+      "marinara-universal-preset",
+      "the local canonical Universal Preset must stay protected",
+    );
+    assert.equal(
+      importedPresets.find((preset) => preset.id === importedStockCopy.id)?.systemKey,
+      "",
+      "a foreign Universal Preset copy must import as an editable, deletable preset",
+    );
     const sameIdentity = afterById.get("same-identity")!;
     assert.equal(
       cryptoModule.decryptApiKey(String(sameIdentity.apiKeyEncrypted)),
@@ -363,10 +477,12 @@ try {
         .warnings.some((warning: { type: string }) => warning.type === "custom_themes_quarantined"),
       "legacy preview must disclose that imported active themes stay inactive",
     );
+    const legacyPreview = legacyPreviewResponse.json();
+    assert.equal(typeof legacyPreview.previewToken, "string");
     const legacyImportResponse = await app.inject({
       method: "POST",
       url: "/api/backup/import-profile",
-      payload: legacyPayload,
+      headers: { "x-profile-preview-token": legacyPreview.previewToken },
     });
     assert.equal(legacyImportResponse.statusCode, 200, legacyImportResponse.body);
     assert.equal((await themes.getActive())?.id, localTheme!.id, "legacy import must preserve the local active theme");

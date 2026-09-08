@@ -6,6 +6,7 @@ export { renderTemplate, validateTemplate } from "./template.js";
 export type { TemplateValidationResult } from "./template.js";
 export {
   PROMPT_OVERRIDE_REGISTRY,
+  CHARACTERS_REFERENCE_SHEET,
   SPRITES_ANIMATED_PORTRAIT,
   SPRITES_EXPRESSION_SHEET,
   SPRITES_SINGLE_PORTRAIT,
@@ -34,6 +35,7 @@ export {
 export type {
   PromptOverrideKeyDef,
   PromptVariable,
+  CharactersReferenceSheetCtx,
   SpritesExpressionSheetCtx,
   SpritesSinglePortraitCtx,
   SpritesAnimatedPortraitCtx,

@@ -478,7 +478,11 @@ export function GameSessionReplay({
           audioManager.playAmbient(resolveAssetTag(effect.ambient, "ambient", assetMap), assetMap);
         }
         for (const sfx of effect.sfx ?? []) {
-          audioManager.playSfx(resolveAssetTag(sfx, "sfx", assetMap), assetMap);
+          audioManager.playSfx(
+            resolveAssetTag(sfx, "sfx", assetMap),
+            assetMap,
+            "sfxLoopCount" in effect ? effect.sfxLoopCount : undefined,
+          );
         }
         if (effect.directions?.length) {
           onPlayDirections(effect.directions);

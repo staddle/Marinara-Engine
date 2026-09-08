@@ -19,6 +19,9 @@ import type { BaseLLMProvider } from "../llm/base-provider.js";
 import { createLLMProvider } from "../llm/provider-registry.js";
 import { getLocalSidecarProvider, LOCAL_SIDECAR_MODEL } from "../llm/local-sidecar.js";
 import { sidecarModelService } from "../sidecar/sidecar-model.service.js";
+import { utilitySidecarService } from "../utility-sidecar/utility-sidecar.service.js";
+import { buildUtilitySidecarEntry } from "../utility-sidecar/utility-sidecar.provider.js";
+import { UTILITY_SIDECAR_CONNECTION_ID } from "@marinara-engine/shared";
 import type { ResolvedAgent } from "../agents/agent-pipeline.js";
 import { logger } from "../../lib/logger.js";
 import {
@@ -115,6 +118,28 @@ function resolveAgentConnectionRequest(args: {
     defaultAgentConnectionId: promptConnectionId ? null : configuredConnectionId ? args.defaultAgentConnectionId : null,
     localSidecarAvailable: args.localSidecarAvailable,
   });
+}
+
+/**
+ * The connection id agents fall back to when they have no explicit one (#5539).
+ *
+ * The sidecar cannot hold the `defaultForAgents` row flag — it has no
+ * connection row — so its default status lives in the sidecar config instead.
+ * The sentinel is substituted only while the sidecar is actually available:
+ * fed into the default slot while unavailable it would bypass the
+ * skip-local-sidecar guard (which only inspects the REQUESTED id) and surface
+ * a misleading "connection was deleted" warning. Degrading to the row default
+ * (or the chat connection) is the right behavior for a missing model anyway —
+ * a default is a preference, unlike an explicit per-agent selection, which
+ * skips the agent rather than silently running it elsewhere.
+ */
+export function resolveAgentsDefaultConnectionId(args: {
+  useLocalSidecarAsAgentsDefault: boolean;
+  localSidecarAvailable: boolean;
+  rowDefaultConnectionId: string | null;
+}): string | null {
+  if (args.useLocalSidecarAsAgentsDefault && args.localSidecarAvailable) return LOCAL_SIDECAR_CONNECTION_ID;
+  return args.rowDefaultConnectionId;
 }
 
 export type ResolvedAgentPipelineAgents = {
@@ -377,6 +402,8 @@ export async function resolveAgentPipelineAgents({
 
   const agentConnectionWarnings: AgentConnectionWarning[] = [];
   const skippedLocalSidecarAgents: string[] = [];
+  /** Agents this run routed to the utility slot, so the UI can say which model answered. */
+  const utilitySidecarAgents: string[] = [];
   const defaultAgentConnectionAgents: string[] = [];
   const unavailableConnectionWarnings = new Map<
     string,
@@ -401,6 +428,11 @@ export async function resolveAgentPipelineAgents({
   };
   const defaultAgentConn = await connections.getDefaultForAgents();
   const fallbackAgentConn = await connections.getFallbackForAgents();
+  const defaultAgentConnectionId = resolveAgentsDefaultConnectionId({
+    useLocalSidecarAsAgentsDefault: sidecarModelService.getConfig().useAsAgentsDefault,
+    localSidecarAvailable: localSidecarAvailableForTrackers,
+    rowDefaultConnectionId: defaultAgentConn?.id ?? null,
+  });
   for (const cfg of enabledConfigs) {
     if (hasPerChatAgentList && !perChatAgentSet.has(cfg.type)) continue;
 
@@ -419,12 +451,14 @@ export async function resolveAgentPipelineAgents({
     const effectiveConnectionId = resolveAgentConnectionRequest({
       agentType: cfg.type as string,
       configuredConnectionId: cfg.connectionId as string | null,
-      defaultAgentConnectionId: defaultAgentConn?.id ?? null,
+      defaultAgentConnectionId,
       chatMetadata,
       localSidecarAvailable: localSidecarAvailableForTrackers,
     });
 
-    if (effectiveConnectionId === "skip-local-sidecar") {
+    // The utility slot outranks this skip: if it serves this agent it can answer even
+    // though the main sidecar — the connection the agent asked for — is unavailable.
+    if (effectiveConnectionId === "skip-local-sidecar" && !utilitySidecarService.servesAgent(cfg.type as string)) {
       skippedLocalSidecarAgents.push(cfg.name ?? cfg.type);
       logger.warn(
         "[generate] Skipping agent %s for chat %s because Local Model was requested but the sidecar is unavailable",
@@ -434,7 +468,7 @@ export async function resolveAgentPipelineAgents({
       continue;
     }
 
-    const resolvedProvider = await resolveAgentConnectionProvider({
+    let resolvedProvider = await resolveAgentConnectionProvider({
       connections,
       agentProviderCache,
       connectionId: effectiveConnectionId,
@@ -454,6 +488,17 @@ export async function resolveAgentPipelineAgents({
       onFallback,
       resolveBaseUrl,
     });
+    // The utility slot outranks the agent's configured connection; see
+    // buildUtilitySidecarEntry for the rule. Returns null when it serves someone else.
+    const utilityEntry = await buildUtilitySidecarEntry(cfg.type as string);
+    if (utilityEntry) {
+      utilitySidecarAgents.push(cfg.name ?? (cfg.type as string));
+      resolvedProvider = { entry: { ...utilityEntry } };
+    } else if (effectiveConnectionId === UTILITY_SIDECAR_CONNECTION_ID) {
+      // Explicitly chosen but not serving: warn rather than quietly answer with a
+      // different model that needs a different prompt.
+      resolvedProvider = { entry: null, unavailableReason: "the local model slot is not serving this agent" };
+    }
     if (!resolvedProvider.entry) {
       addUnavailableConnectionWarning(cfg.name ?? cfg.type, resolvedProvider);
       logger.warn(
@@ -465,7 +510,13 @@ export async function resolveAgentPipelineAgents({
       continue;
     }
 
-    if (defaultAgentConn && effectiveConnectionId === defaultAgentConn.id) {
+    // Not when the utility slot took the run: warning about billing a paid default
+    // connection that was never called is worse than saying nothing.
+    if (
+      defaultAgentConn &&
+      effectiveConnectionId === defaultAgentConn.id &&
+      !utilitySidecarService.servesAgent(cfg.type as string)
+    ) {
       defaultAgentConnectionAgents.push(cfg.name ?? cfg.type);
     }
 
@@ -476,7 +527,9 @@ export async function resolveAgentPipelineAgents({
       isCustomAgent: !BUILT_IN_AGENTS.some((agent) => agent.id === cfg.type),
       phase: normalizeAgentPhaseValue(cfg.phase),
       promptTemplate: selectedPromptTemplate,
-      connectionId: effectiveConnectionId,
+      // The connection that actually answered, not the one configured — otherwise a
+      // run served by the utility slot still reports a paid connection.
+      connectionId: utilityEntry ? utilityEntry.connectionId : effectiveConnectionId,
       settings,
       provider: resolvedProvider.entry.provider,
       model: resolvedProvider.entry.model,
@@ -508,12 +561,12 @@ export async function resolveAgentPipelineAgents({
     const builtInConnectionId = resolveAgentConnectionRequest({
       agentType: builtIn.id,
       configuredConnectionId: null,
-      defaultAgentConnectionId: defaultAgentConn?.id ?? null,
+      defaultAgentConnectionId,
       chatMetadata,
       localSidecarAvailable: localSidecarAvailableForTrackers,
     });
 
-    if (builtInConnectionId === "skip-local-sidecar") {
+    if (builtInConnectionId === "skip-local-sidecar" && !utilitySidecarService.servesAgent(builtIn.id)) {
       skippedLocalSidecarAgents.push(builtIn.name);
       logger.warn(
         "[generate] Skipping built-in agent %s for chat %s because Local Model was requested but the sidecar is unavailable",
@@ -523,7 +576,7 @@ export async function resolveAgentPipelineAgents({
       continue;
     }
 
-    const builtInConnection = await resolveAgentConnectionProvider({
+    let builtInConnection = await resolveAgentConnectionProvider({
       connections,
       agentProviderCache,
       connectionId: builtInConnectionId,
@@ -543,6 +596,13 @@ export async function resolveAgentPipelineAgents({
       onFallback,
       resolveBaseUrl,
     });
+    const builtInUtilityEntry = await buildUtilitySidecarEntry(builtIn.id);
+    if (builtInUtilityEntry) {
+      utilitySidecarAgents.push(builtIn.name);
+      builtInConnection = { entry: { ...builtInUtilityEntry } };
+    } else if (builtInConnectionId === UTILITY_SIDECAR_CONNECTION_ID) {
+      builtInConnection = { entry: null, unavailableReason: "the local model slot is not serving this agent" };
+    }
     if (!builtInConnection.entry) {
       addUnavailableConnectionWarning(builtIn.name, builtInConnection);
       logger.warn(
@@ -553,7 +613,11 @@ export async function resolveAgentPipelineAgents({
       );
       continue;
     }
-    if (defaultAgentConn && builtInConnectionId === defaultAgentConn.id)
+    if (
+      defaultAgentConn &&
+      builtInConnectionId === defaultAgentConn.id &&
+      !utilitySidecarService.servesAgent(builtIn.id)
+    )
       defaultAgentConnectionAgents.push(builtIn.name);
     const builtInSettings = resolveEffectiveAgentSettings({
       agentType: builtIn.id,
@@ -574,7 +638,7 @@ export async function resolveAgentPipelineAgents({
       isCustomAgent: false,
       phase: normalizeAgentPhaseValue(builtIn.phase),
       promptTemplate: selectedPromptTemplate,
-      connectionId: builtInConnectionId,
+      connectionId: builtInUtilityEntry ? builtInUtilityEntry.connectionId : builtInConnectionId,
       settings: builtInSettings,
       provider: builtInConnection.entry.provider,
       model: builtInConnection.entry.model,
@@ -621,6 +685,12 @@ export async function resolveAgentPipelineAgents({
     Array.from(perChatAgentSet).join(","),
     resolvedAgents.map((agent) => `${agent.type}(${agent.phase})`).join(", "),
   );
+
+  if (utilitySidecarAgents.length > 0) {
+    // Recorded because the slot silently outranks the configured connection; without
+    // this a run that went somewhere unexpected leaves no trace of where.
+    logger.info("[generate] Utility model slot answered for: %s", utilitySidecarAgents.join(", "));
+  }
 
   return {
     enabledConfigs,

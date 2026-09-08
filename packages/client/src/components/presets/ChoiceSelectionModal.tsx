@@ -330,45 +330,36 @@ export function ChoiceSelectionModal({
                       if (!opt) return null;
                       const isOn = selections[v.variableName] === opt.value;
                       return (
-                        <button
-                          onClick={() =>
+                        <SettingsSwitch
+                          checked={isOn}
+                          onChange={(checked) =>
                             setOverrides((prev) => ({
                               ...prev,
-                              [v.variableName]: isOn ? "" : opt.value,
+                              [v.variableName]: checked ? opt.value : "",
                             }))
                           }
+                          label={
+                            <span className="min-w-0 flex-1">
+                              <span className={cn("text-xs font-medium", isOn && "text-[var(--primary)]")}>
+                                {opt.label}
+                              </span>
+                              {opt.value && (
+                                <span className="mt-0.5 block line-clamp-2 text-[0.625rem] text-[var(--muted-foreground)]">
+                                  {opt.value.slice(0, 150)}
+                                  {opt.value.length > 150 ? "…" : ""}
+                                </span>
+                              )}
+                            </span>
+                          }
+                          labelPosition="start"
                           className={cn(
-                            "flex w-full items-center justify-between gap-2.5 rounded-lg p-2.5 text-left transition-all",
+                            "w-full justify-between gap-2.5 rounded-lg p-2.5 text-left transition-all",
                             isOn
                               ? "bg-[var(--primary)]/10 ring-1 ring-[var(--primary)]/30"
                               : "hover:bg-[var(--accent)]",
                           )}
-                        >
-                          <div className="min-w-0 flex-1">
-                            <span className={cn("text-xs font-medium", isOn && "text-[var(--primary)]")}>
-                              {opt.label}
-                            </span>
-                            {opt.value && (
-                              <p className="mt-0.5 line-clamp-2 text-[0.625rem] text-[var(--muted-foreground)]">
-                                {opt.value.slice(0, 150)}
-                                {opt.value.length > 150 ? "…" : ""}
-                              </p>
-                            )}
-                          </div>
-                          <div
-                            className={cn(
-                              "relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors",
-                              isOn ? "bg-[var(--primary)]" : "bg-[var(--border)]",
-                            )}
-                          >
-                            <span
-                              className={cn(
-                                "pointer-events-none inline-block h-3 w-3 translate-y-0.5 rounded-full bg-white shadow transition-transform",
-                                isOn ? "translate-x-3.5" : "translate-x-0.5",
-                              )}
-                            />
-                          </div>
-                        </button>
+                          labelClassName="min-w-0 flex-1"
+                        />
                       );
                     })()
                   ) : (

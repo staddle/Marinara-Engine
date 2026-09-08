@@ -560,6 +560,7 @@ class SidecarModelService {
       Pick<
         SidecarConfig,
         | "useForTrackers"
+        | "useAsAgentsDefault"
         | "useForGameScene"
         | "contextSize"
         | "maxTokens"

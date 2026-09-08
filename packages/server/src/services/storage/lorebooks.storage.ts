@@ -208,7 +208,15 @@ function parseEntryRow(row: Record<string, unknown>) {
     dynamicState: JSON.parse((row.dynamicState as string) || "{}"),
     activationConditions: JSON.parse((row.activationConditions as string) || "[]"),
     schedule: row.schedule ? JSON.parse(row.schedule as string) : null,
-    embedding: row.embedding ? JSON.parse(row.embedding as string) : null,
+    // Unprojected selects receive the original JSON string; a projected
+    // select would surface the store's packed Float64Array (#5592) — accept
+    // both so no read path depends on which shape it got.
+    embedding:
+      row.embedding instanceof Float64Array
+        ? Array.from(row.embedding)
+        : row.embedding
+          ? JSON.parse(row.embedding as string)
+          : null,
     embeddingSpaceId: (row.embeddingSpaceId as string | null | undefined) ?? null,
   };
 }
@@ -618,6 +626,17 @@ export function createLorebooksStorage(db: DB) {
         .where(eq(lorebookEntries.lorebookId, lorebookId))
         .orderBy(lorebookEntries.order);
       return rows.map((r) => parseEntryRow(r as Record<string, unknown>));
+    },
+
+    /** Count all entries grouped by lorebook ID (for {{lorebooksize::ID}} macro). */
+    async countAllEntriesByLorebook(): Promise<Record<string, number>> {
+      const rows = await db.select({ lorebookId: lorebookEntries.lorebookId }).from(lorebookEntries);
+      const counts: Record<string, number> = {};
+      for (const row of rows) {
+        const id = row.lorebookId as string;
+        counts[id] = (counts[id] ?? 0) + 1;
+      }
+      return counts;
     },
 
     /** Get all entries across multiple lorebooks (for prompt injection). */

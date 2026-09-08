@@ -19,6 +19,7 @@ import { useUpdateChatMetadata } from "../../hooks/use-chats";
 import { useConnections } from "../../hooks/use-connections";
 import { useUIStore } from "../../stores/ui.store";
 import {
+  AgentSettingsActionButton,
   AgentDefaultStatus,
   AgentSettingsSegmentedControl,
   AgentSettingsSubsection,
@@ -82,8 +83,8 @@ function StoryboardSlider({
   onReset: () => void;
 }) {
   return (
-    <div className="space-y-1">
-      <label className="block space-y-2 rounded-lg bg-[var(--background)]/75 px-3 py-2 ring-1 ring-[var(--border)]">
+    <div className="flex h-full flex-col gap-1">
+      <label className="flex flex-1 flex-col justify-between gap-2 rounded-lg bg-[var(--background)]/75 px-3 py-2 ring-1 ring-[var(--border)]">
         <span className="flex items-center justify-between gap-3">
           <span className="min-w-0">
             <span className="block text-[0.625rem] font-medium text-[var(--foreground)]">{label}</span>
@@ -149,8 +150,8 @@ function StoryboardNumberInput({
   };
 
   return (
-    <div className="space-y-1">
-      <label className="grid gap-2 rounded-lg bg-[var(--background)]/75 px-3 py-2 ring-1 ring-[var(--border)] sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+    <div className="flex h-full flex-col gap-1">
+      <label className="grid flex-1 gap-2 rounded-lg bg-[var(--background)]/75 px-3 py-2 ring-1 ring-[var(--border)] sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
         <span className="min-w-0">
           <span className="block text-[0.625rem] font-medium text-[var(--foreground)]">{label}</span>
           <span className="mt-0.5 block text-[0.5625rem] leading-snug text-[var(--muted-foreground)]">
@@ -576,14 +577,10 @@ export function StoryboardChatSettingsPanel({
             <p className="min-w-0 flex-1 text-[0.625rem] leading-snug text-[var(--muted-foreground)]">
               {localizeUi("ui.agents.storyboard.promptChainDescription")}
             </p>
-            <button
-              type="button"
-              onClick={onOpenAgentSettings}
-              className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg bg-[var(--background)]/80 px-3 py-1.5 text-[0.6875rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-            >
+            <AgentSettingsActionButton onClick={onOpenAgentSettings} className="shrink-0">
               <Settings2 size="0.75rem" />
               <span>{localizeUi("ui.chat.chatsettingsdrawer.openSetup")}</span>
-            </button>
+            </AgentSettingsActionButton>
           </div>
         </AgentSettingsSubsection>
       ) : null}
@@ -943,14 +940,10 @@ function RoleplayStoryboardChatSettingsPanel({
             <p className="min-w-0 flex-1 text-[0.625rem] leading-snug text-[var(--muted-foreground)]">
               {localizeUi("ui.agents.storyboard.roleplayPromptChainDescription")}
             </p>
-            <button
-              type="button"
-              onClick={onOpenAgentSettings}
-              className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg bg-[var(--background)]/80 px-3 py-1.5 text-[0.6875rem] font-medium text-[var(--muted-foreground)] ring-1 ring-[var(--border)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-            >
+            <AgentSettingsActionButton onClick={onOpenAgentSettings} className="shrink-0">
               <Settings2 size="0.75rem" />
               <span>{localizeUi("ui.chat.chatsettingsdrawer.openSetup")}</span>
-            </button>
+            </AgentSettingsActionButton>
           </div>
         </AgentSettingsSubsection>
       ) : null}

@@ -365,7 +365,15 @@ function estimateMessageTokens(message: ChatMessage): number {
     total += message.media.reduce((sum, media) => sum + estimateFileTokens({ data: media.data }), 0);
   }
   if (message.providerMetadata) {
-    total += Math.min(estimateStructuredTokens(message.providerMetadata), 512);
+    const { reasoning_content, reasoning, reasoning_details, geminiParts, encryptedReasoning, ...opaqueMetadata } =
+      message.providerMetadata;
+    if (typeof reasoning_content === "string") total += estimateTextTokens(reasoning_content);
+    if (typeof reasoning === "string") total += estimateTextTokens(reasoning);
+    // Conservatively estimate serialized replay payloads, not their decrypted reasoning-token usage.
+    if (reasoning_details !== undefined) total += estimateStructuredTokens(reasoning_details);
+    if (geminiParts !== undefined) total += estimateStructuredTokens(geminiParts);
+    if (encryptedReasoning !== undefined) total += estimateStructuredTokens(encryptedReasoning);
+    total += Math.min(estimateStructuredTokens(opaqueMetadata), 512);
   }
   return total;
 }
@@ -681,6 +689,13 @@ export function sanitizeApiError(raw: string, maxLen = 300): string {
  * Every provider must implement the `chat` method as an async generator.
  */
 export abstract class BaseLLMProvider {
+  protected customRequestHeaders: Record<string, string> = {};
+
+  /** Bind validated connection options without exposing credentials through the facade. */
+  public setCustomRequestHeaders(headers: Record<string, string>): void {
+    this.customRequestHeaders = { ...headers };
+  }
+
   constructor(
     protected baseUrl: string,
     protected apiKey: string,
@@ -806,10 +821,7 @@ export abstract class BaseLLMProvider {
   async embed(texts: string[], model: string, signal?: AbortSignal): Promise<number[][]> {
     const timeoutMs = getEmbeddingRequestTimeoutMs();
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${this.apiKey}`,
-    };
+    const headers = this.embeddingHeaders();
     const res = await llmFetch(resolveEmbeddingEndpointUrl(this.baseUrl), {
       method: "POST",
       headers,
@@ -824,6 +836,14 @@ export abstract class BaseLLMProvider {
     }
     const json = await res.json();
     return parseEmbeddingResponse(json);
+  }
+
+  protected embeddingHeaders(): Record<string, string> {
+    return {
+      ...this.customRequestHeaders,
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${this.apiKey}`,
+    };
   }
 }
 

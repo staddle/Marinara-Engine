@@ -18,7 +18,10 @@ import { renderInlineWithCustomEmojis } from "../../lib/custom-emoji-render";
 import { renderWithStickerBlocks } from "../../lib/sticker-render";
 import { applyTextareaQuoteFormat } from "../../lib/textarea-quotes";
 import { ImagePromptPanel } from "./ImagePromptPanel";
+import { ChatImagePreview } from "./ChatImagePreview";
+import { MessageActionButton } from "./MessageActionButton";
 import { SwipeJumpControl } from "./SwipeJumpControl";
+import { useUIStore } from "../../stores/ui.store";
 import { AnimatedDiceRoll, isDiceRollResult, shouldAnimateDiceRollMessage } from "../dice/AnimatedDiceRoll";
 import type { CharacterMap } from "./chat-area.types";
 import { useTranslation as useUiTranslation } from "react-i18next";
@@ -466,21 +469,15 @@ export function MsgAction({
   buttonRef?: RefObject<HTMLButtonElement | null>;
 }) {
   return (
-    <button
-      ref={buttonRef}
-      onClick={(e) => {
-        e.stopPropagation();
-        onClick();
-      }}
+    <MessageActionButton
+      buttonRef={buttonRef}
+      icon={icon}
+      onClick={onClick}
       title={title}
+      className={className}
       tabIndex={tabIndex}
-      className={cn(
-        "rounded p-1 text-foreground/70 transition-colors hover:bg-foreground/20 hover:text-foreground",
-        className,
-      )}
-    >
-      {icon}
-    </button>
+      stopPropagation
+    />
   );
 }
 
@@ -507,6 +504,7 @@ export function ConversationMessageEditForm({
     <div className="space-y-2">
       <textarea
         ref={editRef}
+        data-chat-message-editor="true"
         value={editValue}
         onChange={(e) => {
           const nextValue = applyTextareaQuoteFormat(e.currentTarget, quoteFormat, e.nativeEvent as InputEvent);
@@ -566,7 +564,7 @@ export function ConversationMessageAttachments({
               className="block cursor-zoom-in rounded-lg text-left"
               title={localizeUi("ui.noodle.noodlepostcard.openImage")}
             >
-              <img
+              <ChatImagePreview
                 src={att.url || att.data}
                 alt={att.filename || att.name || "image"}
                 className="max-h-[70vh] max-w-full rounded-lg object-contain sm:max-h-[32rem]"
@@ -635,6 +633,7 @@ export function ConversationMessageTranslation({
 
 /** Compact swipe control — consistent style for all Conversation layouts. */
 export function ConversationMessageSwipes({
+  isUser,
   messageId,
   activeSwipeIndex,
   swipeCount,
@@ -642,6 +641,7 @@ export function ConversationMessageSwipes({
   onCreateNextSwipe,
   className,
 }: {
+  isUser: boolean;
   messageId: string;
   activeSwipeIndex: number;
   swipeCount: number;
@@ -649,19 +649,16 @@ export function ConversationMessageSwipes({
   onCreateNextSwipe?: () => void;
   className?: string;
 }) {
+  const alwaysShow = useUIStore((state) => state.alwaysDisplayConversationSwipeMenu);
   return (
     <SwipeJumpControl
+      alwaysShow={alwaysShow && !isUser}
       messageId={messageId}
       activeSwipeIndex={activeSwipeIndex}
       swipeCount={swipeCount}
       onSetActiveSwipe={onSetActiveSwipe}
       onCreateNextSwipe={onCreateNextSwipe}
-      className={cn(
-        "inline-flex items-center gap-0.5 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-1.5 py-0.5 text-[0.625rem] text-[var(--muted-foreground)]",
-        className,
-      )}
-      buttonClassName="rounded-sm p-0.5 transition-colors hover:bg-[var(--accent)] disabled:opacity-30"
-      inputClassName="h-[1.25rem] w-[2rem] border-none bg-transparent text-center text-[0.625rem] outline-none"
+      className={className}
     />
   );
 }

@@ -18,6 +18,7 @@ import { useGameModeStore } from "../../stores/game-mode.store";
 import { useRenderTimer } from "../../lib/perf-diagnostics";
 import { Modal } from "../ui/Modal";
 import { PanelLockButton, useDraggablePanel } from "./DraggablePanel";
+import { GameWidgetSetupEditor } from "./GameWidgetSetupEditor";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
 // ── Public API ──
@@ -352,7 +353,7 @@ export function MobileWidgetPanel({ widgets, position, chatId }: MobileWidgetPan
                     className={GAME_WIDGET_ICON_BUTTON_CLASS}
                     title={localizeUi("ui.game.mobilewidgetpanel.editValue1", { value1: w.label })}
                   >
-                    <Pencil size={10} />
+                    <Pencil size={10} className="text-[var(--marinara-chat-chrome-text)]" />
                   </button>
                   <button
                     type="button"
@@ -449,7 +450,7 @@ function WidgetCard({
           className={GAME_WIDGET_ICON_BUTTON_CLASS}
           title={localizeUi("ui.game.mobilewidgetpanel.editValue1", { value1: widget.label })}
         >
-          <Pencil size={10} />
+          <Pencil size={10} className="text-[var(--marinara-chat-chrome-text)]" />
         </button>
         <PanelLockButton locked={locked} onToggle={toggleLocked} onReset={resetPosition} size={10} />
         <span className={cn("text-[0.5rem]", GAME_WIDGET_MUTED_CLASS)}>{collapsed ? "+" : "-"}</span>
@@ -901,7 +902,11 @@ export function GameWidgetSessionPrepModal({
         <div className="space-y-4">
           <p className="text-sm text-[var(--muted-foreground)]">{copy.description}</p>
 
-          {draftWidgets.length === 0 ? (
+          {mode === "initial" ? (
+            <div className="max-h-[52vh] overflow-y-auto pr-1">
+              <GameWidgetSetupEditor widgets={draftWidgets} onChange={setDraftWidgets} disabled={interactionsLocked} />
+            </div>
+          ) : draftWidgets.length === 0 ? (
             <div className="rounded-xl border border-[var(--border)] bg-[var(--accent)]/30 px-4 py-3 text-sm text-[var(--muted-foreground)]">
               {copy.empty}
             </div>
@@ -930,7 +935,7 @@ export function GameWidgetSessionPrepModal({
                       disabled={interactionsLocked}
                       className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border)] px-3 py-1.5 text-xs font-medium text-[var(--foreground)] transition-colors hover:bg-[var(--accent)] disabled:opacity-50"
                     >
-                      <Pencil size={12} />
+                      <Pencil size={12} className="text-[var(--marinara-chat-chrome-text)]" />
                       <span>{localizeUi("ui.noodle.noodlepostcard.edit")}</span>
                     </button>
                     <button

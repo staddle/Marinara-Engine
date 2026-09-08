@@ -1,7 +1,7 @@
 // ──────────────────────────────────────────────
 // Schema: Chats, Messages & Folders
 // ──────────────────────────────────────────────
-import { fileTable, text, integer } from "../file-schema.js";
+import { fileTable, text, integer, vectorText } from "../file-schema.js";
 
 export const chatFolders = fileTable("chat_folders", {
   id: text("id").primaryKey(),
@@ -23,6 +23,7 @@ export const chats = fileTable("chats", {
   /** Groups related chats together (like ST "chat files" per character) */
   groupId: text("group_id"),
   personaId: text("persona_id"),
+  personaCharacterId: text("persona_character_id"),
   promptPresetId: text("prompt_preset_id"),
   connectionId: text("connection_id"),
   /** JSON object for metadata */
@@ -37,6 +38,19 @@ export const chats = fileTable("chats", {
   lastMessageAt: text("last_message_at"),
   /** Pre-computed semantic embedding of the chat's name/tags/summary (JSON float[]), null until vectorized (#4768) */
   embedding: text("embedding"),
+  /**
+   * High-water mark of the chat's monotonic write ordinal (#5406). Every ordinal handed to a
+   * game_engine_state row (`write_ordinal`) or to the metadata mirror
+   * (`metadata.metadataWriteOrdinals`) is allocated by bumping this one counter, so a client
+   * holding a value from either store can totally order the two. Null until the chat's first
+   * allocation.
+   *
+   * Not the sole floor: a metadata blob can be moved into a chat whose counter never handed its
+   * stamps out (branching, a game session carry, a restore), so allocation takes the max of this
+   * counter and the chat's own mirror. See `writeOrdinalFloor` / `allocateWriteOrdinal` in
+   * chats.storage.ts for the monotonicity argument.
+   */
+  writeOrdinalCounter: integer("write_ordinal_counter"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
@@ -112,7 +126,7 @@ export const memoryChunks = fileTable("memory_chunks", {
   /** Formatted conversation text: "Name: message\n\nName: message\n\n..." */
   content: text("content").notNull(),
   /** JSON-serialized float[] embedding (null until vectorized) */
-  embedding: text("embedding"),
+  embedding: vectorText("embedding"),
   /** Stable provider/model/profile identity for the stored embedding */
   embeddingSpaceId: text("embedding_space_id"),
   /** How many messages were grouped into this chunk */

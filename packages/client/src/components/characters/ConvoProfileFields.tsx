@@ -4,8 +4,13 @@
 // These fields only affect Conversation mode; they are never read in RP/VN/Game.
 // ──────────────────────────────────────────────
 import { useEffect, useRef, useState } from "react";
-import { RotateCcw, Smile } from "lucide-react";
-import { type ConvoBehaviorConfig, type ConvoBehaviorInsertionStrategy } from "@marinara-engine/shared";
+import { CalendarClock, Loader2, RotateCcw, Smile, Wand2 } from "lucide-react";
+import { toast } from "sonner";
+import {
+  type ConvoBehaviorConfig,
+  type ConvoBehaviorInsertionStrategy,
+  type WeekSchedule,
+} from "@marinara-engine/shared";
 import { MacroTextarea } from "../ui/MacroTextarea";
 import { EmojiPicker } from "../ui/EmojiPicker";
 import { HelpTooltip } from "../ui/HelpTooltip";
@@ -19,6 +24,15 @@ const STRATEGY_OPTIONS: Array<{ value: ConvoBehaviorInsertionStrategy; label: st
   { value: "post_history_replace", label: "Replace post-history" },
   { value: "macro", label: "Only where {{convo_behavior}} is placed" },
 ];
+
+/** One-line description of the saved schedule for the Convo tab panel. */
+function scheduleSummary(schedule: WeekSchedule | undefined): string {
+  if (!schedule) return "No schedule yet — create one to give this character a routine.";
+  const summary = schedule.routineSummary?.trim();
+  if (summary) return summary;
+  const dayCount = Object.values(schedule.days ?? {}).filter((blocks) => blocks?.length).length;
+  return `${dayCount} of 7 days planned.`;
+}
 
 interface ConvoProfileFieldsProps {
   kind: "character" | "persona";
@@ -39,6 +53,11 @@ interface ConvoProfileFieldsProps {
   onImageInstructionsChange?: (value: string) => void;
   applyImageInstructionsToNoodle?: boolean;
   onApplyImageInstructionsToNoodleChange?: (value: boolean) => void;
+  /** The character's weekly convo schedule, if one has been generated. */
+  schedule?: WeekSchedule;
+  /** Opens the schedule editor. Omit to hide the schedule panel entirely. */
+  onEditSchedule?: () => void;
+  generateConvoProfile?: (target: "aboutMe" | "behavior") => Promise<{ text: string } | null>;
 }
 
 export function ConvoProfileFields({
@@ -57,15 +76,27 @@ export function ConvoProfileFields({
   onImageInstructionsChange,
   applyImageInstructionsToNoodle,
   onApplyImageInstructionsToNoodleChange,
+  schedule,
+  onEditSchedule,
+  generateConvoProfile,
 }: ConvoProfileFieldsProps) {
   const { t: localizeUi } = useUiTranslation();
   const aboutMeRef = useRef<HTMLTextAreaElement>(null);
   const emojiBtnRef = useRef<HTMLButtonElement>(null);
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [generating, setGenerating] = useState<"aboutMe" | "behavior" | null>(null);
+  const aboutMeValueRef = useRef(aboutMe);
+  const behaviorValueRef = useRef(behavior?.instruction ?? "");
+  const behaviorStrategyRef = useRef(behavior?.insertionStrategy ?? "constant_after");
 
   // Snapshot the about-me right before the first manual edit so the user can
   // undo changes they do not like. Cleared once reverted.
   const [revertTo, setRevertTo] = useState<string | null>(null);
+  useEffect(() => {
+    aboutMeValueRef.current = aboutMe;
+    behaviorValueRef.current = behavior?.instruction ?? "";
+    behaviorStrategyRef.current = behavior?.insertionStrategy ?? "constant_after";
+  }, [aboutMe, behavior]);
   useEffect(() => {
     setRevertTo(null);
     setEmojiOpen(false);
@@ -101,6 +132,36 @@ export function ConvoProfileFields({
 
   const behaviorInstruction = behavior?.instruction ?? "";
   const behaviorStrategy: ConvoBehaviorInsertionStrategy = behavior?.insertionStrategy ?? "constant_after";
+
+  /** Applies generated text only when the user has not changed the source field. */
+  const generateProfile = async (target: "aboutMe" | "behavior") => {
+    if (!generateConvoProfile || generating) return;
+    setGenerating(target);
+    try {
+      const result = await generateConvoProfile(target);
+      if (!result) return;
+      const text = result.text.trim();
+      if (!text) {
+        toast.error(localizeUi("ui.characters.convoprofilefields.generationReturnedNoText"));
+        return;
+      }
+      if (target === "aboutMe" && aboutMeValueRef.current !== aboutMe) return;
+      if (target === "behavior" && behaviorValueRef.current !== behaviorInstruction) return;
+      if (target === "behavior" && behaviorStrategyRef.current !== behaviorStrategy) return;
+      if (target === "aboutMe") {
+        captureRevert();
+        onAboutMeChange(text);
+      } else {
+        onBehaviorChange({ instruction: text, insertionStrategy: behaviorStrategy });
+      }
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : localizeUi("ui.characters.convoprofilefields.generationFailed"),
+      );
+    } finally {
+      setGenerating(null);
+    }
+  };
 
   return (
     <div className="space-y-4" data-component="ConvoProfileFields">
@@ -141,6 +202,18 @@ export function ConvoProfileFields({
               text={localizeUi("ui.characters.convoprofilefields.aShortSelfAuthoredProfileBioShownInConversation")}
             />
           </span>
+          {generateConvoProfile && (
+            <button
+              type="button"
+              onClick={() => void generateProfile("aboutMe")}
+              disabled={!!generating}
+              aria-label={localizeUi("ui.characters.convoprofilefields.generateAboutMe")}
+              title={localizeUi("ui.characters.convoprofilefields.generateAboutMe")}
+              className="inline-flex items-center rounded p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {generating === "aboutMe" ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wand2 className="h-3 w-3" />}
+            </button>
+          )}
         </div>
         <MacroTextarea
           value={aboutMe}
@@ -187,13 +260,31 @@ export function ConvoProfileFields({
 
       {kind === "character" && (
         <div className="mari-editor-panel space-y-3 p-3">
-          <span className="inline-flex items-center gap-1 text-xs font-semibold">
-            {localizeUi("ui.characters.convoprofilefields.convoBehavior")}
-            <HelpTooltip
-              wide
-              text={localizeUi("ui.characters.convoprofilefields.aConversationModeOnlyInstructionForHowThisPerson")}
-            />
-          </span>
+          <div className="flex items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1 text-xs font-semibold">
+              {localizeUi("ui.characters.convoprofilefields.convoBehavior")}
+              <HelpTooltip
+                wide
+                text={localizeUi("ui.characters.convoprofilefields.aConversationModeOnlyInstructionForHowThisPerson")}
+              />
+            </span>
+            {generateConvoProfile && (
+              <button
+                type="button"
+                onClick={() => void generateProfile("behavior")}
+                disabled={!!generating}
+                aria-label={localizeUi("ui.characters.convoprofilefields.generateConvoBehavior")}
+                title={localizeUi("ui.characters.convoprofilefields.generateConvoBehavior")}
+                className="inline-flex items-center rounded p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {generating === "behavior" ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Wand2 className="h-3 w-3" />
+                )}
+              </button>
+            )}
+          </div>
           <MacroTextarea
             value={behaviorInstruction}
             onChange={(value) => onBehaviorChange({ instruction: value, insertionStrategy: behaviorStrategy })}
@@ -223,6 +314,29 @@ export function ConvoProfileFields({
               ))}
             </select>
           </label>
+        </div>
+      )}
+
+      {kind === "character" && onEditSchedule && (
+        <div className="mari-editor-panel space-y-3 p-3">
+          <span className="inline-flex items-center gap-1 text-xs font-semibold">
+            <CalendarClock className="h-3.5 w-3.5" />
+            {localizeUi("ui.characters.convoprofilefields.weeklySchedule")}
+            <HelpTooltip
+              wide
+              text={localizeUi("ui.characters.convoprofilefields.thisCharacterSDailyRoutineItDrivesPresenceReply")}
+            />
+          </span>
+          <p className="text-xs leading-relaxed text-[var(--muted-foreground)]">{scheduleSummary(schedule)}</p>
+          <button
+            type="button"
+            onClick={onEditSchedule}
+            className="rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 py-1.5 text-xs font-medium transition-colors hover:border-[var(--primary)]/40"
+          >
+            {schedule
+              ? localizeUi("ui.characters.convoprofilefields.editSchedule")
+              : localizeUi("ui.chat.chatsettingsdrawer.createSchedule")}
+          </button>
         </div>
       )}
 

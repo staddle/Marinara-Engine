@@ -24,9 +24,22 @@ import { DATA_DIR } from "../../utils/data-dir.js";
 import { isAllowedImageBuffer } from "../../utils/security.js";
 import AdmZip from "adm-zip";
 import { normalizeTimestampOverrides, type TimestampOverrides } from "./import-timestamps.js";
+import { restoreSprites } from "./marinara.importer.js";
 
 const AVATAR_DIR = join(DATA_DIR, "avatars");
 const IMPORT_METADATA_KEY = "importMetadata";
+
+/** Remove Marinara sprite binaries from card metadata before the normalized card is stored. */
+export function takeEmbeddedMarinaraSprites(raw: Record<string, unknown>): unknown {
+  const cardData = raw.data && typeof raw.data === "object" ? (raw.data as Record<string, unknown>) : raw;
+  if (!cardData.extensions || typeof cardData.extensions !== "object") return undefined;
+  const extensions = cardData.extensions as Record<string, unknown>;
+  if (!extensions.marinara || typeof extensions.marinara !== "object") return undefined;
+  const marinara = extensions.marinara as Record<string, unknown>;
+  const sprites = marinara.sprites;
+  delete marinara.sprites;
+  return sprites;
+}
 
 function ensureAvatarDir() {
   if (!existsSync(AVATAR_DIR)) {
@@ -188,6 +201,7 @@ export async function importSTCharacter(raw: Record<string, unknown>, db: DB, op
   const normalizedTimestamps = normalizeTimestampOverrides(options?.timestampOverrides);
   const shouldImportEmbeddedLorebook = options?.importEmbeddedLorebook ?? true;
   const tagImportMode = options?.tagImportMode ?? "all";
+  const embeddedMarinaraSprites = takeEmbeddedMarinaraSprites(raw);
 
   // Extract avatar data URL if present (from PNG import)
   const avatarDataUrl = raw._avatarDataUrl as string | null;
@@ -348,6 +362,14 @@ export async function importSTCharacter(raw: Record<string, unknown>, db: DB, op
     }
   }
 
+  if (charId && embeddedMarinaraSprites !== undefined) {
+    try {
+      await restoreSprites(embeddedMarinaraSprites, charId);
+    } catch (err) {
+      logger.warn(err, "Skipped optional embedded sprite restore for %s", charId);
+    }
+  }
+
   return {
     success: true,
     characterId: charId,
@@ -383,47 +405,11 @@ export function inspectSTCharacter(raw: Record<string, unknown>): STCharacterImp
 }
 
 /**
- * Guard a parsed CharX zip against decompression-bomb abuse before any
- * `getData()` call materializes a decompressed entry into memory.
- *
- * adm-zip's `getData()` allocates the full uncompressed entry as a single
- * Buffer, and the 256 MB multipart cap (`app.ts`) bounds only the
- * *compressed* upload — DEFLATE reaches ~1000:1 on repetitive data, so a
- * few-MB `.charx` can expand to multiple GB and OOM the shared process.
- * Sizes are read off the central-directory headers (`entry.header.size`),
- * not the decompressed stream, so we reject before paying the memory cost.
- * Mirrors the `/marinara-package` cap in `import.routes.ts`. Throws on
- * violation; callers wrap this so the route surfaces a 4xx-style failure
- * instead of crashing.
- */
-function assertCharXWithinLimits(zip: AdmZip): void {
-  const MAX_CHARX_ENTRIES = 512;
-  const MAX_CHARX_ENTRY_BYTES = 64 * 1024 * 1024;
-  const MAX_CHARX_TOTAL_BYTES = 256 * 1024 * 1024;
-  const entries = zip.getEntries();
-  if (entries.length > MAX_CHARX_ENTRIES) {
-    throw new Error(".charx file has too many entries");
-  }
-  let total = 0;
-  for (const entry of entries) {
-    const size = entry.header.size ?? 0;
-    if (size > MAX_CHARX_ENTRY_BYTES) {
-      throw new Error(".charx file has an entry that is too large");
-    }
-    total += size;
-    if (total > MAX_CHARX_TOTAL_BYTES) {
-      throw new Error(".charx file decompresses to too much data");
-    }
-  }
-}
-
-/**
  * Import a CharX (.charx) file — RisuAI Character Card V3 zip format.
  * Extracts card.json and the main icon asset from the zip.
  */
 export async function importCharX(buf: Buffer, db: DB, options?: STCharacterImportOptions) {
   const zip = new AdmZip(buf);
-  assertCharXWithinLimits(zip);
 
   // Extract card.json from root of the zip
   const cardJson = readCharXCardJson(zip);
@@ -477,7 +463,6 @@ export async function importCharX(buf: Buffer, db: DB, options?: STCharacterImpo
 export function inspectCharX(buf: Buffer): STCharacterImportPreview {
   try {
     const zip = new AdmZip(buf);
-    assertCharXWithinLimits(zip);
     const cardJson = readCharXCardJson(zip);
     if (!cardJson) {
       return {
@@ -709,6 +694,9 @@ function normalizeV2(raw: Record<string, unknown>): CharacterData {
   const rawExtensions = optionalRecord(raw.extensions);
   return {
     name: String(raw.name ?? "Unknown"),
+    summary: String(raw.summary ?? "")
+      .trim()
+      .slice(0, 500),
     description: String(raw.description ?? ""),
     personality: String(raw.personality ?? ""),
     scenario: String(raw.scenario ?? ""),

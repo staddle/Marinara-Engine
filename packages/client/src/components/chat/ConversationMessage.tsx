@@ -276,16 +276,20 @@ export const ConversationMessage = memo(function ConversationMessage({
   // back to whichever chat character owns the file when the speaker doesn't.
   const galleryIndex = useChatGalleryFilenameIndex(chatCharacterIds);
 
-  const msgPersona = isUser && !plainUserMessages && extra.personaSnapshot ? extra.personaSnapshot : null;
+  const msgPersona = isUser && extra.personaSnapshot ? extra.personaSnapshot : null;
   const avatarUrl = isUser
     ? plainUserMessages
       ? null
-      : (msgPersona?.avatarUrl ?? personaInfo?.avatarUrl ?? null)
+      : msgPersona
+        ? (msgPersona.avatarUrl ?? null)
+        : (personaInfo?.avatarUrl ?? null)
     : (resolvedCharacterInfo?.avatarUrl ?? null);
   const personaAvatarCrop = isUser
     ? plainUserMessages
       ? null
-      : (normalizeAvatarCrop(msgPersona?.avatarCrop) ?? personaInfo?.avatarCrop ?? null)
+      : msgPersona
+        ? (normalizeAvatarCrop(msgPersona.avatarCrop) ?? null)
+        : (personaInfo?.avatarCrop ?? null)
     : null;
   const avatarCropStyle = isUser
     ? getAvatarCropStyle(personaAvatarCrop)
@@ -293,12 +297,16 @@ export const ConversationMessage = memo(function ConversationMessage({
   const displayName = isUser
     ? plainUserMessages
       ? "You"
-      : (msgPersona?.name ?? personaInfo?.name ?? "You")
+      : msgPersona
+        ? (msgPersona.name ?? "You")
+        : (personaInfo?.name ?? "You")
     : (primaryCharInfo?.name ?? "Assistant");
   const nameColor = isUser
     ? plainUserMessages
       ? undefined
-      : (msgPersona?.nameColor ?? personaInfo?.nameColor)
+      : msgPersona
+        ? msgPersona.nameColor
+        : personaInfo?.nameColor
     : resolvedCharacterInfo?.nameColor;
 
   // Conversation-only cosmetic display name (convoDisplayName). This component only
@@ -321,11 +329,11 @@ export const ConversationMessage = memo(function ConversationMessage({
       userName: displayName,
       persona: {
         name: displayName,
-        description: plainUserMessages ? undefined : (msgPersona?.description ?? personaInfo?.description),
-        personality: plainUserMessages ? undefined : (msgPersona?.personality ?? personaInfo?.personality),
-        backstory: plainUserMessages ? undefined : (msgPersona?.backstory ?? personaInfo?.backstory),
-        appearance: plainUserMessages ? undefined : (msgPersona?.appearance ?? personaInfo?.appearance),
-        scenario: plainUserMessages ? undefined : (msgPersona?.scenario ?? personaInfo?.scenario),
+        description: plainUserMessages ? undefined : msgPersona ? msgPersona.description : personaInfo?.description,
+        personality: plainUserMessages ? undefined : msgPersona ? msgPersona.personality : personaInfo?.personality,
+        backstory: plainUserMessages ? undefined : msgPersona ? msgPersona.backstory : personaInfo?.backstory,
+        appearance: plainUserMessages ? undefined : msgPersona ? msgPersona.appearance : personaInfo?.appearance,
+        scenario: plainUserMessages ? undefined : msgPersona ? msgPersona.scenario : personaInfo?.scenario,
       },
       primaryCharacter: primaryCharInfo ?? { name: displayName },
       characters: scopedCharacterMap
@@ -336,11 +344,7 @@ export const ConversationMessage = memo(function ConversationMessage({
     }),
     [
       displayName,
-      msgPersona?.appearance,
-      msgPersona?.backstory,
-      msgPersona?.description,
-      msgPersona?.personality,
-      msgPersona?.scenario,
+      msgPersona,
       personaInfo?.appearance,
       personaInfo?.backstory,
       personaInfo?.description,
@@ -790,9 +794,24 @@ export const ConversationMessage = memo(function ConversationMessage({
   // ── Build shared render context ──
   // Convo-only: clicking an avatar opens the about-me viewer for that identity.
   // The component only mounts in conversation mode, so this never applies elsewhere.
+  const aboutMeIdentity = msgPersona?.personaId
+    ? { id: msgPersona.personaId, source: msgPersona.source ?? ("persona" as const) }
+    : personaInfo;
+  const aboutMeCharacterInfo = isUser
+    ? aboutMeIdentity?.source === "character"
+      ? personaInfo?.source === "character" && personaInfo.id === aboutMeIdentity.id
+        ? personaInfo
+        : (characterMap?.get(aboutMeIdentity.id) ?? null)
+      : null
+    : message.characterId && charInfo
+      ? charInfo
+      : null;
   const aboutMeTarget: { kind: "character" | "persona"; id: string } | null = isUser
-    ? (msgPersona?.personaId ?? personaInfo?.id)
-      ? { kind: "persona", id: (msgPersona?.personaId ?? personaInfo?.id)! }
+    ? aboutMeIdentity
+      ? {
+          kind: aboutMeIdentity.source === "character" ? "character" : "persona",
+          id: aboutMeIdentity.id,
+        }
       : null
     : message.characterId
       ? { kind: "character", id: message.characterId }
@@ -813,8 +832,8 @@ export const ConversationMessage = memo(function ConversationMessage({
           avatarCrop: isUser ? personaAvatarCrop : (resolvedCharacterInfo?.avatarCrop ?? null),
           displayName: headerDisplayName,
           nameColor: nameColor ?? null,
-          status: aboutMeTarget.kind === "character" ? (resolvedCharacterInfo?.conversationStatus ?? null) : null,
-          activity: aboutMeTarget.kind === "character" ? (resolvedCharacterInfo?.conversationActivity ?? null) : null,
+          status: aboutMeTarget.kind === "character" ? (aboutMeCharacterInfo?.conversationStatus ?? null) : null,
+          activity: aboutMeTarget.kind === "character" ? (aboutMeCharacterInfo?.conversationActivity ?? null) : null,
         })
     : undefined;
 
@@ -1088,17 +1107,16 @@ export const ConversationMessage = memo(function ConversationMessage({
           "mari-message relative w-full min-w-0 max-w-full px-4 transition-colors",
           !noHoverGroup && "group",
           isBubbleStyle
-            ? cn("py-1", isUser ? "mari-message-user" : "mari-message-assistant", !isGrouped && "mt-2.5")
+            ? cn("py-1", isUser ? "mari-message-user" : "mari-message-assistant", !isGrouped && "mt-0.5")
             : cn(
-                "flex gap-4 py-0.5 hover:bg-[var(--secondary)]/30",
+                "py-0.5 hover:bg-[var(--secondary)]/30",
                 isUser ? "mari-message-user" : "mari-message-assistant",
-                isGrouped ? "mt-0" : "mt-4",
+                isGrouped ? "mt-0" : "mt-0.5",
                 isStreaming && "bg-[var(--secondary)]/20",
               ),
           isConversationStart && cn("rounded-lg ring-1", CONVERSATION_MESSAGE_CHROME_RING_CLASS),
           isHiddenFromAI && cn("rounded-lg ring-1 saturate-75", CONVERSATION_MESSAGE_CHROME_RING_CLASS),
           multiSelectMode && isSelected && MESSAGE_SELECTION_SURFACE_CLASS,
-          hideActions && hasReasoning && !isUser && "max-sm:pb-8",
         )}
         data-message-id={message.id}
         data-message-role={message.role}
@@ -1106,11 +1124,15 @@ export const ConversationMessage = memo(function ConversationMessage({
         data-grouped={isGrouped || undefined}
         onClick={handleMobileTap}
       >
-        {isBubbleStyle ? <ConversationMessageBubble ctx={ctx} /> : <ConversationMessageLine ctx={ctx} />}
+        <div
+          className={cn("min-w-0 max-w-full", !isBubbleStyle && "flex gap-4")}
+          data-component="ConversationMessage.Content"
+        >
+          {isBubbleStyle ? <ConversationMessageBubble ctx={ctx} /> : <ConversationMessageLine ctx={ctx} />}
+        </div>
 
         {(!hideActions || (hasReasoning && !isUser)) && (
           <ConversationMessageActions
-            isBubbleStyle={isBubbleStyle}
             isUser={isUser}
             showActions={showActions}
             forceShowActions={hideActions && hasReasoning ? true : forceShowActions}

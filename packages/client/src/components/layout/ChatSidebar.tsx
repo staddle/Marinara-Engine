@@ -1,6 +1,7 @@
 // ──────────────────────────────────────────────
 // Layout: Chat Sidebar (polished with rich buttons)
 // ──────────────────────────────────────────────
+import { hasEditorLeaveHandler } from "../../lib/editor-leave";
 import {
   MessageSquareText,
   Search,
@@ -25,6 +26,7 @@ import {
   Tag,
   Loader2,
   PhoneIncoming,
+  CalendarClock,
 } from "lucide-react";
 import { useBulkExportChats, useChats, useCreateChat, useDeleteChat, useDeleteChatGroup } from "../../hooks/use-chats";
 import { useChatPresets, useApplyChatPreset } from "../../hooks/use-chat-presets";
@@ -63,7 +65,7 @@ import {
 import { resolveLiveConversationStatus } from "../../lib/conversation-presence-status";
 import { Modal } from "../ui/Modal";
 import { Reorder, useDragControls } from "framer-motion";
-import { getChatDisplayName, parseChatMetadata } from "../../lib/chat-display";
+import { parseChatMetadata } from "../../lib/chat-display";
 import {
   compareChatsByActivityDesc,
   compareChatsByCreatedAtAsc,
@@ -77,6 +79,7 @@ import { useTranslation, useTranslation as useUiTranslation } from "react-i18nex
 import { useLocalizedUiText } from "../../localization/use-localized-ui-text";
 import { PersonalExtensionContributionSlot } from "../extensions/PersonalExtensionContributionSlot";
 import { ChatModeIcon } from "../chat/ChatModeIcon";
+import { CharacterScheduleManagerModal } from "../chat/CharacterScheduleManagerModal";
 
 type ChatSortOption = "recent" | "newest" | "oldest" | "name-asc" | "name-desc";
 const CHAT_LIST_PAGE_SIZE = 100;
@@ -270,6 +273,7 @@ export function ChatSidebar() {
   const [activeTag, setActiveTag] = useState<string | null>(null);
   const [tagsExpanded, setTagsExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<"conversation" | "roleplay" | "game">("conversation");
+  const [scheduleManagerOpen, setScheduleManagerOpen] = useState(false);
   const [visibleChatLimit, setVisibleChatLimit] = useState(CHAT_LIST_PAGE_SIZE);
   const [deleteTarget, setDeleteTarget] = useState<{
     chatId: string;
@@ -395,7 +399,7 @@ export function ChatSidebar() {
         .filter(Boolean);
 
       return (
-        includesTextForMatch(toSearchText(getChatDisplayName(chat)), query) ||
+        includesTextForMatch(toSearchText(chat.name), query) ||
         tags.some((tag) => includesTextForMatch(tag, query)) ||
         characterNames.some((name) => includesTextForMatch(name, query))
       );
@@ -421,9 +425,9 @@ export function ChatSidebar() {
         case "oldest":
           return compareChatsByCreatedAtAsc(a, b);
         case "name-asc":
-          return toSearchText(getChatDisplayName(a)).localeCompare(toSearchText(getChatDisplayName(b)));
+          return toSearchText(a.name).localeCompare(toSearchText(b.name));
         case "name-desc":
-          return toSearchText(getChatDisplayName(b)).localeCompare(toSearchText(getChatDisplayName(a)));
+          return toSearchText(b.name).localeCompare(toSearchText(a.name));
         case "newest":
           return compareChatsByCreatedAtDesc(a, b);
         case "recent":
@@ -896,7 +900,7 @@ export function ChatSidebar() {
   // ── Chat row renderer (shared between unfiled + folder sections) ──
   const renderChatRow = ({ chat, branchCount }: (typeof displayChats)[number]) => {
     const cfg = MODE_CONFIG[chat.mode] ?? MODE_CONFIG.conversation;
-    const displayName = getChatDisplayName(chat);
+    const displayName = chat.name;
     const isActive = activeChatId === chat.id || (chat.groupId != null && chat.groupId === activeGroupId);
     const isSelected = selectedChatIds.has(chat.id);
     const charIds = normalizeChatCharacterIds((chat as { characterIds?: unknown }).characterIds);
@@ -988,7 +992,7 @@ export function ChatSidebar() {
             return;
           }
           if (hasAnyDetailOpen()) {
-            if (editorDirty) {
+            if (editorDirty && !hasEditorLeaveHandler(useUIStore.getState())) {
               if (
                 !(await showConfirmDialog({
                   title: localizeUi("ui.layout.chatsidebar.unsavedChanges"),
@@ -1655,7 +1659,12 @@ export function ChatSidebar() {
       />
 
       {/* ── User Status Selector ── */}
-      <UserStatusFooter />
+      <UserStatusFooter
+        showScheduleManager={activeTab === "conversation"}
+        onOpenScheduleManager={() => setScheduleManagerOpen(true)}
+      />
+
+      {scheduleManagerOpen && <CharacterScheduleManagerModal open onClose={() => setScheduleManagerOpen(false)} />}
 
       {/* ── Delete Branch Modal ── */}
       <Modal
@@ -1936,7 +1945,13 @@ const STATUS_OPTIONS: Array<{
   },
 ];
 
-function UserStatusFooter() {
+function UserStatusFooter({
+  showScheduleManager,
+  onOpenScheduleManager,
+}: {
+  showScheduleManager: boolean;
+  onOpenScheduleManager: () => void;
+}) {
   const { t: localizeUi } = useUiTranslation();
   const userStatus = useUIStore((s) => s.userStatus);
   const userActivity = useUIStore((s) => s.userActivity);
@@ -2029,7 +2044,7 @@ function UserStatusFooter() {
       <div className="flex min-w-0 items-center gap-1.5">
         <button
           onClick={() => setOpen((v) => !v)}
-          className="mari-chrome-control mari-chrome-control--small min-w-0 shrink-0 px-2 py-1.5 max-md:h-9 max-md:min-h-9"
+          className="mari-chrome-control mari-chrome-control--small min-w-0 shrink-0 px-1.5 py-1 max-md:h-9 max-md:min-h-9"
           title={localizeUi("ui.layout.userstatusfooter.changeActivityStatus")}
           aria-label={localizeUi("ui.layout.userstatusfooter.changeActivityStatus")}
         >
@@ -2055,8 +2070,19 @@ function UserStatusFooter() {
           maxLength={120}
           placeholder={localizeUi("ui.layout.userstatusfooter.whatAreYouDoing")}
           aria-label={localizeUi("ui.layout.userstatusfooter.customActivity")}
-          className="mari-chrome-field mari-chrome-field--compact min-w-0 flex-1 px-2 py-1.5 text-xs max-md:h-9 max-md:min-h-9"
+          className="mari-chrome-field mari-chrome-field--compact min-w-0 flex-1 px-2 py-1 text-xs max-md:h-9 max-md:min-h-9"
         />
+        {showScheduleManager && (
+          <button
+            type="button"
+            onClick={onOpenScheduleManager}
+            title={localizeUi("ui.layout.chatsidebar.characterScheduleManager")}
+            aria-label={localizeUi("ui.layout.chatsidebar.characterScheduleManager")}
+            className="mari-chrome-control mari-chrome-control--small ml-1 h-7 w-7 shrink-0 justify-center p-0 max-md:h-9 max-md:min-h-9 max-md:w-9"
+          >
+            <CalendarClock size="1.25rem" strokeWidth={2.25} />
+          </button>
+        )}
       </div>
     </div>
   );

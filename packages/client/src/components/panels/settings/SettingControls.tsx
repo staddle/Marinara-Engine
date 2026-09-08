@@ -20,6 +20,14 @@ import {
   useUploadCustomNotificationSound,
 } from "../../../hooks/use-custom-notification-sound";
 import { cn } from "../../../lib/utils";
+import { api } from "../../../lib/api-client";
+import { enqueueMariPermissionsModeWrite } from "../../../lib/mari-permissions-write-chain";
+import {
+  DEFAULT_MARI_PERMISSIONS_MODE,
+  MARI_PERMISSIONS_MODE_LABELS,
+  MARI_PERMISSIONS_MODES,
+  type MariPermissionsMode,
+} from "@marinara-engine/shared";
 import { localizeStringNode, useLocalizedUiText } from "../../../localization/use-localized-ui-text";
 import { HelpTooltip } from "../../ui/HelpTooltip";
 
@@ -100,6 +108,94 @@ export function SettingsSection({
       </div>
       <div className={cn("border-t border-[var(--border)]/60 px-3 pb-3 pt-2.5", contentClassName)}>{children}</div>
     </section>
+  );
+}
+
+// #5725: Professor Mari's server-authoritative Permissions Mode. Fetched on
+// mount and written through the dedicated validated PUT; a change applies to
+// Mari's next run (an in-flight turn is never aborted by a mode switch).
+export function MariPermissionsModeSetting({ anchorId }: { anchorId?: string }) {
+  const { t: localizeUi } = useUiTranslation();
+  const localize = useLocalizedUiText();
+  const selectId = useId();
+  const [mode, setMode] = useState<MariPermissionsMode | null>(null);
+  // Sequence local writes so a stale GET (or a stale failure rollback) can
+  // never clobber a newer selection.
+  const writeSeqRef = useRef(0);
+  // Refetch on focus/visibility too: the Mari panel's header picker writes the
+  // same server setting, and a stale one-shot read would drift from it.
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      const seqAtStart = writeSeqRef.current;
+      api
+        .get<{ mode: MariPermissionsMode }>("/professor-mari/workspace/permissions-mode")
+        .then((response) => {
+          // Drop reads that predate the latest local write.
+          if (!cancelled && writeSeqRef.current === seqAtStart) setMode(response.mode);
+        })
+        .catch(() => {
+          if (!cancelled) setMode((current) => current ?? DEFAULT_MARI_PERMISSIONS_MODE);
+        });
+    };
+    load();
+    const reload = () => {
+      if (document.visibilityState === "visible") load();
+    };
+    window.addEventListener("focus", reload);
+    document.addEventListener("visibilitychange", reload);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", reload);
+      document.removeEventListener("visibilitychange", reload);
+    };
+  }, []);
+  const currentMode = mode ?? DEFAULT_MARI_PERMISSIONS_MODE;
+  const handleChange = async (event: ChangeEvent<HTMLSelectElement>) => {
+    const next = event.target.value as MariPermissionsMode;
+    const previous = currentMode;
+    const writeSeq = ++writeSeqRef.current;
+    setMode(next);
+    try {
+      // The shared chain serializes this against the Mari panel's per-chat
+      // writes AND against runs - sendWorkspaceMessage awaits the whole chain,
+      // so a default change here can never race a prompt on an
+      // un-overridden chat.
+      await enqueueMariPermissionsModeWrite(() =>
+        api.put("/professor-mari/workspace/permissions-mode", { mode: next }),
+      );
+    } catch {
+      // Only the latest write may roll back.
+      if (writeSeqRef.current !== writeSeq) return;
+      setMode(previous);
+      toast.error(localizeUi("ui.chat.homeprofessormarichat.couldNotChangeThePermissionsMode"));
+    }
+  };
+  return (
+    <div id={anchorId} className="flex flex-col gap-1.5">
+      <div className="flex items-center gap-1.5">
+        <label htmlFor={selectId} className="text-xs font-medium">
+          {localizeUi("ui.chat.homeprofessormarichat.permissionsMode")}
+        </label>
+        <HelpTooltip text={localizeUi("settings.controls.mariPermissionsMode.help")} />
+      </div>
+      <select
+        id={selectId}
+        value={currentMode}
+        onChange={(event) => void handleChange(event)}
+        disabled={mode === null}
+        className="h-9 w-full rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2.5 text-xs"
+      >
+        {MARI_PERMISSIONS_MODES.map((value) => (
+          <option key={value} value={value}>
+            {localize(MARI_PERMISSIONS_MODE_LABELS[value].label)}
+          </option>
+        ))}
+      </select>
+      <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
+        {localize(MARI_PERMISSIONS_MODE_LABELS[currentMode].description)}
+      </p>
+    </div>
   );
 }
 
@@ -605,6 +701,28 @@ export function SettingsCheckbox({
 
 type SettingsSwitchAccessibleLabel = { label: ReactNode; ariaLabel?: never } | { label?: undefined; ariaLabel: string };
 
+export function SettingsSwitchTrack({ checked, className }: { checked: boolean; className?: string }) {
+  return (
+    <span
+      aria-hidden="true"
+      data-settings-switch-track
+      className={cn(
+        "inline-flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition-colors",
+        checked ? "bg-[var(--primary)]/70 mari-accent-animated" : "bg-[var(--border)]",
+        className,
+      )}
+    >
+      <span
+        data-settings-switch-thumb
+        className={cn(
+          "pointer-events-none block h-4 w-4 shrink-0 rounded-full bg-[var(--background)] shadow-sm ring-1 ring-[var(--border)] transition-transform",
+          checked && "translate-x-4",
+        )}
+      />
+    </span>
+  );
+}
+
 type SettingsSwitchProps = SettingsSwitchAccessibleLabel & {
   checked: boolean;
   onChange: (v: boolean) => void;
@@ -645,7 +763,11 @@ export function SettingsSwitch({
   const localizedDescription = localizeStringNode(description, localize);
   const localizedTitle = title ? localize(title) : undefined;
   const switchControl = (
-    <span className="relative inline-flex h-5 w-9 shrink-0">
+    <label
+      htmlFor={inputId}
+      title={localizedTitle}
+      className={cn("relative inline-flex h-5 w-9 shrink-0", disabled ? "cursor-not-allowed" : "cursor-pointer")}
+    >
       <input
         id={inputId}
         type="checkbox"
@@ -655,25 +777,11 @@ export function SettingsSwitch({
         onChange={(e) => onChange(e.target.checked)}
         className="peer sr-only"
       />
-      <label
-        htmlFor={inputId}
-        title={localizedTitle}
-        className={cn(
-          "relative inline-flex h-5 w-9 shrink-0 rounded-full transition-colors peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--ring)]",
-          checked ? "bg-[var(--primary)]/70" : "bg-[var(--border)]",
-          checked && "mari-accent-animated",
-          disabled ? "cursor-not-allowed" : "cursor-pointer",
-          switchClassName,
-        )}
-      >
-        <span
-          className={cn(
-            "pointer-events-none absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-[var(--background)] shadow-sm ring-1 ring-[var(--border)] transition-transform",
-            checked && "translate-x-4",
-          )}
-        />
-      </label>
-    </span>
+      <SettingsSwitchTrack
+        checked={checked}
+        className={cn("peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--ring)]", switchClassName)}
+      />
+    </label>
   );
   const switchCluster = (
     <span className="inline-flex shrink-0 items-center gap-1.5">

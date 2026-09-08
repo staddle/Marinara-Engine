@@ -302,6 +302,7 @@ try {
     return apkWorkflowSource.slice(start, next === -1 ? undefined : next);
   };
   const checkoutStepSource = getWorkflowStep("Checkout");
+  const releaseTagStepSource = getWorkflowStep("Resolve release tag");
   const locateStepSource = getWorkflowStep("Locate APK");
   const releaseUploadStepSource = getWorkflowStep("Attach APK to release");
 
@@ -331,9 +332,14 @@ try {
     assert.doesNotMatch(invalidVersion, versionPattern, `the release guard must reject ${invalidVersion}`);
   }
   assert.match(
-    locateStepSource,
-    /RELEASE_TAG: \$\{\{ steps\.release_tag\.outputs\.tag \}\}[\s\S]*\[ -n "\$RELEASE_TAG" \] && \[ "\$\{RELEASE_TAG#v\}" != "\$VERSION" \][\s\S]*exit 1[\s\S]*OUT_NAME=/u,
-    "a release tag must match package.json.version before the APK is named or uploaded",
+    releaseTagStepSource,
+    /if \[ -n "\$tag" \]; then node scripts\/check-release-tag\.mjs "\$tag"; fi/u,
+    "a release tag must pass the shared package.json.version guard",
+  );
+  assert.ok(
+    apkWorkflowSource.indexOf("      - name: Resolve release tag\n") <
+      apkWorkflowSource.indexOf("      - name: Build release APK\n"),
+    "the release tag must be validated before the APK is built",
   );
 
   const wrapperProperties = readFileSync(
@@ -342,7 +348,7 @@ try {
   );
   assert.match(
     wrapperProperties,
-    /distributionSha256Sum=9d926787066a081739e8200858338b4a69e837c3a821a33aca9db09dd4a41026/u,
+    /distributionSha256Sum=acd53f1edaf02f1a8ff99879f8a34b302661a057d9b063ae9e35b552f804d20a/u,
   );
 
   console.info("Android local authentication regressions passed.");

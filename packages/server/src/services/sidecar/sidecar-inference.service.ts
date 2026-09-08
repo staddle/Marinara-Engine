@@ -537,6 +537,7 @@ const SCENE_ANALYSIS_SCHEMA = {
             items: { type: "string" as const },
             maxItems: 3,
           },
+          sfxLoopCount: { type: "integer" as const, minimum: 1, maximum: 5 },
           directions: {
             type: "array" as const,
             maxItems: 1,

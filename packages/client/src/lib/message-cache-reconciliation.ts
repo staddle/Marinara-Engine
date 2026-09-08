@@ -12,6 +12,8 @@ function sortMessagesByCreatedAt(messages: Message[]): Message[] {
 
 function mergeCachedGeneratedMessage(existing: Message, incoming: Message): Message {
   const merged = { ...existing, ...incoming };
+  const activeSwipeChanged =
+    typeof incoming.activeSwipeIndex === "number" && incoming.activeSwipeIndex !== existing.activeSwipeIndex;
   const existingSwipeCount = typeof existing.swipeCount === "number" ? existing.swipeCount : 0;
   const incomingSwipeCount = typeof incoming.swipeCount === "number" ? incoming.swipeCount : 0;
   const activeSwipeFloor =
@@ -23,9 +25,9 @@ function mergeCachedGeneratedMessage(existing: Message, incoming: Message): Mess
   }
   const existingExtra = parseMessageExtraRecord(existing.extra);
   const incomingExtra = parseMessageExtraRecord(incoming.extra);
-  // The saved-message SSE snapshot can predate post-processing extras such as
-  // expression avatars or illustration attachments already present in cache.
-  if (Object.keys(existingExtra).length > 0 || Object.keys(incomingExtra).length > 0) {
+  // A same-swipe SSE snapshot can predate post-processing extras already in
+  // cache. Never carry those extras into a newly selected swipe.
+  if (!activeSwipeChanged && (Object.keys(existingExtra).length > 0 || Object.keys(incomingExtra).length > 0)) {
     merged.extra = { ...existingExtra, ...incomingExtra } as unknown as Message["extra"];
   }
   return merged;

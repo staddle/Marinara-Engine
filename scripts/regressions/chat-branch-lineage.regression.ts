@@ -374,6 +374,55 @@ try {
     assert.equal(key in exportedMetadata.marinara_metadata, false);
   }
 
+  const exportGame = await create("Visible narration export", "game");
+  const editedExportMessage = await addMessage(
+    exportGame.id,
+    "Narration: Original first segment.\n\nNarration: Removed second segment.",
+    "assistant",
+  );
+  await app.inject({
+    method: "POST",
+    url: `/api/chats/${exportGame.id}/messages/${editedExportMessage.id}/swipes`,
+    payload: {
+      content: "Narration: Alternate first segment.\n\nNarration: Removed alternate segment.",
+      silent: true,
+    },
+  });
+  const deletedExportMessage = await addMessage(exportGame.id, "Narration: Entirely removed message.", "assistant");
+  const segmentMetadata = {
+    [`segmentEdit:${editedExportMessage.id}:0`]: { content: "Visible edited segment." },
+    [`segmentDelete:${editedExportMessage.id}:1`]: true,
+    [`segmentDelete:${deletedExportMessage.id}:0`]: true,
+  };
+  const exportMetadataResponse = await app.inject({
+    method: "PATCH",
+    url: `/api/chats/${exportGame.id}/metadata`,
+    payload: segmentMetadata,
+  });
+  assert.equal(exportMetadataResponse.statusCode, 200);
+
+  const gameJsonlExport = await app.inject({
+    method: "GET",
+    url: `/api/chats/${exportGame.id}/export?format=jsonl`,
+  });
+  assert.equal(gameJsonlExport.statusCode, 200);
+  const gameJsonlLines = gameJsonlExport.body.split("\n").map((line: string) => JSON.parse(line));
+  assert.equal(gameJsonlLines.length, 2, "an entirely deleted Game message must be omitted from JSONL");
+  assert.equal(gameJsonlLines[1].mes, "Visible edited segment.");
+  assert.deepEqual(gameJsonlLines[1].swipes, ["Visible edited segment.", "Visible edited segment."]);
+  for (const key of Object.keys(segmentMetadata)) {
+    assert.equal(key in gameJsonlLines[0].chat_metadata, false);
+    assert.equal(key in gameJsonlLines[0].chat_metadata.marinara_metadata, false);
+  }
+
+  const gameTextExport = await app.inject({
+    method: "GET",
+    url: `/api/chats/${exportGame.id}/export?format=text`,
+  });
+  assert.equal(gameTextExport.statusCode, 200);
+  assert.match(gameTextExport.body, /Visible edited segment\./u);
+  assert.doesNotMatch(gameTextExport.body, /Removed second segment|Entirely removed message/u);
+
   const malformed = await create("Malformed metadata");
   const malformedMetadataResponse = await app.inject({
     method: "PATCH",

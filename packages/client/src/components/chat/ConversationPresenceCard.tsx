@@ -1,12 +1,20 @@
 import { createPortal } from "react-dom";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CalendarClock, ChevronDown, RefreshCw, Settings2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import type { ConversationPresenceStatus, ConversationStatusOverride, WeekSchedule } from "@marinara-engine/shared";
 import type { Message } from "@marinara-engine/shared";
-import { useUpdateChatMetadata } from "../../hooks/use-chats";
-import { characterKeys } from "../../hooks/use-characters";
+import { chatKeys, useUpdateChatMetadata } from "../../hooks/use-chats";
+import { characterKeys, useUpdateCharacter } from "../../hooks/use-characters";
 import { useGenerate } from "../../hooks/use-generate";
 import { api } from "../../lib/api-client";
 import { cn, getAvatarCropStyle } from "../../lib/utils";
@@ -109,17 +117,6 @@ function parseSchedules(raw: unknown): Record<string, WeekSchedule> {
   return schedules;
 }
 
-function buildOverrides(
-  existing: Record<string, ConversationStatusOverride>,
-  characterId: string,
-  override: ConversationStatusOverride | null,
-): Record<string, ConversationStatusOverride | null> {
-  const next: Record<string, ConversationStatusOverride | null> = { ...existing };
-  // Null signals deletion to the server merge; the server strips these tombstones.
-  next[characterId] = override;
-  return next;
-}
-
 function resizeActivityField(field: HTMLTextAreaElement | null) {
   if (!field) return;
   field.style.height = "0px";
@@ -158,7 +155,9 @@ export function ConversationPresenceCard({
     width: 320,
   });
   const queryClient = useQueryClient();
+  const qc = queryClient;
   const updateMeta = useUpdateChatMetadata();
+  const updateCharacter = useUpdateCharacter();
   const { generate } = useGenerate();
   const activeAbortController = useChatStore((s) => s.abortControllers.get(chatId) ?? null);
   const delayedInfo = useChatStore((s) => s.perChatDelayed.get(chatId) ?? null);
@@ -344,11 +343,13 @@ export function ConversationPresenceCard({
   }, [messages]);
 
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const refreshStatuses = async () => {
+  const needsScheduleRefresh = statusesQuery.data?.needsRefresh ?? false;
+  const refetchStatuses = statusesQuery.refetch;
+  const refreshStatuses = useCallback(async () => {
     if (isRefreshing) return;
     setIsRefreshing(true);
     try {
-      if (statusesQuery.data?.needsRefresh) {
+      if (needsScheduleRefresh) {
         await api.post("/conversation/schedule/generate", {
           chatId,
           characterIds: chatCharIds,
@@ -357,11 +358,29 @@ export function ConversationPresenceCard({
         });
         await queryClient.refetchQueries({ queryKey: ["chat", chatId] });
       }
-      await statusesQuery.refetch();
+      await refetchStatuses();
     } finally {
       setIsRefreshing(false);
     }
-  };
+  }, [chatCharIds, chatId, isRefreshing, needsScheduleRefresh, queryClient, refetchStatuses]);
+
+  /**
+   * Roll the week over without waiting for the refresh button. A schedule from
+   * an earlier week still works, but nothing regenerated it on its own: the
+   * `ensureSchedules` helper was never wired to a caller, so the button was the
+   * only path and a routine silently stayed a week behind.
+   *
+   * Once per chat per session, so a missing or failing connection cannot loop.
+   * Chats with schedules switched off never report `needsRefresh`, so this
+   * cannot generate for them.
+   */
+  const autoRegeneratedChatsRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!chatId || !needsScheduleRefresh || isRefreshing) return;
+    if (autoRegeneratedChatsRef.current.has(chatId)) return;
+    autoRegeneratedChatsRef.current.add(chatId);
+    void refreshStatuses();
+  }, [chatId, isRefreshing, needsScheduleRefresh, refreshStatuses]);
 
   if (characters.length === 0) return <div />;
 
@@ -385,15 +404,23 @@ export function ConversationPresenceCard({
   ): Promise<boolean> => {
     setPendingStatuses((current) => ({ ...current, [characterId]: status }));
     try {
-      await updateMeta.mutateAsync({
-        id: chatId,
-        conversationStatusOverrides: buildOverrides(overrides, characterId, {
-          status,
-          activity: typeof activity === "string" ? activity : null,
-          createdAt: new Date().toISOString(),
-          expiresAt: null,
-        }),
+      // The override belongs to the character, so it applies in every chat. The
+      // chat's cached copy is refreshed when the chat is re-read.
+      await updateCharacter.mutateAsync({
+        id: characterId,
+        data: {
+          extensions: {
+            conversationStatusOverride: {
+              status,
+              activity: typeof activity === "string" ? activity : null,
+              createdAt: new Date().toISOString(),
+              expiresAt: null,
+            },
+          },
+        },
+        skipVersionSnapshot: true,
       });
+      await qc.invalidateQueries({ queryKey: chatKeys.detail(chatId) });
       await statusesQuery.refetch();
       setPendingStatuses((current) => {
         const next = { ...current };
@@ -423,10 +450,12 @@ export function ConversationPresenceCard({
       return next;
     });
     try {
-      await updateMeta.mutateAsync({
-        id: chatId,
-        conversationStatusOverrides: buildOverrides(overrides, characterId, null),
+      await updateCharacter.mutateAsync({
+        id: characterId,
+        data: { extensions: { conversationStatusOverride: null } },
+        skipVersionSnapshot: true,
       });
+      await qc.invalidateQueries({ queryKey: chatKeys.detail(chatId) });
       void statusesQuery.refetch();
     } catch (error) {
       toast.error(
@@ -516,6 +545,7 @@ export function ConversationPresenceCard({
       <button
         ref={buttonRef}
         type="button"
+        data-chat-help="identity"
         className={identityPillClass}
         title={title}
         onClick={() => {
@@ -599,6 +629,7 @@ export function ConversationPresenceCard({
         createPortal(
           <div
             ref={popoverRef}
+            data-chat-floating-panel
             className={cn(NEUTRAL_PANEL_SHELL, "fixed z-[9999] overflow-hidden")}
             style={{
               top: position.top,
@@ -645,6 +676,7 @@ export function ConversationPresenceCard({
             </div>
 
             <div
+              data-chat-floating-scroll
               className={cn(
                 NEUTRAL_PANEL_SCROLL_AREA,
                 "max-h-[min(28rem,calc(100vh-12rem))] space-y-2 overflow-y-auto p-2",

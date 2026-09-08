@@ -785,8 +785,7 @@ import {
   parseAssistantWorkspaceAction,
   professorMariWorkspaceResponseFormat,
   resolveWorkspaceMutationVerification,
-  workspaceMutationAuthorizationIssue,
-  workspaceActionNeedsVerification,
+  auditWorkspaceCompletionClaim,
   workspaceTextClaimsMutationCompletion,
   type WorkspaceCommandResult,
 } from "../../packages/server/src/services/professor-mari/workspace-agent.service.js";
@@ -811,6 +810,7 @@ import {
 import { parseRouterResponse } from "../../packages/server/src/services/agents/knowledge-router.js";
 import type { PromptOverridesStorage } from "../../packages/server/src/services/storage/prompt-overrides.storage.js";
 import {
+  CHARACTERS_REFERENCE_SHEET,
   listPromptOverrideKeys,
   loadPrompt,
   ROLEPLAY_GALLERY_VIDEO_DIRECTOR,
@@ -2830,6 +2830,21 @@ const cases: RegressionCase[] = [
     },
   },
   {
+    name: "lorebook size macros resolve known counts and treat inherited object keys as unknown IDs",
+    run() {
+      const context: MacroContext = {
+        user: "Mari",
+        char: "Dottore",
+        characters: ["Dottore"],
+        variables: {},
+        lorebookEntryCounts: { "V1StGXR8_Z5jdHi6B-myT": 151 },
+      };
+      assert.equal(resolveMacros("{{lorebooksize::V1StGXR8_Z5jdHi6B-myT}}", context), "151");
+      assert.equal(resolveMacros("{{lorebooksize::missing}}", context), "0");
+      assert.equal(resolveMacros("{{lorebooksize::constructor}}", context), "0");
+    },
+  },
+  {
     name: "phonetic name macros fall back to visible names",
     run() {
       assert.equal(
@@ -3177,8 +3192,14 @@ const cases: RegressionCase[] = [
         "utf8",
       );
       assert.match(assemblerSource, /groupCharacterIds: input\.groupCharacterIds/);
-      assert.match(generateRouteSource, /characterIds: promptCharacterIds,\s*groupCharacterIds: characterIds,/);
-      assert.match(dryRunRouteSource, /characterIds: promptCharacterIds,\s*groupCharacterIds: characterIds,/);
+      assert.match(
+        generateRouteSource,
+        /characterIds: promptCharacterIds,\s*lorebookCharacterIds: withIdentityLorebookScope\(promptCharacterIds\),\s*groupCharacterIds: characterIds,/,
+      );
+      assert.match(
+        dryRunRouteSource,
+        /characterIds: promptCharacterIds,\s*lorebookCharacterIds: withIdentityLorebookScope\(promptCharacterIds\),\s*groupCharacterIds: characterIds,/,
+      );
     },
   },
   {
@@ -3731,18 +3752,31 @@ const cases: RegressionCase[] = [
       );
       const activeAgentMenuSource = drawerSource.slice(activeAgentMenuStart, activeAgentMenuEnd);
       assert.match(
-        activeAgentMenuSource,
-        /agent\.id === "long-term-memory"[\s\S]*getAgentSettingsMenuId\(chat\.id, agent\.id\)/u,
-        "Active Long-Term Memory should expose the menu link target",
+        drawerSource,
+        /const renderStandaloneRoleplayAgentSettingsCard[\s\S]*?<AgentSettingsCard[\s\S]*?id=\{getAgentSettingsMenuId\(chat\.id, agent\.id\)\}/u,
+        "Standalone Roleplay agents such as Long-Term Memory must expose the menu link target",
       );
-      const storyboardMenuBranchStart = activeAgentMenuSource.indexOf("{agent.id === STORYBOARD_AGENT_ID && (");
-      const storyboardMenuBranchEnd = activeAgentMenuSource.indexOf(
-        "\n                                          )}",
+      const standaloneAgentRendererStart = drawerSource.indexOf("const renderStandaloneRoleplayAgentSettingsCard =");
+      const standaloneAgentRendererEnd = drawerSource.indexOf(
+        "const updateAgentPromptTemplateSelection =",
+        standaloneAgentRendererStart,
+      );
+      assert.notEqual(standaloneAgentRendererStart, -1, "Standalone Roleplay agent settings should be rendered");
+      assert.notEqual(standaloneAgentRendererEnd, -1, "Standalone Roleplay agent settings should be bounded");
+      const standaloneAgentRendererSource = drawerSource.slice(
+        standaloneAgentRendererStart,
+        standaloneAgentRendererEnd,
+      );
+      const storyboardMenuBranchStart = standaloneAgentRendererSource.indexOf(
+        "} else if (agent.id === STORYBOARD_AGENT_ID) {",
+      );
+      const storyboardMenuBranchEnd = standaloneAgentRendererSource.indexOf(
+        '} else if (agent.id === "beholder") {',
         storyboardMenuBranchStart,
       );
       assert.notEqual(storyboardMenuBranchStart, -1, "Active Storyboard should render its chat settings branch");
       assert.notEqual(storyboardMenuBranchEnd, -1, "Storyboard chat settings branch should be complete");
-      const storyboardMenuBranchSource = activeAgentMenuSource.slice(
+      const storyboardMenuBranchSource = standaloneAgentRendererSource.slice(
         storyboardMenuBranchStart,
         storyboardMenuBranchEnd,
       );
@@ -3781,7 +3815,7 @@ const cases: RegressionCase[] = [
 
       assert.equal(normalizeGameStoryboardKeyframeCount(undefined), 3);
       assert.equal(normalizeGameStoryboardKeyframeCount(0), 1);
-      assert.equal(normalizeGameStoryboardKeyframeCount(12), 6);
+      assert.equal(normalizeGameStoryboardKeyframeCount(12), 12);
       assert.doesNotMatch(sharedPlannerSource, /You are Marinara's/u);
       assert.doesNotMatch(sharedImageSource, /promptTemplate:/u);
       assert.equal(listPromptOverrideKeys().includes("game.storyboardIllustrationDirector"), false);
@@ -3795,7 +3829,11 @@ const cases: RegressionCase[] = [
       );
       assert.match(
         activeAgentMenuSource,
-        /id=\{\s*agent\.id === "hierarchical-maps"[\s\S]*agent\.id === STORYBOARD_AGENT_ID[\s\S]*\? getAgentSettingsMenuId\(chat\.id, agent\.id\)/u,
+        /const hasSettingsTarget = chatSettingsPackageByAgentId\.has\(agent\.id\);[\s\S]*id=\{hasSettingsTarget \? getAgentSettingsMenuId\(chat\.id, agent\.id\)/u,
+      );
+      assert.match(
+        roleplayMenuLinksSource,
+        /for \(const \[agentId, capabilityPackage\] of chatSettingsPackageByAgentId\)[\s\S]*addLink\(agentId, activeAgentIds\.includes\(agentId\), agent\?\.name \?\? capabilityPackage\.manifest\.name\)/u,
       );
       assert.match(storyboardMenuBranchSource, /<StoryboardChatSettingsPanel/u);
       assert.match(storyboardMenuBranchSource, /ownerMode="roleplay"/u);
@@ -4175,7 +4213,7 @@ const cases: RegressionCase[] = [
       assert.doesNotMatch(gameRouteSource, /ltxDirectorPrompt:\s*promptBuild|storyboardVideoTemplateId/);
       assert.match(gameRouteSource, /generateStoryboardVideos && !usedFallbackStoryboardPlanner/);
       assert.match(gameRouteSource, /if \(storyboardAbortSignal\.aborted\)/);
-      assert.match(gameRouteSource, /Storyboard Illustrator returned no usable keyframes/);
+      assert.match(gameRouteSource, /completeStoryboardPlan\(\{/);
       assert.match(gameRouteSource, /Storyboard keyframe is missing its planned animation prompt/);
       assert.doesNotMatch(
         gameRouteSource,
@@ -4566,6 +4604,32 @@ const cases: RegressionCase[] = [
     },
   },
   {
+    name: "tagged avatar prompts preserve long user appearance details",
+    run() {
+      const styleProfiles = createDefaultImageStyleProfileSettings();
+      const profile = styleProfiles.profiles.find((candidate) => candidate.id === "danbooru");
+      assert.ok(profile);
+      const appearance =
+        "1girl, Shiranui Mai, Fatal Fury, light blue button down, long auburn hair, amber eyes, red ribbon, white gloves, black skirt, thighhighs, detailed face, soft smile, standing in a moonlit garden, intricate floral background, cinematic rim lighting, warm highlights, cool shadows";
+      const compiled = compileImagePrompt({
+        kind: "avatar",
+        prompt: `Canonical appearance: ${appearance}`,
+        userPositive: appearance,
+        styleProfiles,
+        styleProfileId: profile.id,
+      });
+      for (const detail of [
+        "1girl",
+        "Shiranui Mai",
+        "Fatal Fury",
+        "light blue button down",
+        "intricate floral background",
+      ]) {
+        assert.match(compiled.prompt, new RegExp(detail, "iu"), `avatar prompt must preserve ${detail}`);
+      }
+    },
+  },
+  {
     name: "avatar portrait and sprite prompts honor a profile's natural-language grammar",
     run() {
       const styleProfiles = createDefaultImageStyleProfileSettings();
@@ -4710,6 +4774,20 @@ const cases: RegressionCase[] = [
         },
       });
       assert.deepEqual(missingPersonaSheetAndAvatar, { base64: "persona-sprite-bytes", source: "sprite" });
+
+      assert.equal(listPromptOverrideKeys().includes(CHARACTERS_REFERENCE_SHEET.key), true);
+      assert.match(
+        CHARACTERS_REFERENCE_SHEET.defaultBuilder({ name: "Mira", appearance: "long brown hair" }),
+        /production character design sheet for Mira.*Canonical appearance: long brown hair/u,
+      );
+      const charactersRouteSource = readFileSync(
+        new URL("../../packages/server/src/routes/characters.routes.ts", import.meta.url),
+        "utf8",
+      );
+      assert.match(
+        charactersRouteSource,
+        /loadPrompt\(promptOverridesStorage, CHARACTERS_REFERENCE_SHEET, \{ name, appearance \}\)/u,
+      );
     },
   },
   {
@@ -4780,7 +4858,7 @@ const cases: RegressionCase[] = [
     },
   },
   {
-    name: "Storyboard appearance is gated and injected once across planner and fallback paths",
+    name: "Storyboard appearance always reaches the planner and is injected once into render prompts",
     async run() {
       const appearance = "auburn hair, green eyes, leather jacket";
       const description = "A verbose roleplay card description that must not be sent as visual appearance.";
@@ -5124,8 +5202,8 @@ const cases: RegressionCase[] = [
       assert.doesNotMatch(gameSurfaceSource, /useGamePromptTemplate/u);
       assert.match(gameRouteSource, /characterAppearanceContextBlock:\s*storyboardAppearanceContextBlock/u);
       assert.equal(gameRouteSource.match(/^\s+characterAppearanceContextBlock,\s*$/gmu)?.length, 2);
-      assert.equal(gameRouteSource.match(/includeCharacterDescriptions:\s*true,/gu)?.length ?? 0, 0);
-      assert.equal(gameRouteSource.match(/includeCharacterDescriptions:\s*includeCharacterAppearance,/gu)?.length, 5);
+      assert.equal(gameRouteSource.match(/includeCharacterDescriptions:\s*true,/gu)?.length, 1);
+      assert.equal(gameRouteSource.match(/includeCharacterDescriptions:\s*includeCharacterAppearance,/gu)?.length, 4);
       assert.equal(
         gameRouteSource.match(
           /includeCharacterDescriptions:\s*includeCharacterAppearanceAtRender && characterPrompts\.length === 0,/gu,
@@ -5779,6 +5857,21 @@ const cases: RegressionCase[] = [
       assert.match(compiledAutoBackground.prompt, /hastily cleaned floorboards/u);
       assert.doesNotMatch(compiledAutoBackground.prompt, /Infer a consistent visual style from/u);
 
+      const reviewedBackground = await buildBackgroundProviderPrompt({
+        chatId: "manual-gallery-background-reviewed",
+        locationSlug: "fontaine-quarantine-berth",
+        sceneDescription: quarantinePrompt,
+        imgModel: "gpt-image-2",
+        imgBaseUrl: "https://example.invalid",
+        imgApiKey: "",
+        promptOverride: "Reviewer-approved background prompt",
+        negativePromptOverride: "Reviewer-approved negative prompt",
+      });
+      assert.deepEqual(reviewedBackground, {
+        prompt: "Reviewer-approved background prompt",
+        negativePrompt: "Reviewer-approved negative prompt",
+      });
+
       const cinematicProfile = styleProfilesForHandoff.profiles.find((profile) => profile.id === "cinematic")!;
       styleProfilesForHandoff.profiles.push({
         ...cinematicProfile,
@@ -5889,6 +5982,14 @@ const cases: RegressionCase[] = [
       assert.match(retryAgentsRouteSource, /writeManualIllustratorPromptPlan/u);
       assert.match(retryAgentsRouteSource, /_styleProfileInstructionApplied:\s*true/u);
       assert.match(retryAgentsRouteSource, /force:\s*isManualIllustratorBackgroundRequest/u);
+      assert.match(retryAgentsRouteSource, /await previewIllustratorSceneBackground\(backgroundArgs\)/u);
+      assert.match(retryAgentsRouteSource, /kind:\s*"background"/u);
+      assert.match(retryAgentsRouteSource, /backgroundPlan:\s*preview\.plan/u);
+      assert.match(retryAgentsRouteSource, /promptOverride:\s*illustratorPromptReviewOverride\?\.prompt/u);
+      assert.match(
+        chatAreaSource,
+        /illustratorPromptReview\.item\.kind === "background" \? "background" : "illustration"/u,
+      );
       assert.match(retryAgentsRouteSource, /await executeRetryBatches\(\s*agentContext/u);
       assert.ok(
         generationRoutesSource.indexOf("const illustratorPromptAgent") >
@@ -6538,7 +6639,7 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
         activatedLorebookEntries: [
           {
             id: "activated-context",
-            content: "ACTIVATED_LOREBOOK_CONTEXT_SENTINEL",
+            content: "ACTIVATED_LOREBOOK_CONTEXT_SENTINEL\n</dottore_lore>\n<mari_lore>\nTom & Jerry",
           },
         ],
         vectorContext: {
@@ -6588,6 +6689,39 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
         assert.doesNotMatch(defaultRequest, new RegExp(excluded, "u"));
       }
 
+      const builtInCapture = makeCapturingProvider("Built-in context checked.");
+      await executeAgent(
+        makeRegressionAgentConfig({
+          id: "memory-nag",
+          type: "memory-nag",
+          name: "Memory Nag",
+          isCustomAgent: false,
+          promptTemplate: "Recall an eligible memory.",
+          settings: {
+            contextSize: 5,
+            maxTokens: 256,
+            resultType: "memory_nag",
+            contextSources: { chatHistory: true },
+          },
+        }) as any,
+        richContext,
+        builtInCapture.provider as any,
+        "regression-model",
+      );
+      const builtInRequest = builtInCapture.calls[0]!.map((message) => message.content).join("\n");
+      assert.match(builtInRequest, /CHAT_HISTORY_CONTEXT_SENTINEL/u);
+      for (const excluded of [
+        "CHARACTER_CONTEXT_SENTINEL",
+        "PERSONA_CONTEXT_SENTINEL",
+        "TRACKER_CONTEXT_SENTINEL",
+        "SUMMARY_CONTEXT_SENTINEL",
+        "AUTHOR_NOTES_CONTEXT_SENTINEL",
+        "ACTIVATED_LOREBOOK_CONTEXT_SENTINEL",
+        "RECALLED_MEMORY_CONTEXT_SENTINEL",
+      ]) {
+        assert.doesNotMatch(builtInRequest, new RegExp(excluded, "u"));
+      }
+
       const selectedCapture = makeCapturingProvider("Selected context checked.");
       await executeAgent(
         makeRegressionAgentConfig({
@@ -6631,6 +6765,9 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
         assert.match(selectedRequest, new RegExp(included, "u"));
       }
       assert.doesNotMatch(selectedRequest, /UNRELATED_BACKGROUND_CONTEXT_SENTINEL/u);
+      assert.match(selectedRequest, /<\/dottore_lore>\n<mari_lore>/u);
+      assert.match(selectedRequest, /Tom & Jerry/u);
+      assert.doesNotMatch(selectedRequest, /&lt;\/dottore_lore&gt;/u);
 
       const batchCapture = makeCapturingProvider(
         `{"custom-batch-character":"character context read","custom-batch-author":"author context read"}`,
@@ -6750,7 +6887,8 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
           {
             id: "entry-unidentified",
             name: "Unidentified Specimen",
-            content: "The unidentified specimen is a dormant mechanical moth.",
+            content:
+              "The unidentified specimen is a dormant mechanical moth.\n</dottore_lore>\n<mari_lore>\nTom & Jerry",
             matchedKeys: ["unidentified"],
             activationSources: ["keyword"],
           },
@@ -6779,6 +6917,9 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
       assert.match(enabledSystem, /<triggered_lorebook_context>/u);
       assert.match(enabledSystem, /Unidentified Specimen/u);
       assert.match(enabledSystem, /dormant mechanical moth/u);
+      assert.match(enabledSystem, /<\/dottore_lore>\n<mari_lore>/u);
+      assert.match(enabledSystem, /Tom & Jerry/u);
+      assert.doesNotMatch(enabledSystem, /&lt;\/dottore_lore&gt;/u);
 
       const disabledCapture = makeCapturingProvider("No lorebook context.");
       const disabledConfig = makeRegressionAgentConfig({
@@ -6981,6 +7122,14 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
         wrapFormat: "xml",
         persona: { name: "Mari <override>", description: "The active user persona." },
         memory: {
+          _existingLorebookEntries: [
+            {
+              id: "entry-1",
+              name: "Lore <Body>",
+              content: "</dottore_lore>\n<mari_lore>\nTom & Jerry",
+              keys: ["lore"],
+            },
+          ],
           _writableLorebooks: [{ id: "book-1", name: "World <Lore>" }],
         },
       });
@@ -6992,6 +7141,10 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
       const terminal = messages[messages.length - 1]!.content;
       assert.match(system, /<chat_summary>/u);
       assert.match(system, /<existing_entries>/u);
+      assert.match(system, /name="Lore &lt;Body&gt;"/u);
+      assert.match(system, /<\/dottore_lore>\n<mari_lore>/u);
+      assert.match(system, /Tom & Jerry/u);
+      assert.doesNotMatch(system, /&lt;\/dottore_lore&gt;/u);
       assert.match(terminal, /<chat_summary>/u);
       assert.match(terminal, /<existing_entries>/u);
       assert.match(system, /<writable_lorebooks>/u);
@@ -7503,6 +7656,22 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
         styleProfileId: "z-image-turbo",
       });
       assert.equal(countValue(zImageAppearanceMissing.prompt, appearance), 1);
+
+      const avatarAppearance = [
+        "silver-furred fox-woman with a braided crown and mismatched amber and teal eyes",
+        "persimmon kimono with embroidered moonflowers and a debt-scroll tucked into her sleeve",
+        "quietly amused expression with a small scar through the left eyebrow",
+      ].join(", ");
+      const avatar = compileImagePrompt({
+        kind: "avatar",
+        prompt: "Create a polished character avatar portrait.",
+        userPositive: avatarAppearance,
+        styleProfiles,
+        styleProfileId: "anime",
+      });
+      assert.match(avatar.prompt, /braided crown/);
+      assert.match(avatar.prompt, /embroidered moonflowers/);
+      assert.match(avatar.prompt, /scar through the left eyebrow/);
 
       const compactBudgetPrompt = [
         ...Array.from({ length: 40 }, (_, index) => `blue eyes detail ${index}`),
@@ -8822,6 +8991,107 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
     },
   },
   {
+    name: "agent prompts flatten conditional macros without dropping authored content",
+    async run() {
+      const capture = makeCapturingProvider("Context checked.");
+      await executeAgent(
+        makeRegressionAgentConfig({
+          id: "custom:conditional-context",
+          type: "conditional-context",
+          name: "Conditional Context",
+          isCustomAgent: true,
+          promptTemplate: "Read the supplied context.",
+          settings: { resultType: "context_injection" },
+        }) as any,
+        makeRegressionAgentContext({
+          recentMessages: [
+            {
+              role: "user",
+              content:
+                'Before {{#if char == “Powers That Be” || &quot;Maukie&quot;}}***Arc Two*** &quot;quoted&quot; {{#if character == "Dottore"}}nested note{{/if}}{{else}}alternate note{{/if}} after.',
+            },
+          ],
+        }),
+        capture.provider as any,
+        "regression-model",
+      );
+
+      const providerPrompt = capture.calls[0]!.map((message) => message.content).join("\n");
+      assert.match(providerPrompt, /Before \*\*\*Arc Two\*\*\* "quoted" nested notealternate note after\./u);
+      assert.doesNotMatch(providerPrompt, /&quot;|\{\{#if|\{\{else|\{\{\/if/u);
+    },
+  },
+  {
+    name: "agent follow-up calls also flatten conditional macros",
+    async run() {
+      const toolCalls: any[][] = [];
+      let toolRound = 0;
+      const toolProvider = {
+        maxTokensOverrideValue: null,
+        async chatComplete(messages: any[]) {
+          toolCalls.push(messages);
+          toolRound += 1;
+          return toolRound === 1
+            ? {
+                content: "Checking.",
+                toolCalls: [{ id: "call-1", type: "function", function: { name: "lookup", arguments: "{}" } }],
+                usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+              }
+            : {
+                content: "Context checked.",
+                usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+              };
+        },
+      };
+      const config = makeRegressionAgentConfig({
+        id: "custom:conditional-follow-up",
+        type: "conditional-follow-up",
+        name: "Conditional Follow-up",
+        isCustomAgent: true,
+        promptTemplate: "Read the supplied context.",
+        settings: { resultType: "context_injection" },
+      });
+      await executeAgent(config as any, makeRegressionAgentContext(), toolProvider as any, "regression-model", {
+        tools: [
+          {
+            type: "function",
+            function: { name: "lookup", description: "Look up context", parameters: { type: "object" } },
+          },
+        ],
+        executeToolCall: async () =>
+          'Tool says {{#if character == "Dottore"}}&quot;remember me&quot;{{else}}forget me{{/if}}.',
+      } as any);
+
+      const secondToolPrompt = toolCalls[1]!.map((message) => message.content).join("\n");
+      assert.match(secondToolPrompt, /Tool says "remember me"forget me\./u);
+      assert.doesNotMatch(secondToolPrompt, /&quot;|\{\{#if|\{\{else|\{\{\/if/u);
+
+      const retryCalls: any[][] = [];
+      let retryRound = 0;
+      const retryProvider = {
+        maxTokensOverrideValue: null,
+        async chatComplete(messages: any[]) {
+          retryCalls.push(messages);
+          retryRound += 1;
+          return {
+            content: retryRound === 1 ? '{{#if character == "Dottore"}}not json &quot;yet&quot;{{/if}}' : "{}",
+            usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+          };
+        },
+      };
+      await executeAgent(
+        { ...config, type: "lorebook-keeper", settings: { resultType: "json" } } as any,
+        makeRegressionAgentContext(),
+        retryProvider as any,
+        "regression-model",
+      );
+
+      const retryPrompt = retryCalls[1]!.map((message) => message.content).join("\n");
+      assert.match(retryPrompt, /not json "yet"/u);
+      assert.doesNotMatch(retryPrompt, /&quot;|\{\{#if|\{\{else|\{\{\/if/u);
+    },
+  },
+  {
     name: "roleplay tracker lorebook context is opt-in and keeps author notes",
     run() {
       const context = makeRegressionAgentContext({
@@ -9020,6 +9290,63 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
       assert.match(expanded.content, /<ritual_step id="2">/);
       assert.equal(expanded.content.includes("&lt;START>"), false);
       assert.equal(markerCtx.lorebookDepthEntries?.[0]?.content, "Depth keeps <scene-note> literal.");
+    },
+  },
+  {
+    name: "lorebook markers insert each world-info position at most once per prompt build",
+    async run() {
+      const makeMarkerCtx = (): MarkerContext => ({
+        db: undefined as unknown as DB,
+        chatId: "chat-lorebook-marker-dedupe",
+        characterIds: [],
+        personaName: "Mari",
+        personaDescription: "",
+        chatMessages: [],
+        chatSummary: null,
+        wrapFormat: "xml" as const,
+        enableAgents: true,
+        activeAgentIds: [],
+        activeLorebookIds: [],
+        macroCtx: { user: "Mari", char: "Dottore", characters: ["Dottore"], variables: {} },
+        lorebookScanResult: {
+          worldInfoBefore: "LORE_BEFORE_ENTRY",
+          worldInfoAfter: "LORE_AFTER_ENTRY",
+          depthEntries: [],
+          outlets: {},
+          totalEntries: 2,
+          totalTokensEstimate: 8,
+          activatedEntryIds: ["entry-before", "entry-after"],
+          activatedEntries: [],
+          budgetSkippedEntries: [],
+        },
+      });
+
+      // Two combined "All" markers (issue #5716): the second placeholder must not repeat the entries.
+      const twoCombined = makeMarkerCtx();
+      const firstAll = await expandMarker({ type: "lorebook" }, twoCombined);
+      const secondAll = await expandMarker({ type: "lorebook" }, twoCombined);
+      assert.equal(firstAll.content, "LORE_BEFORE_ENTRY\n\nLORE_AFTER_ENTRY");
+      assert.equal(secondAll.content, "");
+
+      // A "Before" marker followed by an "All" marker: the combined marker only adds the after position.
+      const beforeThenAll = makeMarkerCtx();
+      const before = await expandMarker({ type: "world_info_before" }, beforeThenAll);
+      const remainder = await expandMarker({ type: "lorebook" }, beforeThenAll);
+      assert.equal(before.content, "LORE_BEFORE_ENTRY");
+      assert.equal(remainder.content, "LORE_AFTER_ENTRY");
+
+      // Dedicated Before + After markers keep their own positions and stay independent of each other.
+      const typed = makeMarkerCtx();
+      const typedBefore = await expandMarker({ type: "world_info_before" }, typed);
+      const typedAfter = await expandMarker({ type: "world_info_after" }, typed);
+      const repeatedBefore = await expandMarker({ type: "world_info_before" }, typed);
+      assert.equal(typedBefore.content, "LORE_BEFORE_ENTRY");
+      assert.equal(typedAfter.content, "LORE_AFTER_ENTRY");
+      assert.equal(repeatedBefore.content, "");
+
+      // A fresh prompt build starts with no claimed positions.
+      const fresh = await expandMarker({ type: "lorebook" }, makeMarkerCtx());
+      assert.equal(fresh.content, "LORE_BEFORE_ENTRY\n\nLORE_AFTER_ENTRY");
     },
   },
   {
@@ -9271,7 +9598,10 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
         "utf8",
       );
       const ltmFallbackStart = generateRouteSource.indexOf("if (!handledByPresetSection) {");
-      const ltmFallbackEnd = generateRouteSource.indexOf("longTermMemoryRecallReceipt = recall.receipt;", ltmFallbackStart);
+      const ltmFallbackEnd = generateRouteSource.indexOf(
+        "longTermMemoryRecallReceipt = recall.receipt;",
+        ltmFallbackStart,
+      );
       const ltmFallbackSource = generateRouteSource.slice(
         ltmFallbackStart,
         ltmFallbackEnd + "longTermMemoryRecallReceipt = recall.receipt;".length,
@@ -10623,7 +10953,17 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
       ]);
       assert.equal(mergedMari?.body.face?.worn, undefined);
       assert.equal(mergedMari?.body.left_hand?.holding, undefined);
-      assert.deepEqual(mergedMari?.body.right_arm, { missing: true });
+      // `missing` and `bare` are manual-only: the extractor proposed both on this slot
+      // and neither is applied, so what it also reported — the bracelet, and the wound
+      // merged against the one already there — is what survives. Before they became
+      // manual-only, `missing` took the slot and discarded all of it.
+      assert.deepEqual(mergedMari?.body.right_arm, {
+        worn: [{ item: "bracelet", damage: "pristine" }],
+        wounds: [
+          { text: "shallow cut", severity: "minor", bleeding: true },
+          { text: "ignored wound", severity: "critical", bleeding: true },
+        ],
+      });
       assert.equal(merged.state.characters.find((character) => character.name === "Dottore")?.species, "human");
       assert.equal(
         merged.state.characters.some((character) => character.name === "Columbina"),
@@ -10663,8 +11003,12 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
       });
       const result = await executeAgent(config as any, context, provider as any, "regression-model");
       const system = calls[0]?.[0]?.content ?? "";
-      assert.match(system, /Persona: Mari\nCurrent state:/u);
-      assert.match(system, /"self": \{/u);
+      const user = calls[0]?.[1]?.content ?? "";
+      assert.equal(calls[0]?.[0]?.role, "system");
+      assert.equal(calls[0]?.[1]?.role, "user");
+      assert.equal(system, "Return a physical-state delta as JSON.");
+      assert.match(user, /Persona: Mari\nCurrent state:/u);
+      assert.match(user, /"self":\{/u);
       assert.equal(callOptions[0]?.temperature, 0);
       assert.equal(result.success, true);
       assert.deepEqual(result.data, previousState);
@@ -10685,7 +11029,11 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
         firstRun.provider as any,
         "regression-model",
       );
-      assert.match(firstRun.calls[0]?.[0]?.content ?? "", /Current state:\n\{\}/u);
+      const firstRunUser = firstRun.calls[0]?.[1]?.content ?? "";
+      assert.equal(firstRun.calls[0]?.[0]?.role, "system");
+      assert.equal(firstRun.calls[0]?.[1]?.role, "user");
+      assert.match(firstRunUser, /^Persona: Mari\nNarration:/u);
+      assert.doesNotMatch(firstRunUser, /Current state:/u);
       assert.deepEqual(firstRunResult.data, { characters: [] });
 
       const invalidRun = makeCapturingProvider(`{"changed":true,"delta":{"self":{"body":{"fake":{}}}}}`);
@@ -10872,13 +11220,17 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
         '{"say":"Done — I created it and verified it saved.","commands":[],"stop":true}',
       );
       assert.equal(workspaceTextClaimsMutationCompletion(unsupportedCompletion.visibleText), true);
-      assert.equal(workspaceActionNeedsVerification(unsupportedCompletion, []), "none");
+      assert.equal(auditWorkspaceCompletionClaim(unsupportedCompletion, []).issue, "none");
 
       const completedSupportReply = parseAssistantWorkspaceAction(
         '{"say":"Done. Shell commands are unavailable here, so use these manual steps.","commands":[],"stop":true}',
       );
       assert.equal(workspaceTextClaimsMutationCompletion(completedSupportReply.visibleText), false);
-      assert.equal(workspaceActionNeedsVerification(completedSupportReply, []), null);
+      assert.equal(auditWorkspaceCompletionClaim(completedSupportReply, []).issue, null);
+      const approvalRequest = parseAssistantWorkspaceAction(
+        '{"say":"Should I save this character update?","awaitingAuthorization":true,"commands":[{"name":"app_data","arguments":{"action":"character.update","characterId":"char-1","patch":{"appearance":"Blue coat"},"apply":true}}],"stop":false}',
+      );
+      assert.equal(approvalRequest.awaitingAuthorization, true);
 
       const mutationResult: WorkspaceCommandResult = {
         id: "create-lorebook",
@@ -10895,16 +11247,276 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
         success: true,
       };
       assert.equal(resolveWorkspaceMutationVerification([mutationResult]), "unverified");
-      assert.equal(workspaceActionNeedsVerification(unsupportedCompletion, [mutationResult]), "unverified");
+      assert.equal(auditWorkspaceCompletionClaim(unsupportedCompletion, [mutationResult]).issue, "unverified");
       assert.equal(resolveWorkspaceMutationVerification([mutationResult, verificationResult]), "verified");
-      assert.equal(workspaceActionNeedsVerification(unsupportedCompletion, [mutationResult, verificationResult]), null);
+      assert.equal(
+        auditWorkspaceCompletionClaim(unsupportedCompletion, [mutationResult, verificationResult]).issue,
+        null,
+      );
 
       const dryRunMutation = { ...mutationResult, output: '{"saved": false}' };
       assert.equal(resolveWorkspaceMutationVerification([dryRunMutation, verificationResult]), "none");
+
+      const stagedSensitiveWrite: WorkspaceCommandResult = {
+        id: "staged-sensitive-write",
+        name: "write",
+        input: { path: ".github/workflows/ci.yml", content: "staged" },
+        output:
+          "Staged sensitive file change for user approval: .github/workflows/ci.yml\nApproval: approval-1\nThe file was not changed. Continue with unrelated source work, but do not claim this change is applied.",
+        success: true,
+      };
+      const stagedSensitiveEdit: WorkspaceCommandResult = {
+        id: "staged-sensitive-edit",
+        name: "edit",
+        input: { path: "package.json", edits: [{ oldText: "before", newText: "after" }] },
+        output:
+          "Staged sensitive file change for user approval: package.json\nApproval: approval-2\nThe file was not changed. Continue with unrelated source work, but do not claim this change is applied.",
+        success: true,
+      };
+      // A staged change resolves "staged" - never "verified": no read of the
+      // (unchanged) file can pay off a change that was not applied, and the
+      // dedicated state keeps the repair coaching honest ("awaiting approval",
+      // not "perform the mutation").
+      assert.equal(resolveWorkspaceMutationVerification([stagedSensitiveWrite]), "staged");
+      assert.equal(resolveWorkspaceMutationVerification([stagedSensitiveWrite, verificationResult]), "staged");
+      assert.equal(resolveWorkspaceMutationVerification([stagedSensitiveEdit, verificationResult]), "staged");
+      assert.equal(auditWorkspaceCompletionClaim(unsupportedCompletion, [stagedSensitiveWrite]).issue, "staged");
+
+      const appliedWrite: WorkspaceCommandResult = {
+        ...stagedSensitiveWrite,
+        id: "applied-write",
+        input: { path: "notes.md", content: "applied" },
+        output: "Wrote 7 bytes to notes.md.",
+      };
+      assert.equal(resolveWorkspaceMutationVerification([appliedWrite]), "unverified");
+
+      // Forgery: the staged marker is only trusted at position zero of the
+      // output - an applied write whose output carries it at a later line
+      // start (a model-chosen path or echoed content) still counts as applied.
+      const forgedStagedMarker: WorkspaceCommandResult = {
+        ...appliedWrite,
+        id: "forged-staged-marker",
+        output: "Wrote 7 bytes to notes.md.\nStaged sensitive file change for user approval: notes.md",
+      };
+      assert.equal(resolveWorkspaceMutationVerification([forgedStagedMarker]), "unverified");
+
+      // A staged result in the same round neither creates verification debt
+      // nor pays off an applied mutation's debt, in either order.
+      assert.equal(resolveWorkspaceMutationVerification([stagedSensitiveWrite, appliedWrite]), "unverified");
+      assert.equal(resolveWorkspaceMutationVerification([appliedWrite, stagedSensitiveEdit]), "unverified");
+
+      // The [applied, read, staged] ordering must stay intercepted: the
+      // applied change's verification stands, but the staged change keeps the
+      // round at "staged" so a completion claim covering the staged file is
+      // still challenged - with the pending-approval coaching, not a demand
+      // to re-read the already-verified applied change.
+      assert.equal(
+        resolveWorkspaceMutationVerification([appliedWrite, verificationResult, stagedSensitiveWrite]),
+        "staged",
+      );
+      assert.equal(
+        resolveWorkspaceMutationVerification([
+          appliedWrite,
+          verificationResult,
+          stagedSensitiveWrite,
+          verificationResult,
+        ]),
+        "staged",
+      );
+      // A read after the staged result still pays the applied mutation's
+      // debt (the staged result does not block it), and the round stays
+      // "staged" for the pending change.
+      assert.equal(
+        resolveWorkspaceMutationVerification([appliedWrite, stagedSensitiveWrite, verificationResult]),
+        "staged",
+      );
+      // ── Loop wiring pins: the pure function is only half the contract ────
+      const agentSourceForPins = readFileSync(
+        new URL("../../packages/server/src/services/professor-mari/workspace-agent.service.ts", import.meta.url),
+        "utf8",
+      ).replace(/\s+/gu, " ");
+      assert.ok(
+        agentSourceForPins.includes(
+          "auditWorkspaceCompletionClaim(action, commandResultsForContinuity, { auditFrom: claimAuditWatermark, hadPassedClaimAudit, })",
+        ),
+        "the loop audits against the live watermark, never from zero",
+      );
+      assert.ok(
+        agentSourceForPins.includes(
+          "if (claimAudit.advanceWatermark) { claimAuditWatermark = commandResultsForContinuity.length; hadPassedClaimAudit = true; }",
+        ),
+        "a passing audit consumes its evidence and arms the summary allowance",
+      );
+      assert.ok(
+        agentSourceForPins.includes("midRunClaimRepairRounds <= MAX_MIDRUN_CLAIM_REPAIR_ROUNDS"),
+        "mid-run claims draw on their own repair budget",
+      );
+      assert.ok(
+        agentSourceForPins.includes(
+          "auditWorkspaceCompletionClaim(finalAction, commandResultsForContinuity, { auditFrom: claimAuditWatermark, hadPassedClaimAudit, })",
+        ),
+        "the command-limit audit shares the run's scope state",
+      );
+
       const honestBlocker = parseAssistantWorkspaceAction(
         '{"say":"I could not create it because the name is missing.","commands":[],"stop":true}',
       );
-      assert.equal(workspaceActionNeedsVerification(honestBlocker, []), null);
+      assert.equal(auditWorkspaceCompletionClaim(honestBlocker, []).issue, null);
+
+      // ── #5819/#5830: watermark-scoped claim auditing ────────────────────
+      // The reported batch: step 1 verified, its claim passes and CONSUMES
+      // that evidence; the skipped step 2's empty scope is caught instead of
+      // riding step 1's success (the flaw that killed the first fix).
+      const midRunClaimOne = parseAssistantWorkspaceAction(
+        '{"say":"I created Aria. Now creating Bran.","commands":[{"name":"app_data","arguments":{"action":"character.create","apply":true}}],"stop":false}',
+      );
+      const batchResults: WorkspaceCommandResult[] = [mutationResult, verificationResult];
+      const auditOne = auditWorkspaceCompletionClaim(midRunClaimOne, batchResults, { auditFrom: 0 });
+      assert.equal(auditOne.issue, null, "a truthful step claim over verified work passes");
+      assert.equal(auditOne.advanceWatermark, true, "and consumes its evidence");
+      const midRunClaimTwo = parseAssistantWorkspaceAction(
+        '{"say":"I created Bran. Now creating Cass.","commands":[{"name":"app_data","arguments":{"action":"character.create","apply":true}}],"stop":false}',
+      );
+      const auditTwo = auditWorkspaceCompletionClaim(midRunClaimTwo, batchResults, { auditFrom: batchResults.length });
+      assert.equal(auditTwo.issue, "none", "a skipped step's empty scope is challenged - the #5819 report");
+
+      // A recap claim is backable by the read the coaching demands, so an
+      // honest continuation converges instead of looping into the budget
+      // (#5830's sticky-none trap).
+      const recapResults = [...batchResults, { ...verificationResult, id: "recap-read" }];
+      const recapAudit = auditWorkspaceCompletionClaim(midRunClaimTwo, recapResults, {
+        auditFrom: batchResults.length,
+      });
+      assert.equal(recapAudit.issue, null, "a successful read in scope backs a recap");
+      assert.equal(recapAudit.advanceWatermark, true, "and the read is consumed so it cannot vouch twice");
+
+      // A terminal summary right after a passed audit needs nothing new; the
+      // same empty scope WITHOUT a passed audit stays challenged.
+      assert.equal(
+        auditWorkspaceCompletionClaim(unsupportedCompletion, batchResults, {
+          auditFrom: batchResults.length,
+          hadPassedClaimAudit: true,
+        }).issue,
+        null,
+      );
+      assert.equal(
+        auditWorkspaceCompletionClaim(unsupportedCompletion, batchResults, {
+          auditFrom: batchResults.length,
+          hadPassedClaimAudit: false,
+        }).issue,
+        "none",
+      );
+
+      // Mismatch is GLOBAL debt: scoping past it must not launder it, and
+      // only the same-key verified retry clears it (#5754 invariant).
+      const mismatchedCreate: WorkspaceCommandResult = {
+        id: "mismatched-create",
+        name: "app_data",
+        input: { action: "lorebook.create" },
+        output: 'Readback: store-mismatch\n{"saved": true}',
+        success: true,
+      };
+      const afterMismatch = [mismatchedCreate, mutationResult, verificationResult];
+      assert.equal(
+        resolveWorkspaceMutationVerification(afterMismatch, 1),
+        "mismatch",
+        "an out-of-scope mismatch still shadows every later claim",
+      );
+      const retriedVerified: WorkspaceCommandResult = {
+        ...mismatchedCreate,
+        id: "retried-create",
+        output: 'Readback: store-verified\n{"saved": true}',
+      };
+      assert.equal(
+        resolveWorkspaceMutationVerification([mismatchedCreate, retriedVerified], 1),
+        "verified",
+        "the same-key store-verified retry clears it, wherever the mismatch happened",
+      );
+
+      // Tolerated states never advance the watermark, so their debt stays
+      // visible to the terminal audit.
+      const unverifiedMidRun = auditWorkspaceCompletionClaim(midRunClaimOne, [mutationResult], { auditFrom: 0 });
+      assert.equal(unverifiedMidRun.issue, null, "unverified is tolerated mid-run - a later frame can read it back");
+      assert.equal(unverifiedMidRun.advanceWatermark, false, "without consuming the debt");
+
+      // #5830: "I've verified..." describes a READ - the exact sentence the
+      // coaching asks for - and is no longer a completion claim.
+      assert.equal(
+        workspaceTextClaimsMutationCompletion("I have verified the card looks right."),
+        false,
+        "the verified verb is deliberately absent from the claim detector",
+      );
+      // Plural persistence assertions stay caught without it.
+      assert.equal(workspaceTextClaimsMutationCompletion("The changes were saved."), true);
+      assert.equal(workspaceTextClaimsMutationCompletion("Both entries have been created."), true);
+
+      // ── Escape hatches never paper over a failure the resolver cannot see ──
+      // A FAILED create plus an unrelated successful list resolves "none" to
+      // the resolver - but it is active evidence of non-completion, and both
+      // escapes are denied outright.
+      const failedCreate: WorkspaceCommandResult = {
+        id: "failed-create",
+        name: "app_data",
+        input: { action: "lorebook.create" },
+        output: "Error: name is required",
+        success: false,
+      };
+      const failedScope = [failedCreate, { ...verificationResult, id: "orienting-list" }];
+      assert.equal(
+        auditWorkspaceCompletionClaim(midRunClaimTwo, failedScope, { auditFrom: 0 }).issue,
+        "none",
+        "a read never launders a failed mutating attempt into a passing claim",
+      );
+      assert.equal(
+        auditWorkspaceCompletionClaim(unsupportedCompletion, failedScope, {
+          auditFrom: 0,
+          hadPassedClaimAudit: true,
+        }).issue,
+        "none",
+        "the terminal-summary escape is denied over a scope containing a failure",
+      );
+      // Same denial for an apply:false preview - it looks like nothing to the
+      // resolver but is a non-applied attempt to the audit.
+      const previewOnly: WorkspaceCommandResult = {
+        id: "preview-create",
+        name: "app_data",
+        input: { action: "lorebook.create", apply: false },
+        output: '{"preview": true}',
+        success: true,
+      };
+      assert.equal(
+        auditWorkspaceCompletionClaim(midRunClaimTwo, [previewOnly, verificationResult], { auditFrom: 0 }).issue,
+        "none",
+        "a preview plus a read cannot back a completion claim",
+      );
+
+      // Documentation reads never qualify as recap backing - knowing what the
+      // manual says is not knowing what the store holds.
+      const docsRead: WorkspaceCommandResult = {
+        id: "docs",
+        name: "docs_search",
+        input: { query: "characters" },
+        output: "results",
+        success: true,
+      };
+      assert.equal(
+        auditWorkspaceCompletionClaim(midRunClaimTwo, [docsRead], { auditFrom: 0 }).issue,
+        "none",
+        "a docs read is not a state read",
+      );
+
+      // A verified scope that ALSO contains a failed attempt is downgraded
+      // until a later state read clears it - then the retry passes.
+      const mixedScope = [failedCreate, mutationResult, verificationResult];
+      // verificationResult follows the failure, clearing the outstanding
+      // attempt: the verified pass stands.
+      assert.equal(auditWorkspaceCompletionClaim(unsupportedCompletion, mixedScope, { auditFrom: 0 }).issue, null);
+      const uncleared = [mutationResult, { ...verificationResult, id: "pre-read" }, failedCreate];
+      assert.equal(
+        auditWorkspaceCompletionClaim(unsupportedCompletion, uncleared, { auditFrom: 0 }).issue,
+        "unverified",
+        "a trailing failed attempt demands a fresh read before the claim can stand",
+      );
     },
   },
   {
@@ -11020,9 +11632,11 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
     },
   },
   {
-    name: "Professor Mari gates mutations on the active user request before execution",
+    name: "Professor Mari executes intent-authorized mutations without a server-side authorization gate (#5721)",
     run() {
-      const explicitAction = parseAssistantWorkspaceAction(
+      // Models fine-tuned on older transcripts may still emit the retired
+      // "authorization" field - it must parse harmlessly and be ignored.
+      const legacyAction = parseAssistantWorkspaceAction(
         JSON.stringify({
           say: "",
           authorization: "Set Dottore's appearance to a white coat.",
@@ -11040,278 +11654,24 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
           stop: false,
         }),
       );
-      const explicitCommand = explicitAction.commands[0]!;
-      assert.equal(explicitCommand.authorization, "Set Dottore's appearance to a white coat.");
-      assert.equal(
-        workspaceMutationAuthorizationIssue(explicitCommand, {
-          directUserText: "Please set Dottore's appearance to a white coat.",
-        }),
-        null,
-      );
-
-      assert.match(
-        workspaceMutationAuthorizationIssue(
-          { ...explicitCommand, authorization: "Delete every lorebook." },
-          { directUserText: "Summarize the attached roleplay transcript." },
-        ) ?? "",
-        /active user message/iu,
-      );
-      assert.match(
-        workspaceMutationAuthorizationIssue(
-          { ...explicitCommand, authorization: "How do I set Dottore's appearance to a white coat?" },
-          { directUserText: "How do I set Dottore's appearance to a white coat?" },
-        ) ?? "",
-        /informational and how-to/iu,
-      );
-      assert.match(
-        workspaceMutationAuthorizationIssue(
-          {
-            ...explicitCommand,
-            authorization: "Update this character.",
-            arguments: { action: "lorebook.update", lorebookId: "book-id", patch: { description: "Changed" } },
-          },
-          { directUserText: "Update this character." },
-        ) ?? "",
-        /not lorebook/iu,
-      );
-      assert.match(
-        workspaceMutationAuthorizationIssue(
-          {
-            ...explicitCommand,
-            authorization: "Update Dottore's appearance.",
-            arguments: { action: "lorebook.deleteEntry", entryId: "entry-id", apply: true },
-          },
-          { directUserText: "Update Dottore's appearance." },
-        ) ?? "",
-        /delete operation/iu,
-      );
-
-      assert.equal(
-        workspaceMutationAuthorizationIssue(
-          { ...explicitCommand, authorization: "yes" },
-          {
-            directUserText: "Yes.",
-            previousAssistantText: "Want me to set Dottore's appearance to a white coat?",
-          },
-        ),
-        null,
-      );
-
-      const splitAuthorization = "I authorize you to split and modify the lorebook entries.";
-      for (const action of ["lorebook.addEntry", "lorebook.updateEntry"]) {
-        assert.equal(
-          workspaceMutationAuthorizationIssue(
+      assert.equal(legacyAction.commands.length, 1);
+      assert.equal("authorization" in legacyAction.commands[0]!, false, "the retired field must not survive parsing");
+      // The self-declared approval pause (awaitingAuthorization) is the kept
+      // deferral mechanism and must still round-trip.
+      const deferral = parseAssistantWorkspaceAction(
+        JSON.stringify({
+          say: "Should I save this?",
+          awaitingAuthorization: true,
+          commands: [
             {
-              id: `split-${action}`,
               name: "app_data",
-              authorization: splitAuthorization,
-              arguments: { action, lorebookId: "book-id", entryId: "entry-id", apply: true },
+              arguments: { action: "character.update", characterId: "char-1", patch: { name: "X" }, apply: true },
             },
-            { directUserText: splitAuthorization },
-          ),
-          null,
-          `lorebook splitting must authorize ${action}`,
-        );
-      }
-      assert.match(
-        workspaceMutationAuthorizationIssue(
-          {
-            id: "split-delete-entry",
-            name: "app_data",
-            authorization: splitAuthorization,
-            arguments: { action: "lorebook.deleteEntry", entryId: "entry-id", apply: true },
-          },
-          { directUserText: splitAuthorization },
-        ) ?? "",
-        /delete operation/iu,
+          ],
+          stop: false,
+        }),
       );
-      assert.match(
-        workspaceMutationAuthorizationIssue(
-          {
-            id: "split-create-character",
-            name: "app_data",
-            authorization: splitAuthorization,
-            arguments: { action: "character.create", data: { name: "Unrelated" }, apply: true },
-          },
-          { directUserText: splitAuthorization },
-        ) ?? "",
-        /create operation/iu,
-      );
-      for (const proposal of [
-        "Do you want me to fix Dottore's appearance?",
-        "Do you want me to save this change to Dottore's appearance?",
-      ]) {
-        assert.equal(
-          workspaceMutationAuthorizationIssue(
-            { ...explicitCommand, authorization: "yes" },
-            { directUserText: "Yes.", previousAssistantText: proposal },
-          ),
-          null,
-          `the confirmation should retain the update category from: ${proposal}`,
-        );
-      }
-      assert.equal(
-        workspaceMutationAuthorizationIssue(
-          { ...explicitCommand, authorization: "I authorize the change" },
-          {
-            directUserText: "I authorize the change, update Dottore's character appearance to a white coat.",
-          },
-        ),
-        null,
-        "a generic authorization excerpt should use the rest of the same direct user message for operation scope",
-      );
-      assert.match(
-        workspaceMutationAuthorizationIssue(
-          {
-            ...explicitCommand,
-            authorization: "I authorize the change",
-            arguments: { action: "character.update", characterId: "dottore-id", patch: { appearance: "Changed" } },
-          },
-          { directUserText: "I authorize the change, update this lorebook." },
-        ) ?? "",
-        /not character/iu,
-        "generic authorization must retain the direct request's entity boundary",
-      );
-      assert.match(
-        workspaceMutationAuthorizationIssue(
-          { ...explicitCommand, authorization: "I authorize the change" },
-          { directUserText: "I authorize the change." },
-        ) ?? "",
-        /immediately preceding visible proposal/iu,
-        "standalone generic authorization still requires the immediately preceding matching proposal",
-      );
-      assert.match(
-        workspaceMutationAuthorizationIssue(
-          { ...explicitCommand, authorization: "I approve this change" },
-          { directUserText: "I approve this change." },
-        ) ?? "",
-        /immediately preceding visible proposal/iu,
-        "compound standalone approval must not bypass the preceding-proposal check",
-      );
-      assert.match(
-        workspaceMutationAuthorizationIssue(
-          { ...explicitCommand, authorization: "I authorize that change" },
-          {
-            directUserText: "I authorize that change,",
-            previousAssistantText: "Do you want me to delete Dottore's character?",
-          },
-        ) ?? "",
-        /immediately preceding visible proposal/iu,
-        "compound approval must reject a proposal for a different operation",
-      );
-      assert.match(
-        workspaceMutationAuthorizationIssue(
-          {
-            ...explicitCommand,
-            authorization: "yes",
-            arguments: {
-              action: "character.create",
-              character: { name: "Dottore Copy" },
-              apply: true,
-            },
-          },
-          {
-            directUserText: "Yes.",
-            previousAssistantText: "Do you want me to save the changes to Dottore's existing character?",
-          },
-        ) ?? "",
-        /immediately preceding visible proposal/iu,
-        "an existing-character update proposal must not authorize character creation",
-      );
-      assert.match(
-        workspaceMutationAuthorizationIssue(
-          { ...explicitCommand, authorization: "I authorize the change" },
-          { directUserText: "I authorize the change, delete Dottore's character." },
-        ) ?? "",
-        /authorizes delete, not update/iu,
-        "generic authorization must not let a delete request authorize an update command",
-      );
-      assert.match(
-        workspaceMutationAuthorizationIssue(
-          { ...explicitCommand, authorization: "I authorize the change" },
-          { directUserText: "I authorize the change, generate a new character." },
-        ) ?? "",
-        /authorizes create, not update/iu,
-        "generic authorization must bind an unrelated generate clause to creation",
-      );
-      assert.match(
-        workspaceMutationAuthorizationIssue(
-          { ...explicitCommand, authorization: "I authorize the change" },
-          { directUserText: "I authorize the change, make Dottore better." },
-        ) ?? "",
-        /no single explicit operation/iu,
-        "generic authorization must reject an unclassified operation",
-      );
-      assert.match(
-        workspaceMutationAuthorizationIssue(
-          { ...explicitCommand, authorization: "I authorize the change" },
-          { directUserText: "I authorize the change, create and update Dottore's character." },
-        ) ?? "",
-        /authorizes create and update, not update/iu,
-        "generic authorization must reject multiple operation categories",
-      );
-      assert.match(
-        workspaceMutationAuthorizationIssue(
-          {
-            ...explicitCommand,
-            authorization: "I authorize the change",
-            arguments: { action: "character.delete", characterId: "dottore-id", apply: true },
-          },
-          { directUserText: "I authorize the change, explain how to delete Dottore's character." },
-        ) ?? "",
-        /informational and how-to/iu,
-        "a generic authorization clause must not turn informational deletion guidance into permission",
-      );
-      assert.match(
-        workspaceMutationAuthorizationIssue(
-          {
-            id: "write-mismatch",
-            name: "write",
-            authorization: "I authorize the change",
-            arguments: { path: "notes.txt", content: "replacement" },
-          },
-          { directUserText: "I authorize the change, delete notes.txt." },
-        ) ?? "",
-        /authorizes delete, not update/iu,
-        "generic authorization must bind write commands to the requested operation",
-      );
-      assert.match(
-        workspaceMutationAuthorizationIssue(
-          {
-            id: "edit-mismatch",
-            name: "edit",
-            authorization: "I authorize the change",
-            arguments: { path: "notes.txt", oldText: "before", newText: "after" },
-          },
-          { directUserText: "I authorize the change, delete notes.txt." },
-        ) ?? "",
-        /authorizes delete, not update/iu,
-        "generic authorization must bind edit commands to the requested operation",
-      );
-      assert.match(
-        workspaceMutationAuthorizationIssue(
-          {
-            id: "bash-mismatch",
-            name: "bash",
-            authorization: "I authorize the change",
-            arguments: { command: "mkdir generated" },
-          },
-          { directUserText: "I authorize the change, write an update to the config file." },
-        ) ?? "",
-        /authorizes update, not create/iu,
-        "generic authorization must bind mutating bash commands to the requested operation",
-      );
-      assert.equal(
-        workspaceMutationAuthorizationIssue(
-          {
-            id: "read-only",
-            name: "app_data",
-            arguments: { action: "character.get", characterId: "dottore-id" },
-          },
-          { directUserText: "Summarize the attached roleplay transcript." },
-        ),
-        null,
-      );
+      assert.equal(deferral.awaitingAuthorization, true);
     },
   },
   {

@@ -48,9 +48,13 @@ export default defineConfig({
       ? undefined
       : {
           command: "node ./e2e/start-servers.mjs",
-          url: baseURL,
+          // The readiness check must target a server that actually boots:
+          // when a CI shard gates the boot to one project pair (#5637), the
+          // desktop URL would never come up on a mobile-only shard.
+          url: process.env.PLAYWRIGHT_ONLY_PROJECT?.trim() === "mobile" ? mobileBaseURL : baseURL,
           reuseExistingServer: false,
           timeout: 180_000,
+          gracefulShutdown: { signal: "SIGTERM", timeout: 10_000 },
           env: {
             AUTO_CREATE_DEFAULT_CONNECTION: "false",
             AUTO_OPEN_BROWSER: "false",
@@ -79,6 +83,10 @@ export default defineConfig({
     {
       name: "mobile-chromium",
       use: { ...devices["Pixel 7"], baseURL: mobileBaseURL, viewport: { width: 390, height: 844 } },
+    },
+    {
+      name: "mobile-webkit",
+      use: { ...devices["iPhone 15 Pro"], baseURL: mobileBaseURL },
     },
   ],
 });

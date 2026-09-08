@@ -51,6 +51,7 @@ import { normalizeSpriteExpressionKey, resolveSpriteExpression } from "../../lib
 import { DIALOGUE_QUOTE_CAPTURE_GROUP_PATTERN_SOURCE, stripSurroundingDialogueQuotes } from "../../lib/dialogue-quotes";
 import type { SpriteInfo } from "../../hooks/use-characters";
 import { useTranslate } from "../../hooks/use-translate";
+import { useTranslationStore } from "../../stores/translation.store";
 import { useTTSConfig } from "../../hooks/use-tts";
 import { useApplyRegex } from "../../hooks/use-apply-regex";
 import { useBackdropDismiss } from "../../hooks/use-backdrop-dismiss";
@@ -65,6 +66,7 @@ import { getDefaultChatTextColor, useUIStore } from "../../stores/ui.store";
 import { useChatStore } from "../../stores/chat.store";
 import { parseChatMetadata } from "../../lib/chat-display";
 import { parseMessageExtraRecord } from "../../lib/chat-message-extra";
+import { isMessageHiddenFromUser } from "../../lib/chat-message-visibility";
 import { estimateGameSessionHistoryTokens } from "../../lib/game-session-history";
 import { createMessageMacroResolver, findCharacterByName } from "../../lib/chat-macros";
 import { animateTextHtml } from "./AnimatedText";
@@ -192,7 +194,10 @@ function isMobileGameViewport(): boolean {
   return typeof window !== "undefined" && window.matchMedia("(max-width: 767px)").matches;
 }
 
-type NarrationMessage = Pick<Message, "id" | "chatId" | "role" | "content" | "characterId" | "extra"> & {
+type NarrationMessage = Pick<
+  Message,
+  "id" | "chatId" | "role" | "content" | "characterId" | "extra" | "activeSwipeIndex"
+> & {
   characterName?: string;
 };
 
@@ -295,6 +300,26 @@ function isSyntheticGameStartMessage(message: Pick<NarrationMessage, "role" | "c
   return message.role === "user" && SYNTHETIC_GAME_START_MESSAGE_RE.test(message.content || "");
 }
 
+// A GM turn that leaves no prose behind — a command-only turn, or one that was
+// nothing but GM verb tags (#5798) — is still saved, as a hidden empty anchor its
+// writes can hang on. Roleplay and Conversation drop those rows while mapping the
+// transcript (`ChatRoleplaySurface`, `ConversationView`); the game surface reads a
+// single "latest GM turn" instead of mapping, so the same filter has to sit where
+// that row is picked or the anchor blanks the narration area. Same triple the
+// server uses to decide a message is worth previewing: visible content, not
+// hidden, not command-only.
+//
+// The commandOnly test is defensive redundancy, not a live filter: the server writes
+// that flag in exactly one place (`generate.routes.ts` empty-response branch) and
+// always sets hiddenFromUser in the same call, so no row the server produces today
+// reaches here on commandOnly alone. It stays for the day one of them is written
+// without the other, and because the server's own preview gate carries both.
+function isNarratableGmMessage(message: NarrationMessage): boolean {
+  if (isMessageHiddenFromUser(message)) return false;
+  if (parseMessageExtraRecord(message.extra).commandOnly === true) return false;
+  return !!message.content?.trim();
+}
+
 function hasExactCachedPrompt(message: Pick<Message, "extra"> | null): boolean {
   const cachedPrompt = parseMessageExtraRecord(message?.extra).cachedPrompt;
   return Array.isArray(cachedPrompt) && cachedPrompt.length > 0;
@@ -316,6 +341,31 @@ interface GameVoiceEntryPlan {
 }
 
 const GAME_TTS_CHUNK_ATTEMPTS = 2;
+
+/**
+ * Status line under the narration box.
+ *
+ * The game stream stays open past the last narration token while post-processing
+ * agents, the message refresh, and scene analysis run, so a single "writing"
+ * label claimed the Game Master was still writing during that whole gap. The
+ * server's `message_saved` event marks the exact moment the narration text is
+ * durable; past it, report the scene-preparation phase instead.
+ */
+function GameGenerationStatus() {
+  const { t: localizeUi } = useUiTranslation();
+  const narrationSaved = useChatStore((s) => (s.activeChatId ? s.narrationSavedChatIds.has(s.activeChatId) : false));
+
+  return (
+    <div className="mt-2 flex items-center gap-1 text-xs text-[var(--foreground)]/50">
+      <span className="animate-pulse">●</span>
+      <span>
+        {narrationSaved
+          ? localizeUi("ui.game.gamenarration.preparingScene")
+          : localizeUi("ui.game.gamenarration.theGameMasterIsWritingTheNextSegment")}
+      </span>
+    </div>
+  );
+}
 
 interface GameNarrationProps {
   messages: NarrationMessage[];
@@ -364,10 +414,10 @@ interface GameNarrationProps {
   onSegmentChange?: (index: number) => void;
   /**
    * Called when narration is fully complete (all segments read, not streaming).
-   * `messageId` identifies which assistant message the completion refers to so the
+   * `turnKey` identifies which assistant message and swipe the completion refers to so the
    * caller can guard against stale narrationDone leaking from the previous turn.
    */
-  onNarrationComplete?: (complete: boolean, messageId: string | null) => void;
+  onNarrationComplete?: (complete: boolean, turnKey: string | null) => void;
   /** Slot rendered above the narration box (used for mobile widget icons) */
   widgetSlot?: ReactNode;
   /** Slot rendered above the narration box for GM choice cards */
@@ -993,7 +1043,7 @@ export function GameNarration({
 }: GameNarrationProps) {
   const { t: localizeUi } = useUiTranslation();
   useRenderTimer("game-narration"); // [#3104 diagnostic]
-  const { translate, translations, translationSources, translating } = useTranslate();
+  const { translate, translations, translationSources, translating, config: translationConfig } = useTranslate();
   const { applyToAIOutput } = useApplyRegex();
   // Parse the chat metadata in a memo (not the store selector) so streaming ticks
   // don't re-parse the whole metadata object on every update.
@@ -1312,10 +1362,57 @@ export function GameNarration({
     // recent turn" — segment edits, voice resolution, log builders, etc.
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i]!;
-      if (msg.role === "assistant" || msg.role === "narrator") return msg;
+      if (msg.role !== "assistant" && msg.role !== "narrator") continue;
+      if (!isNarratableGmMessage(msg)) continue;
+      return msg;
     }
     return null;
   }, [messages]);
+
+  const lastAutoTranslation = useRef<{ id: string; source: string } | null>(null);
+  useEffect(() => {
+    if (!parsedActiveChatMetadata.autoTranslate || isStreaming || !latestAssistant || generationFailed) return;
+    if (
+      translationConfig.chatId !== latestAssistant.chatId ||
+      translationConfig.outputTargetLanguage !==
+        (parsedActiveChatMetadata.translationOutputTargetLang?.trim() ||
+          parsedActiveChatMetadata.translationTargetLang?.trim() ||
+          "en") ||
+      translationConfig.provider !== (parsedActiveChatMetadata.translationProvider || "google")
+    )
+      return;
+    if (useTranslationStore.getState().hiddenTranslationIds[latestAssistant.id]) return;
+    const source = getGameTranslationSource(latestAssistant);
+    if (!source || translating[latestAssistant.id]) return;
+    const extra = parseMessageExtraRecord(latestAssistant.extra);
+    if (
+      typeof extra.translation === "string" &&
+      gameTranslationMatchesMessage(
+        latestAssistant,
+        typeof extra.translationSource === "string" ? extra.translationSource : latestAssistant.content,
+      )
+    )
+      return; // The parent seeds saved translations (including hidden ones); do not request them again.
+    if (lastAutoTranslation.current?.id === latestAssistant.id && lastAutoTranslation.current.source === source) return;
+    // Try each completed source once; failures stay manually retryable, not an API retry loop.
+    lastAutoTranslation.current = { id: latestAssistant.id, source };
+    if (
+      translations[latestAssistant.id] &&
+      gameTranslationMatchesMessage(latestAssistant, translationSources[latestAssistant.id])
+    )
+      return;
+    void translate(latestAssistant.id, source, latestAssistant.chatId, [latestAssistant.content]);
+  }, [
+    parsedActiveChatMetadata.autoTranslate,
+    isStreaming,
+    generationFailed,
+    latestAssistant,
+    translate,
+    translating,
+    translations,
+    translationSources,
+    translationConfig,
+  ]);
 
   // Wheel-nav builds a flat chronological list of log entries — one per visible
   // segment (parsed narration segments for assistant turns + a single player-dialogue
@@ -1356,6 +1453,7 @@ export function GameNarration({
         continue;
       }
       if (msg.role !== "assistant" && msg.role !== "narrator") continue;
+      if (!isNarratableGmMessage(msg)) continue;
       const segs = parseNarrationSegments(msg, speakerColors);
       for (let si = 0; si < segs.length; si++) {
         const seg = segs[si]!;
@@ -2388,13 +2486,13 @@ export function GameNarration({
   // Notify parent about narration completion state. While reviewing the past via
   // wheel-nav, the past message will look "complete" — but it's not the present, so
   // suppress the notification to keep the parent's narrationDone state honest.
-  // Pass the active segment's source message ID so the parent can tell which message's
-  // typewriter the completion refers to (otherwise stale "done" from the previous turn
-  // can leak across to the new turn before this effect re-runs to push false).
+  // Pass the active assistant turn key so the parent can reject completion from
+  // another message or swipe.
+  const narrationKey = latestAssistant ? `${latestAssistant.id}:${latestAssistant.activeSwipeIndex ?? 0}` : null;
   useEffect(() => {
     if (messageOffset > 0) return;
-    onNarrationComplete?.(narrationComplete, activeSourceMessageId);
-  }, [messageOffset, narrationComplete, activeSourceMessageId, onNarrationComplete]);
+    onNarrationComplete?.(narrationComplete, narrationKey);
+  }, [messageOffset, narrationComplete, narrationKey, onNarrationComplete]);
 
   // Build log entries from the LAST scene — includes party chat & player action.
   // Entries are stored chronologically (oldest first, newest last).
@@ -2831,10 +2929,10 @@ export function GameNarration({
 
   const restoredRef = useRef(false);
   const restoredChatIdRef = useRef<string | null>(null);
-  const lastNarrationMsgIdRef = useRef<string | undefined>(undefined);
+  const lastNarrationKeyRef = useRef<string | undefined>(undefined);
   const segmentChangeReady = useRef(false);
   const segmentEnterReady = useRef(false);
-  const narrationMessageChanged = Boolean(latestAssistant?.id && latestAssistant.id !== lastNarrationMsgIdRef.current);
+  const narrationMessageChanged = Boolean(narrationKey && narrationKey !== lastNarrationKeyRef.current);
   const gameInstantTextReveal = useUIStore((s) => s.gameInstantTextReveal);
   const reduceAmbientEffects = useReducedAmbientEffects();
   const revealTextInstantly = gameInstantTextReveal || reduceAmbientEffects;
@@ -2864,29 +2962,29 @@ export function GameNarration({
   );
 
   useEffect(() => {
-    // Only react to message ID changes (not content changes during streaming).
+    // React to a new message or saved swipe (not content changes during streaming).
     // Ignore transient null states (e.g. during React Query refetch) — keep existing ref.
-    if (!latestAssistant?.id) return;
-    if (latestAssistant.id === lastNarrationMsgIdRef.current) return;
+    if (!latestAssistant?.id || !narrationKey) return;
+    if (narrationKey === lastNarrationKeyRef.current) return;
 
     // Don't reset narration while streaming — wait until the full message arrives.
     // This prevents the snap-back to segment 0 mid-stream.
     if (isStreaming) return;
 
-    lastNarrationMsgIdRef.current = latestAssistant.id;
+    lastNarrationKeyRef.current = narrationKey;
 
     const currentChatId = latestAssistant.chatId ?? null;
     const firstNarrationForChat = restoredChatIdRef.current !== currentChatId;
     const shouldRestorePosition = hasStoredNarrationPosition && firstNarrationForChat && segments.length > 0;
     if (shouldRestorePosition) {
-      // Jump to saved segment index (or last segment if saved index exceeds current
-      // segment count — party dialogue may not be restored yet).
+      // Jump to the saved segment index. A stale out-of-range cursor must restart
+      // rather than silently completing a shorter swipe.
       restoredRef.current = true;
       restoredChatIdRef.current = currentChatId;
       const targetIdx =
         restoredSegmentIndex != null && restoredSegmentIndex >= 0 && restoredSegmentIndex < segments.length
           ? restoredSegmentIndex
-          : segments.length - 1;
+          : 0;
       setActiveIndex(targetIdx);
       setVisibleChars(effectDisplayLength(segments[targetIdx]!.content));
       // Allow persistence and segment-enter AFTER the restore state settles
@@ -2907,6 +3005,7 @@ export function GameNarration({
     segmentChangeReady.current = true;
     segmentEnterReady.current = true;
   }, [
+    narrationKey,
     latestAssistant?.id,
     latestAssistant?.chatId,
     isStreaming,
@@ -3299,6 +3398,8 @@ export function GameNarration({
 
   const renderTranslationPanel = useCallback(
     (message: NarrationMessage | null, translatedText?: string, isTranslating = false, className?: string) => {
+      if (message && !gameTranslationMatchesMessage(message, translationSources[message.id]))
+        translatedText = undefined;
       if (!message || (!translatedText && !isTranslating)) return null;
       return (
         <div className={cn("rounded-xl border border-sky-400/15 bg-sky-500/8 px-3 py-2.5", className)}>
@@ -3318,7 +3419,7 @@ export function GameNarration({
         </div>
       );
     },
-    [gameTextEffectsEnabled, localizeUi],
+    [gameTextEffectsEnabled, localizeUi, translationSources],
   );
 
   const playClickSfx = useCallback(() => {
@@ -3554,6 +3655,8 @@ export function GameNarration({
     "inline-flex items-center justify-center rounded p-1 text-[var(--muted-foreground)]/40 transition-colors hover:bg-[var(--muted)]/30 hover:text-[var(--muted-foreground)] dark:text-white/20 dark:hover:bg-white/10 dark:hover:text-white/60";
   const LOG_SEGMENT_ACTION_BTN =
     "rounded p-1 text-white/45 opacity-100 transition-all hover:bg-white/10 hover:text-white/60 md:text-white/20 md:opacity-0 md:group-hover/logseg:opacity-100";
+  const LOG_DELETE_ACTION_BTN =
+    "text-[var(--marinara-chat-message-action-text)] hover:bg-[var(--marinara-chat-message-action-bg-hover)] hover:text-[var(--marinara-chat-message-action-text-hover)] dark:text-[var(--marinara-chat-message-action-text)] dark:hover:bg-[var(--marinara-chat-message-action-bg-hover)] dark:hover:text-[var(--marinara-chat-message-action-text-hover)]";
   const combatMetaButton = onRequestCombatStart ? (
     <button
       type="button"
@@ -3939,6 +4042,34 @@ export function GameNarration({
         {copiedMessageKey === activeCopyKey ? <Check size={11} /> : <Copy size={11} />}
       </button>
     ) : null;
+  const activeTranslateButton =
+    editingContent === null && activeSourceMessage && activeSourceMessage.role !== "system" && !isStreaming ? (
+      <button
+        type="button"
+        onClick={() =>
+          void translate(
+            activeSourceMessage.id,
+            getGameTranslationSource(activeSourceMessage),
+            activeSourceMessage.chatId,
+            [activeSourceMessage.content],
+          )
+        }
+        disabled={activeIsTranslating}
+        className={ACTIVE_SEGMENT_ACTION_BTN}
+        title={localizeUi(
+          activeTranslatedText && gameTranslationMatchesMessage(activeSourceMessage, activeTranslationSource)
+            ? "ui.chat.chatmessage.hideTranslation"
+            : "ui.chat.chatmessage.translate",
+        )}
+        aria-label={localizeUi(
+          activeTranslatedText && gameTranslationMatchesMessage(activeSourceMessage, activeTranslationSource)
+            ? "ui.chat.chatmessage.hideTranslation"
+            : "ui.chat.chatmessage.translate",
+        )}
+      >
+        {activeIsTranslating ? <Loader2 size={11} className="animate-spin" /> : <Languages size={11} />}
+      </button>
+    ) : null;
   const activeEditButton =
     activeCanEditSegment && editingContent === null ? (
       <button
@@ -3962,7 +4093,7 @@ export function GameNarration({
       </button>
     ) : null;
   const activeSegmentActionButtons =
-    activeSaveButton || activeBranchButton || activeCopyButton || activeEditButton ? (
+    activeSaveButton || activeBranchButton || activeCopyButton || activeTranslateButton || activeEditButton ? (
       <div
         onPointerDown={(event) => event.stopPropagation()}
         onPointerUp={(event) => event.stopPropagation()}
@@ -3972,6 +4103,7 @@ export function GameNarration({
           <>
             {activeBranchButton}
             {activeCopyButton}
+            {activeTranslateButton}
             {activeEditButton}
           </>
         )}
@@ -4116,10 +4248,7 @@ export function GameNarration({
             onDeleteSegment?.(sourceMessageId, sourceSegmentIndex);
           }
         }}
-        className={cn(
-          stackedActionButtonClass,
-          "hover:bg-[var(--marinara-chat-chrome-button-bg-hover)] hover:text-[var(--marinara-chat-chrome-button-text-hover)]",
-        )}
+        className={cn(stackedActionButtonClass, LOG_DELETE_ACTION_BTN)}
         title={
           canDeleteThisSegment
             ? localizeUi("ui.game.gamenarration.deleteSegment")
@@ -4529,7 +4658,7 @@ export function GameNarration({
   };
 
   return (
-    <div className="relative flex min-h-0 flex-1 items-end px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] pt-20 md:pt-24 sm:px-6 md:pb-4">
+    <div className="relative flex min-h-0 flex-1 items-end px-3 pb-[max(0.75rem,var(--mari-safe-area-inset-bottom,env(safe-area-inset-bottom)))] pt-20 md:pt-24 sm:px-6 md:pb-4">
       {/* Readability scrim. It darkens the whole scene, not just the panel, so it has to fade
           out with the panel — otherwise collapsing hides the text but keeps the art dimmed. */}
       <div
@@ -5088,7 +5217,7 @@ export function GameNarration({
                   ref={activeSegmentScrollRef}
                   className={cn(
                     "relative game-narration-prose max-h-40 overflow-y-auto rounded-xl border border-amber-400/20 bg-amber-950/20 px-3 py-2.5 sm:max-h-48",
-                    activeCopyKey && "pr-9",
+                    (activeCopyButton || activeTranslateButton) && "pr-16",
                   )}
                 >
                   <div
@@ -5103,18 +5232,16 @@ export function GameNarration({
                       __html: animateTextHtml(formatNarration(activeVisibleContent, false), gameTextEffectsEnabled),
                     }}
                   />
-                  {activeCopyKey && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        void handleCopyMessage(activeCopyKey, activeCopyText);
-                      }}
-                      className="absolute right-1.5 top-1.5 rounded p-1 text-amber-200/45 transition-colors hover:bg-amber-100/10 hover:text-amber-100/70"
-                      title={localizeUi("lorebook.editor.batch.copy")}
-                      aria-label={localizeUi("lorebook.editor.batch.copy")}
+                  {(activeCopyButton || activeTranslateButton) && (
+                    <div
+                      onPointerDown={(event) => event.stopPropagation()}
+                      onPointerUp={(event) => event.stopPropagation()}
+                      onClick={(event) => event.stopPropagation()}
+                      className="absolute right-1.5 top-1.5 flex items-center gap-1"
                     >
-                      {copiedMessageKey === activeCopyKey ? <Check size={11} /> : <Copy size={11} />}
-                    </button>
+                      {activeCopyButton}
+                      {activeTranslateButton}
+                    </div>
                   )}
                 </div>
 
@@ -5169,12 +5296,7 @@ export function GameNarration({
               </div>
             )}
 
-            {isStreaming && (
-              <div className="mt-2 flex items-center gap-1 text-xs text-[var(--foreground)]/50">
-                <span className="animate-pulse">●</span>
-                <span>{localizeUi("ui.game.gamenarration.theGameMasterIsWritingTheNextSegment")}</span>
-              </div>
-            )}
+            {isStreaming && <GameGenerationStatus />}
           </div>
         )}
       </div>
@@ -5214,7 +5336,7 @@ export function GameNarration({
                     <button
                       type="button"
                       onClick={loadOlderLogs}
-                      className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[0.65rem] font-medium text-white/65 transition-colors hover:bg-white/10 hover:text-white"
+                      className="rounded-md border border-white/10 bg-white/5 px-2.5 py-1 text-[0.65rem] font-medium text-white/65 transition-colors hover:bg-white/10 hover:text-white"
                       title={localizeUi("ui.game.gamenarration.loadOlderLogs")}
                     >
                       {localizeUi("ui.game.gamenarration.older")}
@@ -5223,7 +5345,7 @@ export function GameNarration({
                     <button
                       type="button"
                       onClick={showAllLogs}
-                      className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[0.65rem] font-medium text-white/65 transition-colors hover:bg-white/10 hover:text-white"
+                      className="rounded-md border border-white/10 bg-white/5 px-2.5 py-1 text-[0.65rem] font-medium text-white/65 transition-colors hover:bg-white/10 hover:text-white"
                       title={localizeUi("ui.game.gamenarration.loadTheEntireSessionLog")}
                     >
                       {localizeUi("ui.noodle.stageprofilesourcepicker.all")}
@@ -5272,7 +5394,7 @@ export function GameNarration({
                       logScrolledRef.current = true;
                       loadOlderLogs();
                     }}
-                    className="rounded-full border border-white/10 bg-black/55 px-3 py-1.5 text-xs font-medium text-white/70 shadow-lg transition-colors hover:bg-white/10 hover:text-white"
+                    className="rounded-md border border-white/10 bg-black/55 px-3 py-1.5 text-xs font-medium text-white/70 shadow-lg transition-colors hover:bg-white/10 hover:text-white"
                   >
                     {localizeUi("ui.game.gamesurfacecomponent.showMoreOlderLogs")}
                     {hiddenLogCount})
@@ -5473,7 +5595,7 @@ export function GameNarration({
                               onDeleteSegment?.(sourceMessageId, sourceSegmentIndex);
                             }
                           }}
-                          className="rounded p-1 text-[var(--marinara-chat-chrome-button-text)] opacity-100 transition-all hover:bg-[var(--marinara-chat-chrome-button-bg-hover)] hover:text-[var(--marinara-chat-chrome-button-text-hover)] md:opacity-0 md:group-hover/logseg:opacity-100"
+                          className={cn(LOG_SEGMENT_ACTION_BTN, LOG_DELETE_ACTION_BTN)}
                           title={
                             canDeleteThisSegment
                               ? localizeUi("ui.game.gamenarration.deleteSegment")

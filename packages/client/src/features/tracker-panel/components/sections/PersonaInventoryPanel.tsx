@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { HeartPulse, Package, Sparkles } from "lucide-react";
-import type { CharacterStat, InventoryItem, Persona } from "@marinara-engine/shared";
+import { HeartPulse, Sparkles } from "lucide-react";
+import type { CharacterStat, Persona } from "@marinara-engine/shared";
 import { isTrackerFieldLocked, personaStatTrackerLockKey, personaStatusTrackerLockKey } from "@marinara-engine/shared";
-import type { TrackerPanelSide, TrackerPanelSizeProfile, TrackerStatDisplayMode } from "../../../../stores/ui.store";
+import type { TrackerPanelSide, TrackerStatDisplayMode } from "../../../../stores/ui.store";
 import { useCharacterSprites, type SpriteInfo } from "../../../../hooks/use-characters";
 import { getTrackerCardPortraitView, parseTrackerCardColorConfig } from "../../../../lib/tracker-card-colors";
 import { cn } from "../../../../lib/utils";
@@ -28,7 +28,6 @@ import {
   TRACKER_PROFILE_BODY_BOTTOM_RULE_CLASS,
   TRACKER_PROFILE_BODY_TONE_OVERLAY_CLASS,
   TRACKER_PROFILE_CARD_SURFACE_CLASS,
-  TRACKER_PROFILE_EMPTY_SURFACE_CLASS,
   TRACKER_PROFILE_MATERIAL_PANEL_CLASS,
   TRACKER_PROFILE_STATUS_STRIP_CLASS,
   TrackerProfileDisplayWash,
@@ -37,13 +36,12 @@ import {
   TRACKER_PROFILE_SURFACE_TEXTURE_CLASS,
   TRACKER_PROFILE_SURFACE_TOP_RULE_CLASS,
 } from "../controls/TrackerProfileChrome";
-import { AddRowButton, SectionHeader } from "../controls/SectionControls";
+import { SectionHeader, TRACKER_SECTION_SHELL_CLASS } from "../controls/SectionControls";
 import { StatList } from "../controls/StatList";
 import { useTrackerLockContext } from "../TrackerLockContext";
 import { useTrackerWindow } from "../TrackerWindowContext";
 import type { PersonaPortraitSaveSnapshot } from "../../hooks/use-persona-portrait-save";
 import type { StatIconLookup } from "../../hooks/use-stat-icons";
-import { PersonaInventoryRow } from "./PersonaInventoryRow";
 import { PersonaPortraitStage } from "./PersonaPortraitStage";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
@@ -60,27 +58,18 @@ const PERSONA_STAT_DECK_CLASS = cn(
   TRACKER_PROFILE_MATERIAL_PANEL_CLASS,
 );
 const PERSONA_STATUS_STRIP_CLASS = cn(TRACKER_PROFILE_STATUS_STRIP_CLASS, "mx-0.5 items-center px-1.5 py-[0.1875rem]");
-const PERSONA_INVENTORY_HEADER_CLASS =
-  "relative mx-0.5 flex min-h-6 items-center gap-1 overflow-hidden px-0.5 text-[0.625rem] leading-3";
-const PERSONA_INVENTORY_SHELF_CLASS = cn(TRACKER_PROFILE_EMPTY_SURFACE_CLASS, "min-h-0 flex-1");
-
 export function PersonaInventoryPanel({
   persona,
   status,
   spriteExpression,
   trackerPanelSide,
-  trackerPanelSizeProfile,
   statDisplayMode,
   resolveStatIcon,
   personaStats,
-  inventory,
   action,
   onSaveStatus,
   onUpdatePersonaStats,
   onAddPersonaStat,
-  onAddInventoryItem,
-  onUpdateInventoryItem,
-  onRemoveInventoryItem,
   deleteMode,
   addMode,
   queuePersonaPortraitSave,
@@ -92,18 +81,13 @@ export function PersonaInventoryPanel({
   status: string;
   spriteExpression?: string;
   trackerPanelSide: TrackerPanelSide;
-  trackerPanelSizeProfile: TrackerPanelSizeProfile;
   statDisplayMode: TrackerStatDisplayMode;
   resolveStatIcon: StatIconLookup;
   personaStats: CharacterStat[];
-  inventory: InventoryItem[];
   action?: ReactNode;
   onSaveStatus: (status: string) => void;
   onUpdatePersonaStats: (stats: CharacterStat[]) => void;
   onAddPersonaStat: () => void;
-  onAddInventoryItem: () => void;
-  onUpdateInventoryItem: (index: number, item: InventoryItem) => void;
-  onRemoveInventoryItem: (index: number) => void;
   deleteMode: boolean;
   addMode: boolean;
   queuePersonaPortraitSave: (snapshot: PersonaPortraitSaveSnapshot) => void;
@@ -167,57 +151,6 @@ export function PersonaInventoryPanel({
   const renderPersonaGauges = shouldRenderStatGauges(statDisplayMode, addMode, deleteMode, lockMode);
   const personaPortraitSide = getTrackerProfilePortraitSide(trackerPanelSide);
   const personaDetailsSide = getOppositeTrackerProfileSide(personaPortraitSide);
-  const renderInventoryShelf = () => (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className={PERSONA_INVENTORY_HEADER_CLASS}>
-        <Package
-          size="0.6875rem"
-          className="relative z-[1] shrink-0 text-[color-mix(in_srgb,var(--tracker-profile-label-muted-text)_42%,var(--tracker-profile-label-icon)_58%)]"
-        />
-        <span className="relative z-[1] min-w-0 flex-1 truncate font-semibold uppercase tracking-[0.06em] text-[color-mix(in_srgb,var(--tracker-profile-label-muted-text)_62%,var(--tracker-profile-label-text)_38%)]">
-          {localizeUi("ui.trackerPanel.personainventorypanel.inventory")}
-        </span>
-        {addMode && (
-          <span className="relative z-[1]">
-            <AddRowButton
-              title={localizeUi("ui.trackerPanel.personainventorypanel.addItem")}
-              onClick={onAddInventoryItem}
-            />
-          </span>
-        )}
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-[linear-gradient(90deg,transparent,color-mix(in_srgb,var(--tracker-profile-dialogue-border)_42%,transparent),transparent)] opacity-80" />
-      </div>
-      <div
-        className={cn(
-          PERSONA_INVENTORY_SHELF_CLASS,
-          inventory.length === 0
-            ? "flex items-center justify-center px-1 py-2"
-            : [
-                "grid auto-rows-max content-start items-start gap-px overflow-y-auto p-0.5 text-left",
-                "grid-cols-1",
-                trackerPanelSizeProfile === "expanded" && inventory.length >= 6 && "@min-[420px]:grid-cols-2",
-              ],
-          "min-h-10",
-        )}
-      >
-        {inventory.length === 0 ? (
-          <span className="relative z-[1]">{localizeUi("ui.trackerPanel.personainventorypanel.inventoryEmpty")}</span>
-        ) : (
-          inventory.map((item, index) => (
-            <PersonaInventoryRow
-              key={`${item.name}-${index}`}
-              item={item}
-              itemIndex={index}
-              onUpdate={(updated) => onUpdateInventoryItem(index, updated)}
-              onRemove={() => onRemoveInventoryItem(index)}
-              deleteMode={deleteMode}
-              fullWidth={inventory.length === 1}
-            />
-          ))
-        )}
-      </div>
-    </div>
-  );
   const personaStatusAccessibleName = status
     ? localizeUi("ui.trackerPanel.inlineedit.value1Value2", {
         value1: localizeUi("ui.trackerPanel.personainventorypanel.value1Status", { value1: personaName }),
@@ -271,14 +204,14 @@ export function PersonaInventoryPanel({
   }, [flushPersonaPortraitSave, trackerWindow]);
 
   return (
-    <div className="relative z-10 overflow-hidden border-b border-[color-mix(in_srgb,var(--border)_72%,transparent)] bg-[var(--tracker-panel-section-background,color-mix(in_srgb,var(--card)_5%,transparent))] shadow-inner transition-colors duration-200">
+    <div className={cn(TRACKER_SECTION_SHELL_CLASS, "transition-colors duration-200")}>
       <div className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-[color-mix(in_srgb,var(--foreground)_6%,transparent)]" />
 
       <SectionHeader
         icon={<Sparkles size="0.6875rem" />}
         title={localizeUi("ui.characters.cardlibrarydetailcard.persona")}
         action={action}
-        className="bg-[color-mix(in_srgb,var(--background)_86%,var(--card)_14%)] [--primary:var(--foreground)] [--tracker-profile-icon:var(--muted-foreground)]"
+        className="[--primary:var(--foreground)] [--tracker-profile-icon:var(--muted-foreground)]"
         collapsed={collapsed}
         onToggle={onToggleCollapsed}
       />
@@ -318,7 +251,6 @@ export function PersonaInventoryPanel({
                 )}
               >
                 {renderStatusStrip()}
-                {renderInventoryShelf()}
               </div>
               <PersonaPortraitStage
                 persona={persona}

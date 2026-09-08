@@ -134,14 +134,6 @@ function formatQuestLine(quest: any): string | null {
   return `- ${name}${objectives ? "\n" + objectives : ""}`;
 }
 
-function formatInventoryLine(item: any): string | null {
-  const name = asText(item?.name);
-  if (!name) return null;
-  const quantity = finiteNumberText(item?.quantity);
-  const description = asText(item?.description);
-  return `- ${name}${quantity && Number(quantity) > 1 ? ` x${quantity}` : ""}${description ? ` — ${description}` : ""}`;
-}
-
 function formatInventoryTrackerLine(item: any): string | null {
   const name = asText(item?.name);
   if (!name) return null;
@@ -233,11 +225,6 @@ export function buildCommittedTrackerContextBlock(args: {
         if (questLines.length > 0) {
           trackerParts.push(wrapContent(questLines.join("\n"), "Active Quests", args.wrapFormat));
         }
-      }
-
-      if (hasPersonaStats && Array.isArray(stats.inventory) && stats.inventory.length > 0) {
-        const invLines = (stats.inventory as unknown[]).map(formatInventoryLine).filter(isNonEmptyLine);
-        if (invLines.length > 0) trackerParts.push(wrapContent(invLines.join("\n"), "Inventory", args.wrapFormat));
       }
 
       if (hasPersonaStats && Array.isArray(stats.stats) && stats.stats.length > 0) {

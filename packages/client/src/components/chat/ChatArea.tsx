@@ -21,6 +21,7 @@ import {
   useDeleteMessage,
   useDeleteMessages,
   useDeleteSwipe,
+  useDeleteOtherSwipes,
   useUpdateMessage,
   useUpdateMessageExtra,
   usePeekPrompt,
@@ -40,13 +41,14 @@ import {
   useActivePersona,
   useCharacters,
   usePersona,
+  useUpdateCharacter,
   type SpriteInfo,
 } from "../../hooks/use-characters";
 import { usePageActivity } from "../../hooks/use-page-activity";
 import { useRenderTimer, useWhyRender } from "../../lib/perf-diagnostics";
 import { usePresenceClock } from "../../hooks/use-presence-clock";
 import { useKeepLatestChatMessageVisible } from "../../hooks/use-visual-viewport-chat-bottom";
-import { api, ApiError } from "../../lib/api-client";
+import { api, ApiError, isRequestTimeoutError } from "../../lib/api-client";
 import { getChatDisplayName, getConnectedChatDisplayName, parseChatMetadata } from "../../lib/chat-display";
 import { getChatCharacterIds } from "../../lib/chat-macros";
 import { resolveSpriteExpression } from "../../lib/sprite-expression-match";
@@ -143,6 +145,8 @@ import {
 } from "../ui/ImagePromptReviewModal";
 import { useTranslation as useUiTranslation } from "react-i18next";
 import { ChatResourceDropOverlay } from "./ChatResourceDropOverlay";
+import { ChatHelpOverlay } from "./ChatHelpOverlay";
+import { readChatHelpMode } from "../../lib/chat-help-events";
 
 export type { CharacterMap };
 
@@ -339,6 +343,7 @@ type AgentInjectionReviewRequest = {
 
 type IllustratorPromptReviewRequest = {
   chatId: string;
+  subjectOnly?: boolean;
   item: ImagePromptReviewItem;
   resultData: Record<string, unknown>;
 };
@@ -529,6 +534,22 @@ export const ChatArea = memo(function ChatArea() {
   useEffect(() => {
     homeProfessorChatOpenRef.current = homeProfessorChatOpen;
   }, [homeProfessorChatOpen]);
+  // #5889: when Safari's autoplay policy blocks playback, the service parks in
+  // "blocked" and waits for a user gesture instead of retrying - tell the user
+  // the one tap that resumes it. Deduped by toast id across repeat blocks.
+  useEffect(() => {
+    let lastTtsState: ReturnType<typeof ttsService.getState> | null = null;
+    return ttsService.subscribe((state) => {
+      if (state === "blocked" && lastTtsState !== "blocked") {
+        toast.info(localizeUi("ui.chat.chatarea.audioBlockedTapToPlay"), { id: "tts-playback-blocked" });
+      } else if (state !== "blocked" && lastTtsState === "blocked") {
+        // The tap that resumed playback also fulfilled the toast - a lingering
+        // "tap to play" over audio that is already playing reads as broken.
+        toast.dismiss("tts-playback-blocked");
+      }
+      lastTtsState = state;
+    });
+  }, [localizeUi]);
   const handleHomeProfessorChatOpenChange = useCallback((open: boolean) => {
     homeProfessorChatOpenRef.current = open;
     if (open) setHomeProfessorChatActive(true);
@@ -543,7 +564,12 @@ export const ChatArea = memo(function ChatArea() {
   const [selectedMessageIds, setSelectedMessageIds] = useState<Set<string>>(new Set());
   const [selectionAnchorIndex, setSelectionAnchorIndex] = useState<number | null>(null);
 
-  const { data: chatDetail, error: chatError, isFetched: chatDetailFetched } = useChat(activeChatId);
+  const {
+    data: chatDetail,
+    error: chatError,
+    isFetched: chatDetailFetched,
+    refetch: refetchChatDetail,
+  } = useChat(activeChatId);
   const { data: allChats } = useChats();
   const listedActiveChat = useMemo(
     () => (activeChatId ? (allChats?.find((candidate) => candidate.id === activeChatId) ?? null) : null),
@@ -680,9 +706,23 @@ export const ChatArea = memo(function ChatArea() {
     enabled: !!chat?.id && chat.id === activeChatId && isGameChat,
     includeBuiltIn: true,
   });
+  // Only the selected identity card is needed here, so fetch that one row
+  // instead of the whole character library. [PR #5583]
+  const identityCharacterId = isGameChat ? null : (chat?.personaCharacterId ?? null);
+  const identityCharacterQueries = useQueries({
+    queries: (identityCharacterId ? [identityCharacterId] : []).map((id) => ({
+      queryKey: characterKeys.detail(id),
+      queryFn: () => api.get<CharacterRow>(`/characters/${id}`),
+      enabled: !!chat?.id && chat.id === activeChatId,
+      retry: false,
+      staleTime: 5 * 60_000,
+    })),
+  });
+  const identityCharacterRow = identityCharacterQueries[0]?.data ?? null;
   const deleteMessage = useDeleteMessage(activeChatId);
   const deleteMessages = useDeleteMessages(activeChatId);
   const deleteSwipe = useDeleteSwipe(activeChatId);
+  const deleteOtherSwipes = useDeleteOtherSwipes(activeChatId);
   const { mutate: updateMessage, mutateAsync: updateMessageAsync } = useUpdateMessage(activeChatId);
   const { mutate: updateMessageExtra } = useUpdateMessageExtra(activeChatId);
   const peekPrompt = usePeekPrompt();
@@ -768,9 +808,11 @@ export const ChatArea = memo(function ChatArea() {
       const success = await retryAgents(illustratorPromptReview.chatId, ["illustrator"], {
         illustratorPromptReviewOverride: {
           resultData: illustratorPromptReview.resultData,
+          ...(illustratorPromptReview.subjectOnly ? { subjectOnly: true } : {}),
           prompt: override.prompt,
           ...(override.negativePrompt ? { negativePrompt: override.negativePrompt } : {}),
         },
+        illustratorRetryTargets: [illustratorPromptReview.item.kind === "background" ? "background" : "illustration"],
       });
       setIllustratorPromptReviewSubmitting(false);
       if (success) setIllustratorPromptReview(null);
@@ -782,6 +824,42 @@ export const ChatArea = memo(function ChatArea() {
     if (illustratorPromptReviewSubmitting) return;
     setIllustratorPromptReview(null);
   }, [illustratorPromptReviewSubmitting]);
+
+  const handleIllustrate = useCallback(
+    (prompt?: string) => {
+      if (!activeChatId) return;
+      const resultData = { prompt, characters: [] };
+      if (prompt && useUIStore.getState().reviewImagePromptsBeforeSend) {
+        setIllustratorPromptReview({
+          chatId: activeChatId,
+          subjectOnly: true,
+          resultData,
+          item: {
+            id: "roleplay-scene-illustration",
+            kind: "illustration",
+            title: localizeUi("ui.chat.chatgallery.illustrate"),
+            prompt,
+          },
+        });
+        return;
+      }
+      return retryAgents(activeChatId, ["illustrator"], {
+        illustratorRetryTargets: ["illustration"],
+        ...(prompt ? { illustratorPromptReviewOverride: { prompt, subjectOnly: true, resultData } } : {}),
+      }).then(() => undefined);
+    },
+    [activeChatId, localizeUi, retryAgents],
+  );
+
+  const illustratorPromptReviewModal = (
+    <ImagePromptReviewModal
+      open={!!illustratorPromptReview}
+      items={illustratorPromptReview ? [illustratorPromptReview.item] : []}
+      isSubmitting={illustratorPromptReviewSubmitting}
+      onCancel={handleCloseIllustratorPromptReview}
+      onConfirm={(overrides) => void handleContinueIllustratorPromptReview(overrides)}
+    />
+  );
 
   // Character IDs in the active chat. Keyed on the raw characterIds field
   // (all getChatCharacterIds reads) so chat-detail refetches that only bump
@@ -863,6 +941,10 @@ export const ChatArea = memo(function ChatArea() {
       ...Object.keys(chatStatuses ?? {}),
       ...Object.keys((convoMeta.conversationStatusOverrides as Record<string, unknown> | undefined) ?? {}),
       ...Object.keys((convoMeta.characterSchedules as Record<string, unknown> | undefined) ?? {}),
+      // A chat with schedules off has no cached schedules to key off, but its
+      // characters still need the always-online answer instead of the card's
+      // global status.
+      ...(convoMeta.conversationSchedulesEnabled === false ? chatCharIds : []),
     ]);
     for (const id of presenceIds) {
       const existing = map.get(id);
@@ -888,7 +970,7 @@ export const ChatArea = memo(function ChatArea() {
     if (areCharacterMapsEqual(characterMapRef.current, map)) return characterMapRef.current;
     characterMapRef.current = map;
     return map;
-  }, [chatCharacterRows, chat?.metadata, presenceNow]);
+  }, [chatCharacterRows, chat?.metadata, presenceNow, chatCharIds]);
 
   const characterNames = useMemo(
     () => chatCharIds.map((id) => characterMap.get(id)?.name).filter((n): n is string => !!n),
@@ -956,10 +1038,51 @@ export const ChatArea = memo(function ChatArea() {
   const personaInfo = useMemo(() => {
     // Roleplay and Game may intentionally have no Persona; only Conversation
     // falls back to the globally active account Persona.
+    if (chat?.personaCharacterId) {
+      const row = identityCharacterRow;
+      if (row && row.id === chat.personaCharacterId) {
+        try {
+          const rawData = typeof row.data === "string" ? JSON.parse(row.data) : row.data;
+          const data = rawData && typeof rawData === "object" && !Array.isArray(rawData) ? rawData : {};
+          const extensions = data?.extensions ?? {};
+          const conversationStatus =
+            extensions.conversationStatus === "online" ||
+            extensions.conversationStatus === "idle" ||
+            extensions.conversationStatus === "dnd" ||
+            extensions.conversationStatus === "offline"
+              ? extensions.conversationStatus
+              : undefined;
+          return {
+            id: row.id,
+            source: "character" as const,
+            name: typeof data?.name === "string" && data.name.trim() ? data.name : "Unknown",
+            convoDisplayName: typeof extensions.convoDisplayName === "string" ? extensions.convoDisplayName : undefined,
+            phoneticName: typeof extensions.phoneticName === "string" ? extensions.phoneticName : undefined,
+            description: typeof data?.description === "string" ? data.description : undefined,
+            personality: typeof data?.personality === "string" ? data.personality : undefined,
+            scenario: typeof data?.scenario === "string" ? data.scenario : undefined,
+            backstory: typeof extensions.backstory === "string" ? extensions.backstory : undefined,
+            appearance: typeof extensions.appearance === "string" ? extensions.appearance : undefined,
+            avatarUrl: row.avatarPath || undefined,
+            avatarCrop: normalizeAvatarCrop(extensions.avatarCrop),
+            nameColor: typeof extensions.nameColor === "string" ? extensions.nameColor : undefined,
+            dialogueColor: typeof extensions.dialogueColor === "string" ? extensions.dialogueColor : undefined,
+            boxColor: typeof extensions.boxColor === "string" ? extensions.boxColor : undefined,
+            conversationStatus,
+            conversationActivity:
+              typeof extensions.conversationActivity === "string" ? extensions.conversationActivity : undefined,
+          };
+        } catch {
+          return undefined;
+        }
+      }
+      return undefined;
+    }
     const persona = chatPersona ?? (chatMode === "conversation" ? activePersonaFallback : null);
     if (!persona) return undefined;
     return {
       id: persona.id,
+      source: "persona" as const,
       name: persona.name,
       convoDisplayName: persona.convoDisplayName || undefined,
       phoneticName: persona.phoneticName || undefined,
@@ -974,7 +1097,7 @@ export const ChatArea = memo(function ChatArea() {
       dialogueColor: persona.dialogueColor || undefined,
       boxColor: persona.boxColor || undefined,
     };
-  }, [activePersonaFallback, chatMode, chatPersona]);
+  }, [activePersonaFallback, chat, chatMode, chatPersona, identityCharacterRow]);
 
   const { startEncounter } = useEncounter();
   const { concludeScene, abandonScene, forkScene, isForking } = useScene();
@@ -1088,18 +1211,34 @@ export const ChatArea = memo(function ChatArea() {
     setScheduleModalCharacterId(null);
     setScheduleModalInitialDay(null);
   }, []);
+  const updateCharacter = useUpdateCharacter();
+  // The character owns its schedule; the chat's `characterSchedules` map is only
+  // a cache, so write the card and let the server re-resolve the chat copy.
   const handleSaveCharacterSchedule = useCallback(
     (savedCharacterId: string, updated: WeekSchedule) => {
-      if (!chat?.id) return;
-      updateMeta.mutate({
-        id: chat.id,
-        characterSchedules: {
-          ...((chatMeta.characterSchedules as Record<string, WeekSchedule> | undefined) ?? {}),
-          [savedCharacterId]: updated,
+      updateCharacter.mutate(
+        {
+          id: savedCharacterId,
+          data: { extensions: { conversationSchedule: updated } },
+          skipVersionSnapshot: true,
         },
-      });
+        {
+          onSuccess: () => {
+            // Refetching the chat re-resolves its cached copy from the card, so
+            // the new routine shows up here without a second metadata write.
+            void queryClient.invalidateQueries({ queryKey: characterKeys.detail(savedCharacterId) });
+            if (chat?.id) void queryClient.invalidateQueries({ queryKey: chatKeys.detail(chat.id) });
+          },
+          onError: (error) =>
+            toast.error(
+              error instanceof Error
+                ? error.message
+                : localizeUi("ui.chat.characterscheduleeditormodal.failedToSaveSchedule"),
+            ),
+        },
+      );
     },
-    [chat?.id, chatMeta.characterSchedules, updateMeta],
+    [chat?.id, localizeUi, queryClient, updateCharacter],
   );
   const summaryContextSize: number = (chatMeta.summaryContextSize as number) ?? 50;
   const [roleplayVideoReviewItems, setRoleplayVideoReviewItems] = useState<ImagePromptReviewItem[]>([]);
@@ -1374,6 +1513,7 @@ export const ChatArea = memo(function ChatArea() {
           ? chatMeta.translationOutputPrompt
           : undefined;
     useTranslationStore.getState().setConfig({
+      chatId: chat.id,
       provider: chatMeta.translationProvider ?? "google",
       // A cleared settings field stores "" — fall back to the legacy/default
       // language so translation never runs with an empty target.
@@ -1447,7 +1587,6 @@ export const ChatArea = memo(function ChatArea() {
   // stale saved background. We only write null when metadata already had a
   // background — that way a global UI background carried over from a previous
   // chat doesn't pollute a fresh chat's metadata on switch.
-  const bgPersistTimer = useRef<ReturnType<typeof setTimeout>>(null);
   useEffect(() => {
     if (!chat?.id) return;
     const savedBackground = chatBackgroundUrlToMetadata(chatBackgroundMetadataToUrl(chatMeta.background));
@@ -1463,28 +1602,13 @@ export const ChatArea = memo(function ChatArea() {
       restoredBackground.isSyncing = false;
     }
 
-    if (!chatBackground) {
-      if (savedBackground === null) return;
-      if (bgPersistTimer.current) clearTimeout(bgPersistTimer.current);
-      bgPersistTimer.current = setTimeout(() => {
-        updateMeta.mutate({ id: chat!.id, background: null });
-      }, 500);
-      return;
-    }
-
     const nextBackground = chatBackgroundUrlToMetadata(chatBackground);
     if (nextBackground === savedBackground) return;
-    if (bgPersistTimer.current) clearTimeout(bgPersistTimer.current);
-    bgPersistTimer.current = setTimeout(() => {
-      updateMeta.mutate({ id: chat!.id, background: nextBackground });
-    }, 500);
+    // A selection is a discrete action, not typing: save immediately so leaving
+    // the chat cannot cancel a pending background change.
+    updateMeta.mutate({ id: chat.id, background: nextBackground });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatBackground, chat?.id]);
-  useEffect(() => {
-    return () => {
-      if (bgPersistTimer.current) clearTimeout(bgPersistTimer.current);
-    };
-  }, []);
 
   const expressionSaveTimer = useRef<ReturnType<typeof setTimeout>>(null);
   const pendingExpressions = useRef<Record<string, string>>(spriteExpressions);
@@ -1745,6 +1869,7 @@ export const ChatArea = memo(function ChatArea() {
     [deleteDialogMessageId, messages],
   );
   const deleteDialogCanDeleteSwipe = (deleteDialogMessage?.swipeCount ?? 0) > 1;
+  const deleteDialogCanDeleteOtherSwipes = deleteDialogCanDeleteSwipe && !isGameChat;
   const deleteDialogActiveSwipeIndex = deleteDialogMessage?.activeSwipeIndex ?? 0;
   const deleteDialogSwipeCount = deleteDialogMessage?.swipeCount ?? 0;
 
@@ -1798,6 +1923,22 @@ export const ChatArea = memo(function ChatArea() {
     deleteSwipe,
     refreshVisibleGameState,
     shouldRefreshGameStateOnSwipe,
+    localizeUi,
+  ]);
+
+  const handleDeleteOtherSwipes = useCallback(() => {
+    const messageId = deleteDialogMessageId;
+    const index = deleteDialogActiveSwipeIndex;
+    setDeleteDialogMessageId(null);
+    if (!messageId || !deleteDialogCanDeleteOtherSwipes) return;
+    void deleteOtherSwipes.mutateAsync({ messageId, index }).catch(() => {
+      toast.error(localizeUi("ui.chat.chatarea.couldNotDeleteTheSwipe"));
+    });
+  }, [
+    deleteDialogActiveSwipeIndex,
+    deleteDialogCanDeleteOtherSwipes,
+    deleteDialogMessageId,
+    deleteOtherSwipes,
     localizeUi,
   ]);
 
@@ -2416,7 +2557,7 @@ export const ChatArea = memo(function ChatArea() {
     },
     [scrollToMessagesBottom],
   );
-  useKeepLatestChatMessageVisible(scrollRef, scheduleScrollToMessagesBottom);
+  useKeepLatestChatMessageVisible(scrollRef, scrollToMessagesBottom);
   useEffect(() => {
     const handleScrollRequest = (event: Event) => {
       const detail = (event as CustomEvent<ChatScrollToBottomDetail>).detail;
@@ -2876,8 +3017,10 @@ export const ChatArea = memo(function ChatArea() {
   // Restoring persisted active chat
   // ═══════════════════════════════════════════════
   if (activeChatId && !chat) {
-    const errorMessage =
-      chatError instanceof ApiError
+    const chatOpenTimedOut = isRequestTimeoutError(chatError);
+    const errorMessage = chatOpenTimedOut
+      ? localizeUi("ui.chat.chatarea.serverUnreachableHint")
+      : chatError instanceof ApiError
         ? chatError.message
         : chatError instanceof Error
           ? chatError.message
@@ -2896,7 +3039,9 @@ export const ChatArea = memo(function ChatArea() {
           <div className="space-y-1">
             <p className="text-sm font-medium text-[var(--foreground)]">
               {hasOpenError
-                ? localizeUi("ui.chat.chatarea.couldNotOpenThisChat")
+                ? chatOpenTimedOut
+                  ? localizeUi("ui.chat.chatarea.serverUnreachable")
+                  : localizeUi("ui.chat.chatarea.couldNotOpenThisChat")
                 : localizeUi("ui.chat.chatarea.openingChat")}
             </p>
             {hasOpenError && (
@@ -2904,13 +3049,27 @@ export const ChatArea = memo(function ChatArea() {
             )}
           </div>
           {hasOpenError && (
-            <button
-              type="button"
-              onClick={() => setActiveChatId(null)}
-              className="mari-chrome-control mari-chrome-control--small text-xs"
-            >
-              {localizeUi("ui.chat.chatarea.backToChats")}
-            </button>
+            <div className="flex items-center gap-2">
+              {/* The unreachable hint tells the user to try again after
+                  foregrounding Termux; with focus-refetch globally off and
+                  timeout retries disabled, this button is the recovery path. */}
+              {chatOpenTimedOut && (
+                <button
+                  type="button"
+                  onClick={() => void refetchChatDetail()}
+                  className="mari-chrome-control mari-chrome-control--small text-xs"
+                >
+                  {localizeUi("ui.chat.chatarea.tryAgain")}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setActiveChatId(null)}
+                className="mari-chrome-control mari-chrome-control--small text-xs"
+              >
+                {localizeUi("ui.chat.chatarea.backToChats")}
+              </button>
+            </div>
           )}
         </div>
       </div>
@@ -3008,6 +3167,23 @@ export const ChatArea = memo(function ChatArea() {
     </Suspense>
   ) : null;
   const resourceDropOverlay = chat ? <ChatResourceDropOverlay chat={chat} /> : null;
+  const chatHelpMode = readChatHelpMode(chatMode);
+  const chatHelpOverlay =
+    chat && chatHelpMode ? (
+      <ChatHelpOverlay
+        mode={chatHelpMode}
+        activeChatId={chat.id}
+        isFirstChat={(allChats ?? []).filter((candidate) => candidate.mode === chatMode).length === 1}
+        autoOpenBlocked={
+          wizardOpen ||
+          settingsOpen ||
+          galleryOpen ||
+          !!pendingNewChatMode ||
+          !!peekPromptData ||
+          !!deleteDialogMessageId
+        }
+      />
+    ) : null;
 
   // ═══════════════════════════════════════════════
   // Game mode — RPG surface with GM narration, map, party chat
@@ -3055,6 +3231,7 @@ export const ChatArea = memo(function ChatArea() {
             peekPromptData={peekPromptData}
             deleteDialogMessageId={deleteDialogMessageId}
             deleteDialogCanDeleteSwipe={deleteDialogCanDeleteSwipe}
+            deleteDialogCanDeleteOtherSwipes={deleteDialogCanDeleteOtherSwipes}
             deleteDialogActiveSwipeIndex={deleteDialogActiveSwipeIndex}
             deleteDialogSwipeCount={deleteDialogSwipeCount}
             multiSelectMode={multiSelectMode}
@@ -3077,6 +3254,7 @@ export const ChatArea = memo(function ChatArea() {
             onClosePeekPrompt={() => setPeekPromptData(null)}
             onDeleteConfirm={handleDeleteConfirm}
             onDeleteSwipe={handleDeleteSwipe}
+            onDeleteOtherSwipes={handleDeleteOtherSwipes}
             onDeleteMore={handleDeleteMore}
             onCloseDeleteDialog={() => setDeleteDialogMessageId(null)}
             onBulkDelete={handleBulkDelete}
@@ -3085,6 +3263,7 @@ export const ChatArea = memo(function ChatArea() {
             onSelectAllAboveSelection={handleSelectAllAboveSelection}
             onSelectAllBelowSelection={handleSelectAllBelowSelection}
           />
+          {chatHelpOverlay}
         </>
       </Suspense>
     );
@@ -3126,6 +3305,7 @@ export const ChatArea = memo(function ChatArea() {
             peekPromptData={peekPromptData}
             deleteDialogMessageId={deleteDialogMessageId}
             deleteDialogCanDeleteSwipe={deleteDialogCanDeleteSwipe}
+            deleteDialogCanDeleteOtherSwipes={deleteDialogCanDeleteOtherSwipes}
             deleteDialogActiveSwipeIndex={deleteDialogActiveSwipeIndex}
             deleteDialogSwipeCount={deleteDialogSwipeCount}
             multiSelectMode={multiSelectMode}
@@ -3147,11 +3327,7 @@ export const ChatArea = memo(function ChatArea() {
             onOpenScheduleEditor={handleOpenScheduleEditor}
             onCloseSettings={handleCloseSettingsPanel}
             onCloseGallery={handleCloseGalleryPanel}
-            onIllustrate={() =>
-              retryAgents(activeChatId, ["illustrator"], {
-                illustratorRetryTargets: ["illustration"],
-              })
-            }
+            onIllustrate={handleIllustrate}
             onIllustrateWithAgent={async (agentType) => {
               await retryAgents(activeChatId, [agentType], { forceImageGeneration: true });
             }}
@@ -3166,6 +3342,7 @@ export const ChatArea = memo(function ChatArea() {
             onToggleSpriteArrange={() => setSpriteArrangeMode((prev) => !prev)}
             onDeleteConfirm={handleDeleteConfirm}
             onDeleteSwipe={handleDeleteSwipe}
+            onDeleteOtherSwipes={handleDeleteOtherSwipes}
             onDeleteMore={handleDeleteMore}
             onCloseDeleteDialog={() => setDeleteDialogMessageId(null)}
             onBulkDelete={handleBulkDelete}
@@ -3176,6 +3353,7 @@ export const ChatArea = memo(function ChatArea() {
             lastAssistantMessageId={lastAssistantMessageId}
           />
         </Suspense>
+        {illustratorPromptReviewModal}
         <ImagePromptReviewModal
           open={conversationSelfieReviewItems.length > 0}
           items={conversationSelfieReviewItems}
@@ -3183,6 +3361,7 @@ export const ChatArea = memo(function ChatArea() {
           onCancel={() => closeConversationSelfiePromptReview(null)}
           onConfirm={confirmConversationSelfiePromptReview}
         />
+        {chatHelpOverlay}
         {pendingNewChatMode && (
           <NewChatConnectionGate
             mode={pendingNewChatMode}
@@ -3259,6 +3438,7 @@ export const ChatArea = memo(function ChatArea() {
           peekPromptData={peekPromptData}
           deleteDialogMessageId={deleteDialogMessageId}
           deleteDialogCanDeleteSwipe={deleteDialogCanDeleteSwipe}
+          deleteDialogCanDeleteOtherSwipes={deleteDialogCanDeleteOtherSwipes}
           deleteDialogActiveSwipeIndex={deleteDialogActiveSwipeIndex}
           deleteDialogSwipeCount={deleteDialogSwipeCount}
           multiSelectMode={multiSelectMode}
@@ -3291,11 +3471,7 @@ export const ChatArea = memo(function ChatArea() {
           onCloseSettings={handleCloseSettingsPanel}
           onCloseGallery={handleCloseGalleryPanel}
           onOpenScheduleEditor={handleOpenScheduleEditor}
-          onIllustrate={() =>
-            retryAgents(activeChatId, ["illustrator"], {
-              illustratorRetryTargets: ["illustration"],
-            })
-          }
+          onIllustrate={handleIllustrate}
           onIllustrateWithAgent={async (agentType) => {
             await retryAgents(activeChatId, [agentType], { forceImageGeneration: true });
           }}
@@ -3318,6 +3494,7 @@ export const ChatArea = memo(function ChatArea() {
           onFinishSpritePlacement={() => setSpriteArrangeMode(false)}
           onDeleteConfirm={handleDeleteConfirm}
           onDeleteSwipe={handleDeleteSwipe}
+          onDeleteOtherSwipes={handleDeleteOtherSwipes}
           onDeleteMore={handleDeleteMore}
           onCloseDeleteDialog={() => setDeleteDialogMessageId(null)}
           onBulkDelete={handleBulkDelete}
@@ -3337,13 +3514,7 @@ export const ChatArea = memo(function ChatArea() {
           onClose={handleCloseAgentInjectionReview}
         />
       )}
-      <ImagePromptReviewModal
-        open={!!illustratorPromptReview}
-        items={illustratorPromptReview ? [illustratorPromptReview.item] : []}
-        isSubmitting={illustratorPromptReviewSubmitting}
-        onCancel={handleCloseIllustratorPromptReview}
-        onConfirm={(overrides) => void handleContinueIllustratorPromptReview(overrides)}
-      />
+      {illustratorPromptReviewModal}
       <ImagePromptReviewModal
         open={roleplayVideoReviewItems.length > 0}
         items={roleplayVideoReviewItems}
@@ -3352,6 +3523,7 @@ export const ChatArea = memo(function ChatArea() {
         onCancel={() => closeRoleplayVideoPromptReview(null)}
         onConfirm={confirmRoleplayVideoPromptReview}
       />
+      {chatHelpOverlay}
       {pendingNewChatMode && (
         <NewChatConnectionGate
           mode={pendingNewChatMode}

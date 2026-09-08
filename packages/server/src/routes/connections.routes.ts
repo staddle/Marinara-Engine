@@ -19,12 +19,14 @@ import {
   inferImageSource,
   inferVideoSource,
   isLocalAuthProvider,
+  isOpenAIGpt6AstraModel,
   localAuthProviderBaseUrl,
   normalizeVideoGenerationProfile,
 } from "@marinara-engine/shared";
 import { createConnectionsStorage } from "../services/storage/connections.storage.js";
 import { resetMemoryRecallVectorizerCache } from "../services/memory-recall-embedding.js";
 import { createLLMProvider } from "../services/llm/provider-registry.js";
+import { resolveStoredChatOptions, resolveStoredMaxTokens } from "../services/generation/generation-parameters.js";
 import { fetchOpenAIChatGPTModels, getOpenAIChatGPTAuth } from "../services/llm/openai-chatgpt-auth.js";
 import { fetchGrokCliModels } from "../services/llm/providers/grok-subscription.provider.js";
 import {
@@ -134,6 +136,7 @@ function usesResponsesEndpointForTestMessage(provider: string, model: string): b
   if (!isOpenAICompatibleProvider(provider) || provider === "custom") return false;
   const normalized = model.toLowerCase();
   return (
+    isOpenAIGpt6AstraModel(normalized) ||
     normalized.startsWith("gpt-5.6") ||
     normalized.startsWith("gpt-5.5") ||
     normalized.startsWith("gpt-5.4") ||
@@ -271,6 +274,19 @@ async function createSwarmUiSession(baseUrl: string, apiKey: string): Promise<st
 
 export function buildGoogleModelsPageUrl(baseUrl: string, modelsEndpoint: string, pageToken = ""): string {
   return `${baseUrl}${modelsEndpoint}?pageSize=1000` + (pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "");
+}
+
+export function buildConnectionTestCatalogUrl(
+  baseUrl: string,
+  provider: string,
+  modelsEndpoint = "/models",
+  audioSource?: string | null,
+): string {
+  const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
+  if (provider === "audio" && (audioSource || "elevenlabs") === "elevenlabs") {
+    return `${normalizedBaseUrl.replace(/\/v\d+$/, "")}/v1/models`;
+  }
+  return `${normalizedBaseUrl}${modelsEndpoint}`;
 }
 
 function normalizeConnectionTestBaseUrl(baseUrl: string, provider: string): string {
@@ -688,7 +704,12 @@ export async function connectionsRoutes(app: FastifyInstance) {
       } else if (conn.provider === "google_vertex") {
         testUrl = buildGoogleVertexModelUrl(baseUrl, conn.model, "models");
       } else {
-        testUrl = `${baseUrl}${provider?.modelsEndpoint || "/models"}`;
+        testUrl = buildConnectionTestCatalogUrl(
+          baseUrl,
+          conn.provider,
+          provider?.modelsEndpoint || "/models",
+          conn.audioSource,
+        );
       }
 
       const testHeaders =
@@ -1501,11 +1522,13 @@ export async function connectionsRoutes(app: FastifyInstance) {
         conn.id,
       );
 
+      const storedOptions = resolveStoredChatOptions(conn.defaultParameters, conn.provider, model);
       let fullResponse = "";
       for await (const chunk of provider.chat([{ role: "user", content: "hi" }], {
         model,
-        temperature: 0.7,
-        maxTokens: 200,
+        ...storedOptions,
+        temperature: storedOptions.temperature ?? 0.7,
+        maxTokens: resolveStoredMaxTokens(conn.defaultParameters, 200),
         stream: false,
       })) {
         fullResponse += chunk;

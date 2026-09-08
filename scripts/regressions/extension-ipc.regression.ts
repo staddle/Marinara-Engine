@@ -29,10 +29,22 @@ import {
   SANDBOX_HOT_WINDOW_MS,
   SANDBOX_RUNNER_IDLE_POLL_MS,
   SANDBOX_WATCHDOG_INTERVAL_MS,
+  shouldGrantSandboxResumeGrace,
 } from "../../packages/server/src/services/extensions/sandbox-protocol.js";
 
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const CAP = 64;
+const extensionRuntimeSource = readFileSync(
+  join(REPOSITORY_ROOT, "packages/server/src/services/extensions/personal-server-extension-runtime.ts"),
+  "utf8",
+);
+
+assert.match(extensionRuntimeSource, /const tickGeneration = \+\+watchdogTickGeneration/u);
+assert.match(
+  extensionRuntimeSource,
+  /if \(tickGeneration !== watchdogTickGeneration \|\| active\.expectedStop\) return;/u,
+  "a delayed watchdog sample must not apply after a newer tick starts",
+);
 
 // ── Per-message cap semantics ──
 
@@ -86,6 +98,8 @@ assert.equal(
   "the unresponsive threshold keeps the original five-missed-beats multiple",
 );
 assert.ok(SANDBOX_WATCHDOG_INTERVAL_MS >= 1_000, "the watchdog must not return to a 250ms cadence");
+assert.equal(shouldGrantSandboxResumeGrace(2_000, 0), false, "two watchdog intervals do not imply suspension");
+assert.equal(shouldGrantSandboxResumeGrace(2_001, 0), true, "a delayed watchdog tick grants resume grace");
 
 // ── Host/runner constant pairing + no fixed-interval polling ──
 

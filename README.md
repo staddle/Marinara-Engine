@@ -102,7 +102,7 @@
 
 ## Latest Release
 
-Current stable release: **[v2.4.3](https://github.com/Pasta-Devs/Marinara-Engine/releases/tag/v2.4.3)**.
+Current stable release: **[v2.4.4](https://github.com/Pasta-Devs/Marinara-Engine/releases/tag/v2.4.4)**.
 
 See [CHANGELOG.md](CHANGELOG.md) for detailed release notes. Tagged releases use the `vX.Y.Z` format and are published on the [Releases](https://github.com/Pasta-Devs/Marinara-Engine/releases) page with a Windows installer, Android bootstrap APK, and named versioned source ZIP. Android APKs are Termux bootstrap + WebView shells: they can download Termux from F-Droid, launch Android's installer, start the Termux setup flow after required permission prompts, then open the local Marinara server on the same device. **[Download the latest Android APK directly](https://github.com/Pasta-Devs/Marinara-Engine/releases/latest/download/marinara-engine-android.apk).**
 
@@ -152,11 +152,11 @@ Character expression sprites with automatic emotion switching, custom scene back
 
 ### AI Agent System
 
-An optional one-click catalog of 33 first-party agents and feature packages. Fresh installs stay lightweight with no bundled agents. Open **Agents → Download Agents** to install only what you want or uninstall packages you no longer need. When a compatible update appears, Marinara asks before downloading it. Choosing **No** keeps the installed version and leaves **Update** available in Download Agents for later; installed packages also remain available while the server is offline. Existing installations retain their agents during Engine upgrades. Stable Engine builds use the released Agent catalog, while git installations on the Engine `staging` update channel automatically use the matching Marinara-Agents `staging` catalog and artifacts for testing. Package sources, artifacts, and the complete catalog are published in [Pasta-Devs/Marinara-Agents](https://github.com/Pasta-Devs/Marinara-Agents). You can also create custom Agents. External Agent imports require the **Allow custom Agent imports** Danger Zone toggle and an explicit capability review; official downloads and Agents you create yourself are unaffected.
+An optional one-click catalog of 36 first-party agents and feature packages. Fresh installs stay lightweight with no bundled agents. Open **Agents → Download Agents** to install only what you want or uninstall packages you no longer need. When a compatible update appears, Marinara asks before downloading it. Choosing **No** keeps the installed version and leaves **Update** available in Download Agents for later; installed packages also remain available while the server is offline. Existing installations retain their agents during Engine upgrades. Stable Engine builds use the released Agent catalog, while git installations on the Engine `staging` update channel automatically use the matching Marinara-Agents `staging` catalog and artifacts for testing. Package sources, artifacts, and the complete catalog are published in [Pasta-Devs/Marinara-Agents](https://github.com/Pasta-Devs/Marinara-Agents). You can also create custom Agents. External Agent imports require the **Allow custom Agent imports** Danger Zone toggle and an explicit capability review; official downloads and Agents you create yourself are unaffected.
 
 - **Writer Agents:** Prose Guardian, Continuity Checker, Narrative Director, Knowledge Retrieval, Knowledge Router, and Card Evolution Auditor.
-- **Tracker Agents:** World State, Expression Engine, Quest Tracker, Background, Character Tracker, Persona Stats, Custom Tracker, Inventory Tracker, and World Maps.
-- **Misc Agents:** Echo Chamber, Noodle, Illustrator, Lorebook Keeper, Long-Term Memory, Combat, Immersive HTML, Music DJ, Haptic Feedback, CYOA Choices, Storyboard, Calls, UNO, Chess, Poker, 8-Ball Pool, Tic-Tac-Toe, and Rock-Paper-Scissors.
+- **Tracker Agents:** World State, Expression Engine, Quest Tracker, Background, Character Tracker, Persona Stats, Custom Tracker, Inventory Tracker, World Maps, Beholder, and Memory Nag.
+- **Misc Agents:** Echo Chamber, Noodle, Slurp, Illustrator, Lorebook Keeper, Long-Term Memory, Combat, Immersive HTML, Music DJ, Haptic Feedback, CYOA Choices, Storyboard, Calls, UNO, Chess, Poker, 8-Ball Pool, Tic-Tac-Toe, and Rock-Paper-Scissors.
 
 See the [Downloadable Agents Reference](docs/agents/built-in-agents.md) for modes, behavior, and setup guidance for every package, or browse the [official Agent repository](https://github.com/Pasta-Devs/Marinara-Agents) directly.
 

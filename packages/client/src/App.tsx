@@ -30,12 +30,15 @@ import {
   getDefaultAppAccentColor,
   getDefaultAppBackgroundColor,
   getDefaultChatChromeTextColor,
+  MOBILE_SHELL_MEDIA_QUERY,
   useUIStore,
 } from "./stores/ui.store";
 import { useSidecarStore } from "./stores/sidecar.store";
 import { useDialogStore } from "./stores/dialog.store";
-import { api } from "./lib/api-client";
-import { forceRefreshSpa } from "./lib/browser-runtime";
+import { api, requestTimeoutSignal } from "./lib/api-client";
+import { forceRefreshSpa, reloadBrowser } from "./lib/browser-runtime";
+import { recordClientError } from "./lib/client-runtime-diagnostics";
+import { showAppUpdatePrompt } from "./lib/app-update-prompt";
 import { formatRuntimeBuild, getServerRuntimeBuild, isRuntimeBuildCurrent } from "./lib/runtime-build";
 import {
   getCssColorFallback,
@@ -50,10 +53,15 @@ import { useStorageMigrationNotice } from "./hooks/use-storage-migration-notice"
 import { useCustomNotificationSoundStatus } from "./hooks/use-custom-notification-sound";
 import { useReducedAmbientEffects } from "./hooks/use-reduced-ambient-effects";
 import { installLongTaskWarner } from "./lib/perf-diagnostics";
+import { getStoreBackLayers } from "./lib/back-layers";
+import { initBackNavigation, syncBackNavigation } from "./lib/back-navigation";
 import { setCustomNotificationSoundUrl } from "./lib/notification-sound";
 
-const VERSION_RECOVERY_KEY = "marinara:pwa-version-recovery";
 const VERSION_CHECK_INTERVAL_MS = 5 * 60_000;
+// Against a frozen host the connection opens but is never answered; without a
+// deadline every visibility flip leaks one permanently-pending health fetch
+// until the browser's per-host connection pool is saturated (#5658).
+const VERSION_CHECK_TIMEOUT_MS = 10_000;
 const CLIENT_BUILD = formatRuntimeBuild(APP_VERSION, __MARINARA_BUILD_COMMIT__);
 const LazyModalRenderer = lazy(() =>
   import("./components/layout/ModalRenderer").then((module) => ({ default: module.ModalRenderer })),
@@ -143,6 +151,7 @@ export class AppRecoveryBoundary extends Component<{ children: ReactNode }, { er
   }
 
   componentDidCatch(error: unknown, info: ErrorInfo) {
+    recordClientError("render-error", error);
     console.error("[AppRecoveryBoundary] Unhandled render error", error, info.componentStack);
   }
 
@@ -155,7 +164,7 @@ export class AppRecoveryBoundary extends Component<{ children: ReactNode }, { er
     } catch {
       /* ignore storage reset errors */
     }
-    window.location.reload();
+    reloadBrowser("reset-ui");
   };
 
   render() {
@@ -183,7 +192,7 @@ export class AppRecoveryBoundary extends Component<{ children: ReactNode }, { er
               <div className="mt-4 flex flex-wrap gap-2">
                 <button
                   type="button"
-                  onClick={() => window.location.reload()}
+                  onClick={() => reloadBrowser("render-recovery")}
                   className="mari-chrome-control mari-chrome-control--selected px-3 py-2 text-sm"
                 >
                   {t("ui.app.recovery.reload")}
@@ -464,12 +473,8 @@ function isTextEntryFocused() {
 }
 
 async function recoverFromVersionSkew(serverVersion: string) {
-  if (sessionStorage.getItem(VERSION_RECOVERY_KEY) === serverVersion) {
-    return;
-  }
-
-  sessionStorage.setItem(VERSION_RECOVERY_KEY, serverVersion);
   await forceRefreshSpa({
+    reason: "version-update",
     queryParamKey: "v",
     queryParamValue: serverVersion,
   });
@@ -477,6 +482,7 @@ async function recoverFromVersionSkew(serverVersion: string) {
 
 export function App() {
   const theme = useUIStore((s) => s.theme);
+  const notificationPosition = useUIStore((s) => s.notificationPosition);
   const isLite = import.meta.env.VITE_MARINARA_LITE === "true";
   const fontSize = useUIStore((s) => s.fontSize);
   const language = useUIStore((s) => s.language);
@@ -525,6 +531,23 @@ export function App() {
   // [#3104 diagnostic] warn on long main-thread tasks (see lib/perf-diagnostics.ts)
   useEffect(() => {
     installLongTaskWarner();
+  }, []);
+
+  // Hardware / gesture back dismisses the topmost overlay instead of exiting.
+  useEffect(() => {
+    initBackNavigation(getStoreBackLayers);
+    // Overlay state is persisted, so the app can boot with panels already open.
+    syncBackNavigation();
+    const unsubscribeUI = useUIStore.subscribe(syncBackNavigation);
+    const unsubscribeDialog = useDialogStore.subscribe(syncBackNavigation);
+    // Whether a shell panel counts as an overlay depends on the viewport.
+    const shellQuery = window.matchMedia(MOBILE_SHELL_MEDIA_QUERY);
+    shellQuery.addEventListener("change", syncBackNavigation);
+    return () => {
+      unsubscribeUI();
+      unsubscribeDialog();
+      shellQuery.removeEventListener("change", syncBackNavigation);
+    };
   }, []);
 
   useEffect(() => {
@@ -934,14 +957,20 @@ export function App() {
 
   useEffect(() => {
     let cancelled = false;
+    // In-flight guard: visibility flips against a frozen server must reuse the
+    // one pending check instead of stacking a new leaked fetch each time.
+    let checkInFlight = false;
 
     const checkVersion = async () => {
+      if (checkInFlight) return;
+      checkInFlight = true;
       try {
         const res = await fetch("/api/health", {
           cache: "no-store",
           headers: {
             Accept: "application/json",
           },
+          signal: requestTimeoutSignal(VERSION_CHECK_TIMEOUT_MS),
         });
 
         if (!res.ok) {
@@ -955,13 +984,14 @@ export function App() {
 
         const serverBuild = getServerRuntimeBuild(health);
         if (isRuntimeBuildCurrent(APP_VERSION, CLIENT_BUILD, health)) {
-          sessionStorage.removeItem(VERSION_RECOVERY_KEY);
           return;
         }
 
-        await recoverFromVersionSkew(serverBuild);
+        showAppUpdatePrompt(() => recoverFromVersionSkew(serverBuild));
       } catch {
-        // Ignore version checks when the network is unavailable.
+        // Ignore version checks when the network is unavailable or timed out.
+      } finally {
+        checkInFlight = false;
       }
     };
 
@@ -1093,8 +1123,8 @@ export function App() {
         }}
       >
         <Toaster
-          position="top-center"
-          swipeDirections={["left", "right", "top"]}
+          position={notificationPosition === "bottom" ? "bottom-center" : "top-center"}
+          swipeDirections={["left", "right", notificationPosition === "bottom" ? "bottom" : "top"]}
           offset="4rem"
           theme={theme}
           closeButton
@@ -1103,7 +1133,7 @@ export function App() {
           toastOptions={{
             style: {
               background: "var(--card)",
-              border: "1px solid var(--border)",
+              border: "1px solid var(--marinara-chat-chrome-panel-border)",
               color: "var(--foreground)",
               userSelect: "text",
               WebkitUserSelect: "text",

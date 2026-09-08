@@ -4,6 +4,7 @@ import { AlertTriangle, RefreshCw, X } from "lucide-react";
 import type { CapabilityLocalizationContext } from "@marinara-engine/shared";
 import { retryCapabilityClientModule, useCapabilityClientModuleState } from "../../hooks/use-capability-packages";
 import { cn } from "../../lib/utils";
+import { reloadBrowser } from "../../lib/browser-runtime";
 
 type CapabilityElementNode = HTMLElement & {
   capabilityProps?: Record<string, unknown>;
@@ -22,7 +23,8 @@ interface CapabilityElementProps {
     | "workspace"
     | "runtime"
     | "world-map"
-    | "browser";
+    | "browser"
+    | "tracker";
   capabilityProps?: Record<string, unknown>;
   className?: string;
   onHostError?: (message: string) => void;
@@ -307,7 +309,7 @@ function CapabilityRefreshState({
   const { t } = useTranslation();
   const displayName = capabilityName(packageId, name);
   const title = t("capabilities.refresh.title", { name: displayName });
-  const refresh = () => window.location.reload();
+  const refresh = () => reloadBrowser("capability-refresh");
   if (view === "toolbar") {
     return (
       <button

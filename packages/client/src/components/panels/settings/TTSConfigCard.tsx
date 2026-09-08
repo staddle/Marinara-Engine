@@ -500,13 +500,44 @@ function TtsSearchableSelect({
   const filteredOptions = normalizedSearch
     ? options.filter((option) => option.searchText.toLowerCase().includes(normalizedSearch))
     : options;
-  const closePanel = useCallback((restoreFocus = true) => {
-    setOpen(false);
-    setSearch("");
-    if (restoreFocus) {
-      triggerRef.current?.focus();
-    }
+  const restoreFrameRef = useRef(0);
+  const restoreFocusToTrigger = useCallback(() => {
+    // Deferred one frame: focusing synchronously races the panel unmount and
+    // any concurrent re-render of the trigger row — the focus call can land
+    // on a node that detaches a beat later, dropping focus to <body> (#5633).
+    // Retried across frames: focus() on a disabled button is a silent no-op,
+    // and the trigger is transiently disabled whenever a voices refetch flips
+    // `fetchingVoices` — a single-frame restore landing in that window
+    // stranded keyboard focus on <body> for good (#5642). Bounded so an
+    // indefinitely disabled trigger cannot leak a perpetual rAF loop.
+    const startedAt = performance.now();
+    cancelAnimationFrame(restoreFrameRef.current);
+    const attempt = () => {
+      const trigger = triggerRef.current;
+      // If focus has legitimately landed somewhere else in the meantime
+      // (the user tabbed on), the restore is stale — never steal from them.
+      const active = document.activeElement;
+      if (active && active !== document.body && active !== trigger && !panelRef.current?.contains(active)) return;
+      if (trigger && !trigger.disabled) {
+        trigger.focus();
+        if (document.activeElement === trigger) return;
+      }
+      if (performance.now() - startedAt > 2000) return;
+      restoreFrameRef.current = requestAnimationFrame(attempt);
+    };
+    restoreFrameRef.current = requestAnimationFrame(attempt);
   }, []);
+
+  useEffect(() => () => cancelAnimationFrame(restoreFrameRef.current), []);
+
+  const closePanel = useCallback(
+    (restoreFocus = true) => {
+      setOpen(false);
+      setSearch("");
+      if (restoreFocus) restoreFocusToTrigger();
+    },
+    [restoreFocusToTrigger],
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -584,10 +615,27 @@ function TtsSearchableSelect({
   }, [compact, open]);
 
   useEffect(() => {
-    if (!disabled) return;
+    if (!disabled || !open) return;
+    // Force-closing because the control became disabled unmounts the panel —
+    // and with it the autofocused search input — so without a restore,
+    // keyboard focus silently falls to <body> (#5642). Only restore when the
+    // user's focus was actually inside this control. Focus already sitting on
+    // <body> counts as inside: with few options no search input renders, so
+    // focus stays on the trigger, and the browser drops it to <body>
+    // synchronously when the trigger's disabled attribute lands — before this
+    // effect can observe it. An outside pointerdown closes the panel through
+    // closePanel(false) before focus could legitimately be elsewhere, and the
+    // restore's own guard aborts if any real element takes focus meanwhile.
+    const active = document.activeElement;
+    const focusWasInside =
+      !active ||
+      active === document.body ||
+      active === triggerRef.current ||
+      panelRef.current?.contains(active) === true;
     setOpen(false);
     setSearch("");
-  }, [disabled]);
+    if (focusWasInside) restoreFocusToTrigger();
+  }, [disabled, open, restoreFocusToTrigger]);
 
   return (
     <div ref={rootRef} className="relative min-w-0 flex-1">
@@ -1242,7 +1290,7 @@ export function TTSConfigCard() {
   };
 
   const handlePreview = () => {
-    if (ttsState === "playing" || ttsState === "loading") {
+    if (ttsState === "playing" || ttsState === "loading" || ttsState === "blocked") {
       ttsService.stop();
       return;
     }
@@ -1501,7 +1549,7 @@ export function TTSConfigCard() {
         ? "Upload a reference clip first"
         : !enabled
           ? "Enable TTS first"
-          : ttsState === "playing"
+          : ttsState === "playing" || ttsState === "blocked"
             ? "Stop preview"
             : "Preview voice";
   const updateVoiceAssignments = (nextAssignments: TTSVoiceAssignment[]) => {
@@ -2541,7 +2589,7 @@ export function TTSConfigCard() {
               disabled={previewDisabled}
               className={cn(
                 "flex items-center gap-1.5 rounded-xl px-3 py-2 text-xs ring-1 transition-all",
-                ttsState === "playing"
+                ttsState === "playing" || ttsState === "blocked"
                   ? "bg-sky-500/10 text-sky-400 ring-sky-400/30 hover:bg-sky-500/20"
                   : "bg-[var(--secondary)] text-[var(--muted-foreground)] ring-[var(--border)] hover:text-[var(--foreground)] hover:ring-sky-400/60",
                 previewDisabled && "cursor-not-allowed opacity-50",
@@ -2550,14 +2598,14 @@ export function TTSConfigCard() {
             >
               {ttsState === "loading" ? (
                 <Loader2 size="0.75rem" className="animate-spin" />
-              ) : ttsState === "playing" ? (
+              ) : ttsState === "playing" || ttsState === "blocked" ? (
                 <Square size="0.75rem" />
               ) : (
                 <Play size="0.75rem" />
               )}
               {ttsState === "loading"
                 ? localizeUi("ui.panels.ttsconfigcard.loading")
-                : ttsState === "playing"
+                : ttsState === "playing" || ttsState === "blocked"
                   ? localizeUi("ui.chat.summarypopover.stop")
                   : localizeUi("settings.notifications.customSound.actions.preview")}
             </button>

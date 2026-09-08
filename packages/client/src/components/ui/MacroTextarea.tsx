@@ -66,6 +66,8 @@ interface ExpandedMacroEditorProps {
   onChange: (value: string) => void;
   onClose: () => void;
   placeholder?: string;
+  readOnly?: boolean;
+  maxLength?: number;
   formatOnChange?: (textarea: HTMLTextAreaElement, inputEvent: InputEvent) => string;
 }
 
@@ -76,6 +78,8 @@ function ExpandedMacroEditor({
   onChange,
   onClose,
   placeholder,
+  readOnly = false,
+  maxLength,
   formatOnChange,
 }: ExpandedMacroEditorProps) {
   const { t: localizeUi } = useUiTranslation();
@@ -101,14 +105,14 @@ function ExpandedMacroEditor({
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        onChange(localValue);
+        if (!readOnly) onChange(localValue);
         onClose();
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [localValue, onChange, onClose, open]);
+  }, [localValue, onChange, onClose, open, readOnly]);
 
   const handleChange = useCallback(
     (event: ChangeEvent<HTMLTextAreaElement>) => {
@@ -130,7 +134,7 @@ function ExpandedMacroEditor({
         data-component="ExpandedMacroEditor"
         data-macro-modal="true"
         className={cn(
-          "fixed inset-0 z-[10050] flex items-center justify-center bg-black/70 p-3 pb-[max(env(safe-area-inset-bottom),0.75rem)] pt-[max(env(safe-area-inset-top),0.75rem)] backdrop-blur-sm sm:p-4",
+          "fixed inset-0 z-[10050] flex items-center justify-center bg-black/70 p-3 pb-[max(var(--mari-safe-area-inset-bottom,env(safe-area-inset-bottom)),0.75rem)] pt-[max(env(safe-area-inset-top),0.75rem)] backdrop-blur-sm sm:p-4",
           EDITOR_MODAL_SURFACE_VARIABLES,
         )}
       >
@@ -147,7 +151,7 @@ function ExpandedMacroEditor({
             <button
               type="button"
               onClick={() => {
-                onChange(localValue);
+                if (!readOnly) onChange(localValue);
                 onClose();
               }}
               className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-[var(--border)] bg-[var(--secondary)] text-[var(--muted-foreground)] transition hover:border-[var(--primary)] hover:bg-[var(--accent)] hover:text-[var(--foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)]"
@@ -163,6 +167,8 @@ function ExpandedMacroEditor({
             onChange={handleChange}
             onKeyDown={handleTextareaTab}
             placeholder={placeholder}
+            readOnly={readOnly}
+            maxLength={maxLength}
             className="min-h-0 flex-1 resize-none bg-[var(--secondary)] p-4 font-mono text-sm leading-6 text-[var(--foreground)] outline-none placeholder:text-[var(--muted-foreground)]"
             spellCheck={false}
           />
@@ -204,7 +210,7 @@ function MacrosReferenceModal({ open, onClose }: MacrosReferenceModalProps) {
         data-component="MacroReference"
         data-macro-modal="true"
         className={cn(
-          "fixed inset-0 z-[10050] flex items-center justify-center bg-black/70 p-3 pb-[max(env(safe-area-inset-bottom),0.75rem)] pt-[max(env(safe-area-inset-top),0.75rem)] backdrop-blur-sm sm:p-4",
+          "fixed inset-0 z-[10050] flex items-center justify-center bg-black/70 p-3 pb-[max(var(--mari-safe-area-inset-bottom,env(safe-area-inset-bottom)),0.75rem)] pt-[max(env(safe-area-inset-top),0.75rem)] backdrop-blur-sm sm:p-4",
           EDITOR_MODAL_SURFACE_VARIABLES,
         )}
       >
@@ -299,6 +305,7 @@ export interface MacroTextareaProps {
   rows?: number;
   title?: string;
   ariaLabel?: string;
+  ariaInvalid?: boolean;
   placeholder?: string;
   className?: string;
   wrapperClassName?: string;
@@ -313,6 +320,8 @@ export interface MacroTextareaProps {
   /** Character the edited field belongs to — resolves card://self refs in the preview only. */
   selfCharacterId?: string | null;
   spellCheck?: boolean;
+  readOnly?: boolean;
+  maxLength?: number;
   /** Optional ref to the underlying textarea (e.g. to insert emoji at the caret). */
   textareaRef?: Ref<HTMLTextAreaElement>;
 }
@@ -327,6 +336,7 @@ export function MacroTextarea({
   rows = 6,
   title = "Edit text",
   ariaLabel,
+  ariaInvalid,
   placeholder,
   className,
   wrapperClassName,
@@ -340,6 +350,8 @@ export function MacroTextarea({
   showMarkdownPreview = false,
   selfCharacterId,
   spellCheck = true,
+  readOnly = false,
+  maxLength,
   textareaRef,
 }: MacroTextareaProps) {
   const { t: localizeUi } = useUiTranslation();
@@ -410,8 +422,11 @@ export function MacroTextarea({
             onKeyDown={handleKeyDown}
             rows={rows}
             aria-label={ariaLabel}
+            aria-invalid={ariaInvalid || undefined}
             placeholder={placeholder}
             spellCheck={spellCheck}
+            readOnly={readOnly}
+            maxLength={maxLength}
             className={cn(
               "w-full resize-y rounded-lg bg-[var(--secondary)] p-2.5 text-sm leading-6 text-[var(--foreground)] ring-1 ring-[var(--border)] transition placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--ring)]",
               className,
@@ -470,6 +485,8 @@ export function MacroTextarea({
         onChange={onChange}
         onClose={handleExpandedClose}
         placeholder={placeholder}
+        readOnly={readOnly}
+        maxLength={maxLength}
         formatOnChange={formatOnChange}
       />
       <MacrosReferenceModal open={showMacroRef} onClose={() => setShowMacroRef(false)} />

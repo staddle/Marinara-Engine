@@ -8,6 +8,7 @@ import { useGenerate } from "../../hooks/use-generate";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { cn } from "../../lib/utils";
 import { HelpTooltip } from "../ui/HelpTooltip";
+import { MacroTextarea } from "../ui/MacroTextarea";
 import { SettingsSwitch } from "../panels/settings/SettingControls";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
@@ -283,45 +284,54 @@ export function SecretPlotPanel({
                     <span className="mb-1 block text-[0.5625rem] font-medium text-[var(--muted-foreground)]">
                       {localizeUi("ui.agents.secretplotpanel.arcDescription")}
                     </span>
-                    <textarea
+                    <MacroTextarea
                       value={draft.arcDescription}
-                      onChange={(event) => {
+                      onChange={(value) => {
                         setSaved(false);
-                        setDraft((current) => (current ? { ...current, arcDescription: event.target.value } : current));
+                        setDraft((current) => (current ? { ...current, arcDescription: value } : current));
                       }}
                       rows={3}
+                      title={localizeUi("ui.agents.secretplotpanel.arcDescription")}
+                      ariaLabel={localizeUi("ui.agents.secretplotpanel.arcDescription")}
                       spellCheck={false}
-                      className="w-full resize-y rounded-md border border-[var(--input)] bg-[var(--secondary)]/45 px-2 py-1.5 font-mono text-[0.625rem] leading-relaxed text-[var(--foreground)] outline-none transition-colors focus:border-[var(--ring)] focus:ring-1 focus:ring-[var(--ring)]"
+                      wrapperClassName="min-w-0"
+                      className="mari-chrome-field resize-y !rounded-md bg-[var(--secondary)]/45 px-2 py-1.5 font-mono text-[0.625rem] leading-relaxed"
                     />
                   </label>
                   <label className="block">
                     <span className="mb-1 block text-[0.5625rem] font-medium text-[var(--muted-foreground)]">
                       {localizeUi("ui.agents.secretplotpanel.protagonistArc")}
                     </span>
-                    <textarea
+                    <MacroTextarea
                       value={draft.arcProtagonist}
-                      onChange={(event) => {
+                      onChange={(value) => {
                         setSaved(false);
-                        setDraft((current) => (current ? { ...current, arcProtagonist: event.target.value } : current));
+                        setDraft((current) => (current ? { ...current, arcProtagonist: value } : current));
                       }}
                       rows={2}
+                      title={localizeUi("ui.agents.secretplotpanel.protagonistArc")}
+                      ariaLabel={localizeUi("ui.agents.secretplotpanel.protagonistArc")}
                       spellCheck={false}
-                      className="w-full resize-y rounded-md border border-[var(--input)] bg-[var(--secondary)]/45 px-2 py-1.5 font-mono text-[0.625rem] leading-relaxed text-[var(--foreground)] outline-none transition-colors focus:border-[var(--ring)] focus:ring-1 focus:ring-[var(--ring)]"
+                      wrapperClassName="min-w-0"
+                      className="mari-chrome-field resize-y !rounded-md bg-[var(--secondary)]/45 px-2 py-1.5 font-mono text-[0.625rem] leading-relaxed"
                     />
                   </label>
                   <label className="block">
                     <span className="mb-1 block text-[0.5625rem] font-medium text-[var(--muted-foreground)]">
                       {localizeUi("ui.agents.secretplotpanel.characterArc")}
                     </span>
-                    <textarea
+                    <MacroTextarea
                       value={draft.arcCharacter}
-                      onChange={(event) => {
+                      onChange={(value) => {
                         setSaved(false);
-                        setDraft((current) => (current ? { ...current, arcCharacter: event.target.value } : current));
+                        setDraft((current) => (current ? { ...current, arcCharacter: value } : current));
                       }}
                       rows={2}
+                      title={localizeUi("ui.agents.secretplotpanel.characterArc")}
+                      ariaLabel={localizeUi("ui.agents.secretplotpanel.characterArc")}
                       spellCheck={false}
-                      className="w-full resize-y rounded-md border border-[var(--input)] bg-[var(--secondary)]/45 px-2 py-1.5 font-mono text-[0.625rem] leading-relaxed text-[var(--foreground)] outline-none transition-colors focus:border-[var(--ring)] focus:ring-1 focus:ring-[var(--ring)]"
+                      wrapperClassName="min-w-0"
+                      className="mari-chrome-field resize-y !rounded-md bg-[var(--secondary)]/45 px-2 py-1.5 font-mono text-[0.625rem] leading-relaxed"
                     />
                   </label>
                   <SettingsSwitch

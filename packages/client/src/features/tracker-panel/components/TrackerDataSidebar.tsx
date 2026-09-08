@@ -19,12 +19,18 @@ import { useTrackerPanelModel } from "../hooks/use-tracker-panel-model";
 import { useStatIcons } from "../hooks/use-stat-icons";
 import type { PersonaPortraitSaveSnapshot } from "../hooks/use-persona-portrait-save";
 import type { TrackerEditMode } from "../tracker-panel.types";
-import { EmptySection } from "./controls/SectionControls";
+import { EmptySection, TRACKER_SECTION_SHELL_CLASS } from "./controls/SectionControls";
+import { TrackerReadabilityVeil } from "./controls/TrackerProfileChrome";
 import { TrackerSectionList } from "./TrackerSectionList";
 import { TrackerSkeleton } from "./TrackerSkeleton";
 import { TrackerSidebarHeader } from "./TrackerSidebarHeader";
 import { TrackerLockProvider } from "./TrackerLockContext";
 import { Translation, useTranslation as useUiTranslation } from "react-i18next";
+import {
+  partitionTrackerCapabilityPackages,
+  useInstalledCapabilityPackages,
+} from "../../../hooks/use-capability-packages";
+import { CapabilityElement } from "../../../components/capabilities/CapabilityElement";
 
 const TRACKER_PANEL_NEUTRAL_VARS =
   "[--accent:rgb(39_39_42)] [--accent-foreground:rgb(244_244_245)] [--background:rgb(18_18_21)] [--border:rgb(63_63_70)] [--card:rgb(24_24_27)] [--foreground:rgb(244_244_245)] [--input:rgb(63_63_70)] [--muted:rgb(39_39_42)] [--muted-foreground:rgb(161_161_170)] [--popover:rgb(24_24_27)] [--popover-foreground:rgb(244_244_245)] [--primary:rgb(212_212_216)] [--primary-foreground:rgb(18_18_21)] [--ring:rgb(161_161_170)] [--secondary:rgb(39_39_42)] [--tracker-panel-card-background:color-mix(in_srgb,var(--background)_22%,transparent)] [--tracker-panel-section-background:color-mix(in_srgb,var(--card)_6%,transparent)]";
@@ -117,6 +123,35 @@ export function TrackerDataSidebar({
     trackerPanelSectionOrder,
     trackerPanelUseExpressionSprites,
   });
+  const { data: installedCapabilities = [] } = useInstalledCapabilityPackages();
+  const capabilityTrackerPackages = installedCapabilities.filter(
+    (item) =>
+      item.status === "active" &&
+      enabledAgentTypes.has(item.id) &&
+      Boolean(item.manifest.entrypoints.client) &&
+      item.manifest.contributions?.slots?.includes("tracker-panel"),
+  );
+  const {
+    memoryNag: memoryNagTrackerPackages,
+    beholder: beholderTrackerPackages,
+    other: otherCapabilityTrackerPackages,
+  } = partitionTrackerCapabilityPackages(capabilityTrackerPackages);
+  const renderCapabilityTrackerPackage = (item: (typeof capabilityTrackerPackages)[number]) => (
+    <div
+      key={`${item.id}-tracker-panel`}
+      className={cn(TRACKER_SECTION_SHELL_CLASS, "mari-tracker-capability-section")}
+    >
+      <TrackerReadabilityVeil strength="strong" />
+      <div className="relative z-10">
+        <CapabilityElement
+          packageId={item.id}
+          view="tracker"
+          capabilityProps={{ chatId: activeChatId, chatMode: "roleplay", detached }}
+          className="block"
+        />
+      </div>
+    </div>
+  );
   const resolveStatIcon = useStatIcons({
     activeChatId,
     trackerStatIconOverrides,
@@ -154,7 +189,7 @@ export function TrackerDataSidebar({
     },
     [updateFieldLocks],
   );
-  const hasFixedTrackerPanel = orderedTrackerSections.length > 0;
+  const hasFixedTrackerPanel = orderedTrackerSections.length > 0 || capabilityTrackerPackages.length > 0;
   const displayedGameState =
     currentGameState ?? (activeChatId && gameStateLoadStatus === "loaded" ? createEmptyGameState(activeChatId) : null);
   const trackerPanelHasCustomBackground =
@@ -218,7 +253,7 @@ export function TrackerDataSidebar({
         />
 
         <div className={cn("relative z-10", fillHeight && "min-h-0 flex-1 overflow-y-auto")}>
-          {displayedGameState && hasFixedTrackerPanel ? (
+          {displayedGameState && (orderedTrackerSections.length > 0 || capabilityTrackerPackages.length > 0) ? (
             <TrackerPanelErrorBoundary
               resetKey={`${activeChatId}:${displayedGameState.id || "empty"}:${displayedGameState.createdAt}`}
             >
@@ -253,9 +288,25 @@ export function TrackerDataSidebar({
                 addMode={addMode}
                 queuePersonaPortraitSave={queuePersonaPortraitSave}
                 flushPersonaPortraitSave={flushPersonaPortraitSave}
+                beforeCustomSections={
+                  activeChatId ? memoryNagTrackerPackages.map(renderCapabilityTrackerPackage) : null
+                }
+                afterCustomSections={
+                  activeChatId
+                    ? [...otherCapabilityTrackerPackages, ...beholderTrackerPackages].map(
+                        renderCapabilityTrackerPackage,
+                      )
+                    : null
+                }
               />
             </TrackerPanelErrorBoundary>
           ) : null}
+
+          {activeChatId && !displayedGameState
+            ? [...memoryNagTrackerPackages, ...otherCapabilityTrackerPackages, ...beholderTrackerPackages].map(
+                renderCapabilityTrackerPackage,
+              )
+            : null}
 
           {!activeChatId ? (
             <EmptySection>{localizeUi("ui.trackerPanel.trackerdatasidebar.selectAChatToViewTrackerData")}</EmptySection>

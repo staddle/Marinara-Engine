@@ -9,8 +9,14 @@ export function resolvePnpmRunner({
   const pnpmCliPath = environment.npm_execpath;
   const npmUserAgent = environment.npm_config_user_agent ?? "";
   const pathApi = platform === "win32" ? win32 : posix;
-  const useCurrentPnpm =
+  // Standalone pnpm installs expose a native pnpm.exe on Windows as npm_execpath;
+  // Node cannot execute that file. POSIX launchers may legitimately be extensionless.
+  const isNativeWindowsPnpmBinary =
+    platform === "win32" &&
     Boolean(pnpmCliPath) &&
+    !/\.(?:c?js|mjs)$/iu.test(pathApi.basename(pnpmCliPath ?? ""));
+  const useCurrentPnpm =
+    !isNativeWindowsPnpmBinary &&
     (npmUserAgent.startsWith("pnpm/") || pathApi.basename(pnpmCliPath ?? "").startsWith("pnpm"));
 
   if (useCurrentPnpm && pnpmCliPath) {
