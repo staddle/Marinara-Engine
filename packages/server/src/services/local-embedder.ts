@@ -19,6 +19,11 @@ import { logger } from "../lib/logger.js";
 
 const MODEL_ID = "Xenova/all-MiniLM-L6-v2";
 const CACHE_DIR = join(DATA_DIR, "models");
+// Guards against a corrupt/incomplete cache or a slow network path stalling the
+// generate request that triggered this load indefinitely — the library gives no
+// way to cancel the underlying fetch, so this only stops us from waiting on it,
+// not the fetch itself; loadFailed still gets set so later calls fail fast.
+const MODEL_LOAD_TIMEOUT_MS = 20_000;
 const isLite = process.env.MARINARA_LITE === "true" || process.env.MARINARA_LITE === "1";
 const require = createRequire(import.meta.url);
 
@@ -53,6 +58,22 @@ function hasNativeOnnxRuntimeBinding(): boolean {
   return false;
 }
 
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Local embedding model load timed out after ${ms}ms`)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 /**
  * Lazy-load the feature-extraction pipeline.
  * Returns null if the library or model can't be loaded.
@@ -81,9 +102,12 @@ async function getPipeline(): Promise<any> {
       logger.info("[local-embedder] Loading model %s...", MODEL_ID);
       const start = Date.now();
 
-      const p = await createPipeline("feature-extraction", MODEL_ID, {
-        dtype: "q8", // quantized for speed + small size
-      });
+      const p = await withTimeout(
+        createPipeline("feature-extraction", MODEL_ID, {
+          dtype: "q8", // quantized for speed + small size
+        }),
+        MODEL_LOAD_TIMEOUT_MS,
+      );
 
       const elapsed = Date.now() - start;
       logger.info("[local-embedder] Model loaded in %dms", elapsed);

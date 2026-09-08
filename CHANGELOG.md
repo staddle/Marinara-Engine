@@ -89,6 +89,7 @@ This file is the release-notes source of truth for Marinara Engine. Reuse these 
 
 ### Fixed
 
+- The local embedding model load (used as a fallback for Memory Recall when no embedding connection is configured) is now bounded by a timeout instead of running unbounded inside the generate request that triggered it; a corrupt or incomplete cached model, or a slow path to the model host, could previously stall that message's actual LLM request for minutes before failing.
 - Game narration has a Translate action and rejects stale translations after rerolls; automatic translation can start with the first response when enabled during setup. Delayed translations stay with their original chat when switching chats (#5888).
 - Push Story uses the current Director result with or without a preset marker, and Mari consolidates system context for local chat templates (#5931, #5932).
 - Storyboards accept more than six frames (up to the existing 200-section request safety ceiling) and retry unusable local planner output once without reasoning before falling back (#5886).
