@@ -25,6 +25,17 @@ export interface PerceptionContext {
   presentNpcNames: string[];
   /** Current danger level (0-1, higher = more dangerous area) */
   dangerLevel?: number;
+  /** The setting's own scenes (worldgen W6d): a place named like one of them reads as the battlefield it
+   *  is like, so a "megablock corridor" is somewhere enclosed and a "neon street" somewhere crowded. */
+  scenes?: ReadonlyArray<{ label: string; like: string }>;
+}
+
+/** What kind of place the location is, by its words or the setting's scene it names. */
+function placeIs(ctx: PerceptionContext, words: RegExp, likes: readonly string[]): boolean {
+  if (!ctx.location) return false;
+  if (words.test(ctx.location)) return true;
+  const where = ctx.location.toLowerCase();
+  return (ctx.scenes ?? []).some((scene) => likes.includes(scene.like) && where.includes(scene.label.toLowerCase()));
 }
 
 export interface PerceptionHint {
@@ -55,17 +66,27 @@ const ENVIRONMENTAL_HINTS: Array<{ trigger: (ctx: PerceptionContext) => boolean;
     text: "hears something beneath the steady rhythm of rain — footsteps, or perhaps just echoes",
   },
   {
-    trigger: (ctx) => !!ctx.location && /cave|dungeon|underground|ruin|tomb/i.test(ctx.location),
+    trigger: (ctx) =>
+      placeIs(
+        ctx,
+        /cave|dungeon|underground|ruin|tomb|\b(?:tunnel|sewer|basement|bunker|vault|crypt|mine)s?(?![a-z])/i,
+        ["dungeon", "cave", "ruins"],
+      ),
     dc: 11,
     text: "feels a subtle draft suggesting a hidden passage or opening nearby",
   },
   {
-    trigger: (ctx) => !!ctx.location && /forest|wood|jungle/i.test(ctx.location),
+    trigger: (ctx) =>
+      placeIs(ctx, /forest|wood|jungle|\b(?:parks?|wild(?:s|erness)?|marsh(?:es)?)(?![a-z])/i, ["forest", "swamp"]),
     dc: 10,
     text: "notices broken twigs and disturbed earth — something passed through recently",
   },
   {
-    trigger: (ctx) => !!ctx.location && /town|city|market|tavern|inn/i.test(ctx.location),
+    trigger: (ctx) =>
+      placeIs(ctx, /town|city|market|tavern|inn|\b(?:bar|caf[eé]|club|station|plaza|mall|street)s?(?![a-z])/i, [
+        "city",
+        "mansion",
+      ]),
     dc: 13,
     text: "catches a whispered conversation fragment from a nearby table",
   },
@@ -79,7 +100,7 @@ const ENVIRONMENTAL_HINTS: Array<{ trigger: (ctx: PerceptionContext) => boolean;
 const DANGER_HINTS: Array<{ minDanger: number; dc: number; text: string }> = [
   { minDanger: 0.3, dc: 12, text: "has an uneasy feeling — something about this area doesn't feel right" },
   { minDanger: 0.5, dc: 14, text: "spots signs of recent conflict — scorch marks, bloodstains, or spent ammunition" },
-  { minDanger: 0.7, dc: 10, text: "hears distant sounds that suggest danger ahead — growls, clanking, or war drums" },
+  { minDanger: 0.7, dc: 10, text: "hears distant sounds that suggest danger ahead" },
   { minDanger: 0.9, dc: 8, text: "the air itself feels hostile — this is an extremely dangerous area" },
 ];
 

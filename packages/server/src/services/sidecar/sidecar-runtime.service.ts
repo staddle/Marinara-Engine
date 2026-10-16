@@ -6,6 +6,7 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   renameSync,
@@ -44,6 +45,14 @@ const execFileAsync = promisify(execFile);
 const RUNTIME_DIR = join(getDataDir(), "sidecar-runtime");
 const CURRENT_RUNTIME_PATH = join(RUNTIME_DIR, "current.json");
 const SERVER_LOG_PATH = join(RUNTIME_DIR, "server.log");
+/** A llama.cpp runtime folder, named `<release tag>-<variant>` such as `b10188-linux-x64-vulkan`. */
+const LLAMA_RUNTIME_DIRECTORY = /^b\d+-/;
+/**
+ * What this service downloads or unpacks: release archives such as
+ * `llama-b10188-bin-win-vulkan-x64.zip` or `cudart-llama-bin-win-cuda-13.3-x64.zip`, and
+ * `<runtime folder>.extract-…` scratch folders.
+ */
+const LLAMA_DOWNLOAD = /^(?:llama-b\d+-|cudart-llama-|b\d+-)/;
 const WINDOWS_CUDA_DLL_PATTERNS = [
   { label: "cudart64_*.dll", pattern: /^cudart64_\d+\.dll$/i },
   { label: "cublas64_*.dll", pattern: /^cublas64_\d+\.dll$/i },
@@ -404,10 +413,6 @@ class SidecarRuntimeService {
     options: { preserveRuntimeDirectories?: boolean } = {},
   ): void {
     for (const entry of readdirSync(RUNTIME_DIR, { withFileTypes: true })) {
-      if (entry.name === "mlx" || entry.name === "server.log") {
-        continue;
-      }
-
       const fullPath = join(RUNTIME_DIR, entry.name);
       if (entry.name === "current.json") {
         if (!keepDirectoryName) {
@@ -420,8 +425,14 @@ class SidecarRuntimeService {
         continue;
       }
 
-      const isTemporaryArtifact = /\.(extract|zip)$/i.test(entry.name) || entry.name.endsWith(".tar.gz");
-      if (isTemporaryArtifact || (entry.isDirectory() && !options.preserveRuntimeDirectories)) {
+      // Only llama.cpp runtime folders and downloads are this service's to remove. Other
+      // runtimes keep their own folders beside them, such as `mlx` and the decision
+      // model's `decision`, which a reinstall or update must leave alone (#6982).
+      const isTemporaryArtifact =
+        LLAMA_DOWNLOAD.test(entry.name) &&
+        (/\.(extract(?:-[a-z0-9]+)?|zip)$/i.test(entry.name) || entry.name.endsWith(".tar.gz"));
+      const isRuntimeDirectory = entry.isDirectory() && LLAMA_RUNTIME_DIRECTORY.test(entry.name);
+      if (isTemporaryArtifact || (isRuntimeDirectory && !options.preserveRuntimeDirectories)) {
         rmSync(fullPath, { recursive: true, force: true });
       }
     }
@@ -465,7 +476,8 @@ class SidecarRuntimeService {
       const directoryName = `${LLAMA_CPP_RUNTIME_MANIFEST.releaseTag}-${match.variant}`;
       finalDirectory = ensureWithinRuntimeDir(join(RUNTIME_DIR, directoryName));
       archivePath = ensureWithinRuntimeDir(join(RUNTIME_DIR, match.asset.name));
-      extractDirectory = ensureWithinRuntimeDir(join(RUNTIME_DIR, `${directoryName}.extract`));
+      // A private, exclusive directory prevents pre-seeded destination symlinks.
+      extractDirectory = mkdtempSync(ensureWithinRuntimeDir(join(RUNTIME_DIR, `${directoryName}.extract-`)));
 
       if (existsSync(finalDirectory)) {
         rmSync(finalDirectory, { recursive: true, force: true });
@@ -581,9 +593,11 @@ class SidecarRuntimeService {
 
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       if (options.resetExtractDirectory ?? true) {
-        rmSync(options.extractDirectory, { recursive: true, force: true });
+        // Keep the private directory itself intact across retries.
+        for (const name of readdirSync(options.extractDirectory)) {
+          rmSync(join(options.extractDirectory, name), { recursive: true, force: true });
+        }
       }
-      mkdirSync(options.extractDirectory, { recursive: true });
 
       await retry(
         async () => {
@@ -620,7 +634,6 @@ class SidecarRuntimeService {
         return;
       } catch (error) {
         lastError = error;
-        rmSync(options.extractDirectory, { recursive: true, force: true });
         rmSync(options.archivePath, { force: true });
         if (attempt >= 2 || isAbortError(error)) {
           throw error;

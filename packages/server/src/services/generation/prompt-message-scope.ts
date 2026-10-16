@@ -10,6 +10,8 @@ export type GenerationPromptMessage = {
   personaSnapshotName?: string | null;
   hiddenFromAICharacterIds?: string[];
   conversationStartForCharacterIds?: string[];
+  /** Set on the whisper-only stand-in for a message hidden from the viewer (#7191). */
+  whisperSourceId?: string;
   images?: string[];
   files?: Array<{ type: string; data: string; filename?: string }>;
   providerMetadata?: Record<string, unknown>;
@@ -29,6 +31,8 @@ type CharacterPromptScopeInfo = {
 };
 
 const PROFILE_SNIPPET_MIN_LENGTH = 20;
+/** Body of the stand-in left for a whisper's recipient when its message is hidden from them. */
+export const WHISPER_ONLY_PLACEHOLDER = "[Private whisper]";
 
 export function isStandaloneCharacterProfileBlock(content: string, characterName: string): boolean {
   const trimmed = content.trim();
@@ -46,7 +50,9 @@ export function isStandaloneCharacterProfileBlock(content: string, characterName
 
 function nameToMarkdownHeadingForMatch(name: string): string {
   return normalizeTextForMatch(name)
-    .replace(/[^\p{L}\p{N}\s_-]/gu, "")
+    .replace(/[^\p{L}\p{M}\p{N}\s_-]/gu, "")
+    .replace(/[\p{Variation_Selector}\u20E3]/gu, "")
+    .replace(/\s+/gu, " ")
     .trim();
 }
 
@@ -212,16 +218,20 @@ function hasChatHistoryMarkdownWrapper(content: string): boolean {
   return false;
 }
 
-function reassignHistoryLastMessageWrapper(messages: GenerationPromptMessage[]): void {
+function reassignHistoryLastMessageWrapper(
+  messages: GenerationPromptMessage[],
+  wrapperReference: readonly GenerationPromptMessage[] = messages,
+): void {
   const historyIndexes = messages
     .map((message, index) => (message.contextKind === "history" ? index : -1))
     .filter((index) => index >= 0);
   if (historyIndexes.length === 0) return;
 
-  const hasXmlWrappers = historyIndexes.some((index) =>
-    /<\/?(?:chat_history|last_message)>/i.test(messages[index]!.content),
+  const referenceHistory = wrapperReference.filter((message) => message.contextKind === "history");
+  const hasXmlWrappers = referenceHistory.some((message) =>
+    /<\/?(?:chat_history|last_message)>/i.test(message.content),
   );
-  const hasMarkdownWrappers = historyIndexes.some((index) => hasChatHistoryMarkdownWrapper(messages[index]!.content));
+  const hasMarkdownWrappers = referenceHistory.some((message) => hasChatHistoryMarkdownWrapper(message.content));
   if (!hasXmlWrappers && !hasMarkdownWrappers) return;
 
   for (const index of historyIndexes) {
@@ -266,9 +276,84 @@ function reassignHistoryLastMessageWrapper(messages: GenerationPromptMessage[]):
   };
 }
 
+/**
+ * Where a kept history window starts. It also takes in the hidden messages right before its first kept
+ * message, so a window that opens with a message hidden from the viewer keeps that message's whisper (#7191).
+ * ponytail: the window cannot see the memory boundary itself, so a hidden message that ends the previous
+ * scene, or comes just before a character's knowledge start, keeps its whisper too. Pass the boundary in
+ * if that ever needs to be exact.
+ */
+export function keptWindowStart<T>(
+  messages: readonly T[],
+  isKept: (message: T) => boolean,
+  isDropped: (message: T) => boolean,
+): number {
+  let start = messages.findIndex(isKept);
+  while (start > 0 && !isDropped(messages[start - 1]!)) start--;
+  return start;
+}
+
+/** Drop history messages from a prepared prompt in place, moving its chat history wrappers to what is left. */
+export function dropPromptHistoryMessages(
+  messages: GenerationPromptMessage[],
+  drop: (message: GenerationPromptMessage) => boolean,
+): void {
+  const kept = messages.filter((message) => message.contextKind !== "history" || !drop(message));
+  if (kept.length === messages.length) return;
+  reassignHistoryLastMessageWrapper(kept, messages);
+  // Only history entries can be left empty here; other messages, such as a reasoning-only prefill, stay.
+  messages.splice(
+    0,
+    messages.length,
+    ...kept.filter(
+      (message) =>
+        message.contextKind !== "history" || message.content.trim() || message.images?.length || message.files?.length,
+    ),
+  );
+}
+
+/** Select durable history without dropping synthetic current input or rerunning prompt assembly. */
+export function filterPromptHistoryByMessageIds(
+  messages: readonly GenerationPromptMessage[],
+  allowedIds: ReadonlySet<string>,
+  sourceIds: ReadonlySet<string>,
+): GenerationPromptMessage[] {
+  const isDropped = (message: GenerationPromptMessage) =>
+    message.contextKind === "history" && !!message.id && sourceIds.has(message.id) && !allowedIds.has(message.id);
+  // A whisper-only entry stays only inside the kept window.
+  const windowStart = keptWindowStart(
+    messages,
+    (message) => message.contextKind === "history" && !!message.id && allowedIds.has(message.id),
+    isDropped,
+  );
+  const filtered = messages.filter((message, index) =>
+    message.whisperSourceId ? windowStart >= 0 && index >= windowStart : !isDropped(message),
+  );
+  if (filtered.length !== messages.length) {
+    reassignHistoryLastMessageWrapper(filtered, messages);
+    pruneEmptyPromptWrappers(filtered);
+  }
+  return filtered;
+}
+
+/**
+ * Long-term memory recall must see conversation history only. Prompt text and
+ * agent/lorebook injections keep their own `contextKind`, so filtering by origin
+ * keeps narrator/system history while tail injections cannot displace it.
+ */
+export function selectHistoryMessagesForRecall(
+  messages: readonly GenerationPromptMessage[],
+): Array<{ role: "system" | "user" | "assistant"; content: string }> {
+  return messages
+    .filter((message) => message.contextKind === "history")
+    .map(({ role, content }) => ({ role, content }));
+}
+
 export function filterPromptMessagesForCharacterAudience(
   messages: GenerationPromptMessage[],
   audienceCharacterIds: string[],
+  /** Hidden messages that carry a whisper to the viewer (see roleplayHiddenWhisperMessageIds). */
+  whisperMessageIds: ReadonlySet<string> = new Set(),
 ): GenerationPromptMessage[] {
   if (audienceCharacterIds.length === 0) return messages;
   const audience = new Set(audienceCharacterIds);
@@ -285,11 +370,25 @@ export function filterPromptMessagesForCharacterAudience(
       }
     }
   }
-  const filtered = messages.filter((message, index) => {
-    if (characterStartIndex > 0 && index < characterStartIndex && message.contextKind === "history") return false;
-    return !message.hiddenFromAICharacterIds?.some((characterId) => audience.has(characterId));
+  const filtered = messages.flatMap((message, index): GenerationPromptMessage[] => {
+    if (characterStartIndex > 0 && index < characterStartIndex && message.contextKind === "history") return [];
+    if (!message.hiddenFromAICharacterIds?.some((characterId) => audience.has(characterId))) return [message];
+    // Hiding a message from its whisper's recipient hides the narration, not the whisper (#7191).
+    // The stand-in has no id, so only appendRoleplayWhispers can attach anything to it.
+    if (message.contextKind !== "history" || !message.id || !whisperMessageIds.has(message.id)) return [];
+    return [
+      {
+        role: message.role,
+        content: WHISPER_ONLY_PLACEHOLDER,
+        contextKind: "history",
+        characterId: message.characterId ?? null,
+        ...(message.personaSnapshotName ? { personaSnapshotName: message.personaSnapshotName } : {}),
+        whisperSourceId: message.id,
+      },
+    ];
   });
-  if (filtered.length === messages.length) return messages;
+  if (filtered.length === messages.length && filtered.every((message, index) => message === messages[index]))
+    return messages;
   reassignHistoryLastMessageWrapper(filtered);
   pruneEmptyPromptWrappers(filtered);
   return filtered;
@@ -299,11 +398,11 @@ export function scopeIndividualGroupMessagesForTarget(
   messages: GenerationPromptMessage[],
   targetCharacterId: string | null,
   characters: CharacterPromptScopeInfo[],
+  transformHistory?: (messages: GenerationPromptMessage[]) => void,
 ): GenerationPromptMessage[] {
-  if (!targetCharacterId) return messages;
   const targetCharacter = characters.find((character) => character.id === targetCharacterId);
-  if (!targetCharacter) return messages;
-  const otherCharacters = characters.filter((character) => character.id !== targetCharacterId);
+  if (!targetCharacter && !transformHistory) return messages;
+  const otherCharacters = targetCharacter ? characters.filter((character) => character.id !== targetCharacterId) : [];
 
   const scoped = messages
     .map((message) => {
@@ -317,7 +416,7 @@ export function scopeIndividualGroupMessagesForTarget(
         next = { ...next, content };
       }
 
-      if (isHistoryMessage) {
+      if (isHistoryMessage && targetCharacterId) {
         if (next.characterId) {
           const role = next.characterId === targetCharacterId ? "assistant" : "user";
           next = { ...next, role };
@@ -334,11 +433,22 @@ export function scopeIndividualGroupMessagesForTarget(
 
       return next;
     })
-    .filter((message) => message.content.trim());
+    .filter((message) => message.content.trim() || message.images?.length || message.files?.length);
 
-  reassignHistoryLastMessageWrapper(scoped);
-  pruneEmptyPromptWrappers(scoped);
-  return scoped;
+  if (transformHistory) {
+    const history = scoped.filter((message) => message.contextKind === "history");
+    // Regex anchors address the message body, not the assembler's history wrappers.
+    for (const message of history) {
+      message.content = stripChatHistoryMarkdownWrappers(stripChatHistoryXmlWrappers(message.content));
+    }
+    transformHistory(history);
+  }
+  const nonEmpty = scoped.filter(
+    (message) => message.content.trim() || message.images?.length || message.files?.length,
+  );
+  reassignHistoryLastMessageWrapper(nonEmpty, messages);
+  pruneEmptyPromptWrappers(nonEmpty);
+  return nonEmpty;
 }
 
 function escapeRegExp(value: string): string {

@@ -65,6 +65,8 @@ function profileAssetImagePolicy(path: string): { allowSvg?: boolean } | null {
     return { allowSvg: true };
   }
   if (normalized.startsWith("game-assets/backgrounds/")) return {};
+  // Avatar model folders: PNGTuber layers are served as images, so they restore only as images.
+  if (/^avatar-models\/[^/]+\/[^/]+\/pngtuber\//u.test(normalized)) return {};
   return null;
 }
 

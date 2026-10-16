@@ -24,6 +24,7 @@ interface CapabilityElementProps {
     | "runtime"
     | "world-map"
     | "browser"
+    | "widget"
     | "tracker";
   capabilityProps?: Record<string, unknown>;
   className?: string;
@@ -508,6 +509,6 @@ export function CapabilityElement({
     lang: locale,
     dir: direction,
     class: className,
-    key: `${packageId}:${clientModule.version ?? "registered"}:${clientModule.attempt}:${runtimeError ?? "ready"}`,
+    key: `${packageId}:${clientModule.version ?? "registered"}:${clientModule.attempt}`,
   });
 }

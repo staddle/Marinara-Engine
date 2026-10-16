@@ -1,0 +1,214 @@
+# Writing Game Mode Story Scripts
+
+A story script lets a creator steer how a Game Mode game unfolds: scenes that play when the party
+arrives somewhere, things the Game Master is asked to do once a condition is met, objectives the player
+follows in the journal, and moments the Game Master itself may mark. This guide is for people who write
+their own. To play a world that has a story, start with [Making a world](../game/getting-started.md#making-a-world).
+
+A story script is data, not code. Nothing in it runs. The Engine checks it against the world it is for,
+plays it turn by turn, and refuses anything that does not fit.
+
+## Where a story lives
+
+A story belongs to one world. It names that world's places and people, so it only makes sense with the
+world it was written for (its seed, its brief and its hand edits).
+
+- In a **world file** (`.world.json`), as a top-level `story` beside `world`. An Engine that does not
+  know stories still reads the world.
+- In an Experience's **map pack**: each world file can carry its story, and a new game takes it with the
+  map. See [optional agent packages](../development/optional-agent-packages.md).
+- In a world kept in the library, outside any game: `GET`, `PUT` and `DELETE /api/game-worlds/:id/story`,
+  the same as a game's. A new game started from that world takes the story with it.
+- In a game, once it starts: `GET`, `PUT` and `DELETE /api/game/:chatId/story` read, save and remove it.
+  A save is checked against the game's world, hand edits included, and hand edits that would take away
+  something the story names are refused.
+
+In a new game's setup, a story read from a file or a map pack is kept while the world's seed and brief
+stay as they were.
+
+## The shape
+
+```json
+{
+  "storyVersion": 1,
+  "flags": [],
+  "directions": [],
+  "events": [],
+  "cutscenes": []
+}
+```
+
+Ids are 1 to 40 lowercase letters, digits, `_` or `-`, unique within their list. A story holds at most
+64 flags, 64 directions, 128 events and 64 cutscenes. No text in it may hold a line break, square
+brackets or `{{`, and names written into a tag (a group, a background) may not hold a double quote:
+nothing a story says can pass for one of the Game Master's tags.
+
+### Flags
+
+A flag is a value the story keeps: `"bool"` (true or false) or `"number"`.
+
+```json
+{ "id": "trust", "kind": "number", "initial": 0, "gm": true, "note": "How far the town trusts the party" }
+```
+
+- `gm: true` lets the Game Master set it (see [The Game Master's tags](#the-game-masters-tags)); `note`
+  tells it what the flag means.
+- Flags are hidden from the player. A flag becomes a **quest objective** in the journal with `quest`:
+
+```json
+{
+  "id": "favours",
+  "kind": "number",
+  "initial": 0,
+  "quest": { "title": "Favours", "text": "Do the town three favours", "goal": 3 }
+}
+```
+
+A yes-or-no objective is done when its flag is true; a number objective when it reaches its `goal`
+(1 when not given), and with a `goal` written the journal shows how far along it is. An objective with
+`"hidden": true` waits in the journal until an event shows it.
+
+### Directions
+
+A direction is a standing instruction to the Game Master, in force while its conditions hold:
+
+```json
+{ "id": "wary", "text": "The town is wary of strangers.", "if": [{ "flag": "trust", "is": "<", "value": 2 }] }
+```
+
+### Conditions
+
+`{ "flag": "<id>", "is": "=" | "!=" | ">" | ">=" | "<" | "<=", "value": <value> }`. All of an `if` list
+must hold. A yes-or-no flag is only compared with `=` or `!=`.
+
+### Events
+
+An event is something that happens: when its trigger fires and its conditions hold, it does its actions.
+
+```json
+{
+  "id": "gates",
+  "when": { "on": "arrive", "place": "p11" },
+  "if": [{ "flag": "banished", "is": "=", "value": false }],
+  "do": [{ "cutscene": "gates" }, { "set": "arrived", "value": true }, { "show": "key" }]
+}
+```
+
+An event happens once, unless it has `"repeat": true` (which `start`, `turn` and `day` ignore). At most
+32 events happen in one turn, each at most once, in the order the script lists them.
+
+**Triggers** (`when.on`), all read from what the game has recorded:
+
+| Trigger  | Fires                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `start`  | On the game's first reply.                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `turn`   | On or after the Game Master's reply number `turn` in the whole game, across sessions.                                                                                                                                                                                                                                                                                                                                                                   |
+| `day`    | Once the world's day (moved by the Game Master's time passing and by walks) is `day` or later.                                                                                                                                                                                                                                                                                                                                                          |
+| `arrive` | While the party is in `place` (a place id) or a place inside it, having come there by starting there, a walk on the overworld, a visit in town, or a place the Game Master names. With `repeat`, again each time it comes back from elsewhere.                                                                                                                                                                                                          |
+| `meet`   | Once a reply has named `person` (a person id such as `p11-3`, or `p11-e1` for one added by hand) in full. With `repeat`, again for each reply that names them. Only this session's replies are read for names.                                                                                                                                                                                                                                          |
+| `deed`   | Once the world has recorded a deed of the party, of kind `deed` and at `place` when given. With `repeat`, again for each reply that records one.                                                                                                                                                                                                                                                                                                        |
+| `fight`  | When a fight ends in `outcome`: `victory`, `defeat` or `flee`.                                                                                                                                                                                                                                                                                                                                                                                          |
+| `broke`  | When a fight broke the prop called `prop` (Capability API 1.316), matched without case. Only a prop painted on one of the world's battlefields can be named.                                                                                                                                                                                                                                                                                            |
+| `flags`  | When its conditions hold. With `repeat`, again each time they come true after being false.                                                                                                                                                                                                                                                                                                                                                              |
+| `gm`     | Only when the Game Master trips it (the event needs `"gm": true`).                                                                                                                                                                                                                                                                                                                                                                                      |
+| `step`   | When a walk goes over the cell `x`, `y` (0-based from the top-left) of `place`: a settlement's town (a visit's path, door to door), or a place's map made by hand (a walk on it). The cell must be one the party can walk onto: in a town, ground the square reaches and not a free lot, where the story may build; on a map, floor its entry reaches. A generated map has no cells to name. With `repeat`, again on each turn whose walk goes over it. |
+
+Hand edits that take a step event's cell away (a building put on it, a map's floor walled) are refused
+when saved, naming the event.
+
+A repeating `meet` event whose own scene names that person, or a repeating `deed` event that does the
+deed it waits for, would set itself off every turn, so the Engine refuses it.
+
+**Actions** (`do`):
+
+| Action                                                                                                  | Does                                                                     |
+| ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `{ "set": "<flag>", "value": <value> }`                                                                 | Sets a flag.                                                             |
+| `{ "add": "<flag>", "amount": <number> }`                                                               | Adds to a number flag.                                                   |
+| `{ "tell": "<text>" }`                                                                                  | Asks something of the Game Master, once, this turn.                      |
+| `{ "cutscene": "<id>" }`                                                                                | Plays a cutscene.                                                        |
+| `{ "show": "<flag>" }`                                                                                  | Shows a hidden quest objective in the journal.                           |
+| `{ "world": { "deed": "<kind>", "group": "...", "with": "...", "place": "<place id>", "who": "..." } }` | Records a deed in the world, answered as the Game Master's own would be. |
+
+A story does not give items, start fights, move the party or end the game: those stay with the Game
+Master and the player. Ask the Game Master for them with `tell`.
+
+### Cutscenes
+
+A cutscene is either shown to the player exactly as written, or told to the Game Master to narrate.
+
+```json
+{
+  "id": "gates",
+  "kind": "pages",
+  "background": "backgrounds:generated:town-gates",
+  "pages": [
+    { "text": "The gates creak open." },
+    { "speaker": "p11-3", "expression": "happy", "text": "Welcome, travellers." },
+    { "speaker": "player", "text": "We come in peace." }
+  ]
+}
+```
+
+A `pages` cutscene plays before the Game Master's reply, in the narration, one page at a time: a page
+without a speaker is narration, a page with one is that person's line, by their name in the world (or
+the player's, for `player`), with an `expression` from the Game Master's own list. A `background` is a
+background the game has, or `backgrounds:generated:<words>` to have one made when image generation is
+on. The Game Master is told the scene was shown and carries on from it.
+
+```json
+{ "id": "dusk", "kind": "beats", "beats": ["Lamps are lit.", "A bell tolls."] }
+```
+
+A `beats` cutscene is narrated by the Game Master in its own words, beat by beat, on that turn. A
+`gm` event's beats are told to the Game Master with the event, and it narrates them in the reply
+that marks the moment. So a beats scene a `gm` event uses is known to the Game Master from the start,
+even when an Engine event plays it too. Since it is told them on every turn, the beats of all `gm`
+events together are kept to 16,000 characters.
+
+### The intro message
+
+`intro` (Capability API 1.339) sets how the game opens, the same choice the GM setup offers any game:
+
+```json
+"intro": { "mode": "defined", "text": "The leaves have not fallen in Hollowmere for nine years.", "locked": true }
+```
+
+`"defined"` makes the game's first message exactly `text`; the Game Master writes nothing for it, and
+regenerating it gives the same text. `"guided"` only shapes the opening the Game Master writes, as guidance
+it reads for that first reply alone. `text` is 1 to 8000 characters and may hold line breaks (the one text
+in a story that may), but never `{{`; guided text may not hold square brackets either. With `locked`, the
+player sees the intro in the GM setup and cannot change it; without it, the intro only fills the setup's
+field, and the player may change or clear it. A game whose first reply was already written, or that
+carries its party over, has no intro.
+
+## How a story plays
+
+Once each turn, before the Game Master replies, the Engine reads what the story has done so far and
+what this turn brings (a walk, a visit, a fight's end) and lets the events happen. What happens is
+written into the start of that reply: a tag recording each event and what it set, and any scene shown
+as written. Because the story is read back from the replies, a swipe or a regeneration takes back what
+its reply did, and a story changed mid-game never rewrites what already happened. It carries into the
+game's next session.
+
+### The Game Master's tags
+
+Each turn the Game Master is told the story's values (hidden from the player) and the directions in
+force. Of the rest of the script it is told only what the script makes its own: the `gm` events (with
+their `note` and any `beats` to narrate with them) and the `gm` flags, and which of those events it
+cannot mark now (done, or held back by their conditions). It marks them in its reply:
+
+- `[story: event="<id>"]` trips a `gm` event whose conditions hold (once, unless it repeats).
+- `[story: flag="<id>" value="<value>"]`, or `add="<number>"` for a number flag, sets a `gm` flag.
+
+The Engine answers each tag in place, an event at most once a turn, and refuses anything else with the
+reason. In a game with no story, every story tag is refused. What the Game Master
+trips takes effect at once (its flags, its deeds); its scenes and what it asks come at the start of the
+next reply, its `beats` excepted (it was asked to narrate them with the moment). Write a `gm`
+event's `pages` as what follows the moment, since the Game Master has already told the moment itself.
+
+## Trying a story
+
+Save it to a game with `PUT /api/game/:chatId/story` and `{ "story": { ... } }`: a story that does not
+fit is refused with every reason. The game's World tab lists the objectives the story has shown, and
+the Game Master's prompt carries the story's values and directions each turn.

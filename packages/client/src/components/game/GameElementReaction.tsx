@@ -3,6 +3,8 @@
 // ──────────────────────────────────────────────
 import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
+import { GAME_SECTION_CLASS } from "../../lib/chat-widget-colors";
+import { worldElementId, type WorldElementSet } from "@marinara-engine/shared";
 
 interface ReactionDisplay {
   reaction: string;
@@ -15,6 +17,8 @@ interface ReactionDisplay {
 
 interface GameElementReactionProps {
   reaction: ReactionDisplay;
+  /** The game's elements (worldgen W6c), whose own colours and signs come first. */
+  elements?: WorldElementSet;
   onDismiss: () => void;
 }
 
@@ -60,7 +64,7 @@ const ELEMENT_EMOJI: Record<string, string> = {
   imaginary: "✦",
 };
 
-export function GameElementReaction({ reaction, onDismiss }: GameElementReactionProps) {
+export function GameElementReaction({ reaction, elements, onDismiss }: GameElementReactionProps) {
   const [animate, setAnimate] = useState(false);
   const onDismissRef = useRef(onDismiss);
   onDismissRef.current = onDismiss;
@@ -75,8 +79,10 @@ export function GameElementReaction({ reaction, onDismiss }: GameElementReaction
     };
   }, [reaction]);
 
-  const glowColor = reaction.element ? (ELEMENT_COLORS[reaction.element] ?? "#ffffff") : "#ffffff";
-  const emoji = reaction.element ? (ELEMENT_EMOJI[reaction.element] ?? "💥") : "💥";
+  // A setting kit's own colours and signs come first; a game without one draws them as it always did.
+  const own = elements?.elements.find((element) => element.id === worldElementId(elements, reaction.element));
+  const glowColor = own?.color ?? (reaction.element ? (ELEMENT_COLORS[reaction.element] ?? "#ffffff") : "#ffffff");
+  const emoji = own?.emoji ?? (reaction.element ? (ELEMENT_EMOJI[reaction.element] ?? "💥") : "💥");
   const multiplierText =
     reaction.damageMultiplier > 1
       ? `${reaction.damageMultiplier}x DMG`
@@ -91,7 +97,8 @@ export function GameElementReaction({ reaction, onDismiss }: GameElementReaction
       }`}
     >
       <div
-        className="flex flex-col items-center gap-1.5 rounded-xl bg-black/85 px-6 py-3 shadow-lg shadow-black/40 backdrop-blur-md"
+        data-game-section="element-reaction"
+        className={`${GAME_SECTION_CLASS} flex flex-col items-center gap-1.5 rounded-xl bg-black/85 px-6 py-3 shadow-lg shadow-black/40 backdrop-blur-md`}
         style={{ boxShadow: `0 0 24px 4px ${glowColor}40, inset 0 0 12px ${glowColor}20` }}
       >
         {/* Reaction name with emoji */}

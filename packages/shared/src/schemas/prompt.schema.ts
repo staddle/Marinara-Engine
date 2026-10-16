@@ -70,6 +70,9 @@ export const markerTypeSchema = z.enum([
   "persona",
   "chat_history",
   "chat_summary",
+  "current_scene_summary",
+  "recalled_scenes",
+  "recalled_messages",
   "id_macro_cards",
   "world_info_before",
   "world_info_after",
@@ -234,6 +237,7 @@ export const createPromptSectionSchema = z.object({
   injectionDepth: z.number().int().min(0).default(0),
   injectionOrder: z.number().int().default(100),
   forbidOverrides: z.boolean().default(false),
+  skipWrap: z.boolean().default(false),
 });
 
 export const updatePromptSectionSchema = createPromptSectionSchema

@@ -1,6 +1,6 @@
 # Game Assets: Music, Sound, Sprites, and Backgrounds
 
-This guide explains the game asset library that Game Mode uses for music, sound, character art, and scene backgrounds. It covers the built-in starter set, the **Asset Browser** file manager, uploading your own files, and choosing which assets each game may use.
+This guide explains the game asset library that Game Mode uses for music, sound, character art, and scene backgrounds. It covers the built-in starter set, the **Asset Browser** file manager, uploading your own files, choosing which assets each game may use, and sound effects and music that Game Mode can generate for you.
 
 ## What game assets are
 
@@ -43,9 +43,11 @@ From **Settings**:
 From a game:
 
 1. Open a Game Mode chat.
-2. Click the **Game Assets** button in the chat toolbar.
+2. Click or tap the **Game Assets** button (the folder icon). It starts near the top right of the chat. You can drag it to another spot on a computer or phone.
 
-The toolbar button only appears in chats that use Game Mode. Opening it there shows the **Asset Browser** as a panel inside the game.
+The button only appears in chats that use Game Mode. It opens **Game Assets** with the **Asset Browser** inside: a movable window on a computer, or a full-width panel on a phone.
+
+If you used **Put back in Chat Settings** to move this window, open the **Game Assets** section in Chat Settings instead.
 
 The toolbar at the top holds a breadcrumb that starts at **Game Assets**. Next to it are a **Grid view** and **List view** toggle, an **Upload** button, and a **New** button. It also has a **Rescan** button, an **Open in system folder** button, and a **Search in folder** box. A folder tree on the left lets you jump between categories on wider screens.
 
@@ -97,10 +99,20 @@ Music has a strict folder layout. Every music track must sit in a three-level pa
 The allowed values are:
 
 - State: `exploration`, `dialogue`, `combat`, `travel_rest`.
-- Genre: `fantasy`, `horror`, `romance`, `mystery`, `scifi`, `modern`, `slice_of_life`, `adventure`, `drama`, `custom`.
+- Genre: `fantasy`, `horror`, `romance`, `mystery`, `scifi`, `modern`, `slice_of_life`, `adventure`, `drama`, `custom`, or a setting's family (see below), such as `wuxia`.
 - Intensity: `calm`, `tense`, `intense`.
 
 This layout is how Game Mode knows when to play each track. Ambient, sound effect, sprite, and background folders do not have this rule. You can name their subfolders freely.
+
+### A setting's own art and music
+
+A game started with a setting kit has an art family, shown under **Art and music** when you change the kit's words: `fantasy`, `scifi`, `modern`, `wuxia`, `jazz_age`, `wasteland`, or one of the kit's own. The game uses the folders named for its family and every folder that is not named for a family, and leaves the other families' folders out, so a cyberpunk game never plays fantasy battle music or shows the enchanted forest. When nothing of its own family or the shared folders fits, nothing plays rather than another family's track.
+
+- **Music**: put the setting's tracks in `music/<state>/<family>/<intensity>`, such as `combat/wuxia/intense`. They play ahead of shared tracks.
+- **Backgrounds**: `backgrounds/<family>`. Backgrounds generated during a game with a setting kit are saved there too.
+- **Combat sounds**: a sound in `sfx/combat/<family>` with the same name as a bundled one, such as `sword-swing`, replaces it in games of that family. The bundled combat sounds are fantasy, so another family's fights are quiet until you add its own.
+
+The bundled starter backgrounds count as shared, except the fantasy ones (`ancient_library`, `castle_cliff`, `enchanted_forest`) and the modern `city_night`. A game without a setting kit uses every folder, as before. A setting kit saved before art families existed keeps working: one made from a starter kit uses that starter's family, and any other uses every folder until you pick a family under **Art and music**. The selection bar described in [Choosing which assets a game can use](#choosing-which-assets-a-game-can-use) names the open game's family.
 
 ## Organizing your assets
 
@@ -137,7 +149,7 @@ If you copy files into the game asset folder directly on your computer, outside 
 
 Each Game Mode chat can limit itself to only some of your asset folders. This is useful when you want a horror game to skip your cheerful music, for example.
 
-During setup, expand **Adjust Game Assets for this Game** on the **Features** step. For an existing game, open the game's **Asset Browser** panel from the chat toolbar.
+During setup, expand **Adjust Game Assets for this Game** on the **Features** step. For an existing game, open the game's **Game Assets** window.
 
 Then:
 
@@ -145,6 +157,32 @@ Then:
 2. Use the small status control on each folder to include or exclude it.
 
 A bar shows "All folders included" or how many folders are excluded, with a **Reset to all** button to include everything again. This choice is saved for that one chat only. It changes which folders Game Mode may pick from, but it does not delete or hide any files. It has no effect outside that Game Mode chat.
+
+## Generated sound effects and music
+
+Game Mode can also make new sound effects and music for your scenes with ElevenLabs, an AI audio service. You need an ElevenLabs API key. Each new sound or track is a request to ElevenLabs on your account.
+
+First, set up an audio connection:
+
+1. Open the **Connections** panel and create a connection with the **Audio** provider.
+2. Under **Audio Source**, pick **ElevenLabs**, then paste your ElevenLabs API key.
+3. Turn on **Game sound effects**, **Game music**, or both. These switches appear only for the **ElevenLabs** source.
+4. Save the connection.
+
+Then turn it on when you create a game:
+
+1. On the **Features** step of the setup wizard, find the **Game Audio** card.
+2. Under **Audio Connection**, pick your ElevenLabs connection, or keep **Use the default audio connection**.
+3. Leave **Sound effects** and **Music** on, or switch off the one you do not want.
+
+You cannot turn on **Sound effects** or **Music** until the chosen connection is an ElevenLabs connection with that switch on. The card tells you when this is the case.
+
+During play:
+
+- **Sound effects**: after GM turns, Marinara asks ElevenLabs for short sound effects that fit the scene.
+- **Music**: Marinara composes one instrumental track, about two minutes long, for each place the party visits and for each kind of fight, such as a boss fight. Each track is made only once and then reused. A new place's track starts at a later scene change, so the music does not cut in mid-scene. A fight's track fades in as soon as it is ready.
+
+Generated sounds and tracks are saved with your game assets, so the same sound is not made twice. If **Music DJ** plays music for the game, Game Mode does not generate music.
 
 ## Custom music folder for Music DJ
 
@@ -166,5 +204,6 @@ The **Open in system folder** button opens the selected asset folder in your com
 ## Related guides
 
 - [Music DJ: Spotify, YouTube, and Local Music](../media/music.md)
+- [Supported AI Providers](../connections/providers-reference.md)
 - [Game Mode: Getting Started](getting-started.md)
 - [Remote Access: Basic Auth and IP Allowlist](../REMOTE_ACCESS.md)

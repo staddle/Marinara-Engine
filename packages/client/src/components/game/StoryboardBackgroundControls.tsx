@@ -1,6 +1,7 @@
 import { Pause, Play, RotateCcw, Volume2, VolumeX } from "lucide-react";
 import { CHAT_TOOLBAR_ICON_GAP_CLASS, getChatToolbarButtonClass } from "../chat/ChatToolbarControls";
 import { cn } from "../../lib/utils";
+import { GAME_WINDOW_CONTENT_CLASS } from "../../lib/chat-widget-colors";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface StoryboardBackgroundControlsProps {
@@ -26,7 +27,9 @@ export function StoryboardBackgroundControls({
   return (
     <div
       data-storyboard-background-controls
+      data-game-section="storyboard-controls"
       className={cn(
+        GAME_WINDOW_CONTENT_CLASS,
         "flex items-center",
         CHAT_TOOLBAR_ICON_GAP_CLASS,
         mobile ? "" : "rounded-lg bg-black/45 p-1 shadow-sm ring-1 ring-white/10",

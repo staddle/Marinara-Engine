@@ -177,7 +177,7 @@ export function GameReadableDisplay({ type, content, onClose }: GameReadableDisp
         </div>
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto px-6 py-4">
+        <div className="flex-1 overflow-y-auto px-6 py-4 [overflow-wrap:anywhere]">
           <div
             className={cn("whitespace-pre-wrap", style.inner)}
             dangerouslySetInnerHTML={{ __html: formattedContent }}

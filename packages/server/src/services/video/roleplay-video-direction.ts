@@ -1,6 +1,7 @@
 import { clipVerbatimVideoSource, compactVideoPromptText } from "./prompt-context.js";
 import type { PromptOverridesStorage } from "../storage/prompt-overrides.storage.js";
 import { loadPrompt, ROLEPLAY_GALLERY_VIDEO_DIRECTOR } from "../prompt-overrides/index.js";
+import { appendVideoPromptInstructions } from "../generation/image-prompt-instructions.js";
 
 const ROLEPLAY_VIDEO_DIRECTION_MAX_LENGTH = 6_000;
 
@@ -11,6 +12,8 @@ export interface RoleplayVideoDirectionContext {
   referenceImagePrompt: string;
   characterNames: string[];
   setting: string;
+  /** The video connection's Video Prompting Instructions. */
+  videoPromptInstructions?: string | null;
 }
 
 export type RoleplayVideoDirectionMessages = [{ role: "system"; content: string }, { role: "user"; content: string }];
@@ -19,7 +22,7 @@ export function buildRoleplayVideoDirectionUserPrompt(ctx: RoleplayVideoDirectio
   const characterLine =
     ctx.characterNames.length > 0 ? ctx.characterNames.join(", ") : "Use only people visible in the scene.";
   const referenceImagePrompt = clipVerbatimVideoSource(ctx.referenceImagePrompt, 2_000);
-  return [
+  const prompt = [
     `<clip_duration_seconds>${ctx.durationSeconds}</clip_duration_seconds>`,
     `<aspect_ratio>${ctx.aspectRatio}</aspect_ratio>`,
     `<scene_characters>${characterLine}</scene_characters>`,
@@ -32,6 +35,8 @@ export function buildRoleplayVideoDirectionUserPrompt(ctx: RoleplayVideoDirectio
   ]
     .filter(Boolean)
     .join("\n\n");
+  // Next to the request, so they still apply when the director's system prompt is overridden.
+  return appendVideoPromptInstructions(prompt, ctx.videoPromptInstructions);
 }
 
 export async function buildRoleplayVideoDirectionMessages(
@@ -56,7 +61,7 @@ function unwrapJsonFence(value: string): string {
 export function resolveRoleplayVideoDirection(value: unknown, maxLength: number | null): string {
   if (typeof value !== "string") return "";
   const unwrapped = unwrapJsonFence(value);
-  let narrationBeat = unwrapped;
+  let narrationBeat: string;
   try {
     const parsed = JSON.parse(unwrapped) as unknown;
     if (typeof parsed === "string") {

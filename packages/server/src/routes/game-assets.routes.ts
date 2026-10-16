@@ -100,6 +100,9 @@ const PICK_FOLDER_TIMEOUT_MS = 60_000;
 const MUSIC_STATES = ["exploration", "dialogue", "combat", "travel_rest"] as const;
 const MUSIC_STATE_SET = new Set<string>(MUSIC_STATES);
 const MUSIC_GENRE_SET = new Set<string>(MUSIC_GENRES);
+/** A setting's art family (worldgen W6f), whose music a game of that setting plays, may stand where a
+ *  genre does: `combat/wuxia/intense`. */
+const MUSIC_FAMILY = /^[a-z][a-z0-9_]{0,39}$/;
 const MUSIC_INTENSITY_SET = new Set<string>(MUSIC_INTENSITIES);
 
 /**
@@ -300,10 +303,12 @@ function prepareAssetTarget(category: string, subcategory: string, filename: str
       !genre ||
       !intensity ||
       !MUSIC_STATE_SET.has(state) ||
-      !MUSIC_GENRE_SET.has(genre) ||
+      !(MUSIC_GENRE_SET.has(genre) || MUSIC_FAMILY.test(genre)) ||
       !MUSIC_INTENSITY_SET.has(intensity)
     ) {
-      throw new Error("Music folder must be state/genre/intensity, e.g. exploration/fantasy/calm");
+      throw new Error(
+        "Music folder must be state/genre/intensity, e.g. exploration/fantasy/calm, or a setting's family in place of the genre, e.g. combat/wuxia/intense",
+      );
     }
   }
 

@@ -120,3 +120,32 @@ export function orderChatSummaryBatchEntries(entryIds: string[], batchEntries: C
   if (orderedBatchIds.length === 0) return entryIds;
   return [...entryIds.filter((entryId) => !batchIds.has(entryId)), ...orderedBatchIds];
 }
+
+export interface ChatSummaryWriteCoverage {
+  sourceMode: "last" | "range";
+  rangeStartIndex: number | undefined;
+  rangeEndIndex: number | undefined;
+}
+
+/**
+ * What a summary written by hand covers: in Range scope the first range, or that range's error when it can't be
+ * used; otherwise no messages. Every field is set, so applying it to a draft also clears a range it had before.
+ */
+export function resolveChatSummaryWriteCoverage(
+  sourceMode: "last" | "range",
+  firstRange: ChatSummaryBatchRangeInspection | undefined,
+): { error: ChatSummaryBatchRangeError | null; coverage: ChatSummaryWriteCoverage } {
+  const none: ChatSummaryWriteCoverage = { sourceMode: "last", rangeStartIndex: undefined, rangeEndIndex: undefined };
+  if (sourceMode !== "range" || !firstRange) return { error: null, coverage: none };
+  if (firstRange.error !== null || firstRange.normalizedStart === null || firstRange.normalizedEnd === null) {
+    return { error: firstRange.error ?? "missing", coverage: none };
+  }
+  return {
+    error: null,
+    coverage: {
+      sourceMode: "range",
+      rangeStartIndex: firstRange.normalizedStart,
+      rangeEndIndex: firstRange.normalizedEnd,
+    },
+  };
+}

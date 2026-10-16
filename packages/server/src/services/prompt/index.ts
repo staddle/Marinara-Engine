@@ -13,9 +13,13 @@ export { wrapContent, wrapGroup } from "./format-engine.js";
 export { expandMarker, type MarkerContext, type ExpandedMarker } from "./marker-expander.js";
 export {
   buildPromptMacroContext,
+  loadLorebookIncludesFor,
   cloneMacroContextForPreview,
+  decodeDeferredPresetConditionals,
   resolveMacrosForPreview,
   normalizeChatMacroVariables,
+  mergeGeneratedChatMacroVariables,
+  parsePresetVariableNames,
   collectCharacterAdvancedPromptEntries,
   collectCharacterDepthPromptEntries,
   collectCharacterPostHistoryEntries,

@@ -11,6 +11,9 @@ export type DiceGlyphSize = "hero" | "standard" | "compact";
 interface DiceGlyphProps {
   sides: number;
   value: number;
+  /** What the face says, where the die's faces are not their own numbers (Fate's -, blank, +). Given,
+   *  it replaces the number and the pips. */
+  faceText?: string;
   phase: DiceGlyphPhase;
   size?: DiceGlyphSize;
   index?: number;
@@ -62,6 +65,7 @@ function renderD6Pips(value: number) {
 export function DiceGlyph({
   sides,
   value,
+  faceText,
   phase,
   size = "standard",
   index = 0,
@@ -73,7 +77,7 @@ export function DiceGlyph({
   const uid = useId();
   const shape = getDiceShape(sides);
   const profile = getDiceVisualProfile(sides, hero);
-  const face = getFaceLabel(sides, value);
+  const face = faceText ?? getFaceLabel(sides, value);
   const delay = `${index * 62}ms`;
   const restRot = `${((index % 5) - 2) * 7}deg`;
   const restX = `${((index % 3) - 1) * 0.24}rem`;
@@ -123,7 +127,7 @@ export function DiceGlyph({
         {shape.facets.map((path, facetIndex) => (
           <path key={facetIndex} className="dice-glyph-facet" d={path} />
         ))}
-        {shape.renderMode === "pips" ? (
+        {shape.renderMode === "pips" && faceText === undefined ? (
           renderD6Pips(value)
         ) : (
           <>

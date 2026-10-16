@@ -7,3 +7,5 @@ coverage
 **/*.generated.ts
 **/*.generated.tsx
 pnpm-lock.yaml
+# Claude Code writes its mod API types here each time a Claude (Subscription) chat loads the plugin.
+packages/server/src/assets/claude-code-plugin/.claude-plugin/types

@@ -78,7 +78,7 @@ Some clients skip the password even when Basic Auth is on:
 - Loopback (`127.0.0.1`, `::1`), so you never need a password on the host machine itself.
 - Any address in `IP_ALLOWLIST`. Careful: setting an allowlist also blocks every unlisted address (see Option 2).
 - Tailscale (`100.64.0.0/10`) and same-host Docker bridge/gateway traffic, unless you turn their bypass off.
-- The `/api/health` address, so uptime monitors keep working.
+- The `/api/health` address, so uptime monitors keep working. Without a password it reports only basic status, not your local models or graphics card.
 
 Important: Basic Auth only encodes the password. It does not encrypt it. Anyone watching an unencrypted connection can read it. If you expose Marinara to the public internet, pair Basic Auth with HTTPS (see below).
 

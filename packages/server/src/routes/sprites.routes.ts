@@ -2,6 +2,14 @@
 // Routes: Character Sprite Upload, List & Serving
 // ──────────────────────────────────────────────
 import type { FastifyInstance } from "fastify";
+import {
+  isOpenAIGptImageModel,
+  isOpenAIGptImage2Model,
+  normalizeSpriteExpressionKey,
+  supportsOpenAIImageCustomSize,
+  type AvatarEmotion,
+  type AvatarExtraFeeling,
+} from "@marinara-engine/shared";
 import AdmZip from "adm-zip";
 import { execFile } from "child_process";
 import { existsSync, mkdirSync, readdirSync, unlinkSync, statSync, readFileSync } from "fs";
@@ -12,19 +20,18 @@ import { delimiter, dirname, extname, isAbsolute, join, relative, resolve } from
 import { fileURLToPath } from "url";
 import { promisify } from "util";
 import { DATA_DIR } from "../utils/data-dir.js";
-import {
-  getBackgroundRemoverStatus,
-  tryRemoveBackgroundWithBackgroundRemover,
-} from "../services/image/background-remover.service.js";
+import { getBackgroundRemoverStatus } from "../services/image/background-remover.service.js";
 import {
   applySpriteBackgroundInstruction,
-  removeUniformSpriteBackgroundPng,
+  removeSpriteBackgroundPng,
   selectSpriteChromaMatte,
   spriteBackgroundContract,
+  type SpriteCleanupEngine,
+  type UsedSpriteCleanupEngine,
   type SpriteChromaMatte,
 } from "../services/image/sprite-background.service.js";
 import { pixelizeImage, PixelizeInputError } from "../services/image/pixelize.service.js";
-import { clampByte, clampUnit, getSharp, type RgbColor } from "../services/image/sharp-runtime.js";
+import { getSharp } from "../services/image/sharp-runtime.js";
 import { logger } from "../lib/logger.js";
 import { SPRITE_RENAME_RATE_LIMIT } from "../middleware/rate-limit.js";
 
@@ -127,9 +134,6 @@ const ANIMATED_EXPRESSION_GIF_WIDTH = 512;
 const ANIMATED_EXPRESSION_GIF_FPS = 12;
 const ANIMATED_EXPRESSION_FFMPEG_TIMEOUT_MS = Number(process.env.SPRITE_ANIMATED_FFMPEG_TIMEOUT_MS ?? 180_000);
 
-type SpriteCleanupEngine = "auto" | "backgroundremover" | "builtin";
-type UsedSpriteCleanupEngine = "backgroundremover" | "builtin";
-
 interface SpriteCleanupBackupEntry {
   expression: string;
   originalFilename: string;
@@ -180,6 +184,8 @@ type SpriteGenerateSheetBody = {
   /** Optional style-profile override for the bake (#5095); absent keeps the
    *  active-profile resolution unchanged. */
   styleProfileId?: string | null;
+  /** Faces for a 2D avatar's talking head: open eyes and a closed mouth in every face. */
+  talkingHeadFaces?: boolean;
 };
 
 type SpriteGenerateAnimatedBody = Omit<
@@ -224,6 +230,7 @@ type SpritePromptPlan = {
   matte: SpriteChromaMatte;
   nativeTransparentPng: boolean;
   backgroundContract: string;
+  talkingHeadFaces: boolean;
   sheetWidth: number;
   sheetHeight: number;
   cellWidth: number;
@@ -278,14 +285,6 @@ function ensureDir(dir: string) {
   }
 }
 
-function isOpenAIGptImageModel(model?: string): boolean {
-  return !!model && /^gpt-image-(?:1|1\.5|2)(?:$|-)/i.test(model.trim());
-}
-
-function isOpenAIGptImage2Model(model?: string): boolean {
-  return !!model && /^gpt-image-2(?:$|-)/i.test(model.trim());
-}
-
 export function resolveSpriteNativeTransparency(model: string | undefined, requested: boolean): boolean {
   return requested && !isOpenAIGptImage2Model(model);
 }
@@ -307,7 +306,7 @@ export function resolveSpriteSheetCanvas({
   const requestedSheetWidth = cols * preferredCellWidth;
   const requestedSheetHeight = rows * preferredCellHeight;
 
-  if (!isOpenAIGptImageModel(model) || (spriteType !== "full-body" && isOpenAIGptImage2Model(model))) {
+  if (!isOpenAIGptImageModel(model) || (spriteType !== "full-body" && supportsOpenAIImageCustomSize(model))) {
     return {
       sheetWidth: requestedSheetWidth,
       sheetHeight: requestedSheetHeight,
@@ -463,6 +462,9 @@ function resolveVideoConnection(connection: VideoGenerationConnection) {
     comfyWorkflow: connection.comfyuiWorkflow || undefined,
     comfyLoras: isComfyUiVideo ? videoDefaults.comfyui.loras : [],
     comfyFps: isComfyUiVideo ? videoDefaults.comfyui.fps : undefined,
+    atlasModelOptions: isAtlasVideo
+      ? videoDefaults.atlas.modelOptions[connection.model?.trim() || "google/veo3.1/text-to-video"]
+      : undefined,
     publicReferenceUpload: resolveVideoReferencePublicUploadOptions(isSeedanceVideo, videoDefaults.seedance),
   };
 }
@@ -597,6 +599,82 @@ function withSpriteBackgroundContract(prompt: SpriteCompiledPrompt, plan: Sprite
   };
 }
 
+/** How each talking-head face looks with open eyes and closed lips. Unasked, models draw amusement, excitement,
+ *  fear, grief and disgust with an open mouth, shut eyes or teeth, and can't draw vague labels such as approval
+ *  or realization at all. */
+export const TALKING_HEAD_FACE_LOOKS: Readonly<Record<AvatarEmotion | AvatarExtraFeeling, string>> = Object.freeze({
+  neutral: "calm resting face, relaxed brows, eyes open and looking ahead, lips closed in a relaxed line",
+  happy: "warm closed-lip smile with lifted cheeks, bright open eyes, relaxed brows",
+  angry: "glare under lowered, drawn-together brows, lips pressed shut, tense jaw",
+  sad: "brows tilted up at the inner ends, open eyes with a lowered gaze, closed mouth turned down at the corners",
+  relaxed: "peaceful, content look, soft brows, calm open eyes, faint closed-lip smile",
+  surprised: "eyes wide open, brows raised high, lips closed",
+  curiosity: "interested look, one brow raised, head tilted slightly, attentive open eyes, lips closed",
+  admiration: "eyes bright and wide with interest, brows lifted, soft closed-lip smile, looking up a little",
+  amusement: "playful closed-lip grin with lifted cheeks, bright, merry open eyes, relaxed brows",
+  desire:
+    "wistful, longing look, soft open eyes gazing slightly aside, brows gently raised, small hopeful closed-lip smile",
+  embarrassment:
+    "flushed pink cheeks, open eyes glancing aside, brows raised in the middle, small awkward closed-lip smile",
+  excitement: "eyes wide and sparkling, brows high, big closed-lip smile with lifted cheeks",
+  gratitude: "warm thankful look, brows softly raised, open eyes slightly glistening, gentle closed-lip smile",
+  optimism: "hopeful look, bright open eyes looking slightly upward, brows lifted, confident closed-lip smile",
+  pride: "chin raised, self-assured open-eyed gaze, relaxed brows, satisfied closed-lip smile",
+  annoyance: "flat, unimpressed stare under slightly lowered brows, eyes still fully open, lips pressed to one side",
+  disapproval:
+    "stern look, brows drawn together and slightly lowered, open eyes, lips pressed into a thin line, chin slightly raised",
+  disgust: "nose wrinkled, brows lowered, head pulled back slightly, closed lips pulled down at one corner",
+  disappointment:
+    "brows tilted up at the inner ends, open eyes with a dropped gaze, closed mouth turned down, slight slump",
+  grief:
+    "deep sorrow, brows pulled up at the inner ends, open eyes glistening with tears, closed trembling lips turned down",
+  nervousness:
+    "uneasy look, brows raised and drawn together, open eyes glancing sideways, lips pressed in a tight wavy line, a bead of sweat",
+  remorse:
+    "guilty look, head slightly bowed, brows tilted up at the inner ends, open eyes looking down, lips pressed together",
+  approval: "calm, confident look, steady open-eyed gaze, relaxed brows, small closed-lip smile",
+  caring: "gentle, tender look, brows softly raised, warm open eyes, soft closed-lip smile, head tilted slightly",
+  love: "affectionate soft gaze with open eyes, light blush on the cheeks, gentle closed-lip smile",
+  relief: "brows relaxed and slightly raised, shoulders lowered, open eyes, soft closed-lip smile",
+  confusion:
+    "puzzled look, one brow raised and the other lowered, head tilted, open eyes, lips closed and pushed to one side",
+  fear: "eyes very wide with the whites showing, brows raised and pulled together, lips pressed tightly shut, tense shoulders",
+  realization: 'eyes widening slightly, brows lifting, lips closed, a sudden "I see" look',
+});
+
+/** A talking head's blink and talk pictures close the eyes and open the mouth of each face, so every face
+ *  has to start with open eyes and a closed mouth. Unasked, models draw "happy" as a closed-eye smile and
+ *  "angry" and "surprised" with an open mouth, and the swap then changes nothing. Added after the prompt is compiled,
+ *  like the background contract, so the tag compiler can't drop it. The faces asked for get their look; a custom
+ *  label gets none. */
+export function withTalkingHeadFaceContract(
+  prompt: SpriteCompiledPrompt,
+  plan: Pick<SpritePromptPlan, "talkingHeadFaces"> & { expressions?: readonly string[] },
+  expressions: readonly string[] = plan.expressions ?? [],
+): SpriteCompiledPrompt {
+  if (!plan.talkingHeadFaces) return prompt;
+
+  const rule = `MANDATORY TALKING-HEAD FACES: in every face both eyes are fully open with the irises visible, and the lips are closed. Show each feeling with the eyebrows, the shape of the open eyes and the cheeks: a happy face smiles with open eyes and closed lips, an angry face glares under lowered brows with its lips pressed shut, and a surprised face has wide-open eyes and raised brows with a closed mouth. Never draw a closed-eye smile (^_^), a wink, eyes squeezed shut, an open-mouth laugh, gasp or shout, gritted or bared teeth, or any visible teeth. Separate blinking and talking pictures are made from these faces later.`;
+  const looks = expressions.flatMap((label) => {
+    const key = normalizeSpriteExpressionKey(label) as keyof typeof TALKING_HEAD_FACE_LOOKS;
+    return Object.hasOwn(TALKING_HEAD_FACE_LOOKS, key)
+      ? [`${formatSpriteLabelForPrompt(label)}: ${TALKING_HEAD_FACE_LOOKS[key]}`]
+      : [];
+  });
+
+  return {
+    prompt: [prompt.prompt, looks.length > 0 ? `${rule}\nDraw each face like this: ${looks.join("; ")}.` : rule].join(
+      "\n\n",
+    ),
+    negativePrompt: [
+      prompt.negativePrompt,
+      "closed eyes, eyes shut, closed-eye smile, ^_^, winking, squinting, open mouth, parted lips, laughing, gasping, shouting, gritted teeth, bared teeth, visible teeth, tongue out",
+    ]
+      .filter(Boolean)
+      .join(", "),
+  };
+}
+
 function withFullBodyCompositionContract(
   prompt: SpriteCompiledPrompt,
   spriteType: SpriteType | undefined,
@@ -724,196 +802,6 @@ function buildFullBodyExpressionSheetPrompt({
     .join(" ");
 }
 
-function rgbLuma(color: RgbColor): number {
-  return color.red * 0.2126 + color.green * 0.7152 + color.blue * 0.0722;
-}
-
-function rgbSpread(color: RgbColor): number {
-  return Math.max(color.red, color.green, color.blue) - Math.min(color.red, color.green, color.blue);
-}
-
-async function softenBackgroundRemoverMask(
-  originalInput: Buffer,
-  aiOutput: Buffer,
-  cleanupStrength = 35,
-): Promise<Buffer> {
-  const strength = Math.max(0, Math.min(100, cleanupStrength));
-  if (strength >= 99) return aiOutput;
-
-  const sharp = await getSharp();
-  const original = await sharp(originalInput).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
-  if (!original.info.width || !original.info.height) return aiOutput;
-
-  const width = original.info.width;
-  const height = original.info.height;
-  const pixelCount = width * height;
-  const originalRgba = Buffer.from(original.data);
-  const originalChannels = original.info.channels;
-  const ai = await sharp(aiOutput)
-    .ensureAlpha()
-    .resize(width, height, { fit: "fill" })
-    .raw()
-    .toBuffer({ resolveWithObject: true });
-  const outputRgba = Buffer.from(ai.data);
-  const outputChannels = ai.info.channels;
-  const transparentAlpha = 16 + ((100 - strength) / 100) * 18;
-  const backgroundMask = new Uint8Array(pixelCount);
-  const queue = new Int32Array(pixelCount);
-  let queueStart = 0;
-  let queueEnd = 0;
-
-  const originalOffset = (pixelIndex: number) => pixelIndex * originalChannels;
-  const outputOffset = (pixelIndex: number) => pixelIndex * outputChannels;
-  const outputAlpha = (pixelIndex: number) => outputRgba[outputOffset(pixelIndex) + 3] ?? 255;
-  const isOutputTransparent = (pixelIndex: number) => outputAlpha(pixelIndex) <= transparentAlpha;
-
-  const markBackground = (pixelIndex: number) => {
-    if (backgroundMask[pixelIndex] || !isOutputTransparent(pixelIndex)) return;
-    backgroundMask[pixelIndex] = 1;
-    queue[queueEnd++] = pixelIndex;
-  };
-
-  for (let xPos = 0; xPos < width; xPos++) {
-    markBackground(xPos);
-    markBackground((height - 1) * width + xPos);
-  }
-  for (let yPos = 0; yPos < height; yPos++) {
-    markBackground(yPos * width);
-    markBackground(yPos * width + width - 1);
-  }
-
-  while (queueStart < queueEnd) {
-    const pixelIndex = queue[queueStart++]!;
-    const xPos = pixelIndex % width;
-    const yPos = Math.floor(pixelIndex / width);
-    if (xPos > 0) markBackground(pixelIndex - 1);
-    if (xPos < width - 1) markBackground(pixelIndex + 1);
-    if (yPos > 0) markBackground(pixelIndex - width);
-    if (yPos < height - 1) markBackground(pixelIndex + width);
-  }
-
-  const hasForegroundNeighbor = (pixelIndex: number): boolean => {
-    const xPos = pixelIndex % width;
-    const yPos = Math.floor(pixelIndex / width);
-    for (let yOffset = -2; yOffset <= 2; yOffset++) {
-      const sampleY = yPos + yOffset;
-      if (sampleY < 0 || sampleY >= height) continue;
-      for (let xOffset = -2; xOffset <= 2; xOffset++) {
-        if (xOffset === 0 && yOffset === 0) continue;
-        const sampleX = xPos + xOffset;
-        if (sampleX < 0 || sampleX >= width) continue;
-        if (outputAlpha(sampleY * width + sampleX) >= 168) return true;
-      }
-    }
-    return false;
-  };
-
-  const hasOriginalDetailNeighbor = (pixelIndex: number): boolean => {
-    const xPos = pixelIndex % width;
-    const yPos = Math.floor(pixelIndex / width);
-    for (let yOffset = -2; yOffset <= 2; yOffset++) {
-      const sampleY = yPos + yOffset;
-      if (sampleY < 0 || sampleY >= height) continue;
-      for (let xOffset = -2; xOffset <= 2; xOffset++) {
-        const sampleX = xPos + xOffset;
-        if (sampleX < 0 || sampleX >= width) continue;
-        const offset = originalOffset(sampleY * width + sampleX);
-        const alpha = originalRgba[offset + 3] ?? 255;
-        if (alpha <= 8) continue;
-        const color = {
-          red: originalRgba[offset] ?? 255,
-          green: originalRgba[offset + 1] ?? 255,
-          blue: originalRgba[offset + 2] ?? 255,
-        };
-        if (rgbLuma(color) < 166 || rgbSpread(color) > 42) return true;
-      }
-    }
-    return false;
-  };
-
-  const restorePixel = (pixelIndex: number, restoreWeight: number) => {
-    const originalPixelOffset = originalOffset(pixelIndex);
-    const outputPixelOffset = outputOffset(pixelIndex);
-    const originalAlpha = originalRgba[originalPixelOffset + 3] ?? 255;
-    const currentAlpha = outputRgba[outputPixelOffset + 3] ?? 255;
-    const weight = clampUnit(restoreWeight);
-    if (weight <= 0 || currentAlpha >= originalAlpha) return;
-
-    outputRgba[outputPixelOffset] = clampByte(
-      (outputRgba[outputPixelOffset] ?? 0) * (1 - weight) + (originalRgba[originalPixelOffset] ?? 0) * weight,
-    );
-    outputRgba[outputPixelOffset + 1] = clampByte(
-      (outputRgba[outputPixelOffset + 1] ?? 0) * (1 - weight) + (originalRgba[originalPixelOffset + 1] ?? 0) * weight,
-    );
-    outputRgba[outputPixelOffset + 2] = clampByte(
-      (outputRgba[outputPixelOffset + 2] ?? 0) * (1 - weight) + (originalRgba[originalPixelOffset + 2] ?? 0) * weight,
-    );
-    outputRgba[outputPixelOffset + 3] = clampByte(
-      Math.max(currentAlpha, currentAlpha * (1 - weight) + originalAlpha * weight),
-    );
-  };
-
-  const enclosedRestoreWeight = clampUnit((105 - strength) / 70);
-  const edgeRestoreWeight = clampUnit((62 - strength) / 85) * 0.55;
-
-  for (let pixelIndex = 0; pixelIndex < pixelCount; pixelIndex++) {
-    if (!isOutputTransparent(pixelIndex)) continue;
-
-    if (!backgroundMask[pixelIndex]) {
-      restorePixel(pixelIndex, enclosedRestoreWeight);
-      continue;
-    }
-
-    if (edgeRestoreWeight > 0 && hasForegroundNeighbor(pixelIndex) && hasOriginalDetailNeighbor(pixelIndex)) {
-      restorePixel(pixelIndex, edgeRestoreWeight);
-    }
-  }
-
-  return sharp(outputRgba, {
-    raw: {
-      width,
-      height,
-      channels: 4,
-    },
-  })
-    .png()
-    .toBuffer();
-}
-
-async function removeSpriteBackgroundPng(
-  input: Buffer,
-  cleanupStrength = 35,
-  engine: SpriteCleanupEngine = "auto",
-): Promise<{ buffer: Buffer; engine: UsedSpriteCleanupEngine }> {
-  const configuredEngine = engine === "auto" ? getBackgroundRemoverStatus().engine : engine;
-  if (configuredEngine === "backgroundremover") {
-    const aiOutput = await tryRemoveBackgroundWithBackgroundRemover(input, {
-      required: true,
-    });
-    if (aiOutput) {
-      return {
-        buffer: await softenBackgroundRemoverMask(input, aiOutput, cleanupStrength),
-        engine: "backgroundremover",
-      };
-    }
-  }
-
-  const matteOutput = await removeUniformSpriteBackgroundPng(input, cleanupStrength);
-  if (configuredEngine === "builtin" || matteOutput.alreadyTransparent || matteOutput.confidence >= 0.62) {
-    return { buffer: matteOutput.buffer, engine: "builtin" };
-  }
-
-  const aiOutput = await tryRemoveBackgroundWithBackgroundRemover(input, { required: false });
-  if (aiOutput) {
-    return {
-      buffer: await softenBackgroundRemoverMask(input, aiOutput, cleanupStrength),
-      engine: "backgroundremover",
-    };
-  }
-
-  return { buffer: matteOutput.buffer, engine: "builtin" };
-}
-
 function looksLikeBase64(input: string): boolean {
   const trimmed = input.trim();
   if (!trimmed || trimmed.length < 32) return false;
@@ -1037,9 +925,7 @@ function resolveReferenceImageBase64(input?: string): string | undefined {
 }
 
 export type FullBodyReferenceRole =
-  | { kind: "neutral-full-body" }
-  | { kind: "expression"; expression: string }
-  | { kind: "identity" };
+  { kind: "neutral-full-body" } | { kind: "expression"; expression: string } | { kind: "identity" };
 
 export function buildFullBodyReferenceContract(roles: FullBodyReferenceRole[]): string {
   if (roles.length === 0) return "";
@@ -1199,7 +1085,7 @@ async function buildSpritePromptPlan(
     body.spriteType !== "full-body" &&
     !singlePortrait &&
     isOpenAIGptImageModel(imgModel) &&
-    !isOpenAIGptImage2Model(imgModel);
+    !supportsOpenAIImageCustomSize(imgModel);
   if (generateExpressionsIndividually && expressions.length > MAX_INDIVIDUAL_SPRITE_EXPRESSIONS) {
     expressions = expressions.slice(0, MAX_INDIVIDUAL_SPRITE_EXPRESSIONS);
   }
@@ -1259,7 +1145,7 @@ async function buildSpritePromptPlan(
     prompt = await loadPrompt(promptOverridesStorage, SPRITES_EXPRESSION_SHEET, {
       cols,
       rows,
-      expressionCount: expressions.length,
+      expressionCount: cols * rows,
       expressionList,
       appearance: trimmedAppearance,
       sheetWidth,
@@ -1282,6 +1168,7 @@ async function buildSpritePromptPlan(
     matte,
     nativeTransparentPng,
     backgroundContract: spriteBackgroundContract(backgroundOptions),
+    talkingHeadFaces: body.talkingHeadFaces === true && body.spriteType !== "full-body",
     sheetWidth,
     sheetHeight,
     cellWidth,
@@ -1356,8 +1243,11 @@ export async function spritesRoutes(app: FastifyInstance) {
    * GET /api/sprites/:characterId
    * List all sprite expressions for a character.
    */
-  app.get<{ Params: { characterId: string } }>("/:characterId", async (req) => {
+  app.get<{ Params: { characterId: string } }>("/:characterId", async (req, reply) => {
     const { characterId } = req.params;
+    if (characterId.includes("..") || characterId.includes("/") || characterId.includes("\\")) {
+      return reply.status(400).send({ error: "Invalid character ID" });
+    }
     return listSpriteInfos(characterId);
   });
 
@@ -1928,7 +1818,11 @@ export async function spritesRoutes(app: FastifyInstance) {
             plan.promptOverrides.get(spritePromptReviewId("expression", plan.spriteType, expression)),
             compiledPrompt,
           );
-          const finalPrompt = withSpriteBackgroundContract(reviewedPrompt.value, plan);
+          const finalPrompt = withTalkingHeadFaceContract(
+            withSpriteBackgroundContract(reviewedPrompt.value, plan),
+            plan,
+            [expression],
+          );
           const previewSize = resolveImagePromptReviewSize({
             connection: conn,
             prompt: finalPrompt.prompt,
@@ -1963,10 +1857,13 @@ export async function spritesRoutes(app: FastifyInstance) {
     );
     const reviewedPrompt = resolveSpritePromptOverride(plan.promptOverrides.get(sheetPromptId), compiledPrompt);
     const finalPrompt = withFullBodyCompositionContract(
-      withSpriteBackgroundContract(
-        withSpriteSheetLayoutContract(reviewedPrompt.value, plan, {
-          reviewedOverride: reviewedPrompt.overridden,
-        }),
+      withTalkingHeadFaceContract(
+        withSpriteBackgroundContract(
+          withSpriteSheetLayoutContract(reviewedPrompt.value, plan, {
+            reviewedOverride: reviewedPrompt.overridden,
+          }),
+          plan,
+        ),
         plan,
       ),
       plan.spriteType,
@@ -2146,6 +2043,7 @@ export async function spritesRoutes(app: FastifyInstance) {
                   comfyWorkflow: resolved.comfyWorkflow,
                   comfyLoras: resolved.comfyLoras,
                   fps: resolved.comfyFps,
+                  atlasModelOptions: resolved.atlasModelOptions,
                   referenceImage,
                   publicReferenceUpload: resolved.publicReferenceUpload,
                   fallback: videoFallback,
@@ -2252,10 +2150,13 @@ export async function spritesRoutes(app: FastifyInstance) {
       compiledSheetPrompt,
     );
     const sheetPrompt = withFullBodyCompositionContract(
-      withSpriteBackgroundContract(
-        withSpriteSheetLayoutContract(reviewedSheetPrompt.value, plan, {
-          reviewedOverride: reviewedSheetPrompt.overridden,
-        }),
+      withTalkingHeadFaceContract(
+        withSpriteBackgroundContract(
+          withSpriteSheetLayoutContract(reviewedSheetPrompt.value, plan, {
+            reviewedOverride: reviewedSheetPrompt.overridden,
+          }),
+          plan,
+        ),
         plan,
       ),
       plan.spriteType,
@@ -2386,7 +2287,11 @@ export async function spritesRoutes(app: FastifyInstance) {
                   plan.promptOverrides.get(spritePromptReviewId("expression", plan.spriteType, expression)),
                   compiledExpressionPrompt,
                 );
-                const finalExpressionPrompt = withSpriteBackgroundContract(reviewedExpressionPrompt.value, plan);
+                const finalExpressionPrompt = withTalkingHeadFaceContract(
+                  withSpriteBackgroundContract(reviewedExpressionPrompt.value, plan),
+                  plan,
+                  [expression],
+                );
 
                 const targetSize = 1024;
                 const imageResult = await generateImage(imgModel, imgBaseUrl, imgApiKey, imgServiceHint, {

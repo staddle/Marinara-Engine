@@ -1,13 +1,19 @@
+import { currentRoomGeneration, roomHostIdentity } from "../multiplayer/generation-policy.js";
 import {
   GAME_GM_BUILT_IN_PROMPT_TEMPLATES,
+  gameStoryFromMetadata,
+  gameWorldKitFromMetadata,
+  gameWorldBattlefields,
   normalizeAgentPromptTemplateOptions,
   normalizeTextForMatch,
   resolveGameSetupArtStylePrompt,
+  summarizeTacticalBattlefield,
   type GameActiveState,
   type GameCampaignPlan,
   type GameMap,
   type GameNpc,
   type SessionSummary,
+  type GameWorld,
 } from "@marinara-engine/shared";
 import { buildGmSystemPrompt, type GmPromptContext } from "../game/gm-prompts.js";
 import { listPartySprites } from "../game/sprite.service.js";
@@ -87,6 +93,30 @@ export function resolveGameGmPromptTemplate(
   return options.find((option) => option.id === selectedId)?.promptTemplate.trim() || null;
 }
 
+/**
+ * The authored text the GM prompt resolves macros in, so decision statements in it can
+ * be asked before the prompt is built (#6569): the GM prompt template, or the preset's
+ * Game prompt when the chat chose none (as generation applies it), special instructions
+ * and the custom GM prompt.
+ */
+export function gameGmPromptDecisionTexts(chatMetadata: Record<string, unknown>, presetGamePrompt: string): string[] {
+  const setupConfig =
+    chatMetadata.gameSetupConfig &&
+    typeof chatMetadata.gameSetupConfig === "object" &&
+    !Array.isArray(chatMetadata.gameSetupConfig)
+      ? (chatMetadata.gameSetupConfig as Record<string, unknown>)
+      : null;
+  const template = resolveGameGmPromptTemplate(chatMetadata, setupConfig);
+  const chosenNone =
+    !(typeof chatMetadata.gameSystemPrompt === "string" && chatMetadata.gameSystemPrompt.trim()) &&
+    !(typeof chatMetadata.gameGmPromptTemplateId === "string" && chatMetadata.gameGmPromptTemplateId.trim());
+  return [
+    (chosenNone && presetGamePrompt ? presetGamePrompt : template) ?? "",
+    typeof chatMetadata.gameSpecialInstructions === "string" ? chatMetadata.gameSpecialInstructions : "",
+    typeof chatMetadata.customGmPrompt === "string" ? chatMetadata.customGmPrompt : "",
+  ];
+}
+
 function appendGameCardDetails(parts: string[], card: Record<string, unknown> | undefined): void {
   if (!card) return;
   if (card.class) parts.push(`Class: ${card.class}`);
@@ -122,6 +152,9 @@ export async function injectGameGmPromptRuntime(args: {
   chatId: string;
   chat: ChatLike;
   chatMetadata: Record<string, unknown>;
+  /** The game's world (worldgen W1), as `loadGameWorld` reads it. */
+  world: GameWorld | null;
+  ruleset?: GmPromptContext["ruleset"];
   characterIds: string[];
   chars: CharactersStore;
   chats: ChatsStore;
@@ -186,6 +219,7 @@ export async function injectGameGmPromptRuntime(args: {
   }
 
   for (const pcId of partyCharIds) {
+    if (isPartyNpcId(pcId)) continue;
     try {
       const pc = await args.chars.getById(pcId);
       if (pc) {
@@ -218,9 +252,10 @@ export async function injectGameGmPromptRuntime(args: {
 
   let playerCard: string | null = null;
   const playerPersonaId = (args.chat.personaId || setupConfig?.personaId) as string | null | undefined;
-  if (playerPersonaId) {
+  const roomPersona = roomHostIdentity();
+  if (playerPersonaId || roomPersona) {
     try {
-      const persona = await args.chars.getPersona(playerPersonaId);
+      const persona = roomPersona ?? (await args.chars.getPersona(playerPersonaId!));
       if (persona) {
         const parts = [`Name: ${persona.name}`];
         const description = cardPromptText(persona.description);
@@ -237,6 +272,20 @@ export async function injectGameGmPromptRuntime(args: {
     } catch {
       /* ignore */
     }
+  }
+
+  for (const participant of currentRoomGeneration()?.participants ?? []) {
+    if (participant.isHost) continue;
+    const name = participant.persona.name;
+    const parts = [
+      `Name: ${name}`,
+      "Human-controlled persona: only this participant may choose their actions or dialogue.",
+      participant.persona.description,
+    ];
+    appendGameCardDetails(parts, gameCardByName.get(normalizeTextForMatch(name)));
+    partyNames.push(name);
+    partyIdNamePairs.push({ id: participant.id, name });
+    partyCards.push({ name, card: parts.join("\n") });
   }
 
   let weatherContext: string | undefined;
@@ -257,6 +306,30 @@ export async function injectGameGmPromptRuntime(args: {
   const sidecarHandlesScene = sidecarCfg.useForGameScene && (await isSidecarInferenceAvailable());
   const hasSceneModel = !!sceneConnectionId || sidecarHandlesScene;
   const gameTurnNumber = args.mappedMessages.filter((message) => message.role === "user").length + 1;
+
+  const combatSnapshot =
+    args.chatMetadata.gameCombatState &&
+    typeof args.chatMetadata.gameCombatState === "object" &&
+    !Array.isArray(args.chatMetadata.gameCombatState)
+      ? (args.chatMetadata.gameCombatState as Record<string, unknown>)
+      : null;
+  const snapshotCombatStyle = combatSnapshot?.combatStyle;
+  const pinnedCombatStyle =
+    gameActiveState === "combat" && (snapshotCombatStyle === "classic" || snapshotCombatStyle === "tactical")
+      ? snapshotCombatStyle
+      : null;
+  const legacyTacticalCombatStyle =
+    gameActiveState === "combat" &&
+    !pinnedCombatStyle &&
+    args.chatMetadata.gameTacticalCombatSnapshot &&
+    typeof args.chatMetadata.gameTacticalCombatSnapshot === "object" &&
+    !Array.isArray(args.chatMetadata.gameTacticalCombatSnapshot)
+      ? "tactical"
+      : null;
+  const resolvedCombatStyle =
+    pinnedCombatStyle ??
+    legacyTacticalCombatStyle ??
+    ((args.chatMetadata.gameCombatStyle as string) || (setupConfig?.combatStyle as string) || "classic");
 
   const lastMapPos = args.chatMetadata.lastMapPosition as string | { x: number; y: number } | undefined;
   const currentMapPos = gameMap?.partyPosition;
@@ -293,6 +366,8 @@ export async function injectGameGmPromptRuntime(args: {
         weather: latestSnapshot?.weather ?? null,
         timeOfDay: latestSnapshot?.time ?? null,
         presentNpcNames: presentNpcs,
+        // The setting's own scenes (worldgen W6d), so its places read as the kind of place they are.
+        scenes: gameWorldBattlefields(args.chatMetadata)?.scenes,
       };
       const hints = generatePerceptionHints(perceptionContext);
       if (hints.length > 0) {
@@ -303,8 +378,10 @@ export async function injectGameGmPromptRuntime(args: {
     /* non-fatal */
   }
 
+  const promptWorld = args.world;
   const gmCtx: GmPromptContext = {
     gameActiveState: gameActiveState as GameActiveState,
+    ruleset: args.ruleset,
     storyArc,
     plotTwists,
     map: gameMap,
@@ -317,10 +394,16 @@ export async function injectGameGmPromptRuntime(args: {
     playerCard,
     gmCharacterCard,
     difficulty: (setupConfig?.difficulty as string) || "normal",
-    // Effective combat style: runtime drawer override wins, then the wizard
-    // choice, then "classic" for legacy games created before this setting.
-    combatStyle: (args.chatMetadata.gameCombatStyle as string) || (setupConfig?.combatStyle as string) || "classic",
-    genre: (setupConfig?.genre as string) || "fantasy",
+    // An active encounter keeps the style it started with. Legacy snapshots did
+    // not store that pin, so an existing tactical state is the next-best proof.
+    // Outside combat, the runtime drawer remains the preference for the next battle.
+    combatStyle: resolvedCombatStyle,
+    tacticalBattlefieldContext:
+      gameActiveState === "combat" && resolvedCombatStyle === "tactical"
+        ? summarizeTacticalBattlefield(args.chatMetadata.gameTacticalCombatSnapshot)
+        : undefined,
+    // A game with a setting kit is never "fantasy" by default (worldgen W6f).
+    genre: (setupConfig?.genre as string) || gameWorldKitFromMetadata(args.chatMetadata)?.label || "fantasy",
     setting: (setupConfig?.setting as string) || "original",
     tone: (setupConfig?.tone as string) || "balanced",
     rating: (setupConfig?.rating as "sfw" | "nsfw") || "sfw",
@@ -356,6 +439,9 @@ export async function injectGameGmPromptRuntime(args: {
       typeof args.chatMetadata.gameSpecialInstructions === "string"
         ? args.chatMetadata.gameSpecialInstructions.trim()
         : null,
+    worldKit: gameWorldKitFromMetadata(args.chatMetadata),
+    world: promptWorld,
+    story: gameStoryFromMetadata(args.chatMetadata, promptWorld),
   };
 
   const builtGmPrompt = buildGmSystemPrompt(gmCtx);

@@ -18,6 +18,7 @@ import {
   type TrackerCardPaintOpacity,
 } from "../../lib/tracker-card-colors";
 import { ColorPicker } from "./ColorPicker";
+import { SETTINGS_BUTTON_CLASS } from "../panels/settings/SettingControls";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
 export type TrackerCardColorEntityLabel = "Character" | "Persona";
@@ -313,7 +314,7 @@ export function TrackerCardColorControls({
               <span className="px-0.5 text-[0.5625rem] font-semibold uppercase text-[var(--muted-foreground)]">
                 {localizeUi("ui.noodle.wizard.source")}
               </span>
-              <div className="grid grid-cols-3 gap-0.5 rounded-md bg-[var(--background)]/35 p-0.5">
+              <div className="flex flex-wrap gap-1">
                 {MODE_OPTIONS.map((option) => {
                   const Icon = option.icon;
                   const selected = option.mode === mode;
@@ -323,14 +324,10 @@ export function TrackerCardColorControls({
                       type="button"
                       onClick={() => updateMode(option.mode)}
                       disabled={disabled}
-                      className={cn(
-                        "flex min-h-6 min-w-0 items-center justify-center gap-1 rounded-sm px-1 text-[0.5625rem] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-55",
-                        selected
-                          ? "bg-[var(--primary)]/12 text-[var(--primary)] ring-1 ring-[var(--primary)]/24"
-                          : "text-[var(--muted-foreground)] hover:bg-[var(--accent)]/45 hover:text-[var(--foreground)]",
-                      )}
+                      aria-pressed={selected}
+                      className={cn(SETTINGS_BUTTON_CLASS, "flex-auto")}
                     >
-                      {selected ? <Check size="0.625rem" /> : <Icon size="0.625rem" />}
+                      {selected ? <Check size="0.75rem" /> : <Icon size="0.75rem" />}
                       <span className="truncate">{option.label}</span>
                     </button>
                   );
@@ -342,7 +339,7 @@ export function TrackerCardColorControls({
               <span className="px-0.5 text-[0.5625rem] font-semibold uppercase text-[var(--muted-foreground)]">
                 {localizeUi("ui.ui.trackercardcolorcontrols.stage")}
               </span>
-              <div className="grid grid-cols-4 gap-0.5 rounded-md bg-[var(--background)]/35 p-0.5">
+              <div className="flex flex-wrap gap-1">
                 {PORTRAIT_STAGE_BACKGROUND_OPTIONS.map((option) => {
                   const Icon = option.icon;
                   const selected = option.value === portraitStageBackground;
@@ -354,14 +351,10 @@ export function TrackerCardColorControls({
                       title={option.title}
                       onClick={() => updatePortraitStageBackground(option.value)}
                       disabled={disabled}
-                      className={cn(
-                        "flex min-h-6 min-w-0 items-center justify-center gap-1 rounded-sm px-1 text-[0.5625rem] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-55",
-                        selected
-                          ? "bg-[var(--primary)]/12 text-[var(--primary)] ring-1 ring-[var(--primary)]/24"
-                          : "text-[var(--muted-foreground)] hover:bg-[var(--accent)]/45 hover:text-[var(--foreground)]",
-                      )}
+                      aria-pressed={selected}
+                      className={cn(SETTINGS_BUTTON_CLASS, "flex-auto")}
                     >
-                      {selected ? <Check size="0.625rem" /> : <Icon size="0.625rem" />}
+                      {selected ? <Check size="0.75rem" /> : <Icon size="0.75rem" />}
                       <span className="truncate">{option.label}</span>
                     </button>
                   );
@@ -375,7 +368,7 @@ export function TrackerCardColorControls({
               <span className="px-0.5 text-[0.5625rem] font-semibold uppercase text-[var(--muted-foreground)]">
                 {localizeUi("ui.ui.trackercardcolorcontrols.finish")}
               </span>
-              <div className="grid grid-cols-3 gap-0.5 rounded-md bg-[var(--background)]/35 p-0.5">
+              <div className="flex flex-wrap gap-1">
                 {FINISH_PRESETS.map((preset) => {
                   const selected =
                     finish.materialBrightness === preset.finish.materialBrightness &&
@@ -389,12 +382,8 @@ export function TrackerCardColorControls({
                       title={preset.title}
                       onClick={() => updateFinishPreset(preset.finish)}
                       disabled={disabled}
-                      className={cn(
-                        "min-h-6 rounded-sm px-1 text-[0.5625rem] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-55",
-                        selected
-                          ? "bg-[var(--primary)]/12 text-[var(--primary)] ring-1 ring-[var(--primary)]/24"
-                          : "text-[var(--muted-foreground)] hover:bg-[var(--accent)]/45 hover:text-[var(--foreground)]",
-                      )}
+                      aria-pressed={selected}
+                      className={cn(SETTINGS_BUTTON_CLASS, "flex-auto")}
                     >
                       {preset.label}
                     </button>

@@ -55,7 +55,7 @@ jobs:
           else
             LAST_REVIEWED_SHA="$(gh api "repos/${{ github.repository }}/issues/$PR_NUM/comments?per_page=100" \
               --paginate \
-              --jq '.[] | select(.body | contains("<!-- bunny-review:walkthrough -->")) | .body' \
+              --jq '.[] | select(.user.login == "github-actions[bot]") | select(.body | contains("<!-- bunny-review:walkthrough -->")) | .body' \
               | sed -n 's/.*<!-- bunny-review:last-reviewed-sha=\([0-9a-f]\{40\}\) -->.*/\1/p' \
               | tail -n 1)"
             if [ -n "$LAST_REVIEWED_SHA" ] && [ "$LAST_REVIEWED_SHA" = "$PR_HEAD_SHA" ]; then

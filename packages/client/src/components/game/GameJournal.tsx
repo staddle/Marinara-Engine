@@ -5,7 +5,7 @@
 // NPC notes, locations, inventory, and events —
 // all assembled from committed snapshots, no LLM.
 // ──────────────────────────────────────────────
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo, type ComponentProps, type ReactNode } from "react";
 import {
   X,
   MapPin,
@@ -19,16 +19,23 @@ import {
   Loader2,
   Wand2,
   Check,
+  Globe2,
+  Download,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
+import { GAME_WINDOW_CONTENT_CLASS } from "../../lib/chat-widget-colors";
 import { api } from "../../lib/api-client";
+import { downloadJsonFile } from "../../lib/download-json";
+import { useWorldJournal } from "../../hooks/use-game";
 import { toast } from "sonner";
 import { cleanNpcAvatarDisplayName, normalizeNpcAvatarName } from "../../lib/game-npc-avatar";
 import { applyInlineMarkdown, renderMarkdownBlocks } from "../../lib/markdown";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { AnimatedText } from "./AnimatedText";
+import { GameMakeWorld } from "./GameMakeWorld";
+import { useOverworldGamesEnabled } from "../../hooks/use-world-library";
 
-import type { GameNpc } from "@marinara-engine/shared";
+import type { GameNpc, WorldFile, WorldJournal } from "@marinara-engine/shared";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface JournalEntry {
@@ -56,7 +63,7 @@ interface Journal {
   npcLog: Array<{ npcName: string; interactions: string[] }>;
   inventoryLog: Array<{
     item: string;
-    action: "acquired" | "used" | "lost" | "removed";
+    action: "acquired" | "used" | "lost" | "removed" | "sold";
     quantity: number;
     timestamp: string;
   }>;
@@ -72,17 +79,28 @@ interface GameJournalProps {
   generatingNpcPortraitNames?: Set<string>;
   onNpcRemove?: (npcName: string) => Promise<void> | void;
   embedded?: boolean;
+  /** The game has a generated world (worldgen W7), so the journal has a World tab. */
+  hasWorld?: boolean;
+  /** The latest turn as shown (its swipe too), so the World tab reads the world again after it. */
+  worldTurnKey?: string | null;
+  /** A game made without a world may be given one (worldgen W12), from the World tab, when the player asks;
+   *  with what the model writes it for. */
+  canMakeWorld?: boolean;
+  worldRequest?: ComponentProps<typeof GameMakeWorld>["request"];
+  /** The setting kit the game was made with, when it has one: its world is made in it. */
+  worldKit?: ComponentProps<typeof GameMakeWorld>["ownKit"];
 }
 
-type TabId = "all" | "npcs" | "locations" | "inventory" | "library" | "notes";
+type TabId = "all" | "npcs" | "locations" | "inventory" | "library" | "notes" | "world";
 
-const TABS: Array<{ id: TabId; label: string; icon: typeof ScrollText }> = [
+const TABS: Array<{ id: TabId; label: string; labelKey?: string; icon: typeof ScrollText }> = [
   { id: "all", label: "Timeline", icon: ScrollText },
   { id: "npcs", label: "NPCs", icon: Users },
   { id: "locations", label: "Map", icon: MapPin },
   { id: "inventory", label: "Items", icon: Package },
   { id: "library", label: "Library", icon: BookOpen },
   { id: "notes", label: "Notes", icon: PenLine },
+  { id: "world", label: "World", labelKey: "ui.game.gamejournal.world", icon: Globe2 },
 ];
 
 const TYPE_ICONS: Record<string, typeof ScrollText> = {
@@ -139,14 +157,15 @@ function pruneJournalNpc(journal: Journal, npcName: string): Journal {
 }
 
 function shouldShowNpcDescription(npc: GameNpc): boolean {
-  return (npc as GameNpc & { descriptionSource?: string }).descriptionSource === "model" && !!npc.description?.trim();
+  const source = (npc as GameNpc & { descriptionSource?: string }).descriptionSource;
+  return (source === "model" || source === "world") && !!npc.description?.trim();
 }
 
 function shouldShowJournalNpc(npc: GameNpc): boolean {
   const source = (npc as GameNpc & { descriptionSource?: string }).descriptionSource;
   const hasReputationChange = Number.isFinite(npc.reputation) && npc.reputation !== 0;
   const hasRelationshipNotes = Array.isArray(npc.notes) && npc.notes.some((note) => !!note.trim());
-  return source === "model" || hasReputationChange || hasRelationshipNotes;
+  return source === "model" || source === "world" || hasReputationChange || hasRelationshipNotes;
 }
 
 function isDuplicateInventoryEntry(
@@ -188,7 +207,15 @@ export function GameJournal({
   generatingNpcPortraitNames,
   onNpcRemove,
   embedded = false,
+  hasWorld = false,
+  worldTurnKey = null,
+  canMakeWorld = false,
+  worldRequest = null,
+  worldKit = null,
 }: GameJournalProps) {
+  const [makingWorld, setMakingWorld] = useState(false);
+  // Overworld games locked on this server: the World tab says so and cannot make a world.
+  const overworldEnabled = useOverworldGamesEnabled();
   const { t: localizeUi } = useUiTranslation();
   const [journal, setJournal] = useState<Journal | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>("all");
@@ -299,6 +326,7 @@ export function GameJournal({
         message: localizeUi("ui.game.gamejournal.deleteJournalEntryConfirmation", { title: entry.title }),
         confirmLabel: localizeUi("ui.game.gamejournal.deleteEntry"),
         tone: "destructive",
+        chatStyle: true,
       });
       if (!confirmed) return;
 
@@ -338,11 +366,13 @@ export function GameJournal({
   if (!journal) {
     return (
       <div
-        className={
+        data-game-section="journal"
+        className={cn(
+          GAME_WINDOW_CONTENT_CLASS,
           embedded
             ? "flex min-h-40 items-center justify-center"
-            : "absolute inset-0 z-40 flex items-center justify-center bg-black/70 backdrop-blur-sm"
-        }
+            : "absolute inset-0 z-40 flex items-center justify-center bg-black/70 backdrop-blur-sm",
+        )}
       >
         <div className="text-sm text-[var(--muted-foreground)]">{localizeUi("ui.game.gamejournal.loadingJournal")}</div>
       </div>
@@ -351,11 +381,13 @@ export function GameJournal({
 
   return (
     <div
-      className={
+      data-game-section="journal"
+      className={cn(
+        GAME_WINDOW_CONTENT_CLASS,
         embedded
           ? "relative flex h-full min-h-0 flex-1 flex-col overflow-hidden bg-transparent"
-          : "absolute inset-0 z-40 flex min-h-0 flex-col overflow-hidden bg-black/85 backdrop-blur-md"
-      }
+          : "absolute inset-0 z-40 flex min-h-0 flex-col overflow-hidden bg-black/85 backdrop-blur-md",
+      )}
     >
       {/* Header */}
       {!embedded && (
@@ -373,7 +405,7 @@ export function GameJournal({
       {/* Tabs — horizontally scrollable on mobile */}
       <div className="overflow-x-auto border-b border-white/10 px-4 py-2 scrollbar-hide [-webkit-overflow-scrolling:touch]">
         <div className="flex gap-1 w-max min-w-full">
-          {TABS.map((tab) => {
+          {TABS.filter((tab) => tab.id !== "world" || hasWorld || canMakeWorld).map((tab) => {
             const Icon = tab.icon;
             return (
               <button
@@ -389,7 +421,7 @@ export function GameJournal({
                 )}
               >
                 <Icon size={12} />
-                {tab.label}
+                {tab.labelKey ? localizeUi(tab.labelKey) : tab.label}
               </button>
             );
           })}
@@ -434,7 +466,38 @@ export function GameJournal({
           />
         )}
         {activeTab === "notes" && <NotesView notes={playerNotes} onChange={handleNotesChange} saved={notesSaved} />}
+        {activeTab === "world" && hasWorld && <WorldView chatId={chatId} turnKey={worldTurnKey} />}
+        {activeTab === "world" && !hasWorld && canMakeWorld && (
+          <div className="flex flex-col items-center gap-3 py-6 text-center">
+            <p className="max-w-sm text-xs leading-relaxed text-white/60">{localizeUi("ui.game.makeworld.intro")}</p>
+            {!overworldEnabled && (
+              <p role="note" className="max-w-sm text-xs leading-relaxed text-white/60">
+                {localizeUi("game.worldKit.setup.overworldLocked")}
+              </p>
+            )}
+            <button
+              type="button"
+              onClick={() => setMakingWorld(true)}
+              disabled={!overworldEnabled}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--primary)] px-3 py-2 text-xs font-semibold text-[var(--primary-foreground)] transition-opacity disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Globe2 size={13} />
+              {localizeUi("ui.game.makeworld.open")}
+            </button>
+          </div>
+        )}
       </div>
+
+      {makingWorld && (
+        <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+          <GameMakeWorld
+            chatId={chatId}
+            request={worldRequest}
+            ownKit={worldKit}
+            onClose={() => setMakingWorld(false)}
+          />
+        </div>
+      )}
 
       {editingEntry && (
         <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
@@ -741,6 +804,150 @@ function NpcsView({
   );
 }
 
+/** The world as the party knows it (worldgen W7): read from the replies when the tab opens and after
+ *  each turn, and only ever for the game and turn it was asked for. */
+function WorldView({ chatId, turnKey }: { chatId: string; turnKey: string | null }) {
+  const { t: localizeUi } = useUiTranslation();
+  const world = useWorldJournal(chatId, turnKey);
+  // The game's world as a share file (worldgen W9d): its kit, and its world with its hand edits.
+  const downloadWorld = async () => {
+    try {
+      const file = await api.get<WorldFile>(`/game/${chatId}/world/file`);
+      downloadJsonFile(file, `${file.name.replace(/[^\w.-]+/g, "_")}.world.json`);
+    } catch {
+      toast.error(localizeUi("ui.game.worldview.downloadFailed"));
+    }
+  };
+  // Another game's or turn's world is never shown while this one's is read.
+  const shown: WorldJournal | null | undefined = world.isError ? null : world.data;
+  if (shown === undefined) {
+    return (
+      <div className="flex justify-center py-6 text-white/40">
+        <Loader2 size={14} className="animate-spin" />
+      </div>
+    );
+  }
+  if (shown === null) {
+    return <div className="text-center text-xs text-white/40">{localizeUi("ui.game.worldview.noWorld")}</div>;
+  }
+  const nothing = <div className="text-xs text-white/40">{localizeUi("ui.game.worldview.nothingYet")}</div>;
+  const row = "rounded-lg border border-white/5 bg-white/3 px-3 py-2 text-xs text-white/70";
+  const section = (title: string, body: ReactNode) => (
+    <section className="flex flex-col gap-2">
+      <h3 className="text-[0.625rem] font-semibold uppercase tracking-wide text-white/50">{title}</h3>
+      {body}
+    </section>
+  );
+  return (
+    <div className="flex flex-col gap-4">
+      {shown.story?.length
+        ? section(
+            localizeUi("ui.game.worldview.story"),
+            shown.story.map((each) => (
+              <div key={each.flag} className={cn(row, each.done && "text-white/45")}>
+                <div className="flex items-center justify-between gap-2">
+                  <span className={cn("font-medium text-white/85", each.done && "line-through text-white/45")}>
+                    {each.title}
+                  </span>
+                  <span className="shrink-0 text-white/45">
+                    {each.done
+                      ? localizeUi("ui.game.worldview.storyDone")
+                      : each.progress
+                        ? localizeUi("ui.game.worldview.storyProgress", each.progress)
+                        : null}
+                  </span>
+                </div>
+                <div>{each.text}</div>
+              </div>
+            )),
+          )
+        : null}
+      {section(
+        localizeUi("ui.game.worldview.where"),
+        <div className={row}>
+          {shown.where.join(" › ")}
+          <div className="mt-1 text-white/45">{localizeUi(`ui.game.worldview.renown.${shown.renown}`)}</div>
+        </div>,
+      )}
+      {section(
+        localizeUi("ui.game.worldview.standing"),
+        shown.standing.length
+          ? shown.standing.map((each) => (
+              <div key={each.group} className={cn(row, "flex items-center justify-between gap-2")}>
+                <span>{each.group}</span>
+                <span className="text-white/45">{localizeUi(`ui.game.worldview.standingBands.${each.band}`)}</span>
+              </div>
+            ))
+          : nothing,
+      )}
+      {section(
+        localizeUi("ui.game.worldview.news"),
+        shown.news.length
+          ? shown.news.map((each, index) => (
+              <div key={index} className={row}>
+                <div className="flex gap-2 text-white/45">
+                  <span>
+                    {each.ago <= 0
+                      ? localizeUi("ui.game.worldview.newsToday")
+                      : localizeUi("ui.game.worldview.newsAgo", { count: each.ago, day: each.day, days: each.days })}
+                  </span>
+                  {each.rumour ? <span className="italic">{localizeUi("ui.game.worldview.rumour")}</span> : null}
+                </div>
+                <div>{each.text}</div>
+              </div>
+            ))
+          : nothing,
+      )}
+      {section(
+        localizeUi("ui.game.worldview.brewing"),
+        shown.brewing.length
+          ? shown.brewing.map((each, index) => (
+              <div key={index} className={row}>
+                {localizeUi("ui.game.worldview.brewingLine", {
+                  a: each.groups[0],
+                  b: each.groups[1],
+                  count: each.weeks,
+                })}
+                {each.close ? (
+                  <div className="text-white/45">{localizeUi("ui.game.worldview.brewingClose")}</div>
+                ) : null}
+              </div>
+            ))
+          : nothing,
+      )}
+      {section(
+        localizeUi("ui.game.worldview.deeds"),
+        shown.deeds.length
+          ? shown.deeds.map((each, index) => (
+              <div key={index} className={row}>
+                <span className="text-white/45">{each.place}</span>
+                <div>{each.text}</div>
+              </div>
+            ))
+          : nothing,
+      )}
+      {section(
+        localizeUi("ui.game.worldview.past"),
+        shown.past.length
+          ? shown.past.map((line, index) => (
+              <div key={index} className={row}>
+                {line}
+              </div>
+            ))
+          : nothing,
+      )}
+      <button
+        type="button"
+        onClick={() => void downloadWorld()}
+        className="inline-flex items-center gap-1.5 self-start rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs text-white/70 transition-colors hover:bg-white/10 hover:text-white"
+      >
+        <Download size={12} />
+        {localizeUi("ui.game.worldview.download")}
+      </button>
+    </div>
+  );
+}
+
 function LocationsView({ locations }: { locations: string[] }) {
   const { t: localizeUi } = useUiTranslation();
   if (locations.length === 0) {
@@ -768,7 +975,7 @@ function InventoryView({
 }: {
   items: Array<{
     item: string;
-    action: "acquired" | "used" | "lost" | "removed";
+    action: "acquired" | "used" | "lost" | "removed" | "sold";
     quantity: number;
     timestamp: string;
   }>;
@@ -789,6 +996,7 @@ function InventoryView({
     used: "text-amber-400",
     lost: "text-red-400",
     removed: "text-red-300",
+    sold: "text-amber-300",
   };
 
   return (

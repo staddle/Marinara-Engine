@@ -7,7 +7,7 @@
 // ──────────────────────────────────────────────
 import { readdirSync, statSync, existsSync, mkdirSync, writeFileSync, readFileSync, renameSync } from "fs";
 import { join, extname, relative, basename } from "path";
-import { type MusicGenre, type MusicIntensity } from "@marinara-engine/shared";
+import { WORLD_ART_FAMILIES, type MusicGenre, type MusicIntensity } from "@marinara-engine/shared";
 import { DATA_DIR } from "../../utils/data-dir.js";
 
 export const GAME_ASSETS_DIR = join(DATA_DIR, "game-assets");
@@ -143,9 +143,8 @@ export function ensureAssetDirs(): void {
     join(GAME_ASSETS_DIR, "ambient", "interior"),
     join(GAME_ASSETS_DIR, "sprites", "generic-fantasy"),
     join(GAME_ASSETS_DIR, "sprites", "generic-scifi"),
-    join(GAME_ASSETS_DIR, "backgrounds", "fantasy"),
-    join(GAME_ASSETS_DIR, "backgrounds", "scifi"),
-    join(GAME_ASSETS_DIR, "backgrounds", "modern"),
+    // One folder per art family the Engine knows (worldgen W6f), where a setting's backgrounds go.
+    ...WORLD_ART_FAMILIES.map((family) => join(GAME_ASSETS_DIR, "backgrounds", family)),
   ];
   for (const dir of dirs) {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });

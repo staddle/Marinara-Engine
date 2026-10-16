@@ -5,21 +5,58 @@ import { Film, ArrowRight, ArrowLeft, Trash2, ArrowRightLeft } from "lucide-reac
 import { useState } from "react";
 import { useChatStore } from "../../stores/chat.store";
 import { showConfirmDialog } from "../../lib/app-dialogs";
-import type { SceneForkMode } from "@marinara-engine/shared";
+import { returnToSceneOrigin } from "../../lib/scene-generation";
+import { useInstalledCapabilityPackages } from "../../hooks/use-capability-packages";
+import { useUpdateChatMetadata } from "../../hooks/use-chats";
+import { SettingsSwitch } from "../panels/settings/SettingControls";
+import type { SceneForkMode, ScenePackageOrigin } from "@marinara-engine/shared";
 import { useTranslation as useUiTranslation } from "react-i18next";
+
+/** The "back" action for a scene chat: its Conversation, or the package thread it started in. */
+function useSceneOriginBack(originChatId?: string, packageOrigin?: ScenePackageOrigin | null) {
+  const { t: localizeUi } = useUiTranslation();
+  const { data: installed = [] } = useInstalledCapabilityPackages(!!packageOrigin);
+  if (packageOrigin) {
+    const name = installed.find((pkg) => pkg.id === packageOrigin.packageId)?.manifest.name ?? packageOrigin.packageId;
+    return {
+      onBack: () => returnToSceneOrigin({ packageOrigin }),
+      label: localizeUi("ui.chat.scenebanner.backToPackage", { name }),
+      title: localizeUi("ui.chat.scenebanner.returnToPackage", { name }),
+    };
+  }
+  if (!originChatId) return null;
+  return {
+    onBack: () => returnToSceneOrigin({ originChatId }),
+    label: localizeUi("ui.chat.scenebanner.backToConversation"),
+    title: localizeUi("ui.chat.scenebanner.returnToConversation"),
+  };
+}
 
 interface SceneBannerProps {
   /** "origin" = the conversation has an active scene; "scene" = we ARE the scene chat */
   variant: "scene" | "origin";
   sceneChatId?: string;
   sceneChatName?: string;
+  /** Origin only: Scene participants may still answer the user in this Conversation. */
+  repliesAllowed?: boolean;
   originChatId?: string;
+  packageOrigin?: ScenePackageOrigin | null;
   description?: string;
 }
 
-export function SceneBanner({ variant, sceneChatId, sceneChatName, originChatId, description }: SceneBannerProps) {
+export function SceneBanner({
+  variant,
+  sceneChatId,
+  sceneChatName,
+  repliesAllowed = false,
+  originChatId,
+  packageOrigin,
+  description,
+}: SceneBannerProps) {
   const { t: localizeUi } = useUiTranslation();
   const setActiveChatId = useChatStore((s) => s.setActiveChatId);
+  const updateMeta = useUpdateChatMetadata();
+  const back = useSceneOriginBack(originChatId, packageOrigin);
 
   if (variant === "scene") {
     // We're inside the scene — narrator-style description with back button
@@ -44,18 +81,18 @@ export function SceneBanner({ variant, sceneChatId, sceneChatName, originChatId,
             {description}
           </p>
         )}
-        {originChatId && (
+        {back && (
           <button
-            onClick={() => setActiveChatId(originChatId)}
+            onClick={back.onBack}
             className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-all hover:opacity-80"
             style={{
               background: "var(--muted)",
               color: "var(--muted-foreground)",
             }}
-            title={localizeUi("ui.chat.scenebanner.returnToConversation")}
+            title={back.title}
           >
             <ArrowLeft size={12} />
-            {localizeUi("ui.chat.scenebanner.backToConversation")}
+            {back.label}
           </button>
         )}
       </div>
@@ -82,6 +119,18 @@ export function SceneBanner({ variant, sceneChatId, sceneChatName, originChatId,
             {sceneChatName}
           </p>
         )}
+        {sceneChatId && (
+          <SettingsSwitch
+            label={localizeUi("ui.chat.scenebanner.allowRepliesHere")}
+            help={localizeUi("ui.chat.scenebanner.allowRepliesHereHint")}
+            helpPosition="label"
+            checked={repliesAllowed}
+            disabled={updateMeta.isPending}
+            onChange={(next) => updateMeta.mutate({ id: sceneChatId, sceneOriginRepliesAllowed: next })}
+            className="-mx-2 mt-1 gap-2"
+            labelClassName="text-xs"
+          />
+        )}
       </div>
       {sceneChatId && (
         <button
@@ -105,6 +154,7 @@ export function SceneBanner({ variant, sceneChatId, sceneChatName, originChatId,
 export function EndSceneBar({
   sceneChatId,
   originChatId,
+  packageOrigin,
   onConclude,
   onAbandon,
   onFork,
@@ -112,13 +162,14 @@ export function EndSceneBar({
 }: {
   sceneChatId: string;
   originChatId?: string;
+  packageOrigin?: ScenePackageOrigin | null;
   onConclude: (id: string) => void | Promise<void>;
   onAbandon?: (id: string) => void;
   onFork?: (id: string, mode: SceneForkMode) => void;
   isForking?: boolean;
 }) {
   const { t: localizeUi } = useUiTranslation();
-  const setActiveChatId = useChatStore((s) => s.setActiveChatId);
+  const back = useSceneOriginBack(originChatId, packageOrigin);
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   const [isEnding, setIsEnding] = useState(false);
@@ -146,19 +197,19 @@ export function EndSceneBar({
 
   return (
     <div className="flex flex-wrap items-center justify-center gap-2 py-1.5">
-      {originChatId && (
+      {back && (
         <button
-          onClick={() => setActiveChatId(originChatId)}
+          onClick={back.onBack}
           className="flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-medium transition-all hover:opacity-80"
           style={{
             background: "var(--card)",
-            color: "var(--card-foreground)",
+            color: "var(--marinara-chat-chrome-text)",
             border: "1px solid var(--border)",
           }}
-          title={localizeUi("ui.chat.scenebanner.returnToConversation")}
+          title={back.title}
         >
           <ArrowLeft size={12} />
-          {localizeUi("ui.chat.scenebanner.backToConversation")}
+          {back.label}
         </button>
       )}
       {!confirmEnd && (
@@ -170,7 +221,7 @@ export function EndSceneBar({
           className="flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-medium transition-all hover:opacity-80"
           style={{
             background: "var(--card)",
-            color: "var(--card-foreground)",
+            color: "var(--marinara-chat-chrome-text)",
             border: "1px solid var(--border)",
           }}
           title={localizeUi("ui.chat.endscenebar.endTheSceneAndGenerateASummary")}
@@ -217,7 +268,9 @@ export function EndSceneBar({
           disabled={isEnding}
           className="flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-medium transition-all hover:opacity-80"
           style={{
-            color: "var(--muted-foreground)",
+            background: "var(--card)",
+            color: "var(--marinara-chat-chrome-text)",
+            border: "1px solid var(--border)",
           }}
           title={localizeUi("ui.chat.endscenebar.discardTheSceneWithoutSaving")}
         >
@@ -231,7 +284,9 @@ export function EndSceneBar({
           disabled={isForking}
           className="flex items-center gap-1.5 rounded-lg px-3 py-1 text-xs font-medium transition-all hover:opacity-80"
           style={{
-            color: "var(--muted-foreground)",
+            background: "var(--card)",
+            color: "var(--marinara-chat-chrome-text)",
+            border: "1px solid var(--border)",
           }}
           title={localizeUi("ui.chat.endscenebar.detachThisSceneIntoAStandaloneRoleplay")}
         >

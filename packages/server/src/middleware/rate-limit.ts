@@ -24,6 +24,18 @@ type RateLimitRule = {
 
 const DEFAULT_RULE: RateLimitRule = { key: "default", limit: 600, windowMs: 60_000 };
 
+/** Quick answers call a model per request; a person asks a few per minute, never in a loop. */
+export const PROFESSOR_MARI_QUICK_RATE_LIMIT = {
+  max: 30,
+  timeWindow: 60_000,
+} as const satisfies MarinaraRouteRateLimit;
+
+/** Bulk "skip these agent updates" writes the package catalog; a person clicks it, not a script. */
+export const PACKAGE_UPDATE_DECLINE_RATE_LIMIT = {
+  max: 30,
+  timeWindow: 60_000,
+} as const satisfies MarinaraRouteRateLimit;
+
 export const UPDATE_CHANNEL_RATE_LIMIT = {
   max: 30,
   timeWindow: 60_000,
@@ -34,13 +46,65 @@ export const AVATAR_STORAGE_RATE_LIMIT = {
   timeWindow: 60_000,
 } as const satisfies MarinaraRouteRateLimit;
 
+/** Avatar faces: a streaming reply asks at most once per 1.2 seconds (about 50 a minute); room for two tabs. */
+export const AVATAR_CLASSIFY_RATE_LIMIT = {
+  max: 120,
+  timeWindow: 60_000,
+} as const satisfies MarinaraRouteRateLimit;
+
 export const SPRITE_RENAME_RATE_LIMIT = {
   max: 60,
   timeWindow: 60_000,
 } as const satisfies MarinaraRouteRateLimit;
 
+/**
+ * Tile packs: the overworld reads the list, the selection and one built-in pack per family from disk;
+ * saving, importing and removing write the store. A person browsing or editing packs stays far below
+ * this; a scripted loop does not.
+ */
+export const GAME_TILE_PACKS_RATE_LIMIT = {
+  max: 120,
+  timeWindow: 60_000,
+} as const satisfies MarinaraRouteRateLimit;
+
+/**
+ * The world library: listing, reading and editing kept worlds, and making or importing one, which compiles
+ * a whole world. A person building worlds stays far below this; a scripted loop does not.
+ */
+export const GAME_WORLDS_RATE_LIMIT = {
+  max: 120,
+  timeWindow: 60_000,
+} as const satisfies MarinaraRouteRateLimit;
+
+/**
+ * Rulesets and creature packs: reading a package file, a ruleset's own files or the published schema, and
+ * filing or choosing a creature pack. A person importing or editing stays far below this; a scripted loop
+ * does not.
+ */
+export const GAME_RULESETS_RATE_LIMIT = {
+  max: 120,
+  timeWindow: 60_000,
+} as const satisfies MarinaraRouteRateLimit;
+
 export const ADMIN_RESTART_RATE_LIMIT = {
   max: 5,
+  timeWindow: 60_000,
+} as const satisfies MarinaraRouteRateLimit;
+
+export const REQUEST_TIMEOUT_SETTINGS_RATE_LIMIT = {
+  max: 30,
+  timeWindow: 60_000,
+} as const satisfies MarinaraRouteRateLimit;
+
+/** Support snapshot of storage residency and package runtimes; a person reads it a few times, not in a loop. */
+export const RUNTIME_DIAGNOSTICS_RATE_LIMIT = {
+  max: 30,
+  timeWindow: 60_000,
+} as const satisfies MarinaraRouteRateLimit;
+
+/** One document per guest frame mount; each response reads and embeds the trusted bundle. */
+export const MULTIPLAYER_GUEST_VIEW_RATE_LIMIT = {
+  max: 30,
   timeWindow: 60_000,
 } as const satisfies MarinaraRouteRateLimit;
 
@@ -52,6 +116,12 @@ export const ADMIN_RESTART_RATE_LIMIT = {
  */
 export const BEHOLDER_STATE_RATE_LIMIT = {
   max: 60,
+  timeWindow: 60_000,
+} as const satisfies MarinaraRouteRateLimit;
+
+/** Each greeting-image bake downloads up to ten web images on the server. */
+export const GREETING_IMAGE_BAKE_RATE_LIMIT = {
+  max: 20,
   timeWindow: 60_000,
 } as const satisfies MarinaraRouteRateLimit;
 
@@ -72,7 +142,39 @@ export const UTILITY_SIDECAR_RATE_LIMIT = {
   timeWindow: 60_000,
 } as const satisfies MarinaraRouteRateLimit;
 
+/**
+ * The managed decision sidecar's API.
+ *
+ * Sized like the utility slot's: room for the panel to re-read its status while open,
+ * a wall in front of install and remove, which download or delete about ten gigabytes.
+ */
+export const DECISION_SIDECAR_RATE_LIMIT = {
+  max: 60,
+  timeWindow: 60_000,
+} as const satisfies MarinaraRouteRateLimit;
+
+/**
+ * The health probe. Launchers, Docker, the Android bootstrap and the open app poll it, so it keeps the
+ * default allowance in a bucket of its own; it now also decides whether to include local model details.
+ */
+export const HEALTH_RATE_LIMIT = {
+  max: 600,
+  timeWindow: 60_000,
+} as const satisfies MarinaraRouteRateLimit;
+
 const ROUTE_RULES: Array<{ pattern: RegExp; rule: RateLimitRule }> = [
+  {
+    pattern: /^\/api\/health(?:\?|$)/,
+    rule: { key: "health", limit: HEALTH_RATE_LIMIT.max, windowMs: HEALTH_RATE_LIMIT.timeWindow },
+  },
+  {
+    pattern: /^\/api\/multiplayer\/guest-view(?:\?|$)/,
+    rule: {
+      key: "multiplayer-guest-view",
+      limit: MULTIPLAYER_GUEST_VIEW_RATE_LIMIT.max,
+      windowMs: MULTIPLAYER_GUEST_VIEW_RATE_LIMIT.timeWindow,
+    },
+  },
   { pattern: /^\/api\/generate(?:\/|$)/, rule: { key: "generate", limit: 60, windowMs: 60_000 } },
   { pattern: /^\/api\/tts(?:\/|$)/, rule: { key: "tts", limit: 90, windowMs: 60_000 } },
   {
@@ -80,6 +182,30 @@ const ROUTE_RULES: Array<{ pattern: RegExp; rule: RateLimitRule }> = [
     rule: { key: "image-test", limit: 20, windowMs: 60_000 },
   },
   { pattern: /^\/api\/import\/st-bulk(?:\/|$)/, rule: { key: "bulk-import", limit: 20, windowMs: 60_000 } },
+  {
+    pattern: /^\/api\/characters\/[^/]+\/gallery\/bake(?:\?|$)/,
+    rule: {
+      key: "greeting-image-bake",
+      limit: GREETING_IMAGE_BAKE_RATE_LIMIT.max,
+      windowMs: GREETING_IMAGE_BAKE_RATE_LIMIT.timeWindow,
+    },
+  },
+  {
+    pattern: /^\/api\/game-worlds(?:\/|$)/,
+    rule: {
+      key: "game-worlds",
+      limit: GAME_WORLDS_RATE_LIMIT.max,
+      windowMs: GAME_WORLDS_RATE_LIMIT.timeWindow,
+    },
+  },
+  {
+    pattern: /^\/api\/game-tile-packs(?:\/|$)/,
+    rule: {
+      key: "game-tile-packs",
+      limit: GAME_TILE_PACKS_RATE_LIMIT.max,
+      windowMs: GAME_TILE_PACKS_RATE_LIMIT.timeWindow,
+    },
+  },
   {
     pattern: /^\/api\/backup(?:\/|$)/,
     rule: { key: "backup", limit: BACKUP_RATE_LIMIT.max, windowMs: BACKUP_RATE_LIMIT.timeWindow },
@@ -93,8 +219,32 @@ const ROUTE_RULES: Array<{ pattern: RegExp; rule: RateLimitRule }> = [
     },
   },
   {
+    pattern: /^\/api\/avatar-classify(?:\/|\?|$)/,
+    rule: {
+      key: "avatar-classify",
+      limit: AVATAR_CLASSIFY_RATE_LIMIT.max,
+      windowMs: AVATAR_CLASSIFY_RATE_LIMIT.timeWindow,
+    },
+  },
+  {
     pattern: /^\/api\/admin\/restart(?:\?|$)/,
     rule: { key: "admin-restart", limit: ADMIN_RESTART_RATE_LIMIT.max, windowMs: ADMIN_RESTART_RATE_LIMIT.timeWindow },
+  },
+  {
+    pattern: /^\/api\/admin\/request-timeouts(?:\?|$)/,
+    rule: {
+      key: "request-timeout-settings",
+      limit: REQUEST_TIMEOUT_SETTINGS_RATE_LIMIT.max,
+      windowMs: REQUEST_TIMEOUT_SETTINGS_RATE_LIMIT.timeWindow,
+    },
+  },
+  {
+    pattern: /^\/api\/admin\/runtime-diagnostics(?:\?|$)/,
+    rule: {
+      key: "runtime-diagnostics",
+      limit: RUNTIME_DIAGNOSTICS_RATE_LIMIT.max,
+      windowMs: RUNTIME_DIAGNOSTICS_RATE_LIMIT.timeWindow,
+    },
   },
   { pattern: /^\/api\/updates\/apply(?:\?|$)/, rule: { key: "updates-apply", limit: 5, windowMs: 60_000 } },
   {
@@ -109,7 +259,31 @@ const ROUTE_RULES: Array<{ pattern: RegExp; rule: RateLimitRule }> = [
     pattern: /^\/api\/sidecar\/(?:runtime\/install|reinstall|download|model|speech\/download|speech\/model)(?:\/|\?|$)/,
     rule: { key: "sidecar-privileged", limit: 20, windowMs: 60_000 },
   },
+  {
+    pattern: /^\/api\/decision\/sidecar(?:\/|\?|$)/,
+    rule: {
+      key: "decision-sidecar",
+      limit: DECISION_SIDECAR_RATE_LIMIT.max,
+      windowMs: DECISION_SIDECAR_RATE_LIMIT.timeWindow,
+    },
+  },
   { pattern: /^\/api\/haptic\/command(?:\?|$)/, rule: { key: "haptic-command", limit: 30, windowMs: 60_000 } },
+  {
+    pattern: /^\/api\/professor-mari\/quick\/(?:prompt|proposals\/[^/]+\/apply)(?:\?|$)/,
+    rule: {
+      key: "professor-mari-quick",
+      limit: PROFESSOR_MARI_QUICK_RATE_LIMIT.max,
+      windowMs: PROFESSOR_MARI_QUICK_RATE_LIMIT.timeWindow,
+    },
+  },
+  {
+    pattern: /^\/api\/capability-packages\/updates\/decline(?:\?|$)/,
+    rule: {
+      key: "package-update-decline",
+      limit: PACKAGE_UPDATE_DECLINE_RATE_LIMIT.max,
+      windowMs: PACKAGE_UPDATE_DECLINE_RATE_LIMIT.timeWindow,
+    },
+  },
   // One-shot LLM call per user click; keep it out of the 600/min default
   // class so a runaway loop can't burn API credits.
   {

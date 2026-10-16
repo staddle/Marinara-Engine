@@ -41,6 +41,7 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
@@ -76,6 +77,7 @@ public class MainActivity extends Activity {
     private static final int NOTIFICATION_PERMISSION_REQUEST = 1005;
     private static final int FILE_SAVE_REQUEST = 1006;
     private static final String DISPLAY_PREFS = "marinara_display";
+    private static final String OPEN_IN_BROWSER = "open_in_browser";
     private static final String STATUS_BAR_VISIBLE = "status_bar_visible";
     private static final String NOTIFICATION_PERMISSION_PREFS = "marinara_notification_permission";
     private static final String NOTIFICATION_PERMISSION_REQUESTED = "requested";
@@ -101,6 +103,8 @@ public class MainActivity extends Activity {
     private static final String ANDROID_SECRET_PREF = "android_local_secret";
     private static final String INSTALL_SESSION_PREF = "termux_install_session";
     private static final String INSTALL_NONCE_PREF = "termux_install_nonce";
+    private static final String SETUP_IN_PROGRESS_PREF = "termux_setup_in_progress";
+    private static final String START_REQUESTED_PREF = "termux_start_requested";
     private static final String TERMUX_HOME = "/data/data/com.termux/files/home";
     private static final String TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash";
     private static final String TERMUX_EXTERNAL_APPS_COMMAND =
@@ -114,6 +118,9 @@ public class MainActivity extends Activity {
     private TextView statusText;
     private Button manualServerButton;
     private ValueCallback<Uri[]> fileUploadCallback;
+    /** The empty photo the camera choice of the current file chooser writes into, if it offered one. */
+    private Uri pendingCameraPhoto;
+    private static final String PENDING_CAMERA_PHOTO_STATE = "pendingCameraPhoto";
     private byte[] pendingFileSaveData;
     private String pendingFileSaveName;
     private boolean isDownloadingTermux;
@@ -134,6 +141,10 @@ public class MainActivity extends Activity {
     @SuppressLint("SetJavaScriptEnabled")
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // Android may close the app while the camera is open; keep the photo's address so a cancelled
+        // capture can still be cleaned up when it returns. The page's upload itself can't be resumed.
+        String pendingPhoto = savedInstanceState == null ? null : savedInstanceState.getString(PENDING_CAMERA_PHOTO_STATE);
+        if (pendingPhoto != null) pendingCameraPhoto = Uri.parse(pendingPhoto);
 
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         applyStatusBarVisibility(isStatusBarVisible());
@@ -191,6 +202,15 @@ public class MainActivity extends Activity {
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.VERTICAL);
         actions.setPadding(0, 28, 0, 0);
+
+        CheckBox browserChoice = new CheckBox(this);
+        browserChoice.setText("Open in browser");
+        browserChoice.setTextColor(0xFFCCCCCC);
+        browserChoice.setChecked(shouldOpenInBrowser());
+        browserChoice.setOnCheckedChangeListener((button, checked) ->
+                getSharedPreferences(DISPLAY_PREFS, MODE_PRIVATE).edit()
+                        .putBoolean(OPEN_IN_BROWSER, checked).apply());
+        actions.addView(browserChoice, buildActionButtonLayoutParams());
 
         Button setupButton = buildActionButton("Install / Start Marinara");
         setupButton.setOnClickListener(v -> startTermuxSetup());
@@ -330,10 +350,10 @@ public class MainActivity extends Activity {
                     fileUploadCallback.onReceiveValue(null);
                 }
                 fileUploadCallback = callback;
-                Intent intent = params.createIntent();
                 try {
-                    startActivityForResult(intent, FILE_CHOOSER_REQUEST);
+                    startActivityForResult(withCameraChoice(params), FILE_CHOOSER_REQUEST);
                 } catch (Exception e) {
+                    discardPendingCameraPhoto();
                     fileUploadCallback = null;
                     return false;
                 }
@@ -348,12 +368,30 @@ public class MainActivity extends Activity {
         showBootstrap("Connecting to Marinara Engine…\nIf this is your first launch, tap Install / Start Marinara.", true);
 
         isCheckingServer = true;
+        final boolean openInBrowser = shouldOpenInBrowser();
         new Thread(() -> {
             AndroidSessionAttempt attempt = prepareAndroidSession();
+            String browserTicket = attempt.session != null && openInBrowser
+                    ? prepareBrowserTicket(attempt.session) : null;
             runOnUiThread(() -> {
                 isCheckingServer = false;
-                if (connectionRetryPaused) return;
+                if (isDestroyed() || connectionRetryPaused) return;
+                if (openInBrowser != shouldOpenInBrowser()) {
+                    tryConnect();
+                    return;
+                }
                 if (attempt.session != null) {
+                    setStartRequested(false);
+                    setTermuxSetupInProgress(false);
+                    if (openInBrowser) {
+                        pauseConnectionRetryLoop();
+                        if (browserTicket != null) {
+                            openBrowser(SERVER_URL + "/android-login#ticket=" + browserTicket);
+                        } else {
+                            showBootstrap("Could not sign in to the browser. Update the Engine and APK, then tap Retry connection. You can also uncheck Open in browser to use the app.", false);
+                        }
+                        return;
+                    }
                     mainFrameLoadFailed = false;
                     statusText.setText("Opening Marinara Engine…");
                     webView.postUrl(
@@ -361,7 +399,11 @@ public class MainActivity extends Activity {
                             attempt.session.formBody().getBytes(StandardCharsets.UTF_8)
                     );
                 } else if (attempt.manualServerDetected) {
+                    setStartRequested(false);
                     showManualServerOption();
+                } else if (isStartRequested()) {
+                    setStartRequested(false);
+                    beginTermuxSetup();
                 } else {
                     retryConnection();
                 }
@@ -412,7 +454,12 @@ public class MainActivity extends Activity {
                     resumeConnectionRetryLoop();
                     mainFrameLoadFailed = false;
                     showBootstrap("Opening the confirmed manual server…", true);
-                    webView.loadUrl(SERVER_URL);
+                    if (shouldOpenInBrowser()) {
+                        pauseConnectionRetryLoop();
+                        openBrowser(SERVER_URL);
+                    } else {
+                        webView.loadUrl(SERVER_URL);
+                    }
                 })
                 .show();
     }
@@ -435,6 +482,7 @@ public class MainActivity extends Activity {
     }
 
     private void pauseConnectionRetryLoop() {
+        setStartRequested(false);
         connectionRetryPaused = true;
         cancelPendingConnectionRetry();
     }
@@ -487,6 +535,45 @@ public class MainActivity extends Activity {
         }
     }
 
+    private boolean shouldOpenInBrowser() {
+        return getSharedPreferences(DISPLAY_PREFS, MODE_PRIVATE).getBoolean(OPEN_IN_BROWSER, false);
+    }
+
+    private String prepareBrowserTicket(AndroidSessionBootstrap session) {
+        HttpURLConnection connection = null;
+        try {
+            byte[] body = (session.formBody() + "&browser=true").getBytes(StandardCharsets.UTF_8);
+            connection = (HttpURLConnection) new URL(SERVER_URL + "/api/android-auth/session").openConnection();
+            connection.setConnectTimeout(1_000);
+            connection.setReadTimeout(1_500);
+            connection.setInstanceFollowRedirects(false);
+            connection.setUseCaches(false);
+            connection.setRequestMethod("POST");
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+            connection.setFixedLengthStreamingMode(body.length);
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(body);
+            }
+            if (connection.getResponseCode() != HttpURLConnection.HTTP_OK) return null;
+            String ticket = new JSONObject(readSmallResponse(connection)).getString("browserTicket");
+            return isHex256(ticket) ? ticket : null;
+        } catch (Exception error) {
+            return null;
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private void openBrowser(String url) {
+        showBootstrap("Marinara is open in your browser.\nTo use the app instead, uncheck Open in browser and tap Retry connection.", false);
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+        } catch (ActivityNotFoundException error) {
+            showBootstrap("No browser is available. Install a browser, or uncheck Open in browser and tap Retry connection.", false);
+        }
+    }
+
     private boolean isServerUrl(String url) {
         if (url == null) return false;
         try {
@@ -533,6 +620,7 @@ public class MainActivity extends Activity {
                 + "requestNotificationPermission: () => nativeBridge.requestNotificationPermission('" + token + "'),"
                 + "showNotification: (...values) => nativeBridge.showNotification('" + token + "', ...withoutToken(values)),"
                 + "saveFile: (...values) => nativeBridge.saveFile('" + token + "', ...withoutToken(values)),"
+                + "openLauncher: () => nativeBridge.openLauncher('" + token + "'),"
                 + "openConsole: () => nativeBridge.openConsole('" + token + "')"
                 + "});"
                 + "Object.defineProperty(window, 'MarinaraAndroid', {"
@@ -687,6 +775,25 @@ public class MainActivity extends Activity {
     }
 
     private void startTermuxSetup() {
+        if (getSharedPreferences(SECURITY_PREFS, MODE_PRIVATE).getBoolean(SETUP_IN_PROGRESS_PREF, false)) {
+            new AlertDialog.Builder(this)
+                    .setTitle("Marinara setup is already starting")
+                    .setMessage("Wait for Termux to finish. Retry setup only if that session has stopped or failed.")
+                    .setNegativeButton("View Termux", (dialog, which) -> openTermux())
+                    .setPositiveButton("Retry setup", (dialog, which) -> {
+                        setTermuxSetupInProgress(false);
+                        startTermuxSetup();
+                    })
+                    .show();
+            return;
+        }
+        // Authenticate a running server before asking Termux to start another session.
+        setStartRequested(true);
+        resumeConnectionRetryLoop();
+        tryConnect();
+    }
+
+    private void beginTermuxSetup() {
         pauseConnectionRetryLoop();
         if (!isTermuxInstalled()) {
             startTermuxInstallFlow();
@@ -991,16 +1098,35 @@ public class MainActivity extends Activity {
 
         try {
             intent.putExtra("com.termux.RUN_COMMAND_ARGUMENTS", new String[]{"-lc", buildTermuxSetupCommand(true)});
+            setTermuxSetupInProgress(true);
             startService(intent);
             resumeConnectionRetryLoop();
             showBootstrap("Termux setup launched.\nWatch Termux finish installing, then this shell will connect automatically.", true);
             handler.postDelayed(this::openTermux, 500);
             scheduleConnectionRetry();
         } catch (SecurityException e) {
+            setTermuxSetupInProgress(false);
             showTermuxExternalAppsInstructions();
         } catch (IllegalStateException | ActivityNotFoundException e) {
+            setTermuxSetupInProgress(false);
             showManualTermuxSetupInstructions("Android blocked the Termux setup launch.");
         }
+    }
+
+    private boolean isStartRequested() {
+        return getSharedPreferences(SECURITY_PREFS, MODE_PRIVATE).getBoolean(START_REQUESTED_PREF, false);
+    }
+
+    private void setStartRequested(boolean requested) {
+        // A pending authenticated probe must survive Activity recreation too.
+        getSharedPreferences(SECURITY_PREFS, MODE_PRIVATE).edit()
+                .putBoolean(START_REQUESTED_PREF, requested).apply();
+    }
+
+    private void setTermuxSetupInProgress(boolean inProgress) {
+        // Termux keeps running when Android recreates this Activity.
+        getSharedPreferences(SECURITY_PREFS, MODE_PRIVATE).edit()
+                .putBoolean(SETUP_IN_PROGRESS_PREF, inProgress).apply();
     }
 
     private String buildTermuxSetupCommand(boolean provisionAndroidSecret) {
@@ -1192,6 +1318,16 @@ public class MainActivity extends Activity {
         }
 
         @JavascriptInterface
+        public void openLauncher(String token) {
+            if (!isTrustedBridgeCaller(token)) return;
+            runOnUiThread(() -> {
+                pauseConnectionRetryLoop();
+                webView.stopLoading();
+                showBootstrap("Choose how Marinara opens, then tap Retry connection.", false);
+            });
+        }
+
+        @JavascriptInterface
         public void openConsole(String token) {
             if (!isTrustedBridgeCaller(token)) return;
             runOnUiThread(() -> {
@@ -1234,6 +1370,71 @@ public class MainActivity extends Activity {
     private String safeErrorMessage(Exception error) {
         String message = error.getMessage();
         return message == null || message.trim().isEmpty() ? error.getClass().getSimpleName() : message;
+    }
+
+    /**
+     * Adds a Camera choice next to the file picker when the page asks for images, as Chrome does
+     * (#6953). The photo goes to Pictures/Marinara like the app's other saved images; Android 9 and
+     * older keep the plain file picker.
+     */
+    private Intent withCameraChoice(WebChromeClient.FileChooserParams params) {
+        Intent picker = params.createIntent();
+        discardPendingCameraPhoto();
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || !acceptsImages(params.getAcceptTypes())) return picker;
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.MediaColumns.DISPLAY_NAME, "Marinara_" + System.currentTimeMillis() + ".jpg");
+        values.put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg");
+        values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/Marinara");
+        Uri photo;
+        try {
+            photo = getContentResolver().insert(
+                    MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), values);
+        } catch (Exception error) {
+            return picker;
+        }
+        if (photo == null) return picker;
+        Intent camera = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+        camera.putExtra(MediaStore.EXTRA_OUTPUT, photo);
+        camera.setClipData(ClipData.newRawUri("", photo));
+        camera.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        pendingCameraPhoto = photo;
+        Intent chooser = Intent.createChooser(picker, null);
+        chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, new Intent[] { camera });
+        return chooser;
+    }
+
+    private static boolean acceptsImages(String[] acceptTypes) {
+        if (acceptTypes == null || acceptTypes.length == 0) return true;
+        for (String type : acceptTypes) {
+            String value = type == null ? "" : type.trim().toLowerCase();
+            if (value.isEmpty() || value.equals("*/*") || value.startsWith("image/")) return true;
+        }
+        return false;
+    }
+
+    private static boolean containsUri(Uri[] uris, Uri target) {
+        if (uris == null) return false;
+        for (Uri uri : uris) {
+            if (target.equals(uri)) return true;
+        }
+        return false;
+    }
+
+    /** Removes the empty photo file when the camera wasn't used. */
+    private void discardPendingCameraPhoto() {
+        if (pendingCameraPhoto == null) return;
+        try {
+            getContentResolver().delete(pendingCameraPhoto, null, null);
+        } catch (Exception ignored) {
+            // Nothing else to clean up.
+        }
+        pendingCameraPhoto = null;
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+        if (pendingCameraPhoto != null) outState.putString(PENDING_CAMERA_PHOTO_STATE, pendingCameraPhoto.toString());
     }
 
     /** Writes a download into the app's Pictures or Downloads collection on Android 10 and newer. */
@@ -1470,8 +1671,17 @@ public class MainActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         if (requestCode == FILE_CHOOSER_REQUEST) {
+            Uri cameraPhoto = pendingCameraPhoto;
+            pendingCameraPhoto = null;
+            Uri[] result = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
+            // The camera usually answers without data: its photo is already in the file made for it.
+            if (result == null && resultCode == RESULT_OK && cameraPhoto != null) {
+                result = new Uri[] { cameraPhoto };
+            } else if (cameraPhoto != null && !containsUri(result, cameraPhoto)) {
+                pendingCameraPhoto = cameraPhoto;
+                discardPendingCameraPhoto();
+            }
             if (fileUploadCallback != null) {
-                Uri[] result = WebChromeClient.FileChooserParams.parseResult(resultCode, data);
                 fileUploadCallback.onReceiveValue(result);
                 fileUploadCallback = null;
             }
@@ -1512,6 +1722,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        if (isFinishing()) setStartRequested(false);
         bridgeEnabled = false;
         bridgeToken = null;
         cancelPendingConnectionRetry();

@@ -8,7 +8,7 @@
 // a loadout is starting to get heavy, not to predict billing.
 //
 // Two axes:
-//   - instructionTokens: sum of agents' prompt-template tokens (chars/4).
+//   - instructionTokens: sum of agents' prompt-template token estimates.
 //     Does NOT include the chat context (recent messages, character cards,
 //     persona, lorebook, summary) that each call also carries — real per-turn
 //     usage will be substantially higher. UI copy should make that clear.
@@ -17,12 +17,14 @@
 //     the server-side batching in
 //     `packages/server/src/services/agents/agent-pipeline.ts`: agents that
 //     share a phase, connection, and lane batch into a single LLM call. Rewrite
-//     agents use a dedicated lane and never share tracker calls. v1 ignores
+//     agents use a dedicated lane and never share tracker calls. An agent with
+//     its own request (`ownRequest`) is one call of its own. v1 ignores
 //     the tool-extraction nuance (tool-using agents technically run alone,
 //     adding 1 call each beyond the batch) — fine for a soft signal.
 // ──────────────────────────────────────────────
 
 import type { AgentPhase } from "../types/agent.js";
+import { estimateTextTokens } from "./token-estimator.js";
 
 /** Minimal shape needed to estimate an agent's contribution. */
 export interface AgentCostInput {
@@ -35,6 +37,8 @@ export interface AgentCostInput {
   promptTemplate: string;
   /** Resolved output format, used to isolate custom rewrite agents. */
   resultType?: string;
+  /** The user turned off "Share requests with other agents", so this agent is one call of its own. */
+  ownRequest?: boolean;
 }
 
 export interface AgentLoadCost {
@@ -66,22 +70,15 @@ function getAgentCostLane(agent: AgentCostInput): "rewrite" | "standard" {
   return agent.resultType === "text_rewrite" || BUILT_IN_REWRITE_AGENT_TYPES.has(agent.type) ? "rewrite" : "standard";
 }
 
-// TODO: replace chars/4 with a real tokenizer when the project picks one up.
-// Matches the existing `estimateTokens` helpers scattered across the client
-// (PeekPromptModal, LorebookFormFields, etc.).
-function approximateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
-}
-
 export function estimateAgentLoadCost(enabled: AgentCostInput[], defaultConnectionId: string | null): AgentLoadCost {
   let instructionTokens = 0;
   const callKeys = new Set<string>();
 
   for (const a of enabled) {
-    instructionTokens += approximateTokens(a.promptTemplate);
+    instructionTokens += estimateTextTokens(a.promptTemplate);
     if (NO_EXTRA_CALL_AGENT_TYPES.has(a.type)) continue;
     const connection = a.connectionId ?? defaultConnectionId ?? "default";
-    callKeys.add(`${a.phase}::${connection}::${getAgentCostLane(a)}`);
+    callKeys.add(`${a.phase}::${connection}::${getAgentCostLane(a)}${a.ownRequest ? `::${a.type}` : ""}`);
   }
 
   const extraCalls = callKeys.size;

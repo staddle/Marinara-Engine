@@ -5,8 +5,10 @@
 import { BUILT_IN_AGENT_MANIFESTS, replaceBuiltInAgentManifestRegistry } from "../features/agents/agent-registry.js";
 import type { BuiltInAgentManifest } from "../features/agents/agent-manifest.types.js";
 import type { AgentToolConfig, ToolDefinition } from "../features/function-calls/tool-definitions.js";
+import { AVATAR_2D_AGENT_ID, AVATAR_PROMPT_TEMPLATE_SETTINGS_KEY } from "./avatars.js";
 import type { ChatMode } from "./chat.js";
 import type { WrapFormat } from "./prompt.js";
+import type { LorebookIncludeSource, MacroDecisionAnswers } from "../utils/macro-engine.js";
 
 /** When in the generation pipeline an agent runs. */
 export type AgentPhase =
@@ -274,6 +276,8 @@ export interface AgentResult {
   /** Whether the agent succeeded */
   success: boolean;
   error: string | null;
+  /** The message the result belongs to, when the server anchored it to one. */
+  messageId?: string | null;
 }
 
 export type AgentWriteApprovalKind = "character_card_create" | "lorebook_update" | "summary_update";
@@ -346,6 +350,13 @@ export interface AgentTaskProgress {
 
 /** Shared context passed to every agent. */
 export interface AgentContext {
+  /** Serialize model calls for Game chats sharing limited GPU memory. */
+  sequentialExecution?: boolean;
+  /**
+   * This turn's answers for `decision:` and `decision_choice:` conditions in the
+   * agent's prompt template (#6569). Absent means none were asked, which reads as no.
+   */
+  decisions?: MacroDecisionAnswers;
   /**
    * Prose to read instead of the recent messages.
    *
@@ -365,6 +376,8 @@ export interface AgentContext {
     role: string;
     content: string;
     characterId?: string;
+    /** Speaker label for agent history; set only when the message has exactly one speaker. */
+    speakerName?: string;
     /** Tracker state snapshot for this message (if any). */
     gameState?: import("./game-state.js").GameState | null;
   }>;
@@ -429,6 +442,9 @@ export interface AgentContext {
   } | null;
   /** The agent's own persistent memory (key-value) */
   memory: Record<string, unknown>;
+  /** Host resolves only this agent's output on the visible message history. */
+  loadPreviousOutput?: (agentConfigId: string) => Promise<unknown>;
+  previousOutput?: { agentType: string; text: string };
   /** All lorebook IDs the agent can write to */
   writableLorebookIds: string[] | null;
   /** Chat summary text (if any) — helps agents avoid duplicating summarized info */
@@ -438,10 +454,13 @@ export interface AgentContext {
   /** Lorebook entries activated for the main generation on this turn. */
   activatedLorebookEntries?: Array<{
     id: string;
+    name?: string;
     content: string;
   }>;
   /** Per-lorebook total entry counts (for {{lorebooksize::ID}} macro in agent prompts). */
   lorebookEntryCounts?: Record<string, number>;
+  /** Lorebooks `{{include::...}}` reads in agent prompts; set only when one uses it (#7212). */
+  lorebookIncludes?: LorebookIncludeSource;
   /**
    * Semantic source material resolved for custom agents that opt into vector access.
    * The runtime keeps this out of ordinary agent prompts and injects it only for
@@ -477,6 +496,13 @@ export interface AgentContext {
   agentDebug?: (event: AgentCallDebugEvent) => void;
   /** Lightweight provider progress; never includes prompts, reasoning, or response content. */
   agentProgress?: (event: AgentTaskProgress) => void;
+  /** Request-local scene check shared by tracker calls; only the first eligible call claims it. */
+  sceneCheck?: {
+    trackerAgentIds: string[];
+    prompt: string;
+    claimed: boolean;
+    result?: unknown;
+  };
   /** Abort signal — when triggered, agent execution should stop. Typed as `any` to avoid DOM/Node lib dependency. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   signal?: any;
@@ -600,6 +626,7 @@ export const CUSTOM_AGENT_CONTEXT_SOURCE_IDS = [
   "authorNotes",
   "trackerData",
   "recalledMemories",
+  "previousOutput",
 ] as const;
 
 export type CustomAgentContextSource = (typeof CUSTOM_AGENT_CONTEXT_SOURCE_IDS)[number];
@@ -614,6 +641,7 @@ export const DEFAULT_CUSTOM_AGENT_CONTEXT_SOURCES: CustomAgentContextSources = {
   authorNotes: false,
   trackerData: false,
   recalledMemories: false,
+  previousOutput: false,
 };
 
 export function normalizeCustomAgentContextSources(settings: unknown): CustomAgentContextSources {
@@ -625,6 +653,26 @@ export function normalizeCustomAgentContextSources(settings: unknown): CustomAge
     if (typeof stored[source] === "boolean") normalized[source] = stored[source];
   }
   return normalized;
+}
+
+/** Built-in agents retain their existing context unless the user explicitly configures sources. */
+export function getAgentContextSources(config: {
+  isCustomAgent?: boolean;
+  settings: unknown;
+}): CustomAgentContextSources {
+  const settings = parseAgentSettingsRecord(config.settings);
+  if (config.isCustomAgent || isRecord(settings.contextSources)) return normalizeCustomAgentContextSources(settings);
+  return {
+    chatHistory: true,
+    characters: true,
+    persona: true,
+    activatedLorebookEntries: true,
+    chatSummary: true,
+    authorNotes: true,
+    trackerData: true,
+    recalledMemories: true,
+    previousOutput: false,
+  };
 }
 
 export interface CustomAgentImportPolicy {
@@ -776,6 +824,8 @@ const ADDITIONAL_BUILT_IN_PROMPT_TEMPLATE_COLLECTION_KEYS: Record<string, readon
     "roleplayAnimationTemplates",
     "roleplayOutputTemplates",
   ],
+  // The 2D Avatars package ships its generation prompts as a template collection (see types/avatars.ts).
+  [AVATAR_2D_AGENT_ID]: [AVATAR_PROMPT_TEMPLATE_SETTINGS_KEY],
 };
 
 const RETIRED_BUILT_IN_AGENT_TOOLS: Record<string, ReadonlySet<string>> = {

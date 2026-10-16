@@ -1,12 +1,15 @@
 // ──────────────────────────────────────────────
 // Quick Switcher Mobile — single chevron opens
 // a tabbed menu with Connections + Personas
-// (with persona group support)
+// (with persona group support). Tapping a
+// connection switches to it; its arrow opens
+// the connection's models as a second step.
 // ──────────────────────────────────────────────
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import {
   ChevronUp,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Link,
   CircleUser,
@@ -22,14 +25,20 @@ import { useUpdateChat, useChat } from "../../hooks/use-chats";
 import { useChatStore } from "../../stores/chat.store";
 import { useUIStore } from "../../stores/ui.store";
 import { useSidecarStore } from "../../stores/sidecar.store";
-import { appendLocalSidecarConnectionOption, isLocalSidecarConnectionOption } from "../../lib/connection-filters";
+import {
+  appendLocalSidecarConnectionOption,
+  isLocalSidecarConnectionOption,
+  resolveUsageConnection,
+} from "../../lib/connection-filters";
 import { cn, getAvatarCropStyle } from "../../lib/utils";
-import { parseCharacterDisplayData } from "../../lib/character-display";
+import { getCharacterTitle, parseCharacterDisplayData } from "../../lib/character-display";
 import { buildCharacterIdentityGroups, type CharacterIdentityChoice } from "../../lib/character-identity-groups";
 import { useTranslation as useUiTranslation } from "react-i18next";
 import type { CharacterGroup, Persona } from "@marinara-engine/shared";
 import type { ProfessorMariContextBudget } from "../../lib/professor-mari-context-budget";
 import { ContextBudgetGauge, ContextBudgetIndicator } from "./ContextBudgetIndicator";
+import { SubscriptionUsageWidget } from "../connections/SubscriptionUsageWidget";
+import { ConnectionModelPicker } from "../connections/ConnectionModelPicker";
 
 interface PersonaGroupRow {
   id: string;
@@ -45,8 +54,6 @@ interface ParsedGroup {
   members: Persona[];
 }
 
-const UNGROUPED_PERSONA_GROUP_ID = "__ungrouped-personas__";
-
 export function QuickSwitcherMobile({ contextBudget }: { contextBudget?: ProfessorMariContextBudget | null }) {
   const { t: localizeUi } = useUiTranslation();
   const [open, setOpen] = useState(false);
@@ -55,6 +62,8 @@ export function QuickSwitcherMobile({ contextBudget }: { contextBudget?: Profess
   const [showCharacterGroups, setShowCharacterGroups] = useState(false);
   const [expandedCharacterGroups, setExpandedCharacterGroups] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
+  /** The connection whose models are shown as the menu's second step; null shows the connection list. */
+  const [modelsStep, setModelsStep] = useState<string | null>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const activeChatId = useChatStore((s) => s.activeChatId);
@@ -86,12 +95,24 @@ export function QuickSwitcherMobile({ contextBudget }: { contextBudget?: Profess
   const chatMode = (chat as unknown as { mode?: string } | null | undefined)?.mode;
   const isRandom = activeConnectionId === "random";
   const sortedConnections = appendLocalSidecarConnectionOption(
-    (connections ?? []) as Array<{ id: string; name: string; provider?: string; useForRandom?: string }>,
+    (connections ?? []) as Array<{
+      id: string;
+      name: string;
+      provider?: string;
+      model?: string;
+      pinnedModels?: unknown;
+      useForRandom?: string;
+      showUsageWidget?: unknown;
+    }>,
     chatMode !== "game" && sidecarModelDownloaded,
     sidecarModelDisplayName,
   )
     .filter((connection) => !isRandom || !isLocalSidecarConnectionOption(connection))
     .sort((a, b) => (a.name || "").localeCompare(b.name || ""));
+
+  // Mirrors the desktop switcher: the NanoGPT quota follows the selected
+  // connection, and Random has no single connection to read a quota from.
+  const usageConnection = resolveUsageConnection(sortedConnections, activeConnectionId);
 
   const sortedPersonas = (rawPersonas ?? []).slice().sort((a, b) => a.name.localeCompare(b.name));
   const normalizedSearch = search.trim().toLocaleLowerCase();
@@ -107,7 +128,7 @@ export function QuickSwitcherMobile({ contextBudget }: { contextBudget?: Profess
     return map;
   }, [sortedPersonas]);
 
-  const { groups } = useMemo(() => {
+  const { groups, ungroupedPersonas } = useMemo(() => {
     const groupRows = (rawPersonaGroups ?? []) as PersonaGroupRow[];
     const allGroupedIds = new Set<string>();
     const parsedGroups: ParsedGroup[] = [];
@@ -133,16 +154,13 @@ export function QuickSwitcherMobile({ contextBudget }: { contextBudget?: Profess
     }
 
     parsedGroups.sort((a, b) => a.name.localeCompare(b.name));
-    const ungroupedList = visiblePersonas.filter((p) => !allGroupedIds.has(p.id));
-    if (ungroupedList.length > 0) {
-      parsedGroups.push({
-        id: UNGROUPED_PERSONA_GROUP_ID,
-        name: "Ungrouped",
-        memberIds: ungroupedList.map((p) => p.id),
-        members: ungroupedList,
-      });
-    }
-    return { groups: parsedGroups };
+    // F9 (O5): personas in no named group are not wrapped in their own
+    // "Ungrouped" folder - that folder served no purpose (everyone already
+    // starts expanded/collapsed the same way a real folder would), it just
+    // added a tap for a persona that has no group at all. Flat rows instead,
+    // matching the desktop QuickPersonaSwitcher fix from slice 50.
+    const ungroupedPersonas = visiblePersonas.filter((p) => !allGroupedIds.has(p.id));
+    return { groups: parsedGroups, ungroupedPersonas };
   }, [normalizedSearch, rawPersonaGroups, personaMap, visiblePersonas]);
 
   const visibleCharacterGroups = useMemo(
@@ -176,13 +194,24 @@ export function QuickSwitcherMobile({ contextBudget }: { contextBudget?: Profess
   }, []);
 
   const handleSwitchConnection = useCallback(
-    (connId: string | null) => {
+    (connId: string) => {
       if (!activeChatId) return;
-      updateChat.mutate({ id: activeChatId, connectionId: connId });
+      if (connId !== activeConnectionId) updateChat.mutate({ id: activeChatId, connectionId: connId });
+      // Tapping a row only switches; the row's arrow opens the model list (picking a model there switches too).
       setOpen(false);
+      btnRef.current?.focus();
     },
-    [activeChatId, updateChat],
+    [activeChatId, activeConnectionId, updateChat],
   );
+  useEffect(() => {
+    if (!open) setModelsStep(null);
+  }, [open]);
+  const modelsConnection =
+    tab === "connections" && modelsStep && !isRandom
+      ? sortedConnections.find(
+          (connection) => connection.id === modelsStep && !isLocalSidecarConnectionOption(connection),
+        )
+      : undefined;
 
   const handleToggleRandom = useCallback(() => {
     if (!activeChatId) return;
@@ -225,8 +254,19 @@ export function QuickSwitcherMobile({ contextBudget }: { contextBudget?: Profess
         setOpen(false);
       }
     };
+    // Escape closes the menu wherever focus is: Safari does not focus a tapped or clicked button.
+    const onKeyDown = (event: KeyboardEvent) => {
+      // Escape while an input method is composing cancels the composition, not the menu.
+      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
+      setOpen(false);
+      btnRef.current?.focus();
+    };
     document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("keydown", onKeyDown);
+    };
   }, [open]);
 
   useEffect(() => {
@@ -260,7 +300,8 @@ export function QuickSwitcherMobile({ contextBudget }: { contextBudget?: Profess
       const openAbove = spaceAbove >= spaceBelow;
       const anchoredSpace = openAbove ? spaceAbove : spaceBelow;
       const useViewportFallback = anchoredSpace < 160;
-      const maxHeight = Math.min(400, useViewportFallback ? window.innerHeight - 16 : anchoredSpace);
+      // The models step has a search box and a list, so it may grow taller than the connection list.
+      const maxHeight = Math.min(modelsStep ? 560 : 400, useViewportFallback ? window.innerHeight - 16 : anchoredSpace);
       setPos({
         left,
         // Anchor by `bottom` when opening upwards so short content stays
@@ -285,7 +326,7 @@ export function QuickSwitcherMobile({ contextBudget }: { contextBudget?: Profess
       window.visualViewport?.removeEventListener("resize", update);
       window.visualViewport?.removeEventListener("scroll", update);
     };
-  }, [open, tab, expandedGroups, expandedCharacterGroups, showCharacterGroups]);
+  }, [open, tab, expandedGroups, expandedCharacterGroups, showCharacterGroups, modelsStep]);
 
   if (!activeChatId) return null;
 
@@ -358,9 +399,12 @@ export function QuickSwitcherMobile({ contextBudget }: { contextBudget?: Profess
           <div
             ref={menuRef}
             data-chat-floating-panel
+            data-quick-switcher-mobile-menu
             className={cn(
-              "fixed z-[9999] flex min-w-0 flex-col overflow-hidden rounded-xl border border-foreground/10 shadow-2xl",
-              chatMode === "roleplay" ? "bg-[var(--card)]" : "bg-[var(--background)]",
+              "mari-chat-style-surface fixed z-[9999] flex min-w-0 flex-col overflow-hidden rounded-xl border border-foreground/10 shadow-2xl",
+              chatMode === "roleplay"
+                ? "bg-[var(--card)] [--mari-chat-existing-bg:var(--card)]"
+                : "bg-[var(--background)] [--mari-chat-existing-bg:var(--background)]",
             )}
             style={
               pos
@@ -375,7 +419,10 @@ export function QuickSwitcherMobile({ contextBudget }: { contextBudget?: Profess
           >
             <div className="flex border-b border-foreground/10">
               <button
-                onClick={() => setTab("connections")}
+                onClick={() => {
+                  setTab("connections");
+                  setModelsStep(null);
+                }}
                 className={cn(
                   "flex flex-1 items-center justify-center gap-1.5 px-3 py-2.5 text-[0.6875rem] font-semibold transition-colors",
                   tab === "connections"
@@ -412,12 +459,41 @@ export function QuickSwitcherMobile({ contextBudget }: { contextBudget?: Profess
               </label>
             )}
 
-            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-1">
+            {modelsConnection && (
+              <ConnectionModelPicker
+                connection={modelsConnection}
+                chatId={activeChatId}
+                chatConnectionId={activeConnectionId}
+                showConnectionName
+                onPicked={() => {
+                  setOpen(false);
+                  btnRef.current?.focus();
+                }}
+                leading={
+                  <button
+                    type="button"
+                    data-model-back
+                    onClick={() => setModelsStep(null)}
+                    aria-label={localizeUi("connections.modelPicker.back")}
+                    title={localizeUi("connections.modelPicker.back")}
+                    className="-my-2 -ml-2 flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-foreground/60 transition-colors hover:bg-foreground/10 hover:text-foreground/85"
+                  >
+                    <ChevronLeft size="1rem" />
+                  </button>
+                }
+              />
+            )}
+            <div className={cn("min-h-0 flex-1 overflow-y-auto overscroll-contain p-1", modelsConnection && "hidden")}>
               {tab === "connections" && (
                 <>
                   {contextBudget && (
                     <div className="px-2 pt-1">
                       <ContextBudgetIndicator budget={contextBudget} useAccentColor />
+                    </div>
+                  )}
+                  {usageConnection && (
+                    <div className="px-2 pt-1">
+                      <SubscriptionUsageWidget connectionId={usageConnection.id} variant="inline" />
                     </div>
                   )}
                   <button
@@ -471,18 +547,61 @@ export function QuickSwitcherMobile({ contextBudget }: { contextBudget?: Profess
                         </button>
                       );
                     }
+                    const hasModels = !isLocalSidecarConnectionOption(conn);
                     return (
-                      <button
+                      <div
                         key={conn.id}
-                        onClick={() => handleSwitchConnection(conn.id)}
                         className={cn(
-                          "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs transition-colors hover:bg-foreground/10",
-                          isActive && "text-foreground font-semibold",
+                          "relative flex min-h-11 w-full items-stretch rounded-lg text-xs",
+                          isActive && "bg-foreground/[0.07] text-foreground font-semibold",
                         )}
                       >
-                        <span className="flex-1 truncate">{conn.name || conn.id}</span>
-                        {isActive && <span className="text-[0.6875rem]">✓</span>}
-                      </button>
+                        {isActive && (
+                          <span
+                            aria-hidden
+                            className="pointer-events-none absolute inset-y-1.5 left-0 w-0.5 rounded-full bg-[var(--marinara-chat-chrome-accent)]"
+                          />
+                        )}
+                        <button
+                          type="button"
+                          data-connection-option={conn.id}
+                          aria-current={isActive ? "true" : undefined}
+                          onClick={() => handleSwitchConnection(conn.id)}
+                          className={cn(
+                            "flex min-w-0 flex-1 items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-foreground/10",
+                            hasModels ? "rounded-l-lg" : "rounded-lg",
+                          )}
+                        >
+                          <span className="flex min-w-0 flex-1 flex-col">
+                            <span className="truncate">{conn.name || conn.id}</span>
+                            {isActive && conn.model && (
+                              <span className="truncate text-[0.625rem] font-normal text-foreground/50">
+                                {conn.model}
+                              </span>
+                            )}
+                          </span>
+                          {isActive && (
+                            <Check size="0.75rem" className="shrink-0 text-[var(--marinara-chat-chrome-accent)]" />
+                          )}
+                        </button>
+                        {hasModels && (
+                          <button
+                            type="button"
+                            data-connection-models={conn.id}
+                            onClick={() => setModelsStep(conn.id)}
+                            aria-label={localizeUi("connections.modelPicker.showModels", {
+                              connection: conn.name || conn.id,
+                            })}
+                            title={localizeUi("connections.modelPicker.showModels", {
+                              connection: conn.name || conn.id,
+                            })}
+                            className="relative flex w-12 shrink-0 items-center justify-center rounded-r-lg text-foreground/40 transition-colors hover:bg-foreground/10 hover:text-foreground/70"
+                          >
+                            <span aria-hidden className="absolute inset-y-2.5 left-0 border-l border-foreground/15" />
+                            <ChevronRight size="0.875rem" aria-hidden />
+                          </button>
+                        )}
+                      </div>
                     );
                   })}
                   {sortedConnections.length === 0 && (
@@ -578,6 +697,8 @@ export function QuickSwitcherMobile({ contextBudget }: { contextBudget?: Profess
                       </div>
                     );
                   })}
+                  {/* F9: personas in no named group: flat rows, no folder to tap through. */}
+                  {ungroupedPersonas.map((persona) => renderPersonaRow(persona, false))}
                   {sortedPersonas.length > 0 && visiblePersonas.length === 0 && !hasVisibleCharacterChoices && (
                     <div className="px-3 py-4 text-center text-[0.6875rem] italic text-foreground/45">
                       {localizeUi("ui.chat.personapicker.noMatchingPersonas")}
@@ -665,8 +786,9 @@ export function QuickSwitcherMobile({ contextBudget }: { contextBudget?: Profess
                                       </div>
                                       <div className="min-w-0 flex-1">
                                         <span className="block truncate text-xs font-semibold">{name}</span>
-                                        <span className="block text-[0.625rem] text-foreground/45">
-                                          {character.comment || localizeUi("ui.chat.personapicker.characterSource")}
+                                        <span className="block truncate text-[0.625rem] text-foreground/45">
+                                          {getCharacterTitle(characterData) ||
+                                            localizeUi("ui.chat.personapicker.characterSource")}
                                         </span>
                                       </div>
                                       {isActive && <span className="text-[0.6875rem]">✓</span>}

@@ -1,0 +1,873 @@
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+// The parameter panel only shows settings that change the request for the selected provider and model. This test is
+// the source of truth for those rules: it changes one setting at a time and records which changes alter the request.
+// Most providers use a local HTTP stub; ChatGPT uses its production Responses body builder before transport, and the
+// subscription provider uses an SDK stub.
+// The shared rules must match exactly, for effort on and effort off, so a provider change that makes a hidden setting
+// matter (or a shown one stop mattering) fails here instead of silently misleading the panel.
+const root = mkdtempSync(join(tmpdir(), "marinara-param-relevance-"));
+const previousCodexHome = process.env.CODEX_HOME;
+process.env.DATA_DIR = root;
+process.env.FILE_STORAGE_DIR = `${process.env.DATA_DIR}/storage`; // never the live store named in .env
+process.env.CODEX_HOME = join(root, "codex-home");
+mkdirSync(process.env.CODEX_HOME, { recursive: true });
+const testTokenPayload = Buffer.from(JSON.stringify({ exp: 9_999_999_999 })).toString("base64url");
+writeFileSync(
+  join(process.env.CODEX_HOME, "auth.json"),
+  JSON.stringify({
+    auth_mode: "chatgpt",
+    last_refresh: new Date().toISOString(),
+    tokens: { access_token: `test.${testTokenPayload}.signature` },
+  }),
+);
+// Every stubbed request fails on purpose; keep those expected provider errors out of the output.
+process.env.LOG_LEVEL = "silent";
+process.env.LOG_FILE_LEVEL = "silent";
+
+type ProbedKey =
+  | "temperature"
+  | "maxTokens"
+  | "topP"
+  | "topK"
+  | "frequencyPenalty"
+  | "presencePenalty"
+  | "reasoningEffort"
+  | "verbosity"
+  | "serviceTier";
+const PROBED: ProbedKey[] = [
+  "temperature",
+  "maxTokens",
+  "topP",
+  "topK",
+  "frequencyPenalty",
+  "presencePenalty",
+  "reasoningEffort",
+  "verbosity",
+  "serviceTier",
+];
+
+try {
+  const { createLLMProvider } = await import("../../packages/server/src/services/llm/provider-registry.js");
+  const { OpenAIProvider } = await import("../../packages/server/src/services/llm/providers/openai.provider.js");
+  const { OpenAIChatGPTProvider } =
+    await import("../../packages/server/src/services/llm/providers/openai-chatgpt.provider.js");
+  const { __setSdkForTesting, ClaudeSubscriptionProvider } =
+    await import("../../packages/server/src/services/llm/providers/claude-subscription.provider.js");
+  const {
+    MODEL_LISTS,
+    isClaudeAdaptiveOnlyNoSamplingModel,
+    isGeminiArgonModel,
+    resolveProviderReasoningEffort,
+    shouldSuppressUnknownModelParameters,
+  } = await import("../../packages/shared/src/constants/model-lists.js");
+  const { resolveAgentConnectionParameters, withThinkingHeadroom } =
+    await import("../../packages/server/src/services/generation/agent-generation-parameters.js");
+  const { relevantGenerationParameters, reasoningEffortChoices, verbosityChoices } =
+    await import("../../packages/shared/src/constants/generation-parameter-relevance.js");
+  const { readOpenRouterModelCapabilities } = await import("../../packages/server/src/routes/connections.routes.js");
+  const { supportsAssistantReasoningPrefill } = await import(
+    "../../packages/server/src/services/generation/generation-parameters.js"
+  );
+
+  assert.deepEqual(
+    readOpenRouterModelCapabilities({
+      supported_parameters: ["temperature", "reasoning", "max_completion_tokens", "unknown"],
+    }),
+    { supportedParameters: ["temperature", "reasoningEffort", "maxTokens"] },
+    "OpenRouter catalog capabilities map only controls recognized by the panel",
+  );
+  assert.equal(
+    readOpenRouterModelCapabilities({ supported_parameters: ["unknown"] }),
+    undefined,
+    "an unrecognized OpenRouter parameter list does not hide all controls",
+  );
+  let firstBody: string | null = null;
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    if (firstBody === null) firstBody = Buffer.concat(chunks).toString("utf8");
+    response.writeHead(400, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: { message: "stub", type: "invalid_request_error" } }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  const base = `http://127.0.0.1:${port}`;
+
+  let sdkOptions: string | null = null;
+  __setSdkForTesting({
+    query: ((args: { options: Record<string, unknown> }) => {
+      const {
+        env: _env,
+        abortController: _abort,
+        canUseTool: _tool,
+        hooks: _hooks,
+        stderr: _stderr,
+        ...rest
+      } = args.options;
+      if (sdkOptions === null) sdkOptions = JSON.stringify(rest);
+      return (async function* () {
+        yield { type: "result", subtype: "success", result: "", usage: { input_tokens: 1, output_tokens: 1 } };
+      })();
+    }) as never,
+  });
+
+  const requireRequestCapture = (captured: string | null, provider: string, model: string): string => {
+    assert.ok(captured, `${provider}/${model} did not produce a request body`);
+    return captured;
+  };
+  assert.throws(
+    () => requireRequestCapture(null, "capture-fixture", "no-request"),
+    /capture-fixture\/no-request did not produce a request body/,
+    "a provider probe without a captured body must fail instead of comparing a sentinel",
+  );
+
+  type Values = {
+    temperature: number;
+    maxTokens: number;
+    topP: number;
+    topK: number;
+    frequencyPenalty: number;
+    presencePenalty: number;
+    reasoningEffort: "low" | "high" | null;
+    verbosity: string;
+    serviceTier: string;
+  };
+
+  // Mirrors provider-generation-runtime.ts and the generate route's option mapping.
+  const chatOptions = (provider: string, model: string, values: Values) => {
+    const lower = model.toLowerCase();
+    let temperature: number | undefined = values.temperature;
+    let topP: number | undefined = values.topP;
+    let topK = values.topK;
+    let frequencyPenalty = values.frequencyPenalty;
+    let presencePenalty = values.presencePenalty;
+    if (isClaudeAdaptiveOnlyNoSamplingModel(lower)) {
+      temperature = undefined;
+      topP = undefined;
+      topK = 0;
+      frequencyPenalty = 0;
+      presencePenalty = 0;
+    } else if (/claude-(opus|sonnet)-4-[56]/.test(lower) || /claude-(opus|sonnet)-4\.[56]/.test(lower)) {
+      topP = undefined;
+      topK = 0;
+      frequencyPenalty = 0;
+      presencePenalty = 0;
+    }
+    const resolved = resolveProviderReasoningEffort({
+      provider,
+      model: lower,
+      reasoningEffort: values.reasoningEffort ?? undefined,
+    });
+    return {
+      model,
+      stream: true,
+      temperature,
+      maxTokens: values.maxTokens,
+      topP,
+      topK: topK > 0 ? topK : undefined,
+      frequencyPenalty: frequencyPenalty || undefined,
+      presencePenalty: presencePenalty || undefined,
+      enableThinking: !!resolved,
+      reasoningEffort: values.reasoningEffort === null && !resolved ? "none" : (resolved ?? undefined),
+      verbosity: values.verbosity,
+      serviceTier: values.serviceTier,
+      enabledParameters: Object.fromEntries(PROBED.map((key) => [key, true])),
+    };
+  };
+
+  const capture = async (make: () => any, provider: string, model: string, values: Values, sdk: boolean) => {
+    firstBody = null;
+    sdkOptions = null;
+    const instance = make();
+    if (provider === "openai_chatgpt") {
+      const delegated = await instance.delegate();
+      const body = delegated.buildResponsesBody(
+        [{ role: "user", content: "test" }],
+        chatOptions(provider, model, values),
+      );
+      return JSON.stringify(body);
+    }
+    const run = (async () => {
+      try {
+        for await (const _chunk of instance.chat(
+          [{ role: "user", content: "test" }],
+          chatOptions(provider, model, values),
+        )) {
+          // drain
+        }
+      } catch {
+        // The stub rejects every request; only the request body matters.
+      }
+    })();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        run,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error(`${provider}/${model} request capture timed out`)), 5000);
+        }),
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+    return requireRequestCapture(sdk ? sdkOptions : firstBody, provider, model);
+  };
+
+  const registry = (id: string, url: string) => () => createLLMProvider(id, url, "test");
+  const cases: Array<{ provider: string; baseUrl: string; models: string[]; make: () => any; sdk?: boolean }> = [
+    {
+      provider: "openai",
+      baseUrl: `${base}/v1`,
+      models: [
+        "gpt-4o",
+        "gpt-4.1",
+        "o3",
+        "gpt-5",
+        "gpt-5.4",
+        "gpt-5.6-sol",
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+        "gpt-6.1-sol",
+        "some-unknown-model",
+      ],
+      make: registry("openai", `${base}/v1`),
+    },
+    {
+      provider: "openrouter",
+      baseUrl: `${base}/openrouter.ai/api/v1`,
+      models: [
+        "openai/gpt-5",
+        "anthropic/claude-sonnet-4.5",
+        "anthropic/claude-opus-5",
+        "anthropic/claude-sonnet-5.5",
+        "deepseek/deepseek-v4-pro",
+        "meta-llama/llama-3.3-70b-instruct",
+        "x-ai/grok-4.3",
+        "google/gemini-3.5-flash",
+        "google/gemini-4-argon",
+        "google/gemini-4-argon:online",
+        "google/gemini-3.8-flash",
+      ],
+      make: registry("openrouter", `${base}/openrouter.ai/api/v1`),
+    },
+    {
+      provider: "nanogpt",
+      baseUrl: `${base}/nano-gpt.com/api/v1`,
+      models: [
+        "TheDrummer/Artemis-v1.1",
+        "gpt-5",
+        "glm-4.6",
+        "deepseek-v4-pro",
+        "claude-opus-5",
+        "google/gemini-4-argon",
+        "gemini-3.7-flash",
+      ],
+      make: registry("nanogpt", `${base}/nano-gpt.com/api/v1`),
+    },
+    {
+      provider: "xai",
+      baseUrl: `${base}/api.x.ai/v1`,
+      models: ["grok-4.3", "grok-4.5", "grok-4-1-fast", "grok-3", "grok-4.20-multi-agent"],
+      make: registry("xai", `${base}/api.x.ai/v1`),
+    },
+    {
+      provider: "mistral",
+      baseUrl: `${base}/v1`,
+      models: [
+        "mistral-large-latest",
+        "magistral-medium-latest",
+        "unknown-mistral",
+        "mistral-large-4-0",
+        "mistral-medium-3-5",
+        "mistral-small-latest",
+        "zai-glm-5-3",
+      ],
+      make: registry("mistral", `${base}/v1`),
+    },
+    {
+      provider: "cohere",
+      baseUrl: `${base}/v1`,
+      models: ["command-a-03-2025", "unknown-cohere"],
+      make: registry("cohere", `${base}/v1`),
+    },
+    {
+      provider: "arli",
+      baseUrl: `${base}/v1`,
+      models: ["Mistral-Nemo-12B-Instruct-2407", "unknown-arli"],
+      make: registry("arli", `${base}/v1`),
+    },
+    {
+      provider: "deepseek",
+      baseUrl: `${base}/v1`,
+      models: ["deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash", "some-unknown-deepseek-model"],
+      make: registry("deepseek", `${base}/v1`),
+    },
+    {
+      provider: "custom",
+      baseUrl: `${base}/v1`,
+      models: ["llama-3.3-70b", "gpt-5.5", "glm-4.6", "claude-opus-5", "gemini-3.8-flash"],
+      make: registry("custom", `${base}/v1`),
+    },
+    {
+      provider: "some_future_provider",
+      baseUrl: `${base}/v1`,
+      models: ["whatever-1"],
+      make: registry("some_future_provider", `${base}/v1`),
+    },
+    {
+      provider: "anthropic",
+      baseUrl: base,
+      models: [
+        "claude-haiku-4-5-20251001",
+        "claude-sonnet-4-5",
+        "claude-opus-4-6",
+        "claude-opus-5",
+        "claude-sonnet-5-5",
+        "claude-3-7-sonnet-20250219",
+        "claude-unknown-9",
+      ],
+      make: registry("anthropic", base),
+    },
+    {
+      provider: "google",
+      baseUrl: `${base}/v1beta`,
+      models: [
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-3-pro-preview",
+        "gemini-4-argon",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-2.0-flash",
+        "gemma-3-27b-it",
+        "gemini-unknown",
+      ],
+      make: registry("google", `${base}/v1beta`),
+    },
+    {
+      provider: "google_vertex",
+      baseUrl: `${base}/v1/projects/p/locations/global`,
+      models: ["gemini-2.5-flash", "gemini-3-pro-preview", "gemini-4-argon", "gemini-3.8-flash", "gemini-unknown"],
+      make: registry("google_vertex", `${base}/v1/projects/p/locations/global`),
+    },
+    {
+      provider: "openai_chatgpt",
+      baseUrl: `${base}/v1`,
+      models: ["gpt-6.1-sol", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-6-astra", "gpt-5.5", "gpt-4o", "some-future-model"],
+      make: () => new OpenAIChatGPTProvider(`${base}/v1`, "test"),
+    },
+    {
+      provider: "local_sidecar",
+      baseUrl: `${base}/v1`,
+      models: ["gemma-3-12b", "qwen3-8b"],
+      make: () => new OpenAIProvider(`${base}/v1`, "local-sidecar", undefined, undefined, undefined, "local-sidecar"),
+    },
+    {
+      provider: "claude_subscription",
+      baseUrl: "",
+      models: [
+        "claude-opus-5",
+        "claude-sonnet-5-5",
+        "claude-fable-5-1",
+        "claude-haiku-4-5-20251001",
+        "claude-sonnet-4-6",
+        "claude-unknown-9",
+      ],
+      make: () => new ClaudeSubscriptionProvider("", ""),
+      sdk: true,
+    },
+  ];
+
+  const mismatches: string[] = [];
+  for (const effort of ["high", null] as const) {
+    const baseline: Values = {
+      temperature: 0.7,
+      maxTokens: 777,
+      topP: 0.9,
+      topK: 40,
+      frequencyPenalty: 0.3,
+      presencePenalty: 0.4,
+      reasoningEffort: effort,
+      verbosity: "low",
+      serviceTier: "flex",
+    };
+    const changes: Array<[ProbedKey, unknown]> = [
+      ["temperature", 0.3],
+      ["maxTokens", 1555],
+      ["topP", 0.5],
+      ["topK", 20],
+      ["frequencyPenalty", 0.6],
+      ["presencePenalty", 0.8],
+      ["reasoningEffort", "low"],
+      ["reasoningEffort", effort === null ? "high" : null],
+      ["verbosity", "high"],
+      ["serviceTier", "priority"],
+    ];
+    for (const testCase of cases) {
+      for (const model of testCase.models) {
+        const before = await capture(testCase.make, testCase.provider, model, baseline, !!testCase.sdk);
+        const sent = new Set<ProbedKey>();
+        for (const [key, value] of changes) {
+          const after = await capture(
+            testCase.make,
+            testCase.provider,
+            model,
+            { ...baseline, [key]: value } as Values,
+            !!testCase.sdk,
+          );
+          if (after !== before) sent.add(key);
+        }
+        const shown = relevantGenerationParameters({
+          provider: testCase.provider,
+          model,
+          reasoningEffort: effort,
+          baseUrl: testCase.baseUrl,
+        });
+        const expected = PROBED.filter((key) => sent.has(key)).join(", ");
+        const actual = PROBED.filter((key) => shown.has(key)).join(", ");
+        if (expected !== actual) {
+          mismatches.push(
+            `${testCase.provider} ${model} (effort ${effort ?? "off"}): request uses [${expected}] but panel shows [${actual}]`,
+          );
+        }
+      }
+    }
+  }
+  assert.deepEqual(mismatches, [], `panel rules disagree with the providers:\n${mismatches.join("\n")}`);
+
+  // Live data only narrows: OpenRouter's per-model list hides what the model ignores upstream.
+  const openRouterGpt5 = relevantGenerationParameters({
+    provider: "openrouter",
+    model: "openai/gpt-5",
+    reasoningEffort: "high",
+    capabilities: { supportedParameters: ["maxTokens", "reasoningEffort"] },
+  });
+  assert.deepEqual(
+    PROBED.filter((key) => openRouterGpt5.has(key)),
+    ["maxTokens", "reasoningEffort", "serviceTier"],
+  );
+
+  // A provider this build has never heard of keeps its controls.
+  const future = relevantGenerationParameters({ provider: "brand_new_provider", model: "", reasoningEffort: "high" });
+  for (const key of ["temperature", "maxTokens", "topP", "topK", "reasoningEffort", "verbosity"] as const) {
+    assert.ok(future.has(key), `unknown providers keep ${key}`);
+  }
+
+  // Effort buttons use the provider's names. Live names come first; otherwise the value actually sent, once each.
+  assert.deepEqual(
+    reasoningEffortChoices({
+      provider: "claude_subscription",
+      model: "claude-opus-5",
+      capabilities: {
+        effortLevels: ["low", "medium", "high", "xhigh", "maximum"],
+        effortLabels: { low: "low", medium: "medium", high: "high", xhigh: "xhigh", maximum: "max" },
+        adaptiveThinking: true,
+      },
+    }).map((choice) => choice.label),
+    [null, "low", "medium", "high", "xhigh", "max"],
+    "Opus 5 can turn thinking off, so Off stays",
+  );
+  assert.deepEqual(
+    reasoningEffortChoices({
+      provider: "claude_subscription",
+      model: "claude-fable-5-1",
+      capabilities: {
+        effortLevels: ["low", "high", "maximum"],
+        effortLabels: { maximum: "max" },
+        adaptiveThinking: true,
+      },
+    }).map((choice) => choice.label),
+    ["low", "high", "max"],
+    "Fable always thinks, so there is no Off",
+  );
+  assert.deepEqual(
+    reasoningEffortChoices({ provider: "openai", model: "o3", selected: "maximum" }).map((choice) => [
+      choice.value,
+      choice.label,
+    ]),
+    [
+      [null, null],
+      ["low", "low"],
+      ["medium", "medium"],
+      ["maximum", "high"],
+    ],
+    "levels that send the same value appear once, keeping the selected one",
+  );
+  assert.deepEqual(
+    reasoningEffortChoices({ provider: "openai", model: "gpt-5.6-sol" }).map((choice) => choice.label),
+    [null, "low", "medium", "high", "xhigh", "max"],
+  );
+  assert.deepEqual(
+    reasoningEffortChoices({ provider: "mistral", model: "mistral-large-4-0", selected: "xhigh" }).map((choice) => [
+      choice.value,
+      choice.label,
+    ]),
+    [
+      [null, null],
+      ["xhigh", "high"],
+    ],
+    "Mistral reasoning models offer Off and high only",
+  );
+  assert.deepEqual(
+    reasoningEffortChoices({ provider: "mistral", model: "zai-glm-5-3" }).map((choice) => choice.label),
+    [null, "low", "high", "max"],
+    "GLM 5.3 on Mistral offers its low, high and max levels",
+  );
+  assert.ok(
+    !relevantGenerationParameters({ provider: "mistral", model: "mistral-large-4-0", reasoningEffort: "high" }).has(
+      "assistantReasoningPrefill",
+    ),
+    "Mistral has no reasoning prefill field",
+  );
+
+  // DeepSeek's own levels: it takes low/high/max, treats medium as high, and never takes xhigh.
+  assert.deepEqual(
+    reasoningEffortChoices({ provider: "deepseek", model: "deepseek-flash" }).map((choice) => choice.label),
+    [null, "low", "high", "max"],
+    "DeepSeek offers Off, low, high and max, with no Medium",
+  );
+  for (const model of ["deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash", "some-unknown-deepseek-model"]) {
+    assert.equal(
+      resolveProviderReasoningEffort({ provider: "deepseek", model, reasoningEffort: "maximum" }),
+      "max",
+      `${model} maps maximum to max`,
+    );
+    assert.equal(
+      resolveProviderReasoningEffort({ provider: "deepseek", model, reasoningEffort: "medium" }),
+      "high",
+      `${model} maps medium to high, the level DeepSeek actually serves`,
+    );
+    assert.equal(
+      resolveProviderReasoningEffort({ provider: "deepseek", model, reasoningEffort: "xhigh" }),
+      "high",
+      `${model} has no xhigh level`,
+    );
+    assert.equal(
+      resolveProviderReasoningEffort({ provider: "deepseek", model, reasoningEffort: "none" }),
+      null,
+      `${model} can turn thinking off`,
+    );
+  }
+
+  // DeepSeek ignores topK, verbosity and both penalties, and the live sampler swaps with the mode.
+  for (const model of ["deepseek-flash", "deepseek-v4-pro", "deepseek-v4-flash"]) {
+    for (const reasoningEffort of ["high", null] as const) {
+      const set = relevantGenerationParameters({ provider: "deepseek", model, reasoningEffort });
+      for (const key of ["topK", "verbosity", "frequencyPenalty", "presencePenalty"] as const) {
+        assert.ok(!set.has(key), `${model} hides ${key} with effort ${reasoningEffort ?? "off"}`);
+      }
+      assert.equal(set.has("topP"), reasoningEffort === "high", `${model} shows topP only while thinking`);
+      assert.equal(
+        set.has("temperature"),
+        reasoningEffort === null,
+        `${model} shows temperature only while not thinking`,
+      );
+    }
+  }
+
+  // A DeepSeek model name this build does not know falls back to the unknown-model rule, which is the same rule that
+  // made the reported "my controls disappeared" case: the panel then offers only max tokens. Pinned here so the
+  // fallback stays deliberate, and so a model-list change that silently widens or narrows it is caught.
+  assert.ok(
+    shouldSuppressUnknownModelParameters("deepseek", "some-unknown-deepseek-model"),
+    "an unrecognized DeepSeek model id suppresses the sampled controls",
+  );
+  assert.deepEqual(
+    [...relevantGenerationParameters({
+      provider: "deepseek",
+      model: "some-unknown-deepseek-model",
+      reasoningEffort: "high",
+    })]
+      .filter((key) => PROBED.includes(key))
+      .sort(),
+    ["maxTokens"],
+    "an unrecognized DeepSeek model id keeps only max tokens",
+  );
+
+  // customParameters are applied before the sampler strip, so they can flip the reasoning mode after the built-in
+  // reasoning branch has run. The strip must follow whatever the body actually ships: picking from options alone
+  // left a non-thinking request carrying top_p and no temperature, the exact opposite of DeepSeek's rules.
+  {
+    const deepseek = registry("deepseek", `${base}/v1`);
+    const withOverride = async (custom: Record<string, unknown>, reasoningEffort: "high" | "none") => {
+      firstBody = null;
+      const instance = deepseek();
+      const request = instance.chat([{ role: "user", content: "hi" }], {
+        ...chatOptions("deepseek", "deepseek-flash", {
+          temperature: 0.7,
+          maxTokens: 64,
+          topP: 0.9,
+          topK: 0,
+          frequencyPenalty: 0,
+          presencePenalty: 0,
+          reasoningEffort: "high",
+          verbosity: "medium",
+          serviceTier: "auto",
+        }),
+        reasoningEffort: reasoningEffort === "none" ? "none" : "high",
+        customParameters: custom,
+      });
+      await request.next().catch(() => undefined);
+      const body = JSON.parse(requireRequestCapture(firstBody, "deepseek", "deepseek-flash")) as Record<string, unknown>;
+      return { temperature: "temperature" in body, topP: "top_p" in body, effort: body.reasoning_effort };
+    };
+
+    const forcedOff = await withOverride({ reasoning_effort: "none" }, "high");
+    assert.equal(forcedOff.effort, "none", "the override reaches the request body");
+    assert.equal(forcedOff.temperature, true, "a non-thinking override keeps temperature");
+    assert.equal(forcedOff.topP, false, "a non-thinking override drops top_p");
+
+    const forcedOn = await withOverride({ reasoning_effort: "high" }, "none");
+    assert.equal(forcedOn.effort, "high", "the override reaches the request body");
+    assert.equal(forcedOn.temperature, false, "a thinking override drops temperature");
+    assert.equal(forcedOn.topP, true, "a thinking override keeps top_p");
+  }
+
+  // DeepSeek's reasoning prefill needs chat prefix completion: the /beta endpoint plus a `prefix: true` flag on the
+  // final assistant message. The shipped /v1 endpoint has neither, so the panel must not offer the control and the
+  // request must not carry a prefill. Pinned on both sides so the pair cannot drift apart.
+  assert.ok(
+    !relevantGenerationParameters({ provider: "deepseek", model: "deepseek-flash" }).has("assistantReasoningPrefill"),
+    "the panel does not offer a reasoning prefill for DeepSeek",
+  );
+  assert.equal(
+    supportsAssistantReasoningPrefill("deepseek"),
+    false,
+    "the request builder refuses a DeepSeek reasoning prefill",
+  );
+  assert.equal(
+    supportsAssistantReasoningPrefill("zai"),
+    true,
+    "the sibling OpenAI-shaped provider still takes a reasoning prefill",
+  );
+  const chatGptChoices = reasoningEffortChoices({
+    provider: "openai_chatgpt",
+    model: "gpt-5.6-sol",
+    capabilities: {
+      effortLevels: ["low", "medium", "high", "xhigh", "maximum"],
+      effortLabels: { low: "low", medium: "medium", high: "high", xhigh: "xhigh", maximum: "max" },
+      defaultEffort: "low",
+    },
+  });
+  assert.deepEqual(
+    chatGptChoices.map((choice) => [choice.label, choice.kind ?? ""]),
+    [
+      [null, "default"],
+      ["low", ""],
+      ["medium", ""],
+      ["high", ""],
+      ["xhigh", ""],
+      ["max", ""],
+    ],
+    "ChatGPT offers its own levels plus the model default instead of an Off it cannot honour",
+  );
+  // Argon cannot turn thinking off. A saved Off or no level sends its default, medium, everywhere: in the request, in
+  // the agent's thinking room and in the panel, so the panel offers only its three levels.
+  for (const provider of ["google", "google_vertex"]) {
+    assert.deepEqual(
+      reasoningEffortChoices({ provider, model: "gemini-4-argon" }).map((choice) => [
+        choice.value,
+        choice.label,
+        choice.kind ?? "",
+        choice.description ?? "",
+      ]),
+      [
+        ["low", "low", "", ""],
+        ["medium", "medium", "", ""],
+        ["high", "high", "", ""],
+      ],
+      `${provider} Argon offers no Off it cannot honour`,
+    );
+    assert.deepEqual(
+      [null, undefined, "none"].map((reasoningEffort) =>
+        resolveProviderReasoningEffort({
+          provider,
+          model: "gemini-4-argon",
+          reasoningEffort: reasoningEffort as never,
+        }),
+      ),
+      ["medium", "medium", "medium"],
+      `${provider} Argon without a level sends medium`,
+    );
+    const agentOn = (reasoningEffort: string | null) => {
+      const resolved = resolveAgentConnectionParameters({
+        provider,
+        model: "gemini-4-argon",
+        defaultParameters: { reasoningEffort },
+      });
+      return {
+        reasoning: resolved.generation.reasoning,
+        maxTokens: withThinkingHeadroom(4096, resolved.generation, resolved.enabledParameters),
+      };
+    };
+    assert.deepEqual(
+      agentOn(null),
+      agentOn("medium"),
+      `${provider} an agent on an Argon connection saved as Off gets medium and its thinking room`,
+    );
+    assert.deepEqual(agentOn(null).reasoning, { reasoningEffort: "medium", enableThinking: true });
+    assert.ok(agentOn(null).maxTokens > 4096, `${provider} Argon agent calls keep room for thinking`);
+    assert.deepEqual(
+      reasoningEffortChoices({ provider, model: "gemini-3-pro-preview" })[0],
+      { value: null, label: null },
+      `${provider} Gemini 3 keeps its Off choice`,
+    );
+  }
+  // Aggregators list google/gemini-4-argon too; the request leaves out what Argon ignores or rejects (#7534).
+  for (const provider of ["openrouter", "nanogpt"]) {
+    const shown = relevantGenerationParameters({ provider, model: "google/gemini-4-argon", reasoningEffort: "high" });
+    for (const key of ["temperature", "topP", "topK", "frequencyPenalty", "presencePenalty"] as const) {
+      assert.ok(!shown.has(key), `${provider} Argon must not offer ${key}`);
+    }
+  }
+  // New Google and Vertex connections start on the first listed model; Argon needs a paid key and a global location.
+  for (const provider of ["google", "google_vertex"] as const) {
+    assert.ok(!isGeminiArgonModel(MODEL_LISTS[provider][0]!.id), `${provider} new connections must not start on Argon`);
+  }
+  assert.deepEqual(
+    verbosityChoices({
+      provider: "openai_chatgpt",
+      capabilities: { verbosity: { supported: true, default: "low" } },
+    }).map((choice) => [choice.label, choice.description ?? ""]),
+    [
+      [null, "Provider default: low"],
+      ["low", "Provider default"],
+      ["medium", ""],
+      ["high", ""],
+    ],
+  );
+
+  // The panel shows those levels as people read them ("Low", "Extra high"), tooltips and effective values included,
+  // while the values above stay the ones saved and sent.
+  const clientRequire = createRequire(new URL("../../packages/client/package.json", import.meta.url));
+  const React = clientRequire("react");
+  // The Node regression host compiles JSX in classic mode; the client uses the automatic runtime.
+  Object.assign(globalThis, { React });
+  const { renderToStaticMarkup } = clientRequire("react-dom/server");
+  const { I18nextProvider } = await import("../../packages/client/node_modules/react-i18next/dist/es/index.js");
+  const { QueryClient, QueryClientProvider } =
+    await import("../../packages/client/node_modules/@tanstack/react-query/build/modern/index.js");
+  const i18n = clientRequire("i18next").createInstance();
+  await i18n.init({
+    lng: "en",
+    keySeparator: false,
+    nsSeparator: false,
+    resources: {
+      en: {
+        translation: JSON.parse(
+          readFileSync(new URL("../../packages/client/src/localization/locales/en.json", import.meta.url), "utf8"),
+        ),
+      },
+    },
+  });
+  const { CHAT_PARAMETER_DEFAULTS, GenerationParametersFields, getEditableGenerationParameters } =
+    await import("../../packages/client/src/components/ui/GenerationParametersEditor.js");
+  const { generationLevelLabel } = await import("../../packages/client/src/lib/generation-level-label.js");
+  const panelRows = (props: Record<string, unknown>) => {
+    const html: string = renderToStaticMarkup(
+      React.createElement(
+        I18nextProvider,
+        { i18n },
+        React.createElement(
+          QueryClientProvider,
+          { client: new QueryClient() },
+          React.createElement(GenerationParametersFields, {
+            value: getEditableGenerationParameters(CHAT_PARAMETER_DEFAULTS),
+            onChange: () => {},
+            ...props,
+          }),
+        ),
+      ),
+    );
+    const row = (label: string) => {
+      const rest = html.slice(html.indexOf(`>${label}<`));
+      const buttons = /<div class="mt-1 flex flex-wrap gap-1.5">(.*?)<\/div>/su.exec(rest)?.[1] ?? "";
+      return {
+        effective: /data-effective-parameter="[^"]*">([^<]*)</u.exec(rest)?.[1],
+        choices: [...buttons.matchAll(/<button([^>]*)>([^<]*)<\/button>/gu)].map(([, attrs, text]) => [
+          text,
+          /title="([^"]*)"/u.exec(attrs!)?.[1] ?? "",
+        ]),
+      };
+    };
+    return { effort: row("Reasoning Effort"), verbosity: row("Verbosity") };
+  };
+  assert.deepEqual(
+    panelRows({
+      provider: "openai_chatgpt",
+      model: "gpt-5.6-sol",
+      modelCapabilities: {
+        effortLevels: ["low", "medium", "high", "xhigh", "maximum"],
+        effortLabels: { low: "low", medium: "medium", high: "high", xhigh: "xhigh", maximum: "max" },
+        defaultEffort: "low",
+      },
+      effectiveParameters: { reasoningEffort: { value: "xhigh", source: "connection", enabled: true } },
+    }).effort,
+    {
+      effective: "Effective: Extra high · from connection",
+      choices: [
+        ["Default", "Provider default: Low"],
+        ["Low", ""],
+        ["Medium", ""],
+        ["High", ""],
+        ["Extra high", ""],
+        ["Max", ""],
+      ],
+    },
+    "Codex effort buttons, their default and the effective level are capitalized",
+  );
+  assert.deepEqual(
+    panelRows({
+      provider: "openai",
+      model: "gpt-5.6-sol",
+      modelCapabilities: { verbosity: { supported: true, default: "medium" } },
+      effectiveParameters: {
+        reasoningEffort: { value: "high", source: "chat", enabled: true },
+        verbosity: { value: "low", source: "preset", enabled: true },
+      },
+    }),
+    {
+      effort: {
+        effective: "Effective: High · this chat",
+        choices: [
+          ["Off", ""],
+          ["Low", ""],
+          ["Medium", ""],
+          ["High", ""],
+          ["Extra high", ""],
+          ["Max", ""],
+        ],
+      },
+      verbosity: {
+        effective: "Effective: Low · from preset",
+        choices: [
+          ["None", "Provider default: Medium"],
+          ["Low", ""],
+          ["Medium", "Provider default"],
+          ["High", ""],
+        ],
+      },
+    },
+    "OpenAI effort and verbosity buttons are capitalized",
+  );
+  // A level with no name of its own (a provider's own label) keeps its text with a capital first letter.
+  assert.deepEqual(
+    ["maximum", "ultra"].map((level) => generationLevelLabel(level, (key: string) => i18n.t(key))),
+    ["Maximum", "Ultra"],
+  );
+
+  __setSdkForTesting(null);
+  await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  console.log("generation-parameter-relevance regression passed");
+} finally {
+  if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = previousCodexHome;
+  rmSync(root, { recursive: true, force: true });
+}

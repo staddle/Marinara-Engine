@@ -6,12 +6,12 @@
 // for smooth transitions.
 // ──────────────────────────────────────────────
 
+import { worldFamilySound } from "@marinara-engine/shared";
 import { gameAssetFileUrl } from "./game-asset-urls";
+import { SILENT_AUDIO_DATA_URI } from "./silent-audio";
 
 const CROSSFADE_MS = 2000;
 const SFX_POOL_SIZE = 8;
-const SILENT_AUDIO_DATA_URI =
-  "data:audio/wav;base64,UklGRkQDAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YSADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==";
 
 type AssetMap = Record<string, { path: string }>;
 type AudioSessionType = "auto" | "ambient" | "playback" | "transient" | "transient-solo" | "play-and-record";
@@ -99,6 +99,8 @@ class GameAudioManager {
   private isMuted = false;
   private currentMusicTag: string | null = null;
   private currentAmbientTag: string | null = null;
+  /** The open game's art family (worldgen W6f), so its sounds are its setting's. */
+  private artFamily: string | undefined;
   private fadeInterval: ReturnType<typeof setInterval> | null = null;
   /** Tracks tags whose play() was rejected by autoplay policy. */
   private pendingMusic: { tag: string; manifest?: Record<string, { path: string }> | null } | null = null;
@@ -793,9 +795,17 @@ class GameAudioManager {
     this.fadeInterval = interval;
   }
 
+  /** The open game's art family: its own sound for an event when it has one, and none from another
+   *  family (no swords in a shoot-out). Undefined for a game without a setting kit. */
+  setArtFamily(family: string | undefined): void {
+    this.artFamily = family;
+  }
+
   /** Play a sound effect once or repeat it sequentially for a scene beat. */
-  playSfx(tag: string, manifest?: AssetMap | null, loopCount = 1): void {
+  playSfx(requested: string, manifest?: AssetMap | null, loopCount = 1): void {
     if (this.isMuted || this.sfxVolume <= 0 || !this.userHasInteracted) return;
+    const tag = worldFamilySound(requested, this.artFamily, manifest);
+    if (!tag) return;
     const generation = this.sfxGeneration;
     const url = this.resolveAssetUrl(tag, manifest);
     const audio = this.sfxPool[this.sfxIndex % SFX_POOL_SIZE]!;

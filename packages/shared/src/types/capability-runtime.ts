@@ -1,3 +1,5 @@
+import type { CapabilityAchievementHost } from "./achievement.js";
+import type { CapabilityIntegrationHost } from "./generation-integration.js";
 import type { ChatMode, MessageRole } from "./chat.js";
 import type { SpatialContextSnapshot, SpatialSnapshotSource } from "./spatial-context.js";
 
@@ -199,6 +201,13 @@ export interface CapabilityMessageRecord {
   activeSwipeIndex: number;
   extra: string;
   createdAt: string;
+  /**
+   * The message as Engine agents read it (capability API 1.71): each live whisper at its saved place as
+   * `[Private whisper to <name>: …]`, a whisper-only message as its whispers alone, a reply's documents after it, and
+   * no leftover private notes. `listMessages` sets it in Roleplay chats outside hosted multiplayer rooms; it is absent
+   * elsewhere and on older Engines, so read `agentContent ?? content`. `extra` still holds every whisper in all modes.
+   */
+  agentContent?: string;
 }
 
 export interface CapabilitySpatialSnapshotWrite {
@@ -363,10 +372,59 @@ export interface CapabilityPersistenceHost extends CapabilityPersistenceSession 
 export interface CapabilityEmbeddingHost {
   spaceId: string;
   label: string;
-  embed(texts: string[], signal?: AbortSignal): Promise<number[][] | null>;
+  /**
+   * Pass `"query"` for search text; texts default to `"document"`. Some models (e5, nomic) add a
+   * different prefix to each. Capability API 1.68: older Engines ignore the third argument.
+   */
+  embed(texts: string[], signal?: AbortSignal, inputType?: "query" | "document"): Promise<number[][] | null>;
+}
+
+/** One bounded question for the user's Decision model. */
+export interface CapabilityDecisionQuestion {
+  /** Unique within one request; the answer comes back under this id. */
+  id: string;
+  /** A yes/no statement about the context, at most 500 characters. */
+  question: string;
+  /** Present for a Choice question: the options the model chooses between. */
+  options?: string[];
+}
+
+export interface CapabilityDecisionRequest {
+  /** Caller-provided context, oldest first. The oldest messages are dropped to fit the model. */
+  /** `name` is at most 100 characters. */
+  messages: Array<{ role: "system" | "user" | "assistant"; name?: string; content: string }>;
+  questions: CapabilityDecisionQuestion[];
+  signal?: AbortSignal;
+  debugMode?: boolean;
+}
+
+export interface CapabilityDecisionResult {
+  model: string | null;
+  /** Probability of yes, per yes/no question id. A question missing here was not answered. */
+  answers: Record<string, number>;
+  /** Chosen option, per Choice question id, or "none of these" when no option fits. */
+  choices: Record<string, string>;
+  /** The model's own yes threshold. Probabilities are not comparable across Decision models. */
+  threshold: number;
+}
+
+export interface CapabilityDecisionHost {
+  /**
+   * Ask the user's configured Decision model. Resolves null when no Decision model is
+   * configured, or it gave no answer at all (unreachable, timed out or cancelled);
+   * throws only for an invalid request.
+   */
+  evaluate(request: CapabilityDecisionRequest): Promise<CapabilityDecisionResult | null>;
 }
 
 export interface CapabilityRuntimeHost {
+  /** Read and unlock the package's own achievements. Requires the `achievements`
+   *  permission and capability API 1.36. */
+  achievements: CapabilityAchievementHost;
+  /** The user's Decision model. Optional: feature-detect it on older Engines. */
+  decisions?: CapabilityDecisionHost;
+  /** Live provider/media services. Requires capability API 1.31. */
+  integrations?: CapabilityIntegrationHost;
   embeddings: CapabilityEmbeddingHost;
   /** Resolve the package's current embedding configuration. Requires capability API 1.15. */
   resolveEmbeddings(): Promise<CapabilityEmbeddingHost>;

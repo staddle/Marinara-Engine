@@ -1,6 +1,8 @@
 // ──────────────────────────────────────────────
 // Character Card V2 Types (compatible with ST / Chub)
 // ──────────────────────────────────────────────
+import type { ChoiceDisplayMode, ChoiceOption, ChoiceOptionSort } from "./prompt.js";
+
 /** Full Character Card V2 envelope. */
 export interface CharacterCardV2 {
   spec: "chara_card_v2";
@@ -40,6 +42,10 @@ export interface CharacterExtensions {
   backstory: string;
   /** Marinara Engine extension: physical appearance description */
   appearance: string;
+  /** Marinara Engine: use `imageAppearance` instead of `appearance` in image prompts. */
+  imageAppearanceEnabled?: boolean;
+  /** Marinara Engine: appearance text used for image prompts when the override is enabled. */
+  imageAppearance?: string;
   /** Marinara Engine: Name display color/gradient (CSS value, e.g. "linear-gradient(90deg, #ff6b6b, #ffd93d)" or "#ff6b6b") */
   nameColor?: string;
   /** Marinara Engine: Dialogue highlight color — text in quotation marks is bold + colored with this */
@@ -52,6 +58,9 @@ export interface CharacterExtensions {
   nameAliases?: string[];
   /** Marinara Engine: RPG stats toggle + custom attributes */
   rpgStats?: RPGStatsConfig;
+  /** Marinara Engine: starting builds for Game Mode rulesets, keyed by ruleset id. A game copies
+   *  the one it needs; a sheet for a ruleset that is not installed is kept dormant. */
+  rulesetSheets?: Record<string, unknown>;
   /** Marinara Engine: per-character Tracker fields copied into each new Roleplay chat. */
   trackerCustomFieldDefaults?: CharacterTrackerCustomFieldDefault[];
   /** Marinara Engine: Conversation-mode availability status */
@@ -87,13 +96,58 @@ export interface CharacterExtensions {
   conversationImageInstructions?: string;
   /** Retain prior card revisions and automatically advance character_version on edits. */
   versioningEnabled?: boolean;
-  /** Marinara Engine: also apply conversationImageInstructions to this character's Noodle images. */
+  /**
+   * Also apply conversationImageInstructions to this character's Noodle images. Noodle owns the
+   * control; Slurp reads it as the default until the character has its own Slurp choice.
+   */
   applyConversationImageInstructionsToNoodle?: boolean;
   /** Marinara Engine: gallery image selected as this character's optional visual reference sheet. */
   characterSheetImageId?: string | null;
   /** Marinara Engine: prefer the selected character sheet over the avatar for image references. */
   useCharacterSheetAsReference?: boolean;
+  /** Marinara Engine: interactive onboarding ("skeleton persona") carried by the card. */
+  onboarding?: CharacterOnboarding;
   [key: string]: unknown;
+}
+
+/**
+ * Interactive onboarding: a skeleton persona the card ships. The five persona
+ * Card fields are prose that may use `{{variable}}` and `{{#if}}`; `variables`
+ * are the questions the player answers once when a chat starts, and the resolved
+ * text becomes a real persona. Absent or `enabled: false` means nothing is parsed.
+ */
+export interface CharacterOnboarding {
+  enabled: boolean;
+  description: string;
+  personality: string;
+  backstory: string;
+  appearance: string;
+  scenario: string;
+  variables: CharacterOnboardingVariable[];
+  /**
+   * Questions for the card's own fields. The answers are saved as chat variables,
+   * so a `{{name}}` in the card resolves per chat and the card itself never changes.
+   */
+  cardVariables: CharacterOnboardingVariable[];
+}
+
+/**
+ * One onboarding question, shaped like a preset variable. No options = free
+ * text; options = a choice whose first option is the default; options plus
+ * `allowCustom` = a choice that also accepts the player's own answer. A variable
+ * named `player` supplies the created persona's name.
+ */
+export interface CharacterOnboardingVariable {
+  id: string;
+  variableName: string;
+  question: string;
+  /** `description` is optional help text shown to the player under the option label. */
+  options: Array<ChoiceOption & { description?: string }>;
+  allowCustom: boolean;
+  multiSelect: boolean;
+  separator: string;
+  displayMode: ChoiceDisplayMode;
+  optionSort: ChoiceOptionSort;
 }
 
 /** Where a Convo-mode behavior directive is inserted into the conversation prompt. */
@@ -157,18 +211,7 @@ export interface CharacterBook {
 }
 
 export type CharacterBookEntryPosition =
-  | "before_char"
-  | "after_char"
-  | "at_depth"
-  | "depth"
-  | 0
-  | 1
-  | 2
-  | 3
-  | 4
-  | 5
-  | 6
-  | 7;
+  "before_char" | "after_char" | "at_depth" | "depth" | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
 export type CharacterBookEntryRole = "system" | "user" | "assistant" | 0 | 1 | 2;
 
 /** A single entry in a character book. */
@@ -237,6 +280,10 @@ export interface PersonaCardSnapshot {
   scenario: string;
   backstory: string;
   appearance: string;
+  /** Marinara Engine: image-prompt override flag, stored as a string like its siblings. */
+  imageAppearanceEnabled?: string;
+  /** Marinara Engine: appearance text used for image prompts while the override is on. */
+  imageAppearance?: string;
   characterSheetImageId: string;
   useCharacterSheetAsReference: string;
   avatarCrop: string;

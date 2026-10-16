@@ -1,22 +1,44 @@
+import { useMessagePresetVariables } from "../../hooks/use-message-preset-variables";
 // ──────────────────────────────────────────────
 // Chat: Message — mode-aware rendering
 // ──────────────────────────────────────────────
+import { createPortal } from "react-dom";
 import { cn, copyToClipboard, getAvatarCropStyle, isLegacyAvatarCrop } from "../../lib/utils";
-import { normalizeAvatarCrop, type AvatarCrop } from "@marinara-engine/shared";
+import {
+  normalizeAvatarCrop,
+  getRoleplayWhispers,
+  getRoleplayCommandContentOffset,
+  type AvatarCrop,
+} from "@marinara-engine/shared";
 import { applyInlineMarkdown, renderMarkdownBlocks, applyInlineMarkdownHTML } from "../../lib/markdown";
+import { MessageReplyPreview, ReplyToMessageButton } from "./MessageReplyPreview";
+import {
+  RoleplayCommandResults,
+  RoleplayDiceRoll,
+  RoleplayWhisper,
+  replaceRoleplayCommandMarkers,
+} from "./RoleplayCommandResults";
+import { splitRoleplayParagraphs } from "../../lib/roleplay-vn-paragraphs";
+import {
+  notifyRoleplayTTSParagraph,
+  withRoleplayTTSParagraphs,
+  type RoleplayTTSParagraphDetail,
+} from "../../lib/roleplay-vn-tts";
 import {
   normalizeCardAssetImageSyntax,
+  resolveCardAssetImageSources,
   resolveCardAssetUrl,
   resolveSelfCardAssets,
   type ChatGalleryIndex,
 } from "../../lib/card-asset-links";
-import { useChatGalleryFilenameIndex } from "../../hooks/use-characters";
+import { useCharacterSummaries, useChatGalleryFilenameIndex } from "../../hooks/use-characters";
 import { useReducedAmbientEffects } from "../../hooks/use-reduced-ambient-effects";
 import { PendingTypingDots } from "./PendingTypingDots";
 import { ChatImagePreview } from "./ChatImagePreview";
+import { ChatVideoAttachment, isAttachmentHiddenByImageText, isVideoAttachment } from "./ChatVideoAttachment";
 import { recordClientRuntimeEvent } from "../../lib/client-runtime-diagnostics";
-import { isDiceRollResult } from "../dice/AnimatedDiceRoll";
-import { DiceMessageContent } from "./ConversationMessageShared";
+import { isDiceRollResult, readRoleplayDiceRolls } from "../../lib/dice-roll-result";
+import { DiceMessageContent, diceRollReplacesMessageContent } from "./ConversationMessageShared";
 import {
   User,
   Bot,
@@ -28,15 +50,18 @@ import {
   Check,
   X,
   Flag,
+  Headphones,
   Eye,
   Search,
   ScrollText,
+  AlertTriangle,
   Brain,
   Languages,
   Volume2,
   VolumeX,
   Mic,
   MicOff,
+  Eraser,
   Loader2,
   Pause,
   Play,
@@ -66,13 +91,18 @@ import { createMessageMacroResolver } from "../../lib/chat-macros";
 import { useApplyRegex } from "../../hooks/use-apply-regex";
 import { getDefaultChatTextColor, useUIStore } from "../../stores/ui.store";
 import { useChatStore } from "../../stores/chat.store";
+import { hasActiveTextSelection } from "../../lib/text-selection";
 import { parseChatMetadata } from "../../lib/chat-display";
 import { useTranslate } from "../../hooks/use-translate";
 import { api } from "../../lib/api-client";
 import { applyTextareaQuoteFormat } from "../../lib/textarea-quotes";
 import { ttsService } from "../../lib/tts-service";
 import { useTTSConfig } from "../../hooks/use-tts";
-import { buildTTSVoiceRequests, normalizeTTSCharacterName, withTTSVoiceRequestCacheKeys } from "../../lib/tts-dialogue";
+import {
+  buildTTSVoiceRequests,
+  findTTSCharacterIdBySpeakerName,
+  withTTSVoiceRequestCacheKeys,
+} from "../../lib/tts-dialogue";
 import { DIALOGUE_QUOTE_PATTERN_SOURCE, HTML_SAFE_DIALOGUE_QUOTE_PATTERN_SOURCE } from "../../lib/dialogue-quotes";
 import { resolveMessageRewriteVersions } from "../../lib/message-rewrite-versions";
 import { convertChatHtmlNewlines } from "../../lib/chat-html-newlines";
@@ -85,6 +115,7 @@ import {
   sanitizeChatHtml,
 } from "../../lib/chat-html";
 import { resolveMessageReasoningDisplay } from "../../lib/message-reasoning";
+import { CHARACTER_COLOR_CLASS, FALLBACK_DIALOGUE_CLASS } from "../../lib/chat-widget-colors";
 import type { CharacterMap, ExpressionAvatarResolver, MessageSelectionToggle, PersonaInfo } from "./chat-area.types";
 import {
   MESSAGE_SELECTION_CHECKBOX_CLASS,
@@ -98,6 +129,7 @@ import { SwipeJumpControl } from "./SwipeJumpControl";
 import { toast } from "sonner";
 import { MessageThinkingModal } from "./MessageThinkingModal";
 import { MESSAGE_ACTION_ICON_SIZE, MessageActionButton } from "./MessageActionButton";
+import { MessageMarkIndicators, MessageMarksAction, type MessageNoteSharing } from "./MessageMarks";
 import { RoleplayStoryboardMessageMedia } from "./RoleplayStoryboardMessageMedia";
 
 const MESSAGE_DOUBLE_TAP_MS = 320;
@@ -354,6 +386,60 @@ function AIVisibilityRecipientAvatars({
   );
 }
 
+function useMessageActionMenu(align: "left" | "right") {
+  const [open, setOpen] = useState(false);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState({ top: 0, left: 0 });
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const update = () => {
+      const button = buttonRef.current;
+      const menu = menuRef.current;
+      if (!button || !menu) return;
+      const rect = button.getBoundingClientRect();
+      const left = align === "right" ? rect.right - menu.offsetWidth : rect.left;
+      setPosition({
+        top: Math.max(8, rect.top - menu.offsetHeight - 7),
+        left: Math.max(8, Math.min(left, window.innerWidth - menu.offsetWidth - 8)),
+      });
+    };
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    const observer = new ResizeObserver(update);
+    if (menuRef.current) observer.observe(menuRef.current);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+      observer.disconnect();
+    };
+  }, [align, open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!buttonRef.current?.contains(target) && !menuRef.current?.contains(target)) setOpen(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+        buttonRef.current?.focus({ preventScroll: true });
+      }
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
+  return { open, setOpen, buttonRef, menuRef, position };
+}
+
 function HideFromAIAction({
   messageId,
   hiddenFromAll,
@@ -370,26 +456,9 @@ function HideFromAIAction({
   align?: "left" | "right";
 }) {
   const { t: localizeUi } = useUiTranslation();
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
+  const { open, setOpen, buttonRef, menuRef, position } = useMessageActionMenu(align);
   const isGroupChat = characters.length > 1;
   const hasRestriction = hiddenFromAll || hiddenCharacterIds.length > 0;
-
-  useEffect(() => {
-    if (!open) return;
-    const handlePointerDown = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("pointerdown", handlePointerDown);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [open]);
 
   const toggleCharacter = (characterId: string) => {
     const next = hiddenFromAll
@@ -401,8 +470,9 @@ function HideFromAIAction({
   };
 
   return (
-    <div ref={rootRef} className="relative">
+    <>
       <ActionBtn
+        buttonRef={buttonRef}
         icon={hasRestriction ? <Eye size={MESSAGE_ACTION_ICON_SIZE} /> : <EyeOff size={MESSAGE_ACTION_ICON_SIZE} />}
         onClick={() => {
           if (isGroupChat) {
@@ -430,61 +500,65 @@ function HideFromAIAction({
         ariaPressed={hasRestriction}
       />
 
-      {open && isGroupChat && (
-        <div
-          role="menu"
-          aria-label={localizeUi("ui.chat.hidefromaiaction.chooseWhichCharactersCannotSeeThisMessage")}
-          className={cn(
-            "marinara-chat-popover absolute bottom-[calc(100%+0.45rem)] z-[80] flex max-h-36 w-max max-w-[min(22rem,calc(100vw-1rem))] flex-wrap items-center gap-1.5 overflow-x-hidden overflow-y-auto rounded-xl border border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-panel-bg)] p-2 shadow-xl",
-            align === "right" ? "right-0" : "left-0",
-          )}
-        >
-          <button
-            type="button"
-            role="menuitemcheckbox"
-            aria-checked={hiddenFromAll}
-            aria-label={localizeUi("ui.chat.hidefromaiaction.hideFromAllCharacters")}
-            title={localizeUi("ui.chat.hidefromaiaction.allCharacters")}
-            onClick={() => onToggle(messageId, hiddenFromAll)}
+      {open &&
+        isGroupChat &&
+        createPortal(
+          <div
+            ref={menuRef}
+            style={position}
+            role="menu"
+            aria-label={localizeUi("ui.chat.hidefromaiaction.chooseWhichCharactersCannotSeeThisMessage")}
             className={cn(
-              "flex aspect-square w-[clamp(1.5rem,8vw,2.25rem)] shrink-0 items-center justify-center rounded-full transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--marinara-chat-chrome-focus-ring)]",
-              hiddenFromAll
-                ? "bg-[var(--marinara-chat-chrome-highlight-bg)] opacity-100 ring-2 ring-[var(--marinara-chat-chrome-button-border-active)]"
-                : "opacity-55 hover:bg-[var(--marinara-chat-chrome-highlight-bg-hover)] hover:opacity-100",
+              "marinara-chat-popover mari-chat-style-surface mari-chat-action-panel fixed z-[9999] flex max-h-36 w-max max-w-[min(22rem,calc(100vw-1rem))] flex-wrap items-center gap-1.5 overflow-x-hidden overflow-y-auto rounded-xl border border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-panel-bg)] p-2 shadow-xl",
             )}
           >
-            <AIVisibilityGroupAvatar characters={characters} className="h-[72%] w-[72%]" />
-          </button>
+            <button
+              type="button"
+              role="menuitemcheckbox"
+              aria-checked={hiddenFromAll}
+              aria-label={localizeUi("ui.chat.hidefromaiaction.hideFromAllCharacters")}
+              title={localizeUi("ui.chat.hidefromaiaction.allCharacters")}
+              onClick={() => onToggle(messageId, hiddenFromAll)}
+              className={cn(
+                "flex aspect-square w-[clamp(1.5rem,8vw,2.25rem)] shrink-0 items-center justify-center rounded-full transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--marinara-chat-chrome-focus-ring)]",
+                hiddenFromAll
+                  ? "bg-[var(--marinara-chat-chrome-highlight-bg)] opacity-100 ring-2 ring-[var(--marinara-chat-chrome-button-border-active)]"
+                  : "opacity-55 hover:bg-[var(--marinara-chat-chrome-highlight-bg-hover)] hover:opacity-100",
+              )}
+            >
+              <AIVisibilityGroupAvatar characters={characters} className="h-[72%] w-[72%]" />
+            </button>
 
-          <span aria-hidden="true" className="h-7 w-px bg-[var(--marinara-chat-chrome-panel-divider)]" />
+            <span aria-hidden="true" className="h-7 w-px bg-[var(--marinara-chat-chrome-panel-divider)]" />
 
-          {characters.map((character) => {
-            const selected = !hiddenFromAll && hiddenCharacterIds.includes(character.id);
-            return (
-              <button
-                key={character.id}
-                type="button"
-                role="menuitemcheckbox"
-                aria-checked={selected}
-                aria-label={localizeUi("ui.chat.hidefromaiaction.hideFromValue1", { value1: character.name })}
-                title={character.name}
-                onClick={() => toggleCharacter(character.id)}
-                className={cn(
-                  "flex aspect-square w-[clamp(1.5rem,8vw,2.25rem)] shrink-0 items-center justify-center rounded-full transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--marinara-chat-chrome-focus-ring)]",
-                  selected
-                    ? "bg-[var(--marinara-chat-chrome-highlight-bg)] opacity-100 ring-2 ring-[var(--marinara-chat-chrome-button-border-active)] brightness-110"
-                    : hiddenFromAll
-                      ? "opacity-35 hover:opacity-80"
-                      : "opacity-55 hover:bg-[var(--marinara-chat-chrome-highlight-bg-hover)] hover:opacity-100",
-                )}
-              >
-                <AIVisibilityAvatar character={character} className="h-[72%] w-[72%] text-[0.625rem]" />
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </div>
+            {characters.map((character) => {
+              const selected = !hiddenFromAll && hiddenCharacterIds.includes(character.id);
+              return (
+                <button
+                  key={character.id}
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={selected}
+                  aria-label={localizeUi("ui.chat.hidefromaiaction.hideFromValue1", { value1: character.name })}
+                  title={character.name}
+                  onClick={() => toggleCharacter(character.id)}
+                  className={cn(
+                    "flex aspect-square w-[clamp(1.5rem,8vw,2.25rem)] shrink-0 items-center justify-center rounded-full transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--marinara-chat-chrome-focus-ring)]",
+                    selected
+                      ? "bg-[var(--marinara-chat-chrome-highlight-bg)] opacity-100 ring-2 ring-[var(--marinara-chat-chrome-button-border-active)] brightness-110"
+                      : hiddenFromAll
+                        ? "opacity-35 hover:opacity-80"
+                        : "opacity-55 hover:bg-[var(--marinara-chat-chrome-highlight-bg-hover)] hover:opacity-100",
+                  )}
+                >
+                  <AIVisibilityAvatar character={character} className="h-[72%] w-[72%] text-[0.625rem]" />
+                </button>
+              );
+            })}
+          </div>,
+          document.body,
+        )}
+    </>
   );
 }
 
@@ -504,26 +578,9 @@ function ConversationStartAction({
   align?: "left" | "right";
 }) {
   const { t: localizeUi } = useUiTranslation();
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
+  const { open, setOpen, buttonRef, menuRef, position } = useMessageActionMenu(align);
   const isGroupChat = characters.length > 1;
   const hasStart = sharedStart || characterIds.length > 0;
-
-  useEffect(() => {
-    if (!open) return;
-    const handlePointerDown = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("pointerdown", handlePointerDown);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [open]);
 
   const toggleCharacter = (characterId: string) => {
     const next = characterIds.includes(characterId)
@@ -533,8 +590,9 @@ function ConversationStartAction({
   };
 
   return (
-    <div ref={rootRef} className="relative">
+    <>
       <ActionBtn
+        buttonRef={buttonRef}
         icon={<Flag size={MESSAGE_ACTION_ICON_SIZE} />}
         onClick={() => {
           if (isGroupChat) setOpen((value) => !value);
@@ -557,61 +615,65 @@ function ConversationStartAction({
         ariaPressed={hasStart}
       />
 
-      {open && isGroupChat && (
-        <div
-          role="menu"
-          aria-label={localizeUi("ui.chat.conversationstartaction.chooseWhoStartsHere")}
-          className={cn(
-            "marinara-chat-popover absolute bottom-[calc(100%+0.45rem)] z-[80] flex max-h-36 w-max max-w-[min(22rem,calc(100vw-1rem))] flex-wrap items-center gap-1.5 overflow-x-hidden overflow-y-auto rounded-xl border border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-panel-bg)] p-2 shadow-xl",
-            align === "right" ? "right-0" : "left-0",
-          )}
-        >
-          <button
-            type="button"
-            role="menuitemcheckbox"
-            aria-checked={sharedStart}
-            aria-label={localizeUi("ui.chat.conversationstartaction.newStartForAllCharacters")}
-            title={localizeUi("ui.chat.hidefromaiaction.allCharacters")}
-            onClick={() => onToggle(messageId, !sharedStart, characterIds)}
+      {open &&
+        isGroupChat &&
+        createPortal(
+          <div
+            ref={menuRef}
+            style={position}
+            role="menu"
+            aria-label={localizeUi("ui.chat.conversationstartaction.chooseWhoStartsHere")}
             className={cn(
-              "flex aspect-square w-[clamp(1.5rem,8vw,2.25rem)] shrink-0 items-center justify-center rounded-full transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--marinara-chat-chrome-focus-ring)]",
-              sharedStart
-                ? "bg-[var(--marinara-chat-chrome-highlight-bg)] opacity-100 ring-2 ring-[var(--marinara-chat-chrome-button-border-active)]"
-                : "opacity-55 hover:bg-[var(--marinara-chat-chrome-highlight-bg-hover)] hover:opacity-100",
+              "marinara-chat-popover mari-chat-style-surface mari-chat-action-panel fixed z-[9999] flex max-h-36 w-max max-w-[min(22rem,calc(100vw-1rem))] flex-wrap items-center gap-1.5 overflow-x-hidden overflow-y-auto rounded-xl border border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-panel-bg)] p-2 shadow-xl",
             )}
           >
-            <AIVisibilityGroupAvatar characters={characters} className="h-[72%] w-[72%]" />
-          </button>
+            <button
+              type="button"
+              role="menuitemcheckbox"
+              aria-checked={sharedStart}
+              aria-label={localizeUi("ui.chat.conversationstartaction.newStartForAllCharacters")}
+              title={localizeUi("ui.chat.hidefromaiaction.allCharacters")}
+              onClick={() => onToggle(messageId, !sharedStart, characterIds)}
+              className={cn(
+                "flex aspect-square w-[clamp(1.5rem,8vw,2.25rem)] shrink-0 items-center justify-center rounded-full transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--marinara-chat-chrome-focus-ring)]",
+                sharedStart
+                  ? "bg-[var(--marinara-chat-chrome-highlight-bg)] opacity-100 ring-2 ring-[var(--marinara-chat-chrome-button-border-active)]"
+                  : "opacity-55 hover:bg-[var(--marinara-chat-chrome-highlight-bg-hover)] hover:opacity-100",
+              )}
+            >
+              <AIVisibilityGroupAvatar characters={characters} className="h-[72%] w-[72%]" />
+            </button>
 
-          <span aria-hidden="true" className="h-7 w-px bg-[var(--marinara-chat-chrome-panel-divider)]" />
+            <span aria-hidden="true" className="h-7 w-px bg-[var(--marinara-chat-chrome-panel-divider)]" />
 
-          {characters.map((character) => {
-            const selected = characterIds.includes(character.id);
-            return (
-              <button
-                key={character.id}
-                type="button"
-                role="menuitemcheckbox"
-                aria-checked={selected}
-                aria-label={localizeUi("ui.chat.conversationstartaction.newStartForValue1", {
-                  value1: character.name,
-                })}
-                title={character.name}
-                onClick={() => toggleCharacter(character.id)}
-                className={cn(
-                  "flex aspect-square w-[clamp(1.5rem,8vw,2.25rem)] shrink-0 items-center justify-center rounded-full transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--marinara-chat-chrome-focus-ring)]",
-                  selected
-                    ? "bg-[var(--marinara-chat-chrome-highlight-bg)] opacity-100 ring-2 ring-[var(--marinara-chat-chrome-button-border-active)] brightness-110"
-                    : "opacity-55 hover:bg-[var(--marinara-chat-chrome-highlight-bg-hover)] hover:opacity-100",
-                )}
-              >
-                <AIVisibilityAvatar character={character} className="h-[72%] w-[72%] text-[0.625rem]" />
-              </button>
-            );
-          })}
-        </div>
-      )}
-    </div>
+            {characters.map((character) => {
+              const selected = characterIds.includes(character.id);
+              return (
+                <button
+                  key={character.id}
+                  type="button"
+                  role="menuitemcheckbox"
+                  aria-checked={selected}
+                  aria-label={localizeUi("ui.chat.conversationstartaction.newStartForValue1", {
+                    value1: character.name,
+                  })}
+                  title={character.name}
+                  onClick={() => toggleCharacter(character.id)}
+                  className={cn(
+                    "flex aspect-square w-[clamp(1.5rem,8vw,2.25rem)] shrink-0 items-center justify-center rounded-full transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--marinara-chat-chrome-focus-ring)]",
+                    selected
+                      ? "bg-[var(--marinara-chat-chrome-highlight-bg)] opacity-100 ring-2 ring-[var(--marinara-chat-chrome-button-border-active)] brightness-110"
+                      : "opacity-55 hover:bg-[var(--marinara-chat-chrome-highlight-bg-hover)] hover:opacity-100",
+                  )}
+                >
+                  <AIVisibilityAvatar character={character} className="h-[72%] w-[72%] text-[0.625rem]" />
+                </button>
+              );
+            })}
+          </div>,
+          document.body,
+        )}
+    </>
   );
 }
 
@@ -620,14 +682,17 @@ function ConversationStartMarkers({
   characterIds,
   characters,
   panel,
+  memoryStartCharacterIds,
 }: {
   sharedStart: boolean;
   characterIds: string[];
   characters: AIVisibilityCharacter[];
   panel?: boolean;
+  memoryStartCharacterIds?: string[];
 }) {
   const { t: localizeUi } = useUiTranslation();
-  const targetedCharacters = characterIds
+  sharedStart ||= memoryStartCharacterIds?.length === 0;
+  const targetedCharacters = [...new Set([...characterIds, ...(memoryStartCharacterIds ?? [])])]
     .map((id) => characters.find((character) => character.id === id))
     .filter((character): character is AIVisibilityCharacter => Boolean(character));
   if (!sharedStart && targetedCharacters.length === 0) return null;
@@ -649,7 +714,11 @@ function ConversationStartMarkers({
   ];
 
   return (
-    <div className={cn("w-full", panel ? "mb-1 px-1" : "mb-0.5 px-2")}>
+    <div
+      className={cn("w-full", panel ? "mb-1 px-1" : "mb-0.5 px-2")}
+      data-advanced-memory-start={memoryStartCharacterIds ? "true" : undefined}
+      title={memoryStartCharacterIds ? localizeUi("chat.advancedMemory.contextStartHelp") : undefined}
+    >
       {sharedStart && panel && (
         <div
           aria-hidden="true"
@@ -825,6 +894,29 @@ const EditTextarea = memo(function EditTextarea({
     }
   }, [autoResize]);
 
+  // An iPhone keyboard shrinks the transcript but not 60dvh. Keep the editor
+  // and its Save row within the part between the top controls and the
+  // composer, so scrolling inside it can always bring its last line into view.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    const transcript = el?.closest<HTMLElement>("[data-chat-scroll]");
+    if (!el || !transcript) return;
+    const fit = () => {
+      const style = getComputedStyle(transcript);
+      const covered =
+        (Number.parseFloat(style.scrollPaddingTop) || 0) +
+        (Number.parseFloat(style.getPropertyValue("--mari-roleplay-content-padding-bottom")) || 0) +
+        (el.nextElementSibling?.getBoundingClientRect().height ?? 0);
+      el.style.setProperty("--mari-message-editor-fit-height", `${Math.max(96, transcript.clientHeight - covered)}px`);
+    };
+    fit();
+    // ponytail: re-measures only when the transcript resizes, so a composer that
+    // grows mid-edit keeps the older limit until then. Observe the composer too if that matters.
+    const observer = new ResizeObserver(fit);
+    observer.observe(transcript);
+    return () => observer.disconnect();
+  }, []);
+
   const handleSave = useCallback(() => {
     if (ref.current) void onSave(formatTextQuotes(ref.current.value, quoteFormat));
   }, [onSave, quoteFormat]);
@@ -848,7 +940,7 @@ const EditTextarea = memo(function EditTextarea({
           if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleSave();
           if (e.key === "Escape") onCancel();
         }}
-        className="relative z-0 w-full resize-none overflow-y-auto overscroll-contain rounded-lg bg-black/30 px-3 py-2 text-white outline-none ring-1 ring-white/20 focus:ring-blue-400/50 max-md:max-h-[min(60dvh,32rem)]"
+        className="relative z-0 w-full resize-none overflow-y-auto overscroll-contain rounded-lg bg-black/30 px-3 py-2 text-white outline-none ring-1 ring-white/20 focus:ring-blue-400/50 max-md:max-h-[min(60dvh,32rem,var(--mari-message-editor-fit-height,100dvh))]"
         style={{ fontSize, lineHeight: 1.5 }}
       />
       <div className="pointer-events-auto relative z-30 flex items-center justify-end gap-1.5">
@@ -881,6 +973,16 @@ const EditTextarea = memo(function EditTextarea({
 interface ChatMessageProps {
   message: Message & { swipes?: Array<{ id: string; content: string }> };
   isStreaming?: boolean;
+  /** Compact paragraph presentation; full message actions stay in the history. */
+  visualNovel?: boolean;
+  followSpeechParagraphs?: boolean;
+  visualNovelSpeech?: RoleplayTTSParagraphDetail | null;
+  onVisualNovelSpeechParagraph?: (index: number) => void;
+  /** Explicit VN paragraph index to render instead of automatically picking the latest paragraph. */
+  visualNovelParagraphIndex?: number;
+  /** Callback notifying the total number of paragraphs available in this message for VN rendering. */
+  onVisualNovelParagraphCount?: (count: number) => void;
+  visualNovelMediaTarget?: HTMLElement | null;
   /** Whether the live Roleplay response has begun emitting visible output. */
   streamingOutputStarted?: boolean;
   /** Frame-throttled live content that receives the same formatter as committed messages. */
@@ -888,8 +990,15 @@ interface ChatMessageProps {
   onDelete?: (messageId: string) => void;
   onRegenerate?: (messageId: string) => void;
   onEdit?: (messageId: string, content: string) => void | Promise<void>;
+  /** N1: this message's reply failed — renders the quiet "Failed · Retry" line. */
+  failedReply?: boolean;
+  failedReplyReason?: string;
+  onRetryFailedReply?: () => void;
+  /** R2: the reply checkup's quiet line, set only on the reply it describes. */
+  replyCheckup?: ReactNode;
   onSetActiveSwipe?: (messageId: string, index: number) => void;
   onToggleConversationStart?: ToggleConversationStart;
+  memoryStartCharacterIds?: string[];
   onToggleHiddenFromAI?: ToggleHiddenFromAI;
   onPeekPrompt?: () => void;
   onBranch?: (messageId: string) => void;
@@ -1030,8 +1139,10 @@ function renderWithSpeakerTags(
   defaultDialogueColor: string | undefined,
   speakerColorMap: Map<string, string> | undefined,
   boldDialogue = true,
+  ownDialogueColor = false,
 ): ReactNode[] {
-  const renderLine = (line: string, color = defaultDialogueColor) => highlightDialogue(line, color, boldDialogue);
+  const renderLine = (line: string, color = defaultDialogueColor, own = ownDialogueColor) =>
+    highlightDialogue(line, color, boldDialogue, own);
 
   if (!SPEAKER_TAG_RE.test(text)) {
     return renderLine(text, defaultDialogueColor);
@@ -1050,9 +1161,11 @@ function renderWithSpeakerTags(
     }
     const speakerName = match[1]!;
     const dialogue = match[2]!;
-    const speakerColor = speakerColorMap?.get(speakerName) ?? defaultDialogueColor;
+    const speakerColor = speakerColorMap?.get(speakerName);
     // Render the dialogue content (without the tags) using the speaker's color
-    nodes.push(<span key={`s${key++}`}>{renderLine(dialogue, speakerColor)}</span>);
+    nodes.push(
+      <span key={`s${key++}`}>{speakerColor ? renderLine(dialogue, speakerColor, true) : renderLine(dialogue)}</span>,
+    );
     lastIndex = match.index + match[0].length;
   }
 
@@ -1089,8 +1202,16 @@ function collectInlineMarkdownRanges(text: string): Array<[number, number]> {
  *
  * Code spans (`…`), images (![…](…)), and links ([…](…)) are treated as
  * protected zones — quotes inside them are not matched as dialogue.
+ *
+ * `ownDialogueColor` marks a character's or persona's own color, which keeps
+ * winning over Apply preset colors (see chat-widget-surfaces.css).
  */
-function highlightDialogue(text: string, dialogueColor?: string, boldDialogue = true): ReactNode[] {
+function highlightDialogue(
+  text: string,
+  dialogueColor?: string,
+  boldDialogue = true,
+  ownDialogueColor = false,
+): ReactNode[] {
   // Step 1: Find protected zones where quotes should NOT trigger dialogue detection.
   // Code spans, images, and links may legitimately contain quotation marks.
   const protectedRanges: Array<[number, number]> = [];
@@ -1143,7 +1264,7 @@ function highlightDialogue(text: string, dialogueColor?: string, boldDialogue = 
       <DialogueTag
         key={`d${key++}`}
         style={dialogueColor ? { color: dialogueColor } : undefined}
-        className={!dialogueColor ? "text-black dark:text-white" : undefined}
+        className={!dialogueColor ? "text-black dark:text-white" : ownDialogueColor ? CHARACTER_COLOR_CLASS : undefined}
       >
         {openQuote}
         {innerNodes}
@@ -1513,7 +1634,7 @@ function colorNamesInNodes(
     if (typeof node === "number") return node;
     if (isCodeNode(node) || isColoredContext(node)) return node;
 
-    if (node && typeof node === "object" && "props" in node) {
+    if (typeof node === "object" && "props" in node) {
       const element = node as React.ReactElement;
       const props = element.props as Record<string, unknown>;
       if (props.children !== undefined) {
@@ -1547,6 +1668,7 @@ function renderContent(
   galleryIndex?: ChatGalleryIndex | null,
   nameColorMap?: Map<string, string> | null,
   textShadow?: string,
+  ownDialogueColor = false,
 ): ReactNode {
   // Portable card://self/gallery refs resolve to the speaking character before
   // any rendering, covering both the markdown branch and the embedded-HTML
@@ -1567,7 +1689,7 @@ function renderContent(
   // interfere with paragraph splitting or trigger the HTML path.
   if (!isHtmlPath) {
     const markdownResult = renderMarkdownBlocks(normalized, (seg, _kp) =>
-      renderWithSpeakerTags(seg, dialogueColor, speakerColorMap, boldDialogue),
+      renderWithSpeakerTags(seg, dialogueColor, speakerColorMap, boldDialogue, ownDialogueColor),
     );
     if (nameColorMap && nameColorMap.size > 0) {
       return colorNamesInNodes(markdownResult, nameColorMap, textShadow);
@@ -1593,13 +1715,12 @@ function renderContent(
   // Convert markdown images to <img> before sanitization so DOMPurify validates them.
   // Keep tags minimal (no class, only loading/decoding attrs) — styling is via .mari-message-content img in CSS
   // to avoid the dialogue-bolding regex mangling attribute quotes.
-  const withImages = normalizeCardAssetImageSyntax(withBreaks).replace(
-    MD_IMAGE_HTML_RE,
-    (_m, alt: string, url: string) => {
+  const withImages = resolveCardAssetImageSources(
+    normalizeCardAssetImageSyntax(withBreaks).replace(MD_IMAGE_HTML_RE, (_m, alt: string, url: string) => {
       const src = escapeHtmlAttr(resolveCardAssetUrl(url));
       const safeAlt = escapeHtmlAttr(alt || "image");
       return `<img src="${src}" alt="${safeAlt}" loading="lazy" decoding="async">`;
-    },
+    }),
   );
 
   const clean = sanitizeChatHtml(withImages, { allowStyle: true });
@@ -1623,7 +1744,7 @@ function renderContent(
         const speakerQuoteRe = new RegExp(`(?<![=\\w])(?:${HTML_SAFE_DIALOGUE_QUOTE_PATTERN_SOURCE})`, "g");
         return content.replace(speakerQuoteRe, (match: string, offset: number) => {
           if (insideTag(content, offset)) return match;
-          return `<${dialogueTag} style="color:${validColor}">${match}</${dialogueTag}>`;
+          return `<${dialogueTag} class="${CHARACTER_COLOR_CLASS}" style="color:${validColor}">${match}</${dialogueTag}>`;
         });
       },
     );
@@ -1640,25 +1761,20 @@ function renderContent(
         if (lastFontClose < lastFontOpen) return match;
       }
       const highlightColor = safeColor(dialogueColor ?? "white");
-      return `<${dialogueTag} style="color:${highlightColor}">${match}</${dialogueTag}>`;
+      const colorClass = ownDialogueColor ? CHARACTER_COLOR_CLASS : FALLBACK_DIALOGUE_CLASS;
+      return `<${dialogueTag} class="${colorClass}" style="color:${highlightColor}">${match}</${dialogueTag}>`;
     });
   })();
 
-  // Convert *** and --- horizontal rules to <hr> tags in HTML path
-  const withHr = withDialogue.replace(
-    /(?:^|(?<=<br[^>]*>))\s*(?:\*{3,}|-{3,})\s*(?:$|(?=<br[^>]*>))/g,
-    '<hr class="mari-md-rule">',
-  );
-
   // Apply markdown-style bold/italic in HTML path
-  const withMarkdown = applyInlineMarkdownHTML(withHr);
+  const withMarkdown = applyInlineMarkdownHTML(withDialogue);
   const finalHtml = sanitizeChatHtml(withMarkdown, { allowStyle: true });
   const scopedCss = scopeChatMessageCss(rawStyleBlocks, `.${htmlScopeClass}`);
   const html = scopedCss ? `<style>${scopedCss}</style>${finalHtml}` : finalHtml;
 
   return (
     <div
-      className={cn("relative !overflow-hidden !contain-paint", htmlScopeClass)}
+      className={cn("mari-html-content relative !overflow-hidden !contain-paint", htmlScopeClass)}
       dangerouslySetInnerHTML={{ __html: html }}
     />
   );
@@ -1711,10 +1827,12 @@ export function RoleplayMessagePreview({
         htmlScopeClass,
         quoteFormat,
         selfCharacterId,
+        undefined, // galleryIndex
         undefined, // nameColorMap
         undefined, // textShadowStr
+        !!dialogueColor,
       ),
-    [boldDialogue, content, htmlScopeClass, quoteFormat, resolvedDialogueColor, selfCharacterId],
+    [boldDialogue, content, dialogueColor, htmlScopeClass, quoteFormat, resolvedDialogueColor, selfCharacterId],
   );
 
   return (
@@ -1757,13 +1875,25 @@ function NameColorText({ color, children }: { color?: string; children: ReactNod
 export const ChatMessage = memo(function ChatMessage({
   message,
   isStreaming,
+  visualNovel = false,
+  followSpeechParagraphs = false,
+  visualNovelSpeech,
+  onVisualNovelSpeechParagraph,
+  visualNovelParagraphIndex,
+  onVisualNovelParagraphCount,
+  visualNovelMediaTarget,
   streamingOutputStarted = false,
   streamingContent,
   onDelete,
   onRegenerate,
   onEdit,
+  failedReply,
+  failedReplyReason,
+  onRetryFailedReply,
+  replyCheckup,
   onSetActiveSwipe,
   onToggleConversationStart,
+  memoryStartCharacterIds,
   onToggleHiddenFromAI,
   onPeekPrompt,
   onBranch,
@@ -1793,6 +1923,7 @@ export const ChatMessage = memo(function ChatMessage({
   const isSystem = message.role === "system";
   const isNarrator = message.role === "narrator";
   const isRoleplay = chatMode === "roleplay";
+  const vnPortraitScale = useUIStore((state) => (visualNovel ? state.roleplayVnPortraitScale : 1));
   const alwaysDisplaySwipeMenu = useUIStore((state) =>
     isRoleplay
       ? state.alwaysDisplayRoleplaySwipeMenu
@@ -1862,7 +1993,7 @@ export const ChatMessage = memo(function ChatMessage({
     () => ({
       fontSize: chatFontSize,
       lineHeight: 1.5,
-      ...(chatFontColor ? { color: chatFontColor } : {}),
+      ...(chatFontColor ? { color: `var(--mari-chat-resolved-text, ${chatFontColor})` } : {}),
       ...textStrokeStyle,
     }),
     [chatFontSize, chatFontColor, textStrokeStyle],
@@ -1960,8 +2091,13 @@ export const ChatMessage = memo(function ChatMessage({
 
   // Translation
   const { translate, translations, translationSources, translating } = useTranslate();
-  const translatedText = translations[message.id];
   const translationSource = translationSources[message.id];
+  // Translations are keyed by message, not swipe. Show one only for the text it
+  // was made from, so a new swipe or a live stream never inherits the old one.
+  const translatedText =
+    !isStreaming && (translationSource === undefined || translationSource === message.content)
+      ? translations[message.id]
+      : undefined;
   const isTranslating = !!translating[message.id];
 
   // TTS
@@ -1973,37 +2109,41 @@ export const ChatMessage = memo(function ChatMessage({
       : message.characterId
         ? characterMap?.get(message.characterId)?.name
         : undefined;
+  // Same lookup as autoplay in ChatArea, so replaying a message uses the voice it autoplayed with.
   const resolveTTSCharacterId = useCallback(
-    (speaker?: string | null) => {
-      const normalizedSpeaker = normalizeTTSCharacterName(speaker);
-      if (!normalizedSpeaker || !characterMap) return null;
-      for (const [characterId, character] of characterMap) {
-        if (normalizeTTSCharacterName(character.name) === normalizedSpeaker) return characterId;
-      }
-      return null;
-    },
+    (speaker?: string | null) => (characterMap ? findTTSCharacterIdBySpeakerName(speaker, characterMap) : null),
     [characterMap],
   );
-  const ttsVoiceRequests = useMemo(
-    () =>
-      ttsConfig
-        ? withTTSVoiceRequestCacheKeys(
-            buildTTSVoiceRequests(
-              message.content,
-              ttsConfig,
-              ttsSpeakerName,
-              message.characterId,
-              resolveTTSCharacterId,
-            ),
-            ttsConfig,
-            message.id,
-          )
-        : [],
-    [message.characterId, message.content, message.id, resolveTTSCharacterId, ttsConfig, ttsSpeakerName],
-  );
+  const ttsVoiceRequests = useMemo(() => {
+    if (!ttsConfig) return [];
+    const requests = buildTTSVoiceRequests(
+      message.content,
+      ttsConfig,
+      ttsSpeakerName,
+      message.characterId,
+      resolveTTSCharacterId,
+    );
+    return withTTSVoiceRequestCacheKeys(
+      visualNovel || followSpeechParagraphs
+        ? withRoleplayTTSParagraphs(requests, message.content, ttsConfig)
+        : requests,
+      ttsConfig,
+      message.id,
+    );
+  }, [
+    message.characterId,
+    message.content,
+    message.id,
+    resolveTTSCharacterId,
+    ttsConfig,
+    ttsSpeakerName,
+    visualNovel,
+    followSpeechParagraphs,
+  ]);
   const hasTTSContent = ttsVoiceRequests.length > 0;
   const [ttsState, setTTSState] = useState(ttsService.getState());
   const [ttsActiveId, setTTSActiveId] = useState<string | null>(ttsService.getActiveId());
+  const [clearingTTS, setClearingTTS] = useState(false);
   useEffect(
     () =>
       ttsService.subscribe((state, id) => {
@@ -2044,11 +2184,21 @@ export const ChatMessage = memo(function ChatMessage({
     } else {
       if (!hasTTSContent) return;
       void ttsService.speakSequence(ttsVoiceRequests, message.id, {
+        chatId: message.chatId,
         progressive: ttsConfig?.progressivePlayback,
         volume: ttsLinePlaybackVolume,
+        onChunkStart: (_request, index) =>
+          notifyRoleplayTTSParagraph(message.chatId, message.id, ttsVoiceRequests, index),
       });
     }
-  }, [hasTTSContent, message.id, ttsConfig?.progressivePlayback, ttsLinePlaybackVolume, ttsVoiceRequests]);
+  }, [
+    hasTTSContent,
+    message.chatId,
+    message.id,
+    ttsConfig?.progressivePlayback,
+    ttsLinePlaybackVolume,
+    ttsVoiceRequests,
+  ]);
 
   const handlePauseResumeTTS = useCallback(() => {
     if (ttsService.getActiveId() !== message.id) return;
@@ -2065,6 +2215,33 @@ export const ChatMessage = memo(function ChatMessage({
     }
   }, [message.id]);
 
+  // Drop this message's cached clips (primary keys and text aliases) so the
+  // next Speak regenerates them instead of replaying audio synthesized by an
+  // older provider or configuration. Deliberately does NOT re-speak: awaiting
+  // a full speakSequence parked the spinner until the reply finished playing,
+  // and auto-playing audio the user never asked for.
+  const handleClearCachedVoice = useCallback(() => {
+    if (!hasTTSContent || clearingTTS) return;
+    const liveState = ttsService.getState();
+    const liveActiveId = ttsService.getActiveId();
+    const liveBusy =
+      liveState === "loading" || liveState === "playing" || liveState === "paused" || liveState === "blocked";
+    if (liveBusy && liveActiveId !== message.id) return;
+
+    ttsService.stop();
+    setClearingTTS(true);
+    void (async () => {
+      try {
+        await ttsService.clearCachedAudio(ttsVoiceRequests);
+      } catch (err) {
+        console.warn("[TTS] Clearing the cached voice failed:", err);
+        toast.error(localizeUi("ui.chat.chatmessage.clearCachedVoiceFailed"));
+      } finally {
+        setClearingTTS(false);
+      }
+    })();
+  }, [clearingTTS, hasTTSContent, localizeUi, message.id, ttsVoiceRequests]);
+
   const startEditing = useCallback(() => {
     if (!onEdit || isStreaming) return;
     const sp = msgRef.current?.closest("[class*='overflow-y']") as HTMLElement | null;
@@ -2079,6 +2256,7 @@ export const ChatMessage = memo(function ChatMessage({
         return false;
       }
       if (isMessageQuickEditIgnoredTarget(target)) return false;
+      if (matchMedia("(pointer: coarse)").matches && hasActiveTextSelection()) return false;
       window.getSelection()?.removeAllRanges();
       setShowActions(false);
       startEditing();
@@ -2100,6 +2278,11 @@ export const ChatMessage = memo(function ChatMessage({
   useEffect(() => {
     if (!showActions) return;
     const handleTouch = (e: TouchEvent) => {
+      if (
+        e.target instanceof Element &&
+        e.target.closest('[role="dialog"], [role="alertdialog"], [role="menu"], [data-chat-floating-panel]')
+      )
+        return;
       if (msgRef.current && !msgRef.current.contains(e.target as Node)) {
         setShowActions(false);
       }
@@ -2110,6 +2293,10 @@ export const ChatMessage = memo(function ChatMessage({
 
   const handleMobileTap = useCallback(
     (e: React.MouseEvent) => {
+      if (matchMedia("(pointer: coarse)").matches && hasActiveTextSelection()) {
+        lastQuickTapRef.current = null;
+        return;
+      }
       // In multi-select mode, clicking toggles selection on any device
       if (multiSelectMode) {
         onToggleSelect?.({
@@ -2124,7 +2311,12 @@ export const ChatMessage = memo(function ChatMessage({
       if (!matchMedia("(pointer: coarse)").matches) return;
       // Don't toggle when tapping buttons, links, or the edit textarea
       const target = e.target as HTMLElement;
-      if (target.closest("button, a, textarea")) return;
+      if (
+        target.closest(
+          'button, a, textarea, [role="dialog"], [role="alertdialog"], [role="menu"], [data-chat-floating-panel]',
+        )
+      )
+        return;
       if (isRoleplay) {
         const now = Date.now();
         const lastTap = lastQuickTapRef.current;
@@ -2152,7 +2344,7 @@ export const ChatMessage = memo(function ChatMessage({
     if (!message.extra) return {};
     return typeof message.extra === "string" ? JSON.parse(message.extra) : message.extra;
   }, [message.extra]);
-  const isConversationStart = !!extra.isConversationStart;
+  const isConversationStart = !!extra.isConversationStart || memoryStartCharacterIds?.length === 0;
   const conversationStartForCharacterIds: string[] = extra.conversationStartForCharacterIds ?? [];
   const isHiddenFromAllAI = extra.hiddenFromAI === true;
   const hiddenFromAICharacterIds: string[] = Array.isArray(extra.hiddenFromAICharacterIds)
@@ -2176,6 +2368,7 @@ export const ChatMessage = memo(function ChatMessage({
   const reasoningDurationMs = readPositiveNumber(extra.generationInfo?.reasoningDurationMs);
   const generationReplay = hasGenerationReplayDetails(extra.generationReplay) ? extra.generationReplay : null;
   const diceRollResult = isDiceRollResult(extra.diceRollResult) ? extra.diceRollResult : null;
+  const diceReplacesContent = diceRollReplacesMessageContent(message.role, diceRollResult);
   const canCreateNextSwipe = Boolean(onRegenerate && !isUser);
   const rewriteVersions = resolveMessageRewriteVersions(message.content, extra, isUser);
   const proseGuardianOriginalText = rewriteVersions.originalText;
@@ -2300,7 +2493,15 @@ export const ChatMessage = memo(function ChatMessage({
       if (genInfo.tokensPrompt != null || genInfo.tokensCompletion != null) {
         const p = genInfo.tokensPrompt != null ? genInfo.tokensPrompt : null;
         const c = genInfo.tokensCompletion ?? "?";
-        parts.push(p != null ? `${p}→${c} tok` : `${c} tok`);
+        const tokenUsage = p != null ? `${p}→${c} tok` : `${c} tok`;
+        parts.push(
+          (genInfo.requestCount ?? 0) > 1
+            ? localizeUi("ui.chat.chatmessage.usageAcrossRequests", {
+                count: genInfo.requestCount,
+                usage: tokenUsage,
+              })
+            : tokenUsage,
+        );
       }
       if ((genInfo.tokensCachedPrompt ?? 0) > 0) {
         parts.push(`cache hit ${genInfo.tokensCachedPrompt!.toLocaleString()}`);
@@ -2311,7 +2512,7 @@ export const ChatMessage = memo(function ChatMessage({
       if (genInfo.durationMs != null) parts.push(`${(genInfo.durationMs / 1000).toFixed(1)}s`);
     }
     return parts.length > 0 ? parts.join(" · ") : null;
-  }, [genInfo, showModelName, showTokenUsage]);
+  }, [genInfo, showModelName, showTokenUsage, localizeUi]);
   // useLayoutEffect runs after DOM mutation but before browser paint — prevents visible scroll jump
   useLayoutEffect(() => {
     // Restore scroll position saved before the state change
@@ -2323,8 +2524,11 @@ export const ChatMessage = memo(function ChatMessage({
         if (editor) {
           editor.scrollTop = 0;
           // The action row can be far below a long message's first line.
-          // Align only the transcript, never scroll the mobile app shell.
-          el.scrollTop += editor.getBoundingClientRect().top - el.getBoundingClientRect().top - 8;
+          // Align only the transcript, never scroll the mobile app shell, and
+          // start below the floating top controls (its scroll padding) so the
+          // first line is not under them.
+          const topInset = Number.parseFloat(getComputedStyle(el).scrollPaddingTop) || 8;
+          el.scrollTop += editor.getBoundingClientRect().top - el.getBoundingClientRect().top - topInset;
         }
       }
       scrollRestoreRef.current = null;
@@ -2403,7 +2607,18 @@ export const ChatMessage = memo(function ChatMessage({
   // Select the raw metadata (stable while tokens stream) and parse it in a memo so
   // we don't JSON-parse the whole chat metadata on every store tick during streaming.
   const activeChatMetadata = useChatStore((s) => s.activeChat?.metadata);
+  const presetVariables = useMessagePresetVariables(`${message.id}:${message.activeSwipeIndex ?? 0}`);
   const scopedRegexMode = useMemo(() => parseChatMetadata(activeChatMetadata).scopedRegexMode, [activeChatMetadata]);
+  // Roleplay can show a private note to one character; it stays private only when each character replies alone.
+  const noteSharing = useMemo<MessageNoteSharing | undefined>(() => {
+    if (!isRoleplay || !chatCharacterIds?.length) return undefined;
+    const narratorId = parseChatMetadata(activeChatMetadata).roleplayCommandNarratorId;
+    return {
+      characters: chatCharacterIds.map((id) => ({ id, name: characterMap?.get(id)?.name ?? id })),
+      narratorId: typeof narratorId === "string" && chatCharacterIds.includes(narratorId) ? narratorId : null,
+      available: chatCharacterIds.length === 1 || groupChatMode === "individual",
+    };
+  }, [activeChatMetadata, characterMap, chatCharacterIds, groupChatMode, isRoleplay]);
 
   const scopedCharacterMap = useMemo(() => {
     if (!characterMap) return null;
@@ -2477,55 +2692,76 @@ export const ChatMessage = memo(function ChatMessage({
     return charName ? [{ name: charName }] : [];
   }, [charName, scopedCharacterMap]);
 
-  const displayContent = useMemo(() => {
-    const macroContext = {
+  const formatDisplayContent = useCallback(
+    (content: string) => {
+      const macroContext = {
+        variables: presetVariables,
+        userName,
+        persona: {
+          name: userName,
+          description: personaDescription,
+          personality: personaPersonality,
+          backstory: personaBackstory,
+          appearance: personaAppearance,
+          scenario: personaScenario,
+        },
+        primaryCharacter: primaryCharInfo ?? { name: charName },
+        characters: macroCharacters,
+      };
+      // #3164: seed display randomness by message identity, not content — a
+      // content-based seed re-rolls every {{random}}/{{roll}} on each streamed
+      // chunk (visible churn) and on every edit. Swipes keep distinct picks.
+      const macroRandomSeed = `${message.id}:${message.activeSwipeIndex ?? 0}`;
+      const resolveDisplayMacros = createMessageMacroResolver(macroContext, { randomSeed: macroRandomSeed });
+      const text =
+        isUser || isSystem
+          ? content
+          : applyToAIOutput(content, {
+              depth: messageDepth,
+              resolveMacros: resolveDisplayMacros,
+              scopedMode: scopedRegexMode,
+              characterId: message.characterId,
+            });
+      return resolveDisplayMacros(text);
+    },
+    [
+      applyToAIOutput,
+      scopedRegexMode,
+      presetVariables,
+      message.characterId,
+      charName,
+      isSystem,
+      isUser,
+      macroCharacters,
+      message.activeSwipeIndex,
+      messageDepth,
+      message.id,
+      personaAppearance,
+      personaBackstory,
+      personaDescription,
+      personaPersonality,
+      personaScenario,
+      primaryCharInfo,
       userName,
-      persona: {
-        name: userName,
-        description: personaDescription,
-        personality: personaPersonality,
-        backstory: personaBackstory,
-        appearance: personaAppearance,
-        scenario: personaScenario,
-      },
-      primaryCharacter: primaryCharInfo ?? { name: charName },
-      characters: macroCharacters,
-    };
-    // #3164: seed display randomness by message identity, not content — a
-    // content-based seed re-rolls every {{random}}/{{roll}} on each streamed
-    // chunk (visible churn) and on every edit. Swipes keep distinct picks.
-    const macroRandomSeed = `${message.id}:${message.activeSwipeIndex ?? 0}`;
-    const resolveDisplayMacros = createMessageMacroResolver(macroContext, { randomSeed: macroRandomSeed });
-    const text =
-      isUser || isSystem
-        ? message.content
-        : applyToAIOutput(message.content, {
-            depth: messageDepth,
-            resolveMacros: resolveDisplayMacros,
-            scopedMode: scopedRegexMode,
-            characterId: message.characterId,
-          });
-    return resolveDisplayMacros(text);
-  }, [
-    applyToAIOutput,
-    scopedRegexMode,
-    message.characterId,
-    charName,
-    isSystem,
-    isUser,
-    macroCharacters,
-    message.activeSwipeIndex,
-    message.content,
-    messageDepth,
-    message.id,
-    personaAppearance,
-    personaBackstory,
-    personaDescription,
-    personaPersonality,
-    personaScenario,
-    primaryCharInfo,
-    userName,
-  ]);
+    ],
+  );
+  const displayContent = useMemo(() => formatDisplayContent(message.content), [formatDisplayContent, message.content]);
+
+  useEffect(() => {
+    if (
+      !visualNovel ||
+      !ttsConfig ||
+      visualNovelSpeech?.messageId !== message.id ||
+      !onVisualNovelSpeechParagraph ||
+      document.querySelector('[data-component="ExpandedTextarea"]')
+    )
+      return;
+    // Display regexes/macros can remove or merge source paragraphs. Match the
+    // speech against the very same text that the VN renderer splits below.
+    const mapped = withRoleplayTTSParagraphs(visualNovelSpeech.requests, displayContent, ttsConfig, false);
+    const index = mapped[visualNovelSpeech.chunkIndex]?.paragraphIndex;
+    if (index !== undefined) onVisualNovelSpeechParagraph(index);
+  }, [displayContent, message.id, onVisualNovelSpeechParagraph, ttsConfig, visualNovel, visualNovelSpeech]);
 
   const displayName = isUser ? userName : charName;
   const avatarUrl = isUser
@@ -2567,6 +2803,8 @@ export const ChatMessage = memo(function ChatMessage({
     : resolvedCharacterInfo;
   const fallbackDialogueColor = defaultDialogueColor || getDefaultChatTextColor(theme);
   const dialogueColor = isMergedGroup ? fallbackDialogueColor : msgColors?.dialogueColor || fallbackDialogueColor;
+  // Only a character's or persona's own color outranks Apply preset colors; the fallback follows the preset.
+  const ownDialogueColor = !isMergedGroup && !!msgColors?.dialogueColor;
   const boxBgColor = msgColors?.boxColor;
   const msgNameColor = msgColors?.nameColor;
   const roleplayBubbleBg = boxBgColor ? boxBgColor : isUser ? userBubbleBg : assistantBubbleBg;
@@ -2606,9 +2844,21 @@ export const ChatMessage = memo(function ChatMessage({
   }, [personaInfo?.dialogueColor, personaInfo?.name, scopedCharacterMap]);
 
   // Merged group chat: cycling avatars + cycling name color
+  // References affect only this reply's avatars, never the group roster or speakers.
+  const referencedAvatarIds = useMemo(() => {
+    if (!isRoleplay || !isMergedGroup || !Array.isArray(extra.referencedCharacterIds)) return [];
+    return Array.from(
+      new Set<string>(
+        (extra.referencedCharacterIds as unknown[]).filter(
+          (id): id is string => typeof id === "string" && /^[A-Za-z0-9_-]{21}$/.test(id),
+        ),
+      ),
+    ).filter((id) => !chatCharacterIds?.includes(id));
+  }, [isRoleplay, isMergedGroup, extra.referencedCharacterIds, chatCharacterIds]);
+  const { data: referencedAvatarCharacters } = useCharacterSummaries(referencedAvatarIds);
   const mergedCharacterIds = useMemo(
-    () => mergedGroupCharacterIds ?? chatCharacterIds ?? [],
-    [chatCharacterIds, mergedGroupCharacterIds],
+    () => [...(mergedGroupCharacterIds ?? chatCharacterIds ?? []), ...referencedAvatarIds],
+    [chatCharacterIds, mergedGroupCharacterIds, referencedAvatarIds],
   );
   const mergedCycleKey = JSON.stringify(mergedCharacterIds);
   const reduceAmbientEffects = useReducedAmbientEffects();
@@ -2626,13 +2876,16 @@ export const ChatMessage = memo(function ChatMessage({
     return mergedCharacterIds
       .map((id, index) => {
         const info = characterMap.get(id);
+        // Query placeholder data may belong to the previous swipe; only the
+        // current mergedCharacterIds may contribute an avatar.
+        const reference = referencedAvatarCharacters?.find((character) => character.id === id);
         const expressionUrl = expressionAvatarResolver?.(message, id) ?? null;
-        const url = expressionUrl ?? info?.avatarUrl;
+        const url = expressionUrl ?? info?.avatarUrl ?? reference?.avatarUrl;
         if (!url) return null;
         return {
           id,
           url,
-          crop: expressionUrl ? null : info?.avatarCrop,
+          crop: expressionUrl ? null : (info?.avatarCrop ?? normalizeAvatarCrop(reference?.avatarCrop)),
           nameColor: info?.nameColor || fallbackPalette[index % fallbackPalette.length]!,
         };
       })
@@ -2642,7 +2895,7 @@ export const ChatMessage = memo(function ChatMessage({
       crop?: AvatarCrop | null;
       nameColor: string;
     }[];
-  }, [isMergedGroup, characterMap, mergedCharacterIds, expressionAvatarResolver, message]);
+  }, [isMergedGroup, characterMap, mergedCharacterIds, expressionAvatarResolver, message, referencedAvatarCharacters]);
   const mergedNameColors = useMemo(() => mergedAvatars.map((avatar) => avatar.nameColor), [mergedAvatars]);
   // Cycle index for merged group avatars/names — driven by a ref + 2s setInterval to avoid re-renders
   const cycleIndexRef = useRef(0);
@@ -2710,27 +2963,139 @@ export const ChatMessage = memo(function ChatMessage({
   );
 
   // Render content with dialogue highlighting (or HTML rendering)
-  const text = typeof displayContent === "string" ? displayContent : message.content;
+  const fullText = typeof displayContent === "string" ? displayContent : message.content;
+  const vnParagraphs = useMemo(
+    () => (visualNovel ? splitRoleplayParagraphs(fullText, isStreaming) : []),
+    [fullText, isStreaming, visualNovel],
+  );
+
+  useEffect(() => {
+    if (visualNovel && onVisualNovelParagraphCount) {
+      onVisualNovelParagraphCount(Math.max(1, vnParagraphs.length));
+    }
+  }, [onVisualNovelParagraphCount, visualNovel, vnParagraphs.length]);
+
+  const activeVnParagraphIndex =
+    visualNovelParagraphIndex != null
+      ? Math.max(0, Math.min(vnParagraphs.length - 1, visualNovelParagraphIndex))
+      : vnParagraphs.length - 1;
+
+  const text = visualNovel ? (vnParagraphs.length > 0 ? (vnParagraphs[activeVnParagraphIndex] ?? "") : "") : fullText;
   const isHtmlContent = containsChatHtml(text);
   const htmlScopeClass = useMemo(() => {
     const suffix = message.id.replace(/[^a-zA-Z0-9_-]/g, "");
     return `mari-html-message-${suffix || "content"}`;
   }, [message.id]);
 
+  const inlineRoleplayCommands = useMemo(() => {
+    const commands = isRoleplay
+      ? [
+          ...(isUser ? [] : readRoleplayDiceRolls(fullText, extra).map((roll) => ({ ...roll, kind: "roll" as const }))),
+          ...getRoleplayWhispers(extra).map((whisper) => ({
+            ...whisper,
+            kind: "whisper" as const,
+            offset: getRoleplayCommandContentOffset(fullText, whisper.activity),
+          })),
+        ].sort((a, b) => a.offset - b.offset || a.index - b.index)
+      : [];
+    let paragraphStart = 0;
+    let nextParagraphStart = Number.POSITIVE_INFINITY;
+    if (visualNovel) {
+      for (let index = 0; index <= activeVnParagraphIndex; index++) {
+        const paragraph = vnParagraphs[index] ?? "";
+        paragraphStart = fullText.indexOf(paragraph, paragraphStart);
+        if (paragraphStart < 0) break;
+        if (index < activeVnParagraphIndex) paragraphStart += paragraph.length;
+      }
+      const next = vnParagraphs[activeVnParagraphIndex + 1];
+      if (paragraphStart >= 0 && next !== undefined) {
+        const found = fullText.indexOf(next, paragraphStart + text.length);
+        if (found >= 0) nextParagraphStart = found;
+      }
+    }
+    return commands
+      .filter(
+        (command) => paragraphStart >= 0 && command.offset >= paragraphStart && command.offset < nextParagraphStart,
+      )
+      .map((command) => ({ ...command, offset: Math.min(command.offset - paragraphStart, text.length) }));
+  }, [isRoleplay, isUser, fullText, extra, visualNovel, activeVnParagraphIndex, vnParagraphs, text.length]);
+
+  const renderInlineRoleplayCommand = useCallback(
+    (command: (typeof inlineRoleplayCommands)[number]) =>
+      command.kind === "whisper" ? (
+        <RoleplayWhisper
+          // The original command text identifies the whisper, so an open editor never saves over a replacement.
+          key={`whisper-${message.id}-${message.activeSwipeIndex}-${command.index}-${personaInfo?.id}-${command.activity.raw}`}
+          chatId={message.chatId}
+          messageId={message.id}
+          swipeIndex={message.activeSwipeIndex}
+          activityIndex={command.index}
+          extra={extra}
+          isStreaming={!!isStreaming}
+          character={command.command.character}
+          text={command.command.text}
+          knownToUser={
+            isUser || (command.recipient.kind === "persona" && command.recipient.id === (personaInfo?.id ?? "user"))
+          }
+        />
+      ) : (
+        <RoleplayDiceRoll
+          key={`roll-${message.id}-${message.activeSwipeIndex}-${command.index}`}
+          result={command.result}
+          createdAt={message.createdAt}
+        />
+      ),
+    [
+      message.chatId,
+      message.id,
+      message.activeSwipeIndex,
+      message.createdAt,
+      personaInfo?.id,
+      extra,
+      isStreaming,
+      isUser,
+    ],
+  );
+
   const renderedContent = useMemo(() => {
-    return renderContent(
-      text,
-      dialogueColor,
-      speakerColorMap,
-      boldDialogue,
-      htmlScopeClass,
-      quoteFormat,
-      selfCharacterId,
-      galleryIndex,
-      nameColorMap,
-      textShadowStr,
+    const renderPart = (part: string) =>
+      renderContent(
+        part,
+        dialogueColor,
+        speakerColorMap,
+        boldDialogue,
+        htmlScopeClass,
+        quoteFormat,
+        selfCharacterId,
+        galleryIndex,
+        nameColorMap,
+        textShadowStr,
+        ownDialogueColor,
+      );
+    let markerPrefix = "\uE000";
+    while (text.includes(markerPrefix)) markerPrefix = "\uE000" + markerPrefix;
+    const slots = new Map<string, ReactNode>();
+    let markedText = text;
+    for (const command of inlineRoleplayCommands) {
+      const marker = `${markerPrefix}${command.index}\uE001`;
+      slots.set(marker, renderInlineRoleplayCommand(command));
+    }
+    for (const roll of [...inlineRoleplayCommands].reverse()) {
+      const marker = `${markerPrefix}${roll.index}\uE001`;
+      markedText = markedText.slice(0, roll.offset) + marker + markedText.slice(roll.offset);
+    }
+    const prose = replaceRoleplayCommandMarkers(renderPart(markedText), slots);
+    return (
+      <>
+        {isUser && <MessageReplyPreview reply={extra.replyTo} />}
+        {prose}
+      </>
     );
   }, [
+    inlineRoleplayCommands,
+    renderInlineRoleplayCommand,
+    extra.replyTo,
+    isUser,
     text,
     dialogueColor,
     speakerColorMap,
@@ -2741,11 +3106,12 @@ export const ChatMessage = memo(function ChatMessage({
     galleryIndex,
     nameColorMap,
     textShadowStr,
+    ownDialogueColor,
   ]);
   const renderStreamingText = useCallback(
     (streamText: string) =>
       renderContent(
-        streamText,
+        formatDisplayContent(streamText),
         dialogueColor,
         speakerColorMap,
         boldDialogue,
@@ -2755,8 +3121,10 @@ export const ChatMessage = memo(function ChatMessage({
         galleryIndex,
         nameColorMap,
         textShadowStr,
+        ownDialogueColor,
       ),
     [
+      formatDisplayContent,
       boldDialogue,
       dialogueColor,
       galleryIndex,
@@ -2766,16 +3134,30 @@ export const ChatMessage = memo(function ChatMessage({
       speakerColorMap,
       nameColorMap,
       textShadowStr,
+      ownDialogueColor,
     ],
   );
 
   // Translated text is rendered through the same markdown pipeline as the
   // message so bold/italics/quotes format identically.
+  const vnTranslatedParagraphs = useMemo(
+    () => (visualNovel && translatedText ? splitRoleplayParagraphs(translatedText, false) : []),
+    [translatedText, visualNovel],
+  );
+  // In VN mode, ensure translated paragraphs map one-to-one with source paragraphs.
+  // If paragraph counts diverge, disable paragraph-level translation to avoid mismatched content.
+  const hasMatchingVnTranslation =
+    visualNovel && vnTranslatedParagraphs.length > 0 && vnTranslatedParagraphs.length === vnParagraphs.length;
+
+  const translatedVnText = hasMatchingVnTranslation ? (vnTranslatedParagraphs[activeVnParagraphIndex] ?? "") : "";
+
+  const effectiveTranslationText = visualNovel ? (hasMatchingVnTranslation ? translatedVnText : null) : translatedText;
+
   const renderedTranslation = useMemo(
     () =>
-      translatedText
+      effectiveTranslationText
         ? renderContent(
-            translatedText,
+            effectiveTranslationText,
             dialogueColor,
             speakerColorMap,
             boldDialogue,
@@ -2785,10 +3167,11 @@ export const ChatMessage = memo(function ChatMessage({
             galleryIndex,
             nameColorMap,
             textShadowStr,
+            ownDialogueColor,
           )
         : null,
     [
-      translatedText,
+      effectiveTranslationText,
       dialogueColor,
       speakerColorMap,
       boldDialogue,
@@ -2798,6 +3181,7 @@ export const ChatMessage = memo(function ChatMessage({
       galleryIndex,
       nameColorMap,
       textShadowStr,
+      ownDialogueColor,
     ],
   );
   const translationDisplayOnly = useMemo(
@@ -2809,7 +3193,15 @@ export const ChatMessage = memo(function ChatMessage({
   // content, so switching swipes or editing never shows a stale translation
   // in place of the real text.
   const showTranslationOnly =
-    translationDisplayOnly && !!translatedText && !isTranslating && translationSource === message.content;
+    translationDisplayOnly && !!effectiveTranslationText && !isTranslating && translationSource === message.content;
+  // A translation has no reliable source-text offsets. Keep its visible
+  // paragraph's command results after the translated prose.
+  const renderedTranslationOnly = (
+    <>
+      {renderedTranslation}
+      {inlineRoleplayCommands.map(renderInlineRoleplayCommand)}
+    </>
+  );
 
   const handleCopy = () => {
     copyToClipboard(message.content);
@@ -2941,6 +3333,16 @@ export const ChatMessage = memo(function ChatMessage({
       statusLabel={hiddenFromAIStatusLabel}
     />
   ) : null;
+  const roleplayCommandResults = (
+    <RoleplayCommandResults
+      chatId={message.chatId}
+      messageId={message.id}
+      swipeIndex={message.activeSwipeIndex}
+      characterName={displayName}
+      extra={extra}
+      isStreaming={!!isStreaming}
+    />
+  );
   const roleplayBubbleContent = isHiddenCollapsed ? (
     <HiddenFromAIMessageSummary
       roleplay={isRoleplay}
@@ -2985,17 +3387,15 @@ export const ChatMessage = memo(function ChatMessage({
           <>
             {diceRollResult ? (
               <DiceMessageContent diceRollResult={diceRollResult} createdAt={message.createdAt} />
-            ) : showTranslationOnly ? (
-              renderedTranslation
-            ) : (
-              renderedContent
-            )}
+            ) : null}
+            {diceReplacesContent ? null : showTranslationOnly ? renderedTranslationOnly : renderedContent}
             {isStreaming && (
               <span className="ml-0.5 inline-block h-4 w-[0.125rem] animate-pulse rounded-full bg-blue-400" />
             )}
           </>
         )}
       </div>
+      {roleplayCommandResults}
       {(translatedText || isTranslating) && !showTranslationOnly && (
         <div className="mt-2 border-t border-white/10 pt-2">
           {isTranslating ? (
@@ -3007,6 +3407,244 @@ export const ChatMessage = memo(function ChatMessage({
       )}
     </>
   );
+
+  const hasVnMediaTarget = visualNovel && !!visualNovelMediaTarget;
+  const renderRoleplayImage = (image: ReactNode, key: number) =>
+    hasVnMediaTarget ? createPortal(image, visualNovelMediaTarget!, `${message.id}:${key}`) : image;
+  // Text that is an image link already shows that picture; only videos still show below it.
+  const textIsImageUrl = IMAGE_URL_RE.test(message.content.trim());
+  const skipAttachment = (att: any) => att.roleplaySound === true || isAttachmentHiddenByImageText(att, textIsImageUrl);
+  const roleplayAttachments = isRoleplay &&
+    !editing &&
+    extra.attachments?.length > 0 &&
+    extra.attachments.some((att: any) => !skipAttachment(att)) && (
+      <div className={hasVnMediaTarget ? "contents" : "mt-1.5 flex flex-col items-center gap-2 px-3 pb-2"}>
+        {extra.attachments.map((att: any, i: number) =>
+          skipAttachment(att) ? null : isVideoAttachment(att) && att.url ? (
+            renderRoleplayImage(
+              <ChatVideoAttachment
+                key={att.videoId ?? att.url}
+                src={att.url}
+                prompt={att.prompt}
+                onRemove={hasVnMediaTarget ? undefined : () => handleRemoveAttachment(i)}
+                className={hasVnMediaTarget ? "pointer-events-auto" : undefined}
+              />,
+              i,
+            )
+          ) : att.type === "image" || att.type?.startsWith("image/") ? (
+            renderRoleplayImage(
+              <div
+                key={i}
+                className={cn(
+                  "group/att relative",
+                  hasVnMediaTarget
+                    ? "pointer-events-auto flex h-full min-h-0 min-w-0 max-w-3xl flex-1 items-end justify-center"
+                    : "inline-block",
+                )}
+              >
+                <button
+                  type="button"
+                  onClick={() => openAttachmentImageLightbox(att, i)}
+                  className={hasVnMediaTarget ? "flex h-full min-h-0 w-full items-end justify-center" : "block"}
+                  title={localizeUi("ui.noodle.noodlepostcard.openImage")}
+                  aria-label={localizeUi("ui.chat.chatmessage.openValue1", {
+                    value1: att.filename || att.name || localizeUi("ui.ui.spritegenerationmodal.image"),
+                  })}
+                >
+                  <ChatImagePreview
+                    src={att.url || att.data}
+                    alt={att.filename || att.name || "image"}
+                    className={cn(
+                      "max-w-full rounded-lg object-contain",
+                      hasVnMediaTarget ? "max-h-full" : "max-h-[70vh] sm:max-h-[32rem]",
+                    )}
+                    loading="lazy"
+                    decoding="async"
+                  />
+                </button>
+                {!hasVnMediaTarget && (
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveAttachment(i)}
+                    aria-label={localizeUi("ui.chat.chatmessage.removeImageFromMessage")}
+                    title={localizeUi("ui.chat.chatmessage.removeFromMessage")}
+                    className="absolute top-1.5 right-1.5 rounded-full bg-black/60 p-1 text-white/80 transition-opacity hover:bg-black/80 hover:text-white sm:opacity-0 sm:group-hover/att:opacity-100"
+                  >
+                    <X size="0.875rem" />
+                  </button>
+                )}
+              </div>,
+              i,
+            )
+          ) : (
+            <div
+              key={i}
+              className="group/att flex max-w-full items-center gap-2 rounded-lg bg-foreground/10 px-2.5 py-1.5 text-xs text-foreground/70 ring-1 ring-foreground/10"
+            >
+              <ScrollText size="0.875rem" className="shrink-0 text-[var(--primary)]" />
+              <span className="min-w-0 max-w-[16rem] truncate">{att.filename || att.name || "attachment"}</span>
+              <button
+                type="button"
+                onClick={() => handleRemoveAttachment(i)}
+                aria-label={localizeUi("ui.chat.chatmessage.removeFileFromMessage")}
+                title={localizeUi("ui.chat.chatmessage.removeFromMessage")}
+                className="rounded-full p-0.5 text-foreground/45 transition-colors hover:bg-foreground/10 hover:text-[var(--destructive)] sm:opacity-0 sm:group-hover/att:opacity-100"
+              >
+                <X size="0.75rem" />
+              </button>
+            </div>
+          ),
+        )}
+      </div>
+    );
+
+  const roleplayTtsControls = ttsEnabled && (
+    <MessageAudioMenu align="right" dark>
+      {isSpeakingThis && (ttsState === "playing" || ttsState === "paused") && (
+        <>
+          <ActionBtn
+            icon={isPausedThis ? <Play size={MESSAGE_ACTION_ICON_SIZE} /> : <Pause size={MESSAGE_ACTION_ICON_SIZE} />}
+            onClick={handlePauseResumeTTS}
+            title={
+              isPausedThis
+                ? localizeUi("ui.chat.chatmessage.resumeSpeaking")
+                : localizeUi("ui.chat.chatmessage.pauseSpeaking")
+            }
+          />
+          <ActionBtn
+            icon={<RefreshCw size={MESSAGE_ACTION_ICON_SIZE} />}
+            onClick={handleRestartTTS}
+            title={localizeUi("ui.chat.chatmessage.restartSpeaking")}
+          />
+        </>
+      )}
+      <ActionBtn
+        icon={
+          isLoadingThis ? (
+            <Loader2 size={MESSAGE_ACTION_ICON_SIZE} className="animate-spin" />
+          ) : isSpeakingThis ? (
+            <MicOff size={MESSAGE_ACTION_ICON_SIZE} />
+          ) : (
+            <Mic size={MESSAGE_ACTION_ICON_SIZE} />
+          )
+        }
+        onClick={handleSpeak}
+        title={
+          !hasTTSContent
+            ? localizeUi("ui.chat.chatmessage.noDialogueToSpeak")
+            : isLoadingThis
+              ? localizeUi("ui.panels.ttsconfigcard.loading")
+              : isSpeakingThis
+                ? localizeUi("ui.chat.chatmessage.stopSpeaking")
+                : localizeUi("ui.chat.chatmessage.speak")
+        }
+        disabled={!hasTTSContent || clearingTTS || (ttsBusy && !isSpeakingThis)}
+      />
+      <ActionBtn
+        icon={
+          clearingTTS ? (
+            <Loader2 size={MESSAGE_ACTION_ICON_SIZE} className="animate-spin" />
+          ) : (
+            <Eraser size={MESSAGE_ACTION_ICON_SIZE} />
+          )
+        }
+        onClick={handleClearCachedVoice}
+        title={localizeUi("ui.chat.chatmessage.clearCachedVoice")}
+        disabled={!hasTTSContent || clearingTTS || (ttsBusy && !isSpeakingThis)}
+      />
+      <TTSLineVolumeSlider volume={ttsLineVolume} onVolumeChange={handleTTSLineVolumeChange} dark />
+    </MessageAudioMenu>
+  );
+
+  const vnAvatarCropStyle = expressionAvatarUrl ? {} : avatarCropStyle;
+
+  if (visualNovel) {
+    return (
+      <>
+        <div
+          className="mari-roleplay-vn-dialogue flex min-w-0 gap-3 p-3 sm:gap-4 sm:p-4"
+          data-vn-message-id={message.id}
+        >
+          <div
+            className="relative shrink-0 self-start overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--secondary)]"
+            style={{ width: `min(${5 * vnPortraitScale}rem, 26vw)`, height: `min(${5 * vnPortraitScale}rem, 26vw)` }}
+          >
+            {displayAvatarUrl ? (
+              <button
+                type="button"
+                className="block h-full w-full cursor-zoom-in focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-[var(--primary)]"
+                onClick={() => openImageLightbox(displayAvatarUrl)}
+                aria-label={localizeUi("ui.chat.chatmessage.openValue1Avatar", { value1: displayName })}
+              >
+                <img
+                  src={displayAvatarUrl}
+                  alt={displayName}
+                  className="h-full w-full object-cover"
+                  style={vnAvatarCropStyle}
+                />
+              </button>
+            ) : (
+              <div
+                className="flex h-full items-center justify-center text-[var(--muted-foreground)]"
+                aria-hidden="true"
+              >
+                {isUser ? <User size="1.75rem" /> : <Bot size="1.75rem" />}
+              </div>
+            )}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="mb-2 truncate text-sm font-semibold text-[var(--marinara-chat-chrome-highlight-text)]">
+              {isMergedGroup ? (
+                mergedNameElement
+              ) : isNarrator ? (
+                localizeUi("ui.chat.chatmessage.narrator")
+              ) : (
+                <span style={solidNameColorStyle(msgNameColor)}>
+                  <NameColorText color={msgNameColor}>{displayName}</NameColorText>
+                </span>
+              )}
+            </div>
+            <div
+              className="mari-message-content max-h-[min(30dvh,18rem)] overflow-y-auto overscroll-contain whitespace-pre-wrap break-words pr-1"
+              style={messageTextStyle}
+              tabIndex={0}
+              role="region"
+              aria-label={localizeUi("chat.roleplayVn.currentParagraph")}
+              aria-live="polite"
+            >
+              {isStreaming && streamingContent ? (
+                streamingContent(renderStreamingText)
+              ) : (
+                <>
+                  {diceRollResult && (
+                    <DiceMessageContent diceRollResult={diceRollResult} createdAt={message.createdAt} />
+                  )}
+                  {diceReplacesContent ? null : showTranslationOnly ? renderedTranslationOnly : renderedContent}
+                  {roleplayAttachments}
+                  {roleplayCommandResults}
+                  {renderedTranslation && !showTranslationOnly && (
+                    <div className="translation-text mt-2 whitespace-pre-wrap border-t border-[var(--border)] pt-2">
+                      {renderedTranslation}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+            {ttsEnabled && <div className="mt-2 flex flex-wrap items-center gap-2">{roleplayTtsControls}</div>}
+          </div>
+        </div>
+        {imageLightbox && (
+          <ChatImageLightbox
+            image={imageLightbox.image}
+            alt={imageLightbox.alt}
+            pinEnabled={imageLightbox.pinEnabled}
+            downloadEnabled={imageLightbox.downloadEnabled}
+            onClose={closeImageLightbox}
+          />
+        )}
+      </>
+    );
+  }
 
   // ─── System messages (shared across modes) ───
   if (isSystem) {
@@ -3088,7 +3726,7 @@ export const ChatMessage = memo(function ChatMessage({
                   </button>
                 </div>
               )}
-              <div className="mari-message-bubble relative flex-1 rounded-xl border border-amber-500/10 bg-black/40 px-5 py-4">
+              <div className="mari-message-bubble mari-chat-style-surface relative flex-1 rounded-xl border border-amber-500/10 bg-black/40 px-5 py-4">
                 {/* Delete button */}
                 {!multiSelectMode && onDelete && (
                   <button
@@ -3124,11 +3762,8 @@ export const ChatMessage = memo(function ChatMessage({
                   >
                     {diceRollResult ? (
                       <DiceMessageContent diceRollResult={diceRollResult} createdAt={message.createdAt} />
-                    ) : showTranslationOnly ? (
-                      renderedTranslation
-                    ) : (
-                      renderedContent
-                    )}
+                    ) : null}
+                    {diceReplacesContent ? null : showTranslationOnly ? renderedTranslationOnly : renderedContent}
                   </div>
                 )}
               </div>
@@ -3332,6 +3967,7 @@ export const ChatMessage = memo(function ChatMessage({
             )}
 
             <ConversationStartMarkers
+              memoryStartCharacterIds={memoryStartCharacterIds}
               sharedStart={isConversationStart}
               characterIds={conversationStartForCharacterIds}
               characters={aiVisibilityCharacters}
@@ -3342,7 +3978,7 @@ export const ChatMessage = memo(function ChatMessage({
             <div
               data-roleplay-bubble-transparent={roleplayBubbleBg === "transparent" ? "true" : undefined}
               className={cn(
-                "mari-message-bubble mari-rp-bubble relative overflow-hidden rounded-2xl shadow-lg shadow-black/20",
+                "mari-message-bubble mari-rp-bubble mari-chat-style-surface relative overflow-hidden rounded-2xl shadow-lg shadow-black/20",
                 roleplayAvatarsScrollable && showRoleplayAvatarPanel && "mari-rp-bubble--scrollable-avatar-panel",
                 isUser
                   ? "rounded-tr-sm text-neutral-100 ring-1 ring-white/10"
@@ -3476,60 +4112,7 @@ export const ChatMessage = memo(function ChatMessage({
               ) : null}
             </div>
 
-            {/* Attachments (illustrations, selfies, uploaded files) */}
-            {!editing && extra.attachments?.length > 0 && !IMAGE_URL_RE.test(message.content.trim()) && (
-              <div className="mt-1.5 flex flex-col items-center gap-2 px-3 pb-2">
-                {extra.attachments.map((att: any, i: number) =>
-                  att.type === "image" || att.type?.startsWith("image/") ? (
-                    <div key={i} className="group/att relative inline-block">
-                      <button
-                        type="button"
-                        onClick={() => openAttachmentImageLightbox(att, i)}
-                        className="block"
-                        title={localizeUi("ui.noodle.noodlepostcard.openImage")}
-                        aria-label={localizeUi("ui.chat.chatmessage.openValue1", {
-                          value1: att.filename || att.name || localizeUi("ui.ui.spritegenerationmodal.image"),
-                        })}
-                      >
-                        <ChatImagePreview
-                          src={att.url || att.data}
-                          alt={att.filename || att.name || "image"}
-                          className="max-h-[70vh] max-w-full rounded-lg object-contain sm:max-h-[32rem]"
-                          loading="lazy"
-                          decoding="async"
-                        />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveAttachment(i)}
-                        aria-label={localizeUi("ui.chat.chatmessage.removeImageFromMessage")}
-                        title={localizeUi("ui.chat.chatmessage.removeFromMessage")}
-                        className="absolute top-1.5 right-1.5 rounded-full bg-black/60 p-1 text-white/80 transition-opacity hover:bg-black/80 hover:text-white sm:opacity-0 sm:group-hover/att:opacity-100"
-                      >
-                        <X size="0.875rem" />
-                      </button>
-                    </div>
-                  ) : (
-                    <div
-                      key={i}
-                      className="group/att flex max-w-full items-center gap-2 rounded-lg bg-foreground/10 px-2.5 py-1.5 text-xs text-foreground/70 ring-1 ring-foreground/10"
-                    >
-                      <ScrollText size="0.875rem" className="shrink-0 text-[var(--primary)]" />
-                      <span className="min-w-0 max-w-[16rem] truncate">{att.filename || att.name || "attachment"}</span>
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveAttachment(i)}
-                        aria-label={localizeUi("ui.chat.chatmessage.removeFileFromMessage")}
-                        title={localizeUi("ui.chat.chatmessage.removeFromMessage")}
-                        className="rounded-full p-0.5 text-foreground/45 transition-colors hover:bg-foreground/10 hover:text-[var(--destructive)] sm:opacity-0 sm:group-hover/att:opacity-100"
-                      >
-                        <X size="0.75rem" />
-                      </button>
-                    </div>
-                  ),
-                )}
-              </div>
-            )}
+            {roleplayAttachments}
 
             {!editing && !isUser && (storyboard || storyboardGenerating) ? (
               <RoleplayStoryboardMessageMedia
@@ -3551,10 +4134,34 @@ export const ChatMessage = memo(function ChatMessage({
               />
             )}
 
+            <MessageMarkIndicators message={message} className="px-1" />
+
+            {!isUser && replyCheckup && <div className="px-1">{replyCheckup}</div>}
+
+            {isUser && failedReply && (
+              <p className="mari-send-failed" role="alert" title={failedReplyReason}>
+                <AlertTriangle size="0.8rem" aria-hidden="true" />
+                <button
+                  type="button"
+                  className="mari-send-failed__text bg-transparent p-0 text-start"
+                  onClick={() => failedReplyReason && toast(failedReplyReason)}
+                >
+                  {localizeUi("ui.chat.chatmessage.failedReply")}
+                </button>
+                <span aria-hidden="true">·</span>
+                <button type="button" onClick={onRetryFailedReply} className="mari-link">
+                  {localizeUi("ui.chat.chatmessage.retryFailedReply")}
+                </button>
+              </p>
+            )}
+
             {/* Hover actions (tap to toggle on mobile) */}
             <div
+              onClickCapture={() => {
+                if (matchMedia("(pointer: coarse)").matches) setShowActions(true);
+              }}
               className={cn(
-                "mari-message-actions flex w-full min-w-0 flex-wrap items-center justify-between gap-1 px-1 opacity-0 transition-all group-hover:opacity-100 md:gap-x-2",
+                "mari-message-actions flex w-full min-w-0 flex-wrap items-center justify-between gap-1 px-1 opacity-0 transition-all [@media(pointer:fine)]:focus-within:opacity-100 group-hover:opacity-100 md:justify-start md:gap-x-2",
                 (showActions || editing) && "opacity-100",
                 showStreamingThinkingAction &&
                   "opacity-100 [&>button:not([data-message-thinking-action])]:hidden [&>div]:hidden",
@@ -3599,6 +4206,7 @@ export const ChatMessage = memo(function ChatMessage({
                 />
               )}
               <GuidedRegenerateActionBtn onClick={() => onRegenerate?.(message.id)} />
+              <MessageMarksAction message={message} align={isUser ? "right" : "left"} noteSharing={noteSharing} />
               {onToggleConversationStart && (
                 <ConversationStartAction
                   messageId={message.id}
@@ -3666,57 +4274,7 @@ export const ChatMessage = memo(function ChatMessage({
                 onClick={() => onDelete?.(message.id)}
                 title={localizeUi("lorebook.editor.batch.delete")}
               />
-              {ttsEnabled && (
-                <>
-                  {isSpeakingThis && (ttsState === "playing" || ttsState === "paused") && (
-                    <>
-                      <ActionBtn
-                        icon={
-                          isPausedThis ? (
-                            <Play size={MESSAGE_ACTION_ICON_SIZE} />
-                          ) : (
-                            <Pause size={MESSAGE_ACTION_ICON_SIZE} />
-                          )
-                        }
-                        onClick={handlePauseResumeTTS}
-                        title={
-                          isPausedThis
-                            ? localizeUi("ui.chat.chatmessage.resumeSpeaking")
-                            : localizeUi("ui.chat.chatmessage.pauseSpeaking")
-                        }
-                      />
-                      <ActionBtn
-                        icon={<RefreshCw size={MESSAGE_ACTION_ICON_SIZE} />}
-                        onClick={handleRestartTTS}
-                        title={localizeUi("ui.chat.chatmessage.restartSpeaking")}
-                      />
-                    </>
-                  )}
-                  <ActionBtn
-                    icon={
-                      isLoadingThis ? (
-                        <Loader2 size={MESSAGE_ACTION_ICON_SIZE} className="animate-spin" />
-                      ) : isSpeakingThis ? (
-                        <MicOff size={MESSAGE_ACTION_ICON_SIZE} />
-                      ) : (
-                        <Mic size={MESSAGE_ACTION_ICON_SIZE} />
-                      )
-                    }
-                    onClick={handleSpeak}
-                    title={
-                      !hasTTSContent
-                        ? localizeUi("ui.chat.chatmessage.noDialogueToSpeak")
-                        : isLoadingThis
-                          ? localizeUi("ui.panels.ttsconfigcard.loading")
-                          : isSpeakingThis
-                            ? localizeUi("ui.chat.chatmessage.stopSpeaking")
-                            : localizeUi("ui.chat.chatmessage.speak")
-                    }
-                    disabled={!hasTTSContent || (ttsBusy && !isSpeakingThis)}
-                  />
-                  <TTSLineVolumeControl volume={ttsLineVolume} onVolumeChange={handleTTSLineVolumeChange} dark />
-                </>
-              )}
+              {roleplayTtsControls}
             </div>
           </div>
         </div>
@@ -3856,6 +4414,7 @@ export const ChatMessage = memo(function ChatMessage({
           )}
 
           <ConversationStartMarkers
+            memoryStartCharacterIds={memoryStartCharacterIds}
             sharedStart={isConversationStart}
             characterIds={conversationStartForCharacterIds}
             characters={aiVisibilityCharacters}
@@ -3913,11 +4472,8 @@ export const ChatMessage = memo(function ChatMessage({
                     <>
                       {diceRollResult ? (
                         <DiceMessageContent diceRollResult={diceRollResult} createdAt={message.createdAt} />
-                      ) : showTranslationOnly ? (
-                        renderedTranslation
-                      ) : (
-                        renderedContent
-                      )}
+                      ) : null}
+                      {diceReplacesContent ? null : showTranslationOnly ? renderedTranslationOnly : renderedContent}
                       {isStreaming && (
                         <span className="ml-0.5 inline-block h-4 w-[0.125rem] animate-pulse rounded-full bg-white/70" />
                       )}
@@ -3941,10 +4497,17 @@ export const ChatMessage = memo(function ChatMessage({
           </div>
 
           {/* Attachments (illustrations, selfies, uploaded files) */}
-          {!editing && extra.attachments?.length > 0 && !IMAGE_URL_RE.test(message.content.trim()) && (
+          {!editing && extra.attachments?.some((att: any) => !skipAttachment(att)) && (
             <div className="mt-1.5 flex flex-col items-center gap-2 px-3 pb-2">
               {extra.attachments.map((att: any, i: number) =>
-                att.type === "image" || att.type?.startsWith("image/") ? (
+                skipAttachment(att) ? null : isVideoAttachment(att) && att.url ? (
+                  <ChatVideoAttachment
+                    key={att.videoId ?? att.url}
+                    src={att.url}
+                    prompt={att.prompt}
+                    onRemove={() => handleRemoveAttachment(i)}
+                  />
+                ) : att.type === "image" || att.type?.startsWith("image/") ? (
                   <div key={i} className="group/att relative inline-block">
                     <button
                       type="button"
@@ -4024,10 +4587,34 @@ export const ChatMessage = memo(function ChatMessage({
             />
           )}
 
+          <MessageMarkIndicators message={message} className="px-3" />
+
+          {!isUser && replyCheckup && <div className="px-3">{replyCheckup}</div>}
+
+          {isUser && failedReply && (
+            <p className="mari-send-failed" role="alert" title={failedReplyReason}>
+              <AlertTriangle size="0.8rem" aria-hidden="true" />
+              <button
+                type="button"
+                className="mari-send-failed__text bg-transparent p-0 text-start"
+                onClick={() => failedReplyReason && toast(failedReplyReason)}
+              >
+                {localizeUi("ui.chat.chatmessage.failedReply")}
+              </button>
+              <span aria-hidden="true">·</span>
+              <button type="button" onClick={onRetryFailedReply} className="mari-link">
+                {localizeUi("ui.chat.chatmessage.retryFailedReply")}
+              </button>
+            </p>
+          )}
+
           {/* Hover actions (tap to toggle on mobile) */}
           <div
+            onClickCapture={() => {
+              if (matchMedia("(pointer: coarse)").matches) setShowActions(true);
+            }}
             className={cn(
-              "mari-message-actions flex w-full min-w-0 flex-wrap items-center justify-between gap-1 px-1 opacity-0 transition-all group-hover:opacity-100 md:gap-x-2",
+              "mari-message-actions flex w-full min-w-0 flex-wrap items-center justify-between gap-1 px-1 opacity-0 transition-all [@media(pointer:fine)]:focus-within:opacity-100 group-hover:opacity-100 md:justify-start md:gap-x-2",
               (showActions || editing) && "opacity-100",
               showStreamingThinkingAction &&
                 "opacity-100 [&>button:not([data-message-thinking-action])]:hidden [&>div]:hidden",
@@ -4038,6 +4625,9 @@ export const ChatMessage = memo(function ChatMessage({
               onClick={handleCopy}
               title={localizeUi("lorebook.editor.batch.copy")}
             />
+            {chatMode === "conversation" && !isStreaming && (
+              <ReplyToMessageButton message={message} name={displayName} />
+            )}
             <ActionBtn
               icon={<Languages size={MESSAGE_ACTION_ICON_SIZE} />}
               onClick={() => translate(message.id, message.content, message.chatId)}
@@ -4072,6 +4662,7 @@ export const ChatMessage = memo(function ChatMessage({
               />
             )}
             <GuidedRegenerateActionBtn onClick={() => onRegenerate?.(message.id)} />
+            <MessageMarksAction message={message} align={isUser ? "right" : "left"} noteSharing={noteSharing} />
             {onToggleConversationStart && (
               <ConversationStartAction
                 messageId={message.id}
@@ -4138,7 +4729,7 @@ export const ChatMessage = memo(function ChatMessage({
               title={localizeUi("lorebook.editor.batch.delete")}
             />
             {ttsEnabled && (
-              <>
+              <MessageAudioMenu align={isUser ? "right" : "left"}>
                 {isSpeakingThis && !isLoadingThis && (
                   <>
                     <ActionBtn
@@ -4183,10 +4774,22 @@ export const ChatMessage = memo(function ChatMessage({
                           ? localizeUi("ui.chat.chatmessage.stopSpeaking")
                           : localizeUi("ui.chat.chatmessage.speak")
                   }
-                  disabled={!hasTTSContent || (ttsBusy && !isSpeakingThis)}
+                  disabled={!hasTTSContent || clearingTTS || (ttsBusy && !isSpeakingThis)}
                 />
-                <TTSLineVolumeControl volume={ttsLineVolume} onVolumeChange={handleTTSLineVolumeChange} />
-              </>
+                <ActionBtn
+                  icon={
+                    clearingTTS ? (
+                      <Loader2 size={MESSAGE_ACTION_ICON_SIZE} className="animate-spin" />
+                    ) : (
+                      <Eraser size={MESSAGE_ACTION_ICON_SIZE} />
+                    )
+                  }
+                  onClick={handleClearCachedVoice}
+                  title={localizeUi("ui.chat.chatmessage.clearCachedVoice")}
+                  disabled={!hasTTSContent || clearingTTS || (ttsBusy && !isSpeakingThis)}
+                />
+                <TTSLineVolumeSlider volume={ttsLineVolume} onVolumeChange={handleTTSLineVolumeChange} />
+              </MessageAudioMenu>
             )}
           </div>
         </div>
@@ -4222,50 +4825,30 @@ export const ChatMessage = memo(function ChatMessage({
   );
 });
 
-function TTSLineVolumeControl({
-  volume,
-  onVolumeChange,
+function MessageAudioMenu({
+  children,
+  align = "left",
   dark,
 }: {
-  volume: number;
-  onVolumeChange: (volume: number) => void;
+  children: React.ReactNode;
+  align?: "left" | "right";
   dark?: boolean;
 }) {
   const { t: localizeUi } = useUiTranslation();
-  const [open, setOpen] = useState(false);
-  const wrapperRef = useRef<HTMLDivElement | null>(null);
-  const inputRef = useRef<HTMLInputElement | null>(null);
-  const muted = volume <= 0;
-  const label = `Line volume: ${volume}%`;
+  const { open, setOpen, buttonRef, menuRef, position } = useMessageActionMenu(align);
+  const label = localizeUi("ui.chat.chatmessage.voiceControls");
 
   useEffect(() => {
     if (!open) return;
-
-    const handlePointerDown = (event: PointerEvent) => {
-      if (wrapperRef.current?.contains(event.target as Node)) return;
-      setOpen(false);
-    };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-
-    document.addEventListener("pointerdown", handlePointerDown, true);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown, true);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) return;
-    requestAnimationFrame(() => inputRef.current?.focus());
-  }, [open]);
+    const frame = requestAnimationFrame(() => menuRef.current?.querySelector("button")?.focus({ preventScroll: true }));
+    return () => cancelAnimationFrame(frame);
+  }, [menuRef, open]);
 
   return (
-    <div ref={wrapperRef} className="relative inline-flex">
+    <>
       <ActionBtn
-        icon={muted ? <VolumeX size={MESSAGE_ACTION_ICON_SIZE} /> : <Volume2 size={MESSAGE_ACTION_ICON_SIZE} />}
+        buttonRef={buttonRef}
+        icon={<Headphones size={MESSAGE_ACTION_ICON_SIZE} />}
         onClick={() => setOpen((value) => !value)}
         title={label}
         ariaPressed={open}
@@ -4273,45 +4856,77 @@ function TTSLineVolumeControl({
           open ? (dark ? MESSAGE_CHROME_ACTIVE_ICON_CLASS : "bg-[var(--accent)] text-[var(--foreground)]") : undefined
         }
       />
-      {open && (
-        <div
-          role="dialog"
-          aria-label={localizeUi("ui.chat.ttslinevolumecontrol.lineVolume")}
-          className={cn(
-            "absolute bottom-full left-1/2 z-40 mb-2 flex w-44 max-w-[calc(100vw-1.5rem)] -translate-x-1/2 flex-col gap-2.5 rounded-lg border p-2.5 shadow-xl",
-            dark
-              ? "border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-panel-bg)] text-[var(--marinara-chat-chrome-panel-title)] shadow-black/30"
-              : "border-[var(--border)] bg-[var(--popover)] text-[var(--popover-foreground)] shadow-black/20",
-          )}
-        >
-          <div className="flex items-center justify-between gap-2 text-[0.6875rem]">
-            <span className={dark ? "text-[var(--marinara-chat-chrome-panel-title)]" : "text-[var(--foreground)]"}>
-              {localizeUi("ui.chat.ttslinevolumecontrol.lineVolume")}
-            </span>
-            <span
-              className={cn(
-                "tabular-nums",
-                dark ? "text-[var(--marinara-chat-chrome-panel-muted)]" : "text-[var(--muted-foreground)]",
-              )}
-            >
-              {volume}%
-            </span>
-          </div>
-          <input
-            ref={inputRef}
-            type="range"
-            min={0}
-            max={100}
-            step={1}
-            value={volume}
-            onChange={(event) => onVolumeChange(Number(event.currentTarget.value))}
-            className="mari-tts-line-volume-slider w-full"
-            aria-label={localizeUi("ui.chat.ttslinevolumecontrol.lineVolume")}
-            title={localizeUi("ui.chat.ttslinevolumecontrol.lineVolume")}
-            style={{ "--range-progress": `${volume}%` } as React.CSSProperties}
-          />
-        </div>
-      )}
+      {open &&
+        createPortal(
+          <div
+            ref={menuRef}
+            style={position}
+            role="dialog"
+            aria-label={label}
+            className={cn(
+              "marinara-chat-popover mari-chat-style-surface mari-chat-action-panel fixed z-[9999] flex max-w-[calc(100vw-1.5rem)] flex-row flex-wrap items-center gap-1 rounded-lg border p-1.5 shadow-xl",
+              dark
+                ? "border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--marinara-chat-chrome-panel-bg)] text-[var(--marinara-chat-chrome-panel-title)] shadow-black/30"
+                : "border-[var(--border)] bg-[var(--popover)] text-[var(--popover-foreground)] shadow-black/20",
+            )}
+          >
+            {children}
+          </div>,
+          document.body,
+        )}
+    </>
+  );
+}
+
+function TTSLineVolumeSlider({
+  volume,
+  onVolumeChange,
+  dark,
+  autoFocus,
+}: {
+  volume: number;
+  onVolumeChange: (volume: number) => void;
+  dark?: boolean;
+  autoFocus?: boolean;
+}) {
+  const { t: localizeUi } = useUiTranslation();
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (!autoFocus) return;
+    const frame = requestAnimationFrame(() => inputRef.current?.focus({ preventScroll: true }));
+    return () => cancelAnimationFrame(frame);
+  }, [autoFocus]);
+
+  return (
+    <div className="flex items-center gap-2">
+      <span
+        aria-hidden="true"
+        className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md p-0 text-base leading-none text-[var(--marinara-chat-message-action-text)] max-md:h-8 max-md:w-7 max-md:text-sm"
+      >
+        <Volume2 size={MESSAGE_ACTION_ICON_SIZE} className="shrink-0" />
+      </span>
+      <input
+        ref={inputRef}
+        type="range"
+        min={0}
+        max={100}
+        step={1}
+        value={volume}
+        onChange={(event) => onVolumeChange(Number(event.currentTarget.value))}
+        className="mari-tts-line-volume-slider w-28"
+        aria-label={localizeUi("ui.chat.ttslinevolumecontrol.lineVolume")}
+        title={localizeUi("ui.chat.ttslinevolumecontrol.lineVolume")}
+        style={{ "--range-progress": `${volume}%` } as React.CSSProperties}
+      />
+      <span
+        className={cn(
+          "tabular-nums text-[0.6875rem]",
+          dark ? "text-[var(--marinara-chat-chrome-panel-muted)]" : "text-[var(--muted-foreground)]",
+        )}
+      >
+        {volume}%
+      </span>
     </div>
   );
 }

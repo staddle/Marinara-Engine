@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import type { CapabilityPackageUpdate } from "@marinara-engine/shared";
 import {
-  useDeclineCapabilityPackageUpdate,
+  useDeclineCapabilityPackageUpdates,
   useInstallCapabilityPackage,
   usePendingCapabilityPackageUpdates,
 } from "../../hooks/use-capability-packages";
@@ -10,11 +10,19 @@ import { getPrivilegedActionErrorMessage } from "../../lib/api-client";
 import { AgentUpdateDialog } from "./AgentUpdateDialog";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
-export function AgentUpdatePrompter({ presentationAllowed }: { presentationAllowed: boolean }) {
+export function AgentUpdatePrompter({
+  presentationAllowed,
+  onOpenChange,
+  onResolved,
+}: {
+  presentationAllowed: boolean;
+  onOpenChange?: (open: boolean) => void;
+  onResolved?: () => void;
+}) {
   const { t: localizeUi } = useUiTranslation();
-  const { data: pendingUpdateData, refetch: refetchPendingUpdates } = usePendingCapabilityPackageUpdates();
+  const { data: pendingUpdateData, isFetched, refetch: refetchPendingUpdates } = usePendingCapabilityPackageUpdates();
   const install = useInstallCapabilityPackage();
-  const decline = useDeclineCapabilityPackageUpdate();
+  const decline = useDeclineCapabilityPackageUpdates();
   // Kept as a ref, not state: a dismissed update must not re-prompt this session,
   // and marking it must not schedule another render of the queue effect.
   const handledUpdates = useRef(new Set<string>());
@@ -22,12 +30,21 @@ export function AgentUpdatePrompter({ presentationAllowed }: { presentationAllow
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
+    onOpenChange?.(prompted !== null);
+  }, [onOpenChange, prompted]);
+
+  useEffect(() => {
+    if (!isFetched) return;
     const updates = (pendingUpdateData ?? []).filter(
       (update) => !handledUpdates.current.has(`${update.id}@${update.version}`),
     );
-    if (!presentationAllowed || updates.length === 0 || prompted) return;
+    if (updates.length === 0) {
+      onResolved?.();
+      return;
+    }
+    if (!presentationAllowed || prompted) return;
     setPrompted(updates);
-  }, [pendingUpdateData, presentationAllowed, prompted]);
+  }, [isFetched, onResolved, pendingUpdateData, presentationAllowed, prompted]);
 
   const finish = useCallback(
     async (updates: CapabilityPackageUpdate[]) => {
@@ -81,24 +98,23 @@ export function AgentUpdatePrompter({ presentationAllowed }: { presentationAllow
 
   const handleNotNow = useCallback(async () => {
     if (!prompted || busy) return;
-    setBusy(true);
-    const failures: unknown[] = [];
-    for (const update of prompted) {
-      try {
-        await decline.mutateAsync({ id: update.id, version: update.version });
-      } catch (error) {
-        failures.push(error);
-      }
-    }
-    if (failures.length > 0) {
+    // Close first, then decline them all in one request: a reload right after "Not now" must not bring back
+    // updates a one-by-one loop had not reached yet. A failed decline only means the notice can return next
+    // session (this one already treats them as handled).
+    const updates = prompted;
+    updates.forEach((update) => handledUpdates.current.add(`${update.id}@${update.version}`));
+    setPrompted(null);
+    try {
+      await decline.mutateAsync(updates);
+    } catch (error) {
       toast.error(
         getPrivilegedActionErrorMessage(
-          failures[0],
+          error,
           localizeUi("ui.agents.agentupdateprompter.someUpdateNoticesCouldNotBeDismissed"),
         ),
       );
     }
-    await finish(prompted);
+    await finish(updates);
   }, [busy, decline, finish, localizeUi, prompted]);
 
   if (!prompted) return null;

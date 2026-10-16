@@ -3,6 +3,7 @@
 // ──────────────────────────────────────────────
 import { createHash, createSign } from "crypto";
 import {
+  ASSISTANT_CONTINUATION_PROMPT,
   BaseLLMProvider,
   llmFetch,
   llmHttpErrorFromResponse,
@@ -14,8 +15,16 @@ import {
   type LLMToolDefinition,
   type LLMUsage,
 } from "../base-provider.js";
-import { shouldSuppressUnknownModelParameters } from "@marinara-engine/shared";
-import { getEmbeddingRequestTimeoutMs } from "../../../config/runtime-config.js";
+import {
+  capabilityModelId,
+  isGeminiArgonModel,
+  isGeminiStrictRequestModel,
+  isGeminiThinkingLevelModel,
+  shouldSuppressUnknownModelParameters,
+  type GenerationParameterSendKey,
+} from "@marinara-engine/shared";
+import { getEmbeddingRequestTimeoutMs, isDebugAgentsEnabled } from "../../../config/runtime-config.js";
+import { logDebugOverride } from "../../../lib/logger.js";
 import { decodePossiblyCompressedBody } from "../../../utils/security.js";
 
 /** A single Gemini response part (text, thought summary, or signature-only). */
@@ -54,6 +63,7 @@ interface GeminiUsageMetadata {
   candidatesTokenCount: number;
   totalTokenCount: number;
   thoughtsTokenCount?: number;
+  cachedContentTokenCount?: number;
 }
 
 interface GeminiResponsePayload {
@@ -70,6 +80,38 @@ interface GeminiEmbeddingPayload {
 }
 
 type GoogleProviderKind = "google" | "google_vertex";
+
+const GEMINI_STRICT_UNSENT = new Set<GenerationParameterSendKey>([
+  "temperature",
+  "topP",
+  "topK",
+  "frequencyPenalty",
+  "presencePenalty",
+]);
+
+// Gemini's adjustable safety filters are always off (#7542). Google documents Off as the default only for
+// Gemini 2.5 and 3, so newer models need it said out loud. Core protections still apply and still block.
+// CIVIC_INTEGRITY is deprecated and JAILBREAK is not in the adjustable list, so neither is sent.
+// https://ai.google.dev/gemini-api/docs/safety-settings
+const GEMINI_SAFETY_SETTINGS_OFF = [
+  "HARM_CATEGORY_HARASSMENT",
+  "HARM_CATEGORY_HATE_SPEECH",
+  "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+  "HARM_CATEGORY_DANGEROUS_CONTENT",
+].map((category) => ({ category, threshold: "OFF" }));
+
+/**
+ * Runs after custom parameters. A user's own safety settings (in either spelling) win for the categories they
+ * name; every other category is still sent as Off, under the user's spelling so the field is never doubled.
+ * A body where the user wrote both spellings is left exactly as written, so nothing contradicts either list.
+ */
+function applyGeminiSafetySettingsOff(body: Record<string, unknown>): void {
+  if ("safetySettings" in body && "safety_settings" in body) return;
+  const key = "safety_settings" in body ? "safety_settings" : "safetySettings";
+  const own = Array.isArray(body[key]) ? (body[key] as Array<{ category?: unknown } | null>) : [];
+  const named = new Set(own.map((setting) => setting?.category));
+  body[key] = [...own, ...GEMINI_SAFETY_SETTINGS_OFF.filter(({ category }) => !named.has(category))];
+}
 
 export function resolveGoogleFunctionCallingMode(toolChoice: ChatOptions["toolChoice"]): "AUTO" | "ANY" {
   return toolChoice === "required" ? "ANY" : "AUTO";
@@ -99,6 +141,18 @@ interface GoogleServiceAccountKey {
 const GOOGLE_CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
 const serviceAccountTokenCache = new Map<string, { accessToken: string; expiresAtMs: number }>();
 const LINKAPI_CONSOLE_HOSTS = new Set(["linkapi.ai", "www.linkapi.ai", "home.linkapi.ai"]);
+
+function supportsGoogleThinkingStreaming(baseUrl: string, model: string): boolean {
+  try {
+    const host = new URL(baseUrl).hostname;
+    if (host === "generativelanguage.googleapis.com") return true;
+    // Argon stops a non-streamed reply at 32,768 tokens, half its streamed limit, so it streams on Vertex too.
+    // ponytail: other models still buffer thinking on Vertex; drop the model check once Vertex is verified for them.
+    return isGeminiArgonModel(model) && host.endsWith(".googleapis.com");
+  } catch {
+    return false;
+  }
+}
 
 function normalizeGoogleBaseUrl(baseUrl: string): string {
   const trimmed = baseUrl.replace(/\/+$/, "");
@@ -242,7 +296,7 @@ function capGeminiThinkingBudget(requestedBudget: number, maxOutputTokens: numbe
 }
 
 function supportsGeminiThinkingDisable(model: string): boolean {
-  const normalized = model.toLowerCase();
+  const normalized = capabilityModelId(model);
   return (
     /^gemini-2\.5-flash(?:-lite)?(?:$|-preview|-latest)/u.test(normalized) ||
     normalized.startsWith("gemini-2.0-flash-thinking")
@@ -259,7 +313,7 @@ export function resolveGeminiThinkingConfig(
   }
   if (!options.enableThinking && !options.reasoningEffort) return undefined;
 
-  if (/gemini-3/i.test(model)) {
+  if (isGeminiThinkingLevelModel(model)) {
     const levelMap = { low: "low", medium: "medium", high: "high", xhigh: "high", max: "high" } as const;
     return {
       thinkingLevel: options.reasoningEffort ? levelMap[options.reasoningEffort] : "high",
@@ -341,12 +395,25 @@ function formatGeminiPromptBlock(feedback: GeminiPromptFeedback | undefined): st
   return message ? `${reason}: ${message}` : reason;
 }
 
-function geminiFinishReasonError(finishReason: string | undefined, hasOutput: boolean): string | null {
+export class GeminiNoContentError extends Error {
+  constructor(
+    readonly finishReason: string,
+    readonly usage?: LLMUsage,
+  ) {
+    super(`Gemini finished without content (${finishReason})`);
+  }
+}
+
+function geminiFinishReasonError(
+  finishReason: string | undefined,
+  hasOutput: boolean,
+  usage?: LLMUsage,
+): GeminiNoContentError | null {
   const normalized = typeof finishReason === "string" ? finishReason.trim().toUpperCase() : "";
   if (!normalized || normalized === "STOP") return null;
   if (hasOutput && normalized === "MAX_TOKENS") return null;
   if (hasOutput) return null;
-  return `Gemini finished without content (${finishReason})`;
+  return new GeminiNoContentError(finishReason!, usage);
 }
 
 function assertGeminiUsableResponse(
@@ -362,8 +429,8 @@ function assertGeminiUsableResponse(
 
   if (!candidate) throw new Error("Gemini returned no candidates. The prompt may have been blocked or filtered.");
 
-  const finishError = geminiFinishReasonError(candidate.finishReason, hasOutput);
-  if (finishError) throw new Error(finishError);
+  const finishError = geminiFinishReasonError(candidate.finishReason, hasOutput, geminiUsage(payload.usageMetadata));
+  if (finishError) throw finishError;
 
   if (!hasOutput) throw new Error("Gemini returned no content.");
 }
@@ -465,12 +532,25 @@ function formatGoogleContents(
 ): Array<{ role: "user" | "model"; parts: Array<Record<string, unknown>> }> {
   const contents: Array<{ role: "user" | "model"; parts: Array<Record<string, unknown>> }> = [];
   const toolNamesById = new Map<string, string>();
+  const emittedToolIds = new Set<string>();
 
   for (const message of messages) {
     if (message.role === "system") continue;
 
+    // Record every call id → name before the assistant branches diverge. A `tool` message
+    // names its functionResponse from this map, including when raw parts are replayed.
+    if (message.role === "assistant" && message.tool_calls?.length) {
+      for (const call of message.tool_calls) toolNamesById.set(call.id, call.function.name);
+    }
+
     if (message.role === "assistant" && message.providerMetadata?.geminiParts) {
-      contents.push({ role: "model", parts: message.providerMetadata.geminiParts as Array<Record<string, unknown>> });
+      const parts = message.providerMetadata.geminiParts as Array<Record<string, unknown>>;
+      for (const part of parts) {
+        if (isRecord(part.functionCall) && typeof part.functionCall.id === "string") {
+          emittedToolIds.add(part.functionCall.id);
+        }
+      }
+      contents.push({ role: "model", parts });
       continue;
     }
 
@@ -478,8 +558,10 @@ function formatGoogleContents(
       const parts: Array<Record<string, unknown>> = [];
       if (message.content?.trim()) parts.push({ text: message.content });
       for (const call of message.tool_calls) {
-        toolNamesById.set(call.id, call.function.name);
-        parts.push({ functionCall: { name: call.function.name, args: parseToolArguments(call.function.arguments) } });
+        emittedToolIds.add(call.id);
+        parts.push({
+          functionCall: { id: call.id, name: call.function.name, args: parseToolArguments(call.function.arguments) },
+        });
       }
       contents.push({ role: "model", parts });
       continue;
@@ -489,7 +571,16 @@ function formatGoogleContents(
       const name = message.tool_call_id ? (toolNamesById.get(message.tool_call_id) ?? "tool_result") : "tool_result";
       contents.push({
         role: "user",
-        parts: [{ functionResponse: { name, response: parseToolResultContent(message.content || "") } }],
+        parts: [
+          {
+            functionResponse: {
+              // Match ids actually replayed to Gemini, not Engine's synthetic ids for id-less calls.
+              ...(message.tool_call_id && emittedToolIds.has(message.tool_call_id) ? { id: message.tool_call_id } : {}),
+              name,
+              response: parseToolResultContent(message.content || ""),
+            },
+          },
+        ],
       });
       continue;
     }
@@ -503,6 +594,22 @@ function formatGoogleContents(
 
   if (contents.length === 0) contents.push({ role: "user", parts: [{ text: "Continue." }] });
   return contents;
+}
+
+/**
+ * Argon and the newer Flash models reject a prefilled final model turn: keep it as history and ask for only the rest of
+ * the reply. https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-argon
+ */
+function withGeminiContinuation(model: string, contents: Array<{ role: string; parts: object[] }>) {
+  const last = contents.at(-1);
+  if (
+    !isGeminiStrictRequestModel(model) ||
+    last?.role !== "model" ||
+    last.parts.some((part) => "functionCall" in part)
+  ) {
+    return contents;
+  }
+  return [...contents, { role: "user", parts: [{ text: ASSISTANT_CONTINUATION_PROMPT }] }];
 }
 
 function geminiToolCallFromPart(part: GeminiPart, index: number): LLMToolCall | null {
@@ -522,12 +629,14 @@ function geminiUsage(usage?: GeminiUsageMetadata): LLMUsage | undefined {
     completionTokens: usage.candidatesTokenCount,
     totalTokens: usage.totalTokenCount,
     completionReasoningTokens: usage.thoughtsTokenCount,
+    cachedPromptTokens: usage.cachedContentTokenCount,
   };
 }
 
 function normalizeGeminiFinishReason(reason: string | null | undefined): string {
   const normalized = typeof reason === "string" ? reason.trim().toUpperCase() : "";
-  if (normalized === "MAX_TOKENS") return "length";
+  // Argon ends a reply cut at its per-request output limit with CONTINUATION (a long-decode token Marinara does not use).
+  if (normalized === "MAX_TOKENS" || normalized === "CONTINUATION") return "length";
   if (normalized === "STOP") return "stop";
   return reason ?? "stop";
 }
@@ -553,6 +662,12 @@ export class GoogleProvider extends BaseLLMProvider {
     );
   }
 
+  // Argon and the newer Flash models ignore temperature, top-p and top-k and reject both penalties with HTTP 400.
+  protected override shouldSendParameter(options: ChatOptions, key: GenerationParameterSendKey): boolean {
+    if (isGeminiStrictRequestModel(options.model) && GEMINI_STRICT_UNSENT.has(key)) return false;
+    return super.shouldSendParameter(options, key);
+  }
+
   async chatComplete(messages: ChatMessage[], options: ChatOptions): Promise<ChatCompletionResult> {
     if (this.shouldSuppressModelParameters(options) || !options.tools?.length)
       return super.chatComplete(messages, options);
@@ -564,8 +679,7 @@ export class GoogleProvider extends BaseLLMProvider {
     const maxTokens = this.applyMaxTokensCap(contextFit.maxTokens ?? configuredMaxTokens);
     const model = options.model || "gemini-2.0-flash";
 
-    const isGemini3 = /gemini-3/i.test(model);
-    const supportsThinking = isGemini3 || /gemini-2\.5|gemini-2\.0-flash-thinking/i.test(model);
+    const supportsThinking = isGeminiThinkingLevelModel(model) || /gemini-2\.5|gemini-2\.0-flash-thinking/i.test(model);
     const thinkingConfig =
       this.shouldSendParameter(options, "reasoningEffort") && supportsThinking
         ? resolveGeminiThinkingConfig(model, options, maxTokens ?? 4096)
@@ -575,14 +689,25 @@ export class GoogleProvider extends BaseLLMProvider {
       this.providerKind === "google"
         ? normalizeGoogleGenerativeLanguageBaseUrl(this.baseUrl)
         : normalizeGoogleBaseUrl(this.baseUrl);
+
+    // Stream the tools round whenever the caller wired a token sink and did not opt out.
+    // The gate is deliberately narrower than the base `options.stream ?? !!options.onToken`
+    // formula: a caller that sets `stream: true` without a sink (the agent tool loop) keeps
+    // the buffered path it uses today. Only the official endpoint streams thinking;
+    // unrecognized proxies retain the workaround for stripped thought parts.
+    const useStream =
+      !!options.onToken &&
+      options.stream !== false &&
+      (!thinkingConfig || supportsGoogleThinkingStreaming(base, model));
+    const endpoint = useStream ? "streamGenerateContent" : "generateContent";
     const url =
       this.providerKind === "google_vertex"
-        ? buildGoogleVertexModelUrl(base, model, "generateContent")
-        : `${base}/models/${model}:generateContent`;
+        ? `${buildGoogleVertexModelUrl(base, model, endpoint)}${useStream ? "?alt=sse" : ""}`
+        : `${base}/models/${model}:${endpoint}${useStream ? "?alt=sse" : ""}`;
 
     const systemMessages = messages.filter((m) => m.role === "system" && m.content?.trim());
     const body: Record<string, unknown> = {
-      contents: formatGoogleContents(messages),
+      contents: withGeminiContinuation(model, formatGoogleContents(messages)),
       generationConfig: {
         ...(this.shouldSendParameter(options, "temperature") ? { temperature: options.temperature ?? 1 } : {}),
         ...(this.shouldSendParameter(options, "maxTokens") ? { maxOutputTokens: maxTokens } : {}),
@@ -610,7 +735,13 @@ export class GoogleProvider extends BaseLLMProvider {
     }
 
     this.applyCustomParameters(body, options);
+    applyGeminiSafetySettingsOff(body);
     applyGoogleFunctionCallingMode(body, options.toolChoice);
+    logDebugOverride(
+      options.debugMode === true || isDebugAgentsEnabled(),
+      "[debug/gemini] final tool request:\n%j",
+      body,
+    );
     const authHeaders =
       this.providerKind === "google_vertex"
         ? await googleAuthHeadersForVertex(this.apiKey)
@@ -633,28 +764,172 @@ export class GoogleProvider extends BaseLLMProvider {
       throw llmHttpErrorFromResponse(`${label} error ${response.status}: ${sanitizeApiError(errorText)}`, response);
     }
 
-    const json = JSON.parse(await readDecodedText()) as GeminiResponsePayload;
-    const candidate = json.candidates?.[0];
-    const parts = candidate?.content?.parts ?? [];
+    if (!useStream) {
+      const json = JSON.parse(await readDecodedText()) as GeminiResponsePayload;
+      const candidate = json.candidates?.[0];
+      const parts = candidate?.content?.parts ?? [];
 
-    let content = "";
-    const toolCalls: LLMToolCall[] = [];
-    for (let i = 0; i < parts.length; i += 1) {
-      const part = parts[i]!;
-      if (part.thought && part.text) options.onThinking?.(part.text);
-      else if (part.text && !part.thought) content += part.text;
-      const call = geminiToolCallFromPart(part, i);
-      if (call) toolCalls.push(call);
+      let content = "";
+      const toolCalls: LLMToolCall[] = [];
+      for (let i = 0; i < parts.length; i += 1) {
+        const part = parts[i]!;
+        if (part.thought && part.text) options.onThinking?.(part.text);
+        else if (part.text && !part.thought) content += part.text;
+        const call = geminiToolCallFromPart(part, i);
+        if (call) toolCalls.push(call);
+      }
+      assertGeminiUsableResponse(json, candidate, content.length > 0 || toolCalls.length > 0);
+      options.onResponseParts?.(parts);
+      if (content && options.onToken) await options.onToken(content);
+
+      return {
+        content: content || null,
+        toolCalls,
+        finishReason: toolCalls.length > 0 ? "tool_calls" : normalizeGeminiFinishReason(candidate?.finishReason),
+        usage: geminiUsage(json.usageMetadata),
+        ...(parts.length > 0 ? { providerMetadata: { geminiParts: parts } } : {}),
+      };
     }
-    assertGeminiUsableResponse(json, candidate, content.length > 0 || toolCalls.length > 0);
-    options.onResponseParts?.(parts);
-    if (content && options.onToken) await options.onToken(content);
+
+    // ── SSE streaming path (tools attached, thinking off) ──
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error("No response body");
+
+    const onAbort = () => reader.cancel().catch(() => {});
+    if (options.signal) {
+      if (options.signal.aborted) {
+        await reader.cancel().catch(() => {});
+        return { content: null, toolCalls: [], finishReason: "abort", usage: undefined };
+      }
+      options.signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let streamUsage: LLMUsage | undefined;
+
+    // Accumulators for reconstructing response parts
+    let thoughtText = "";
+    let responseText = "";
+    let lastSignature: string | undefined;
+    let sawCandidate = false;
+    let lastFinishReason: string | undefined;
+    const toolCalls: LLMToolCall[] = [];
+    // A functionCall part keeps its own thoughtSignature: Gemini 3 rejects a replayed call
+    // whose signature was moved onto a neighboring part.
+    const toolParts: GeminiPart[] = [];
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+
+        const lines = buffer.split(/\r?\n/);
+        buffer = done ? "" : (lines.pop() ?? "");
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data:")) continue;
+          const data = trimmed.slice(5).trimStart();
+
+          let parsed: GeminiResponsePayload;
+          try {
+            parsed = JSON.parse(data) as GeminiResponsePayload;
+          } catch {
+            // Skip malformed lines
+            continue;
+          }
+
+          const apiError = formatGeminiApiError(parsed.error);
+          if (apiError) throw new Error(`Gemini API streaming error: ${apiError}`);
+
+          const blockReason = formatGeminiPromptBlock(parsed.promptFeedback);
+          if (blockReason) throw new Error(`Gemini blocked the prompt (${blockReason})`);
+
+          if (parsed.usageMetadata) streamUsage = geminiUsage(parsed.usageMetadata);
+
+          const candidate = parsed.candidates?.[0];
+          const parts: GeminiPart[] = candidate?.content?.parts ?? [];
+          if (candidate) {
+            sawCandidate = true;
+            if (candidate.finishReason) lastFinishReason = candidate.finishReason;
+          }
+          const finishError = geminiFinishReasonError(
+            candidate?.finishReason,
+            responseText.length > 0 || toolCalls.length > 0 || parts.length > 0,
+            streamUsage,
+          );
+          if (finishError) throw finishError;
+
+          for (const part of parts) {
+            // Gemini sends functionCall args as an object, not a partial-JSON delta, so a
+            // call is complete the moment its part arrives — no accumulation. The index is a
+            // running counter across frames so synthesized fallback ids cannot collide.
+            const call = geminiToolCallFromPart(part, toolParts.length);
+            if (call) {
+              toolCalls.push(call);
+              toolParts.push({
+                functionCall: part.functionCall,
+                ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
+              });
+              continue;
+            }
+
+            // Capture thought signature from any non-call part
+            if (part.thoughtSignature) lastSignature = part.thoughtSignature;
+
+            if (part.thought && part.text) {
+              // Thought summary part
+              thoughtText += part.text;
+              options.onThinking?.(part.text);
+            } else if (part.text && !part.thought) {
+              // Regular text part
+              responseText += part.text;
+              if (options.onToken) await options.onToken(part.text);
+            }
+          }
+        }
+        if (done) break;
+      }
+    } finally {
+      if (options.signal) options.signal.removeEventListener("abort", onAbort);
+      await reader.cancel().catch(() => {});
+    }
+
+    // A tools round may legitimately carry no prose at all — only the functionCall — so the
+    // empty-content guard has to clear on tool calls too.
+    if (!responseText && toolCalls.length === 0 && !options.signal?.aborted) {
+      const finishError = geminiFinishReasonError(lastFinishReason, false, streamUsage);
+      if (finishError) throw finishError;
+      if (!sawCandidate)
+        throw new Error("Gemini stream returned no candidates. The prompt may have been blocked or filtered.");
+      throw new Error("Gemini stream returned no content.");
+    }
+
+    // Reconstruct the canonical parts array (thought signatures + summaries + calls) and
+    // return it as providerMetadata so the tool loop can replay this round verbatim through
+    // formatGoogleContents. The tools path never produced these parts before — a pre-existing
+    // replay hole this fix closes rather than creates.
+    const responseParts: GeminiPart[] = [];
+    if (thoughtText) responseParts.push({ text: thoughtText, thought: true });
+    if (responseText) {
+      const textPart: GeminiPart = { text: responseText };
+      if (lastSignature) textPart.thoughtSignature = lastSignature;
+      responseParts.push(textPart);
+    }
+    responseParts.push(...toolParts);
+    options.onResponseParts?.(responseParts);
 
     return {
-      content: content || null,
+      content: responseText || null,
       toolCalls,
-      finishReason: toolCalls.length > 0 ? "tool_calls" : normalizeGeminiFinishReason(candidate?.finishReason),
-      usage: geminiUsage(json.usageMetadata),
+      finishReason: options.signal?.aborted
+        ? "abort"
+        : toolCalls.length > 0
+          ? "tool_calls"
+          : normalizeGeminiFinishReason(lastFinishReason),
+      usage: streamUsage,
+      ...(responseParts.length > 0 ? { providerMetadata: { geminiParts: responseParts } } : {}),
     };
   }
 
@@ -668,13 +943,11 @@ export class GoogleProvider extends BaseLLMProvider {
 
     const model = options.model || "gemini-2.0-flash";
 
-    // Gemini 3.x models use thinkingLevel; Gemini 2.5 uses thinkingBudget
-    const isGemini3 = /gemini-3/i.test(model);
-
     // Only models that actually support thinking should get thinkingConfig:
-    // Gemini 3.x, 2.5-flash/pro, and 2.0-flash-thinking.
+    // Gemini 3 and later (thinkingLevel), 2.5-flash/pro and 2.0-flash-thinking (thinkingBudget).
     const supportsThinking =
-      !suppressModelParameters && (isGemini3 || /gemini-2\.5|gemini-2\.0-flash-thinking/i.test(model));
+      !suppressModelParameters &&
+      (isGeminiThinkingLevelModel(model) || /gemini-2\.5|gemini-2\.0-flash-thinking/i.test(model));
 
     const thinkingConfig =
       this.shouldSendParameter(options, "reasoningEffort") && supportsThinking
@@ -688,10 +961,9 @@ export class GoogleProvider extends BaseLLMProvider {
         ? normalizeGoogleGenerativeLanguageBaseUrl(this.baseUrl)
         : normalizeGoogleBaseUrl(this.baseUrl);
 
-    // When thinking is enabled, force non-streaming (generateContent) because
-    // proxies like linkapi.ai strip thought parts from SSE streams but return
-    // them in non-streaming responses. Text is still yielded so SSE works.
-    const useStreaming = options.stream && !thinkingConfig;
+    // Proxies can strip thought parts from SSE; keep their buffered workaround.
+    // Google's official endpoint carries those parts in its stream.
+    const useStreaming = options.stream && (!thinkingConfig || supportsGoogleThinkingStreaming(base, model));
     const endpoint = useStreaming ? "streamGenerateContent" : "generateContent";
     const url =
       this.providerKind === "google_vertex"
@@ -700,8 +972,15 @@ export class GoogleProvider extends BaseLLMProvider {
 
     // Convert to Gemini format — filter out empty-content messages
     const systemMessages = messages.filter((m) => m.role === "system" && m.content?.trim());
+    // Saved Gemini parts keep a turn with no text, as formatGoogleContents does.
     const chatMessages = messages.filter(
-      (m) => m.role !== "system" && (m.content?.trim() || m.images?.length || m.files?.length || m.media?.length),
+      (m) =>
+        m.role !== "system" &&
+        (m.content?.trim() ||
+          m.images?.length ||
+          m.files?.length ||
+          m.media?.length ||
+          (m.role === "assistant" && m.providerMetadata?.geminiParts)),
     );
 
     const contents = chatMessages.map((m) => {
@@ -731,7 +1010,7 @@ export class GoogleProvider extends BaseLLMProvider {
     }
 
     const body: Record<string, unknown> = {
-      contents,
+      contents: withGeminiContinuation(model, contents),
     };
 
     const outputMaxTokens = maxTokens ?? 4096;
@@ -753,10 +1032,11 @@ export class GoogleProvider extends BaseLLMProvider {
               ? { presencePenalty: options.presencePenalty }
               : {}),
             ...(thinkingConfig ? { thinkingConfig } : {}),
-            ...googleResponseFormatConfig(options.responseFormat),
             ...(options.stop?.length ? { stopSequences: options.stop } : {}),
           }
         : {}),
+      // An explicitly requested output protocol is not an inferred model sampler.
+      ...googleResponseFormatConfig(options.responseFormat),
     };
 
     if (systemMessages.length > 0) {
@@ -766,6 +1046,7 @@ export class GoogleProvider extends BaseLLMProvider {
     }
 
     this.applyCustomParameters(body, options);
+    applyGeminiSafetySettingsOff(body);
 
     const authHeaders =
       this.providerKind === "google_vertex"
@@ -795,7 +1076,7 @@ export class GoogleProvider extends BaseLLMProvider {
       throw llmHttpErrorFromResponse(`${label} error ${response.status}: ${sanitizeApiError(errorText)}`, response);
     }
 
-    // ── Non-streaming path (also used when thinking is enabled) ──
+    // ── Non-streaming path (also used for proxy thinking turns) ──
     if (!useStreaming) {
       const json = JSON.parse(await readDecodedText()) as GeminiResponsePayload;
       const candidate = json.candidates?.[0];
@@ -817,17 +1098,14 @@ export class GoogleProvider extends BaseLLMProvider {
       }
       if (json.usageMetadata) {
         return {
-          promptTokens: json.usageMetadata.promptTokenCount,
-          completionTokens: json.usageMetadata.candidatesTokenCount,
-          totalTokens: json.usageMetadata.totalTokenCount,
-          completionReasoningTokens: json.usageMetadata.thoughtsTokenCount,
+          ...geminiUsage(json.usageMetadata)!,
           finishReason: normalizeGeminiFinishReason(candidate?.finishReason),
         };
       }
       return;
     }
 
-    // ── SSE streaming path (no thinking) ──
+    // ── SSE streaming path ──
     const reader = response.body?.getReader();
     if (!reader) throw new Error("No response body");
 
@@ -881,12 +1159,7 @@ export class GoogleProvider extends BaseLLMProvider {
           if (blockReason) throw new Error(`Gemini blocked the prompt (${blockReason})`);
 
           if (parsed.usageMetadata) {
-            streamUsage = {
-              promptTokens: parsed.usageMetadata.promptTokenCount,
-              completionTokens: parsed.usageMetadata.candidatesTokenCount,
-              totalTokens: parsed.usageMetadata.totalTokenCount,
-              completionReasoningTokens: parsed.usageMetadata.thoughtsTokenCount,
-            };
+            streamUsage = geminiUsage(parsed.usageMetadata);
           }
           const candidate = parsed.candidates?.[0];
           const parts: GeminiPart[] = candidate?.content?.parts ?? [];
@@ -897,8 +1170,9 @@ export class GoogleProvider extends BaseLLMProvider {
           const finishError = geminiFinishReasonError(
             candidate?.finishReason,
             responseText.length > 0 || parts.length > 0,
+            streamUsage,
           );
-          if (finishError) throw new Error(finishError);
+          if (finishError) throw finishError;
 
           for (const part of parts) {
             // Capture thought signature from any part
@@ -919,11 +1193,12 @@ export class GoogleProvider extends BaseLLMProvider {
       }
     } finally {
       if (options.signal) options.signal.removeEventListener("abort", onAbort);
+      await reader.cancel().catch(() => {});
     }
 
     if (!responseText) {
-      const finishError = geminiFinishReasonError(lastFinishReason, false);
-      if (finishError) throw new Error(finishError);
+      const finishError = geminiFinishReasonError(lastFinishReason, false, streamUsage);
+      if (finishError) throw finishError;
       if (!sawCandidate)
         throw new Error("Gemini stream returned no candidates. The prompt may have been blocked or filtered.");
       throw new Error("Gemini stream returned no content.");

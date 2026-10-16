@@ -1,4 +1,4 @@
-import { getFolderImportEntries, isJsonRecord, sanitizeFolderSegment } from "@marinara-engine/shared";
+import { getFolderImportEntries, isJsonRecord } from "@marinara-engine/shared";
 
 export type PackageTextFile = {
   path: string;
@@ -35,17 +35,7 @@ export function getPackagePathDirname(path: string) {
   return slashIndex >= 0 ? normalized.slice(0, slashIndex) : "";
 }
 
-export function reservePackageFolderSegment(value: string, fallback: string, usedSegments: Set<string>) {
-  const baseSegment = sanitizeFolderSegment(value, fallback);
-  let segment = baseSegment;
-  let suffix = 2;
-  while (usedSegments.has(segment.toLowerCase())) {
-    segment = `${baseSegment}-${suffix}`;
-    suffix++;
-  }
-  usedSegments.add(segment.toLowerCase());
-  return segment;
-}
+export { reservePackageFolderSegment } from "@marinara-engine/shared";
 
 export async function readTextFilesFromFileList(fileList: FileList | null): Promise<PackageTextFile[]> {
   const result: PackageTextFile[] = [];

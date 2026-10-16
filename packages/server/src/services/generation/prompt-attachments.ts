@@ -6,10 +6,14 @@ export type PromptAttachment = {
   name?: string | null;
   prompt?: string | null;
   galleryId?: string | null;
+  /** Character who sent a Conversation selfie; older selfies lack it. */
+  characterName?: string | null;
   imageCaption?: string | null;
   imageCaptionConnectionId?: string | null;
   imageCaptionModel?: string | null;
   imageCaptionProvider?: string | null;
+  /** Short hash of the prompt the caption was made with; missing on captions made before prompts were editable. */
+  imageCaptionPromptKey?: string | null;
   imageCaptionedAt?: string | null;
 };
 
@@ -40,6 +44,14 @@ export function parseExtra(extra: unknown): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+/**
+ * A Conversation selfie the character sent. Selfies are the only generated images saved as
+ * `selfie_*` with type "image"; Illustrator images share that type but stay hidden from the model.
+ */
+export function isSentSelfieAttachment(attachment: PromptAttachment): boolean {
+  return attachment.type === "image" && !!attachment.filename?.startsWith("selfie_");
 }
 
 export function getAttachmentFilename(attachment: PromptAttachment): string {
@@ -141,20 +153,31 @@ export function escapeXmlAttribute(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+/** Read the same bounded source text for prompt formatting and derived memories. */
+export function readableAttachmentText(
+  attachment: PromptAttachment,
+): { filename: string; type: string; text: string } | null {
+  if (!isReadableTextAttachment(attachment) || typeof attachment.data !== "string") return null;
+  if (estimateDataUrlBytes(attachment.data) > FILE_ATTACHMENT_PROVIDER_BYTE_LIMIT) return null;
+  const text = decodeDataUrlText(attachment.data);
+  if (!text?.trim()) return null;
+  return {
+    filename: getAttachmentFilename(attachment),
+    type: typeof attachment.type === "string" && attachment.type.trim() ? attachment.type.trim() : "text/plain",
+    text,
+  };
+}
+
 export function buildReadableAttachmentBlocks(attachments: PromptAttachment[] | undefined): string[] {
   return (attachments ?? []).flatMap((attachment) => {
-    if (!isReadableTextAttachment(attachment) || typeof attachment.data !== "string") return [];
-    if (estimateDataUrlBytes(attachment.data) > FILE_ATTACHMENT_PROVIDER_BYTE_LIMIT) return [];
-    const decoded = decodeDataUrlText(attachment.data);
-    if (!decoded?.trim()) return [];
-
-    const filename = getAttachmentFilename(attachment);
-    const type = typeof attachment.type === "string" && attachment.type.trim() ? attachment.type.trim() : "text/plain";
+    const readable = readableAttachmentText(attachment);
+    if (!readable) return [];
+    const { filename, type, text } = readable;
 
     return [
       [
         `<attached_file name="${escapeXmlAttribute(filename)}" type="${escapeXmlAttribute(type)}">`,
-        decoded,
+        text,
         `</attached_file>`,
       ].join("\n"),
     ];

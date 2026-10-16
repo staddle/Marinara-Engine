@@ -68,7 +68,17 @@ const DEFAULT_PNPM_DESCRIPTOR =
   "10.34.5+sha512.a4ee05f2f73658255bd6a89859c065a45c28a57daefae2c893a168ee2b73168c37b91e83e57ea67654ad03f03031746430e8bce38e362e042605fb8abc80192e";
 const DEFAULT_PNPM_VERSION = DEFAULT_PNPM_DESCRIPTOR.slice(0, DEFAULT_PNPM_DESCRIPTOR.indexOf("+"));
 const PNPM_NONINTERACTIVE_ARGS = ["--config.trustPolicy=off", "--config.confirmModulesPurge=false"];
-const PNPM_UPDATE_INSTALL_ARGS = ["install", "--force", "--frozen-lockfile"];
+/**
+ * The dependency install every update runs. `--force` skips pnpm's platform
+ * filter, so on Termux it fetched every platform's optional binaries (about
+ * 1.7 GB, #7214). Android installs the way start-termux.sh does; since #7179 a
+ * plain frozen install also repairs the stale pnpm state `--force` used to heal.
+ */
+export function getUpdateInstallStep(platform: ServerPlatform): { env: Record<string, string>; args: string[] } {
+  return platform === "android-termux"
+    ? { env: { SHARP_IGNORE_GLOBAL_LIBVIPS: "1" }, args: ["install", "--frozen-lockfile", "--prefer-offline"] }
+    : { env: {}, args: ["install", "--force", "--frozen-lockfile"] };
+}
 // A forced reinstall is verbose; the execFile default (1 MiB) can abort an
 // otherwise healthy install with a maxBuffer error.
 const PNPM_OUTPUT_MAX_BUFFER = 32 * 1024 * 1024;
@@ -232,7 +242,11 @@ export function getManualGitApplyCommand(
     platform === "android-termux"
       ? `${pnpmCommand} --filter @marinara-engine/shared build && ${pnpmCommand} --filter @marinara-engine/server build && ${pnpmCommand} --filter @marinara-engine/client build`
       : `${pnpmCommand} --filter @marinara-engine/shared build && ${pnpmCommand} --filter @marinara-engine/server --filter @marinara-engine/client --parallel run build`;
-  const applyCommand = `git fetch ${UPDATE_REMOTE} ${channel.fetchRef} && ${checkoutCommand} && ${cleanCommand} && ${pnpmCommand} --config.trustPolicy=off --config.confirmModulesPurge=false ${PNPM_UPDATE_INSTALL_ARGS.join(" ")} && ${buildCommand}`;
+  const install = getUpdateInstallStep(platform);
+  const installEnv = Object.entries(install.env)
+    .map(([name, value]) => `${name}=${value} `)
+    .join("");
+  const applyCommand = `git fetch ${UPDATE_REMOTE} ${channel.fetchRef} && ${checkoutCommand} && ${cleanCommand} && ${installEnv}${pnpmCommand} --config.trustPolicy=off --config.confirmModulesPurge=false ${install.args.join(" ")} && ${buildCommand}`;
   return repoRoot ? `${getChangeDirectoryCommand(platform, repoRoot)} && ${applyCommand}` : applyCommand;
 }
 
@@ -704,7 +718,7 @@ function describePnpmFailure(err: unknown, args: string[], timeout: number): Err
   return new Error(parts.join(" "));
 }
 
-async function runPinnedPnpm(root: string, args: string[], baseTimeout: number) {
+async function runPinnedPnpm(root: string, args: string[], baseTimeout: number, env: Record<string, string> = {}) {
   const runner = await resolvePinnedPnpmRunner(root);
   const timeout = updateStepTimeout(baseTimeout);
   const invocation = commandInvocation(runner.command, [...runner.prefixArgs, ...PNPM_NONINTERACTIVE_ARGS, ...args]);
@@ -713,6 +727,7 @@ async function runPinnedPnpm(root: string, args: string[], baseTimeout: number) 
       cwd: root,
       timeout,
       maxBuffer: PNPM_OUTPUT_MAX_BUFFER,
+      env: { ...process.env, ...env },
     });
   } catch (err) {
     throw describePnpmFailure(err, args, timeout);
@@ -1218,7 +1233,8 @@ export async function updatesRoutes(app: FastifyInstance) {
 
       // Step 2: pnpm install. Channel switches (stable <-> staging) force a
       // near-full dependency reinstall, so this step gets a generous budget.
-      await runPinnedPnpm(root, PNPM_UPDATE_INSTALL_ARGS, 300_000);
+      const installStep = getUpdateInstallStep(serverPlatform);
+      await runPinnedPnpm(root, installStep.args, 300_000, installStep.env);
 
       // Step 3: Rebuild all packages
       await runPinnedBuild(root);

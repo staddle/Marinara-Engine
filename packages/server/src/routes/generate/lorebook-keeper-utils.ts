@@ -1,8 +1,10 @@
 import {
   customAgentHasCapability,
+  decodeAgentXmlEntities,
   normalizeLorebookCategory,
   type AgentContext,
   type LorebookEntry,
+  type SourceMessageRef,
 } from "@marinara-engine/shared";
 import { logger } from "../../lib/logger.js";
 import { createLorebooksStorage } from "../../services/storage/lorebooks.storage.js";
@@ -440,7 +442,7 @@ function readNestedEntry(update: Record<string, unknown>): Record<string, unknow
     : {};
 }
 
-function readKeeperUpdateName(update: Record<string, unknown>): string {
+export function readKeeperUpdateName(update: Record<string, unknown>, namesAreVerbatim = false): string {
   const nestedEntry = readNestedEntry(update);
   const rawName =
     typeof update.entryName === "string"
@@ -450,7 +452,7 @@ function readKeeperUpdateName(update: Record<string, unknown>): string {
         : typeof nestedEntry.name === "string"
           ? nestedEntry.name
           : "";
-  return rawName.trim();
+  return (namesAreVerbatim ? rawName : decodeAgentXmlEntities(rawName)).trim();
 }
 
 function readKeeperUpdateContent(update: Record<string, unknown>): string {
@@ -487,9 +489,21 @@ export async function persistLorebookKeeperUpdates(args: {
   writableLorebookIds: string[] | null;
   /** An explicitly selected target takes precedence over model-proposed destinations. */
   allowTargetRouting?: boolean;
+  /** Human-approved names have already crossed the model-output decoding boundary. */
+  namesAreVerbatim?: boolean;
   writableLorebooks?: WritableLorebookSummary[];
   lorebookNamingScheme?: LorebookNamingScheme;
   worldName?: string | null;
+  /**
+   * Agent producing these updates; stamped onto entries together with the
+   * source refs so message deletion can cascade (a human PATCH never carries
+   * provenance — the HTTP schemas strip it).
+   */
+  sourceAgentId?: string;
+  /** Turn messages the updates were extracted from; entries' current-content refs. */
+  sourceMessageRefs?: SourceMessageRef[];
+  /** Shared across routed batches so one keeper call keeps its original undo snapshot. */
+  writtenEntryIds?: Set<string>;
   updates: Array<Record<string, unknown>>;
   revectorizeEntry?: (entry: LorebookEntry) => Promise<void>;
   signal?: AbortSignal;
@@ -502,12 +516,24 @@ export async function persistLorebookKeeperUpdates(args: {
     writableLorebookIds,
     writableLorebooks,
     allowTargetRouting = true,
+    namesAreVerbatim = false,
     lorebookNamingScheme = {},
     worldName,
+    sourceAgentId,
+    sourceMessageRefs,
+    writtenEntryIds = new Set<string>(),
     updates,
     revectorizeEntry,
     signal,
   } = args;
+  // Refs are the anchor; attribution rides along with them. Callers that
+  // pass refs explicitly stamp provenance even when the array is empty (the
+  // entry stays attributed — and snapshotted — just not cascade-reachable);
+  // callers passing nothing keep the old unstamped behavior.
+  const provenance =
+    sourceMessageRefs !== undefined
+      ? { sourceAgentId: sourceAgentId ?? "lorebook-keeper", sourceMessageRefs }
+      : undefined;
   signal?.throwIfAborted();
 
   const routedUpdates = updates.filter(
@@ -527,7 +553,7 @@ export async function persistLorebookKeeperUpdates(args: {
 
     const resolveTarget = async (rawTarget: string): Promise<string | null> => {
       signal?.throwIfAborted();
-      const target = rawTarget.trim();
+      const target = (namesAreVerbatim ? rawTarget : decodeAgentXmlEntities(rawTarget)).trim();
       const exact = [...books.values()].find((book) => book.name === target);
       if (exact) return exact.id;
 
@@ -578,7 +604,11 @@ export async function persistLorebookKeeperUpdates(args: {
         chatName,
         preferredTargetLorebookId: targetId ?? preferredTargetLorebookId,
         writableLorebookIds: targetId ? [targetId] : [...writableIds],
+        sourceAgentId,
+        sourceMessageRefs,
+        writtenEntryIds,
         updates: targetUpdates,
+        namesAreVerbatim,
         revectorizeEntry,
         signal,
       });
@@ -625,7 +655,7 @@ export async function persistLorebookKeeperUpdates(args: {
 
   for (const update of updates) {
     signal?.throwIfAborted();
-    const rawName = readKeeperUpdateName(update);
+    const rawName = readKeeperUpdateName(update, namesAreVerbatim);
     if (!rawName) continue;
 
     const content = readKeeperUpdateContent(update);
@@ -652,7 +682,10 @@ export async function persistLorebookKeeperUpdates(args: {
         keys: mergedKeys,
         tag: mergedTag,
         ...(order !== undefined ? { order } : {}),
+        ...(provenance ?? {}),
+        ...(provenance ? { preserveProvenanceSnapshot: writtenEntryIds.has(existing.id) } : {}),
       });
+      if (updated) writtenEntryIds.add(existing.id);
       signal?.throwIfAborted();
       if (revectorizeEntry && updated) {
         try {
@@ -687,10 +720,12 @@ export async function persistLorebookKeeperUpdates(args: {
       tag,
       enabled: true,
       ...(order !== undefined ? { order } : {}),
+      ...(provenance ?? {}),
     });
     signal?.throwIfAborted();
     if (created && typeof created === "object" && "id" in created) {
       const createdEntry = created as { id: string; name?: string | null; locked?: unknown };
+      writtenEntryIds.add(createdEntry.id);
       entryByName.set(rawName.toLowerCase(), {
         ...createdEntry,
         name: createdEntry.name ?? rawName,

@@ -96,3 +96,19 @@ export function useApplyChatPreset() {
     },
   });
 }
+
+/** After saving a profile, update the chat settings of the other chats that use it. */
+export function useApplyChatPresetToFollowers() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ presetId, exceptChatId }: { presetId: string; exceptChatId: string }) =>
+      api.post<{ updated: number; chatIds: string[]; failed: number }>(`/chat-presets/${presetId}/apply-to-followers`, {
+        exceptChatId,
+      }),
+    onSuccess: ({ chatIds }) => {
+      for (const chatId of chatIds) qc.invalidateQueries({ queryKey: chatKeys.detail(chatId) });
+      qc.invalidateQueries({ queryKey: chatKeys.list() });
+      qc.invalidateQueries({ queryKey: [...chatKeys.all, "group"] });
+    },
+  });
+}

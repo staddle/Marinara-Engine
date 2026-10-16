@@ -42,6 +42,7 @@ export function CharacterTrackerPanel({
   onAddCharacter,
   onToggleFeatured,
   onUploadAvatar,
+  onGeneratePortrait,
   deleteMode,
   addMode,
   action,
@@ -67,6 +68,7 @@ export function CharacterTrackerPanel({
   onAddCharacter: () => void;
   onToggleFeatured: (key: string) => void;
   onUploadAvatar: (index: number) => void;
+  onGeneratePortrait?: (index: number, includeOutfit: boolean) => Promise<void>;
   deleteMode: boolean;
   addMode: boolean;
   action?: ReactNode;
@@ -150,6 +152,9 @@ export function CharacterTrackerPanel({
           addMode={addMode}
           onToggleFeatured={() => onToggleFeatured(entry.cardKey)}
           onUploadAvatar={() => onUploadAvatar(entry.index)}
+          onGeneratePortrait={
+            onGeneratePortrait ? (includeOutfit) => onGeneratePortrait(entry.index, includeOutfit) : undefined
+          }
         />
       </div>
     );

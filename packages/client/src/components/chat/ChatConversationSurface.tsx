@@ -1,8 +1,11 @@
-import type { ComponentProps } from "react";
+import { useMemo, type ComponentProps, type ReactNode } from "react";
 import type { Message, SpriteSide } from "@marinara-engine/shared";
-import { ConversationView } from "./ConversationView";
+import { ConversationPackageWindows, ConversationView } from "./ConversationView";
 import { ChatCommonOverlays } from "./ChatCommonOverlays";
+import { ChatConnectedChatWindow } from "./ChatControlWindow";
 import { useRenderTimer } from "../../lib/perf-diagnostics";
+import { useProvideChatGalleryActions } from "../../hooks/use-chat-gallery-actions";
+import type { ChatImage } from "../../hooks/use-gallery";
 import type { CharacterMap, MessageSelectionToggle, PeekPromptData, PersonaInfo } from "./chat-area.types";
 
 type SceneInfo =
@@ -38,8 +41,6 @@ type ConversationSurfaceProps = {
   settingsOpen: boolean;
   settingsAnchor: ComponentProps<typeof ChatCommonOverlays>["settingsAnchor"];
   settingsInitialSection?: ComponentProps<typeof ChatCommonOverlays>["settingsInitialSection"];
-  galleryOpen: boolean;
-  galleryAnchor: ComponentProps<typeof ChatCommonOverlays>["galleryAnchor"];
   wizardOpen: boolean;
   peekPromptData: PeekPromptData | null;
   deleteDialogMessageId: string | null;
@@ -53,22 +54,29 @@ type ConversationSurfaceProps = {
   onDelete: (messageId: string) => void;
   onRegenerate: (messageId: string) => void;
   onEdit: (messageId: string, content: string) => void;
+  /** N1: the user message whose reply failed, if any — drives the "Failed · Retry" line. */
+  failedReplyMessageId?: string | null;
+  failedReplyReason?: string;
+  onRetryFailedReply?: () => void;
+  /** R2: the reply that gets the checkup's quiet line, and the line itself. */
+  replyCheckupMessageId?: string | null;
+  replyCheckup?: ReactNode;
   onSetActiveSwipe: (messageId: string, index: number) => void;
   onToggleHiddenFromAI: (messageId: string, current: boolean) => void;
-  onPeekPrompt: () => void;
+  onPeekPrompt: (messageId?: string) => void;
   onBranch?: (messageId: string) => void;
   onToggleSelectMessage: (toggle: MessageSelectionToggle) => void;
   onSwitchChat?: () => void;
   onConcludeScene?: () => void;
   onAbandonScene?: () => void;
   onOpenSettings: ComponentProps<typeof ConversationView>["onOpenSettings"];
-  onOpenGallery: ComponentProps<typeof ConversationView>["onOpenGallery"];
   onOpenScheduleEditor?: ComponentProps<typeof ConversationView>["onOpenScheduleEditor"];
-  onCloseSettings: () => void;
-  onCloseGallery: () => void;
-  onIllustrate?: (prompt?: string) => void;
+  onCloseSettings: (options?: { force?: boolean }) => void;
+  onIllustrate?: (prompt?: string, messageRange?: [string, string]) => void;
   onIllustrateWithAgent?: (agentType: string) => void | Promise<void>;
   onGenerateSelfie?: (characterId?: string) => void | Promise<void>;
+  onGenerateVideo?: (characterId?: string) => void | Promise<void>;
+  onAnimateImage?: (image: ChatImage, characterId?: string) => void | Promise<void>;
   onWizardFinish: () => void;
   onClosePeekPrompt: () => void;
   onResetSpritePlacements: () => void;
@@ -107,8 +115,6 @@ export function ChatConversationSurface({
   settingsOpen,
   settingsAnchor,
   settingsInitialSection,
-  galleryOpen,
-  galleryAnchor,
   wizardOpen,
   peekPromptData,
   deleteDialogMessageId,
@@ -122,6 +128,11 @@ export function ChatConversationSurface({
   onDelete,
   onRegenerate,
   onEdit,
+  failedReplyMessageId,
+  failedReplyReason,
+  onRetryFailedReply,
+  replyCheckupMessageId,
+  replyCheckup,
   onSetActiveSwipe,
   onToggleHiddenFromAI,
   onPeekPrompt,
@@ -131,13 +142,13 @@ export function ChatConversationSurface({
   onConcludeScene,
   onAbandonScene,
   onOpenSettings,
-  onOpenGallery,
   onOpenScheduleEditor,
   onCloseSettings,
-  onCloseGallery,
   onIllustrate,
   onIllustrateWithAgent,
   onGenerateSelfie,
+  onGenerateVideo,
+  onAnimateImage,
   onWizardFinish,
   onClosePeekPrompt,
   onResetSpritePlacements,
@@ -156,6 +167,23 @@ export function ChatConversationSurface({
   lastAssistantMessageId,
 }: ConversationSurfaceProps) {
   useRenderTimer("convo-surface"); // [#3104 diagnostic]
+  const galleryActions = useMemo(
+    () => ({
+      onIllustrate,
+      onIllustrateWithAgent,
+      onGenerateSelfie,
+      onGenerateVideo,
+      onAnimateImage,
+      selfieCharacters: chatCharIds
+        .map((id) => {
+          const character = characterMap.get(id);
+          return character ? { id, name: character.name } : null;
+        })
+        .filter((character): character is { id: string; name: string } => Boolean(character)),
+    }),
+    [characterMap, chatCharIds, onAnimateImage, onGenerateSelfie, onGenerateVideo, onIllustrate, onIllustrateWithAgent],
+  );
+  useProvideChatGalleryActions(activeChatId, galleryActions);
   return (
     <div data-component="ChatArea.Conversation" className="flex flex-1 overflow-hidden">
       <div className="relative flex flex-1 flex-col overflow-hidden">
@@ -172,40 +200,49 @@ export function ChatConversationSurface({
           characterNames={characterNames}
           personaInfo={personaInfo}
           chatMeta={chatMeta}
-          chatName={chat?.name}
-          chatGroupId={chat?.groupId ?? null}
           chatCharIds={chatCharIds}
           onDelete={onDelete}
           onRegenerate={onRegenerate}
           onEdit={onEdit}
+          failedReplyMessageId={failedReplyMessageId}
+          failedReplyReason={failedReplyReason}
+          onRetryFailedReply={onRetryFailedReply}
+          replyCheckupMessageId={replyCheckupMessageId}
+          replyCheckup={replyCheckup}
           onSetActiveSwipe={onSetActiveSwipe}
           onToggleHiddenFromAI={onToggleHiddenFromAI}
           onPeekPrompt={onPeekPrompt}
           onIllustrate={onIllustrate}
           onGenerateSelfie={onGenerateSelfie}
+          onGenerateVideo={onGenerateVideo}
           lastAssistantMessageId={lastAssistantMessageId}
           onOpenSettings={onOpenSettings}
-          onOpenGallery={onOpenGallery}
           onOpenScheduleEditor={onOpenScheduleEditor}
           onBranch={onBranch}
           multiSelectMode={multiSelectMode}
           selectedMessageIds={selectedMessageIds}
           onToggleSelectMessage={onToggleSelectMessage}
-          connectedChatName={connectedChatName}
-          onSwitchChat={onSwitchChat}
           sceneInfo={sceneInfo}
           onConcludeScene={onConcludeScene}
           onAbandonScene={onAbandonScene}
         />
       </div>
 
+      {/* The connected chat and package toolbars are windows that minimize to bubbles. */}
+      {onSwitchChat && <ChatConnectedChatWindow name={connectedChatName} onSwitch={onSwitchChat} />}
+      <ConversationPackageWindows
+        chatId={activeChatId}
+        chatMeta={chatMeta}
+        characterMap={characterMap}
+        chatCharIds={chatCharIds}
+        personaInfo={personaInfo}
+      />
+
       <ChatCommonOverlays
         chat={chat}
         settingsOpen={settingsOpen}
         settingsAnchor={settingsAnchor}
         settingsInitialSection={settingsInitialSection}
-        galleryOpen={galleryOpen}
-        galleryAnchor={galleryAnchor}
         wizardOpen={wizardOpen}
         peekPromptData={peekPromptData}
         deleteDialogMessageId={deleteDialogMessageId}
@@ -222,17 +259,7 @@ export function ChatConversationSurface({
           onSpriteSideChange,
         }}
         onCloseSettings={onCloseSettings}
-        onCloseGallery={onCloseGallery}
         onOpenScheduleEditor={onOpenScheduleEditor}
-        onIllustrate={onIllustrate}
-        onIllustrateWithAgent={onIllustrateWithAgent}
-        onGenerateSelfie={onGenerateSelfie}
-        selfieCharacters={chatCharIds
-          .map((id) => {
-            const character = characterMap.get(id);
-            return character ? { id, name: character.name } : null;
-          })
-          .filter((character): character is { id: string; name: string } => Boolean(character))}
         onWizardFinish={onWizardFinish}
         onClosePeekPrompt={onClosePeekPrompt}
         onDeleteConfirm={onDeleteConfirm}

@@ -4,7 +4,8 @@
 import { useState, useRef, useCallback, useEffect, type ReactNode } from "react";
 import { Pipette, Sparkles, X, Plus, Trash2 } from "lucide-react";
 import { cn } from "../../lib/utils";
-import { isCssGradient, RAINBOW_GRADIENT_PRESET } from "../../lib/css-colors";
+import { SETTINGS_BUTTON_CLASS, SETTINGS_ICON_BUTTON_CLASS } from "../panels/settings/SettingControls";
+import { isCssGradient, MARINARA_GRADIENT_PRESET, RAINBOW_GRADIENT_PRESET } from "../../lib/css-colors";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface ColorPickerProps {
@@ -58,6 +59,7 @@ const PRESETS = [
 
 /** Preset gradients */
 const GRADIENT_PRESETS = [
+  MARINARA_GRADIENT_PRESET,
   RAINBOW_GRADIENT_PRESET,
   "linear-gradient(90deg, #ff6b6b, #ffd93d)",
   "linear-gradient(90deg, #a29bfe, #fd79a8)",
@@ -338,10 +340,11 @@ export function ColorPicker({
   disabled = false,
 }: ColorPickerProps) {
   const { t: localizeUi } = useUiTranslation();
-  const isGradient = isEditableLinearGradient(value);
+  const previewValue = value || emptyPreviewValue;
+  const isGradient = isEditableLinearGradient(previewValue);
   const [mode, setMode] = useState<"solid" | "gradient">(isGradient ? "gradient" : "solid");
   const [gradientStops, setGradientStops] = useState<string[]>(
-    isGradient ? parseGradientStops(value) : ["#ff6b6b", "#ffd93d"],
+    isGradient ? parseGradientStops(previewValue) : ["#ff6b6b", "#ffd93d"],
   );
   const [gradientAngle, setGradientAngle] = useState(90);
   const [expanded, setExpanded] = useState(false);
@@ -352,15 +355,15 @@ export function ColorPicker({
 
   // Sync value → local state when value changes externally
   useEffect(() => {
-    if (isEditableLinearGradient(value)) {
+    if (isEditableLinearGradient(previewValue)) {
       setMode("gradient");
-      setGradientStops(parseGradientStops(value));
-      const angleMatch = value.match(/linear-gradient\((\d+)deg/);
+      setGradientStops(parseGradientStops(previewValue));
+      const angleMatch = previewValue.match(/linear-gradient\((\d+)deg/);
       if (angleMatch) setGradientAngle(parseInt(angleMatch[1]));
-    } else if (value) {
+    } else if (previewValue) {
       setMode("solid");
     }
-  }, [value]);
+  }, [previewValue]);
 
   useEffect(() => {
     setActiveStop((current) => Math.min(current, Math.max(0, gradientStops.length - 1)));
@@ -483,7 +486,6 @@ export function ColorPicker({
     setExpanded(false);
   }, [clearValue, commitChange]);
 
-  const previewValue = value || emptyPreviewValue;
   const solidSliderColor = !isCssGradient(previewValue)
     ? previewValue
       ? resolveCssColorToHex(previewValue)
@@ -507,13 +509,8 @@ export function ColorPicker({
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           {showClear && (
-            <button
-              type="button"
-              onClick={clearColor}
-              disabled={disabled}
-              className="flex items-center gap-1 rounded-lg px-1.5 py-0.5 text-[0.625rem] text-[var(--muted-foreground)] transition-all hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
-            >
-              <X size="0.625rem" />
+            <button type="button" onClick={clearColor} disabled={disabled} className={SETTINGS_BUTTON_CLASS}>
+              <X size="0.75rem" />
               {clearLabel}
             </button>
           )}
@@ -662,12 +659,9 @@ export function ColorPicker({
                   <p className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
                     {localizeUi("ui.ui.colorpicker.colorStops")}
                   </p>
-                  <button
-                    type="button"
-                    onClick={addStop}
-                    className="flex items-center gap-0.5 rounded-md bg-[var(--secondary)] px-2 py-0.5 text-[0.625rem] text-[var(--muted-foreground)] transition-all hover:text-[var(--foreground)]"
-                  >
-                    <Plus size="0.625rem" /> {localizeUi("ui.characters.metadatatab.add")}
+                  <button type="button" onClick={addStop} className={SETTINGS_BUTTON_CLASS}>
+                    <Plus size="0.75rem" />
+                    {localizeUi("ui.characters.metadatatab.add")}
                   </button>
                 </div>
                 {gradientStops.map((stop, i) => {
@@ -695,9 +689,10 @@ export function ColorPicker({
                         <button
                           type="button"
                           onClick={() => removeStop(i)}
-                          className="rounded-md p-1 text-[var(--muted-foreground)] hover:bg-[var(--destructive)]/15 hover:text-[var(--destructive)]"
+                          aria-label={localizeUi("ui.ui.colorpicker.removeColorStop", { index: i + 1 })}
+                          className={cn(SETTINGS_ICON_BUTTON_CLASS, "mari-chrome-control--danger")}
                         >
-                          <Trash2 size="0.6875rem" />
+                          <Trash2 size="0.75rem" />
                         </button>
                       )}
                     </div>
@@ -755,10 +750,16 @@ export function ColorPicker({
                       }}
                       className={cn(
                         "h-6 w-6 rounded-md ring-1 ring-[var(--border)] transition-all hover:scale-110 hover:ring-2 hover:ring-[var(--primary)]/50",
-                        value === g && "ring-2 ring-[var(--primary)] scale-110",
+                        previewValue === g && "ring-2 ring-[var(--primary)] scale-110",
                       )}
                       style={{ background: g }}
-                      title={g === RAINBOW_GRADIENT_PRESET ? localizeUi("ui.ui.colorpicker.gayRgbRainbow") : g}
+                      title={
+                        g === MARINARA_GRADIENT_PRESET
+                          ? localizeUi("ui.ui.colorpicker.marinaraGradient")
+                          : g === RAINBOW_GRADIENT_PRESET
+                            ? localizeUi("ui.ui.colorpicker.gayRgbRainbow")
+                            : g
+                      }
                     />
                   ))}
                 </div>

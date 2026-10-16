@@ -3,10 +3,11 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { basename, extname, relative, resolve, sep, win32 } from "node:path";
 import { brotliDecompressSync, gunzipSync, zstdDecompressSync } from "node:zlib";
 import { Agent } from "undici";
-import { isLoopbackIp, isPrivateNetworkIp } from "../middleware/ip-allowlist.js";
+import { isLoopbackIp, isNonRoutableNetworkIp, isPrivateNetworkIp } from "../middleware/ip-allowlist.js";
 import { logger } from "../lib/logger.js";
 import { CSRF_HEADER, CSRF_HEADER_VALUE } from "@marinara-engine/shared";
 import { requestHeadersWithOpenRouterAttribution } from "./openrouter-attribution.js";
+import { getOpenCodeSessionId, isOpenCodeApiUrl, requestHeadersWithOpenCodeSession } from "./opencode-session.js";
 
 export { CSRF_HEADER, CSRF_HEADER_VALUE };
 
@@ -24,7 +25,8 @@ const RESERVED_IPV4_CIDRS = [
   "224.0.0.0/4",
   "240.0.0.0/4",
 ];
-const RESERVED_IPV6_CIDRS = ["::/128", "::1/128", "64:ff9b::/96", "100::/64", "2001:db8::/32"];
+// ::/96 also covers deprecated IPv4-compatible forms such as ::7f00:1; ff00::/8 is multicast.
+const RESERVED_IPV6_CIDRS = ["::/96", "::/128", "::1/128", "64:ff9b::/96", "100::/64", "2001:db8::/32", "ff00::/8"];
 
 type CidrEntry = { bytes: number[]; prefixLen: number };
 type AgentOptions = ConstructorParameters<typeof Agent>[0];
@@ -210,7 +212,9 @@ const RESERVED_CIDRS = [...RESERVED_IPV4_CIDRS, ...RESERVED_IPV6_CIDRS]
   .filter((entry): entry is CidrEntry => Boolean(entry));
 
 function isReservedIp(ip: string): boolean {
-  if (isLoopbackIp(ip) || isPrivateNetworkIp(ip)) return true;
+  // The built-in private ranges stay blocked even when TRUSTED_PRIVATE_NETWORKS
+  // narrows the login trust list; that setting is about who may sign in.
+  if (isLoopbackIp(ip) || isPrivateNetworkIp(ip) || isNonRoutableNetworkIp(ip)) return true;
   const bytes = ipToBytes(ip);
   if (!bytes) return true;
   return RESERVED_CIDRS.some((cidr) => matchesCidr(bytes, cidr));
@@ -240,10 +244,13 @@ function isMdnsHostname(hostname: string): boolean {
   return normalizeHostnameForAddress(hostname).replace(/\.$/, "").toLowerCase().endsWith(".local");
 }
 
+function isLocalhostName(hostname: string): boolean {
+  return LOCALHOST_NAMES.has(normalizeHostnameForAddress(hostname).replace(/\.$/, "").toLowerCase());
+}
+
 export function normalizeLoopbackUrl(url: string | URL): string {
   const parsed = typeof url === "string" ? new URL(url) : new URL(url.toString());
-  const normalized = normalizeHostnameForAddress(parsed.hostname).replace(/\.$/, "").toLowerCase();
-  if (LOCALHOST_NAMES.has(normalized)) {
+  if (isLocalhostName(parsed.hostname)) {
     parsed.hostname = "127.0.0.1";
   }
   return parsed.toString();
@@ -251,6 +258,14 @@ export function normalizeLoopbackUrl(url: string | URL): string {
 
 async function resolveHostname(hostname: string): Promise<Array<{ address: string; family: 4 | 6 }>> {
   const normalized = normalizeHostnameForAddress(hostname);
+  // `localhost` always means this machine (RFC 6761), so do not ask the resolver: some hosts map it
+  // to `::1` only, while llama.cpp and KoboldCPP listen on 127.0.0.1 by default (#7513).
+  if (isLocalhostName(normalized)) {
+    return [
+      { address: "127.0.0.1", family: 4 },
+      { address: "::1", family: 6 },
+    ];
+  }
   if (isIpLiteral(normalized)) {
     return [{ address: normalized, family: normalized.includes(":") ? 6 : 4 }];
   }
@@ -378,7 +393,9 @@ async function validateOutboundUrlForFetch(
   keepAliveInitialDelayMs?: number,
 ): Promise<{ url: URL; dispatcher?: Agent }> {
   const parsed = await validateOutboundUrl(url, policy);
-  if (policy.allowLocal) {
+  // Local URLs skip the address checks, but `localhost` still goes through the pinned lookup below
+  // so it reaches 127.0.0.1 even where the resolver only answers `::1`.
+  if (policy.allowLocal && !isLocalhostName(parsed.hostname)) {
     const dispatcher =
       agentOptions || keepAliveInitialDelayMs
         ? new Agent({
@@ -404,7 +421,14 @@ async function validateOutboundUrlForFetch(
         used = true;
         const family = options.family === 4 || options.family === 6 ? options.family : undefined;
         const selected = addresses.find((record) => !family || record.family === family) ?? addresses[0]!;
-        if (options.all) callback(null, [selected]);
+        // `localhost` lists both loopback addresses, IPv4 first, so a server on either one answers.
+        if (options.all)
+          callback(
+            null,
+            isLocalhostName(parsed.hostname)
+              ? addresses.filter((record) => !family || record.family === family)
+              : [selected],
+          );
         else callback(null, selected.address, selected.family);
       },
     },
@@ -601,6 +625,7 @@ const CROSS_ORIGIN_REDIRECT_STRIPPED_HEADERS = [
   "xi-api-key",
   "x-api-key",
   "api-key",
+  "x-opencode-session",
   "content-type",
   "content-length",
 ];
@@ -648,12 +673,17 @@ export async function safeFetch(url: string | URL, options: SafeFetchOptions = {
     dispatcher ? undefined : keepAliveInitialDelayMs,
   );
   const redirects = policy?.maxRedirects ?? MAX_REDIRECTS;
+  const sessionId = getOpenCodeSessionId();
   let currentHeaders = headers;
   let currentInit = { ...init };
 
   for (let i = 0; i <= redirects; i += 1) {
     const internalDispatcher = dispatcher ? undefined : current.dispatcher;
-    const attributedHeaders = requestHeadersWithOpenRouterAttribution(current.url, currentHeaders);
+    const attributedHeaders = requestHeadersWithOpenCodeSession(
+      current.url,
+      requestHeadersWithOpenRouterAttribution(current.url, currentHeaders),
+      sessionId,
+    );
     const requestHeaders = decodeCompressedResponse
       ? requestHeadersWithIdentityEncoding(attributedHeaders)
       : attributedHeaders;
@@ -672,6 +702,9 @@ export async function safeFetch(url: string | URL, options: SafeFetchOptions = {
         currentHeaders = stripCrossOriginRedirectHeaders(currentHeaders);
         currentInit = { ...currentInit };
         delete (currentInit as { body?: unknown }).body;
+      } else if (isOpenCodeApiUrl(previousUrl) && !isOpenCodeApiUrl(nextUrl)) {
+        currentHeaders = new Headers(currentHeaders);
+        currentHeaders.delete("x-opencode-session");
       }
       current = await validateOutboundUrlForFetch(nextUrl, policy, agentOptions, keepAliveInitialDelayMs);
       continue;

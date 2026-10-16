@@ -18,6 +18,8 @@ Keyword and semantic matches have equal priority when Marinara applies lorebook 
 
 Semantic search needs a model that can create embeddings. You have two options.
 
+Whichever you pick, you can make it the app-wide default: open **Connections**, then **Connection defaults**, and choose it under **Embeddings**. Every connection that does not set an embedding model or **Embedding Connection** of its own then uses it. A connection's own setting still wins, and the row tells you how many connections use their own settings instead. **None** keeps the built-in local model as the fallback.
+
 Option 1: a connection with an embedding model.
 
 1. Open the **Connections** panel.
@@ -95,7 +97,7 @@ Rebuild every vector after you change the embedding model. Use **Re-vectorize N 
 
 Do not run only a partial vectorize after a model change. If a "missing only" run returns a different vector size than the stored vectors, the server refuses it with this message: "Embedding dimensions changed. Use Re-vectorize all entries instead of only missing entries before switching embedding models."
 
-There is one quiet failure mode to know about. At chat time, Marinara embeds your recent messages with a query model. The query model is the active connection's own embedding model. If the connection has none set, Marinara uses the built-in local model. The query model may produce a different vector size than the model that vectorized your entries. Marinara then skips those entries in semantic matching. You do not see an error. To avoid this, vectorize your entries with the same embedding source you use during chat. Re-vectorize after any model change.
+There is one quiet failure mode to know about. At chat time, Marinara embeds your recent messages with a query model. The query model is the active connection's own embedding model, or the model from its **Embedding Connection** if it sets one. If the connection sets neither, Marinara uses the **Embeddings** default from **Connection defaults**, or the built-in local model when that is **None**. The query model may produce a different vector size than the model that vectorized your entries. Marinara then skips those entries in semantic matching. You do not see an error. To avoid this, vectorize your entries with the same embedding source you use during chat. Setting an **Embeddings** default helps: the vectorize picker starts on it unless you picked something else before, and connections without embedding settings of their own query with it. Re-vectorize after any model change.
 
 ## How it feeds the Knowledge Router agent
 

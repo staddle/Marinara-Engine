@@ -1,6 +1,8 @@
 import dotenv from "dotenv";
+import { randomUUID } from "node:crypto";
+import { REQUEST_TIMEOUTS, requestTimeoutSettingsSchema, type RequestTimeoutSettings } from "@marinara-engine/shared";
 import { logger as sharedLogger } from "../lib/logger.js";
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -15,6 +17,13 @@ const DEFAULT_PORT = 7860;
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_DATA_DIR = resolve(SERVER_ROOT, "data");
 const DEFAULT_MAX_TOOL_ROUNDS = 100;
+/** The most tool rounds a Game Mode turn gets before it must narrate (MAX_TOOL_ROUNDS when lower). */
+export const GAME_TURN_MAX_TOOL_ROUNDS = 4;
+/** The most tool rounds an agent gets before it must answer (MAX_TOOL_ROUNDS when lower). */
+export const AGENT_MAX_TOOL_ROUNDS = 16;
+/** The most tool rounds a lorebook backfill run gets: it saves one entry a call, a chunk at a time, on a
+ *  backend that may call one tool a round (MAX_TOOL_ROUNDS when lower). */
+export const LOREBOOK_BACKFILL_MAX_TOOL_ROUNDS = 64;
 const MAX_CONFIGURED_TOOL_ROUNDS = 10_000;
 const DEFAULT_CUSTOM_TOOL_TIMEOUT_MS = 60_000;
 export const DEFAULT_CHAT_GENERATION_TIMEOUT_MS = 300_000;
@@ -154,20 +163,24 @@ export function loadRuntimeEnv() {
   const envPath = getEnvFilePath();
   ensureEnvFileExists(envPath);
   if (existsSync(envPath)) {
-    const result = dotenv.config({ path: envPath });
+    const result = dotenv.config({ path: envPath, quiet: true });
     if (result.parsed) {
       envFileKeys = new Set(Object.keys(result.parsed));
     }
   } else {
-    dotenv.config();
+    dotenv.config({ quiet: true });
   }
 
+  applySavedRequestTimeouts();
   normalizeRuntimeTimezoneEnv();
 
   envLoaded = true;
 }
 
 loadRuntimeEnv();
+
+// Deliberately restart-only: a hot reload or a saved UI preference cannot open peer networking.
+export const multiplayerAvailable = process.env.MULTIPLAYER_ENABLED === "true";
 
 export interface EnvReloadResult {
   added: string[];
@@ -194,6 +207,7 @@ export function reloadRuntimeEnv(): EnvReloadResult {
       delete process.env[key];
     }
     envFileKeys = new Set();
+    applySavedRequestTimeouts();
     return { added: [], updated: [], removed, unchanged: [] };
   }
 
@@ -226,6 +240,7 @@ export function reloadRuntimeEnv(): EnvReloadResult {
     }
   }
 
+  applySavedRequestTimeouts();
   normalizeRuntimeTimezoneEnv();
   envFileKeys = newKeys;
   return { added, updated, removed, unchanged };
@@ -263,6 +278,15 @@ function isDisabledFlag(value: string | undefined | null) {
 
 function isEnabledFlag(value: string | undefined | null) {
   return ["1", "true", "yes", "on"].includes((value ?? "").trim().toLowerCase());
+}
+
+/**
+ * An on/off environment variable that pins a feature switch: null when unset or blank (the saved
+ * setting applies), otherwise true for 1/true/yes/on and false for anything else. Read per call.
+ */
+export function readEnvFlagOverride(envVar: string): boolean | null {
+  const raw = normalizeEnvValue(process.env[envVar]);
+  return raw === null ? null : isEnabledFlag(raw);
 }
 
 function parsePositiveIntEnv(value: string | undefined | null, fallback: number, max: number) {
@@ -320,6 +344,17 @@ export function getLogLevel() {
 
 export function getLogPreset() {
   return normalizeEnvValue(process.env.LOG_PRESET)?.toLowerCase() ?? "default";
+}
+
+/**
+ * Whether the `claude_subscription` provider may use the host's installed
+ * Claude Code instead of the Agent SDK's bundled build. Default `true`; set
+ * `CLAUDE_SUBSCRIPTION_USE_INSTALLED_CLI=false` (or `0`/`off`/`no`) to always
+ * use the bundled build.
+ */
+export function isClaudeSubscriptionInstalledCliEnabled(value = process.env.CLAUDE_SUBSCRIPTION_USE_INSTALLED_CLI) {
+  const raw = normalizeEnvValue(value);
+  return raw === null || !isDisabledFlag(raw);
 }
 
 /**
@@ -494,6 +529,69 @@ export function isProviderLocalUrlsEnabled() {
   return isEnabledFlag(process.env.PROVIDER_LOCAL_URLS_ENABLED);
 }
 
+/**
+ * Opt-in: keep the full text of activated lorebook entries only on the newest generated message of a chat (its row
+ * and its swipes) and store older messages' scans without it. Off by default, which keeps today's storage shape.
+ * Read per call, so a `.env` change applies on the next generation.
+ */
+export function isLorebookScanCompactionEnabled() {
+  return isEnabledFlag(process.env.LOREBOOK_COMPACT_STORED_SCANS);
+}
+
+// Robustness settings. Every one is off by default, which keeps today's behaviour exactly, and each can be turned on
+// by itself. Read per call unless noted, so a `.env` change applies without a restart where the code path allows it.
+
+// LOREBOOK_STABLE_GROUP_WINNERS and PROVIDER_RETRY_TRANSIENT_ERRORS are feature switches now
+// (stableLorebookGroupPicks, providerRetry): services/features/feature-settings.ts reads them with
+// readEnvFlagOverride, where a set variable wins over Settings > Advanced > Features.
+
+/** Opt-in: a storage flush skips a shard or manifest write whose content matches this process's last durable write. */
+export function isStorageSkipUnchangedWritesEnabled() {
+  return isEnabledFlag(process.env.STORAGE_SKIP_UNCHANGED_WRITES);
+}
+
+/** Opt-in: large shards serialize in short slices that yield the event loop instead of one blocking call. */
+export function isStorageYieldingSerializeEnabled() {
+  return isEnabledFlag(process.env.STORAGE_YIELDING_SERIALIZE);
+}
+
+/**
+ * Opt-in, Windows only: cache the writer-lease boot id probe (about 1.5 to 2 s of PowerShell on every start) for the
+ * rest of the OS boot. Read once, when the storage module loads.
+ */
+export function isWindowsBootIdCacheEnabled() {
+  return isEnabledFlag(process.env.STORAGE_CACHE_WINDOWS_BOOT_ID);
+}
+
+/** The Windows boot id cache file: inside DATA_DIR, never in a per-user application or install folder. */
+export function getWindowsBootIdCachePath() {
+  return resolve(getDataDir(), ".writer-boot-id.json");
+}
+
+/** Opt-in, Windows only: Ctrl+Break and closing the console window also start the graceful shutdown. */
+export function isShutdownWindowsConsoleSignalsEnabled() {
+  return isEnabledFlag(process.env.SHUTDOWN_WINDOWS_CONSOLE_SIGNALS);
+}
+
+/** Opt-in: a second Ctrl+C (or Ctrl+Break) more than 1.5 s after the first forces the exit. */
+export function isShutdownForceExitOnRepeatEnabled() {
+  return isEnabledFlag(process.env.SHUTDOWN_FORCE_EXIT_ON_REPEAT);
+}
+
+/** Opt-in: start writing pending saves as soon as a stop signal arrives, while connections are still closing. */
+export function isShutdownEarlyFlushEnabled() {
+  return isEnabledFlag(process.env.SHUTDOWN_EARLY_FLUSH);
+}
+
+/**
+ * Opt-in budget (ms) for the runtime stops that run before the store close. 0 or unset waits for every stop, as
+ * before; a positive value moves on to the store close once it has passed. Capped at 2.5 s so the 4 s connection
+ * cut, the budget and the store close still fit inside the 8 s shutdown force exit.
+ */
+export function getShutdownRuntimeStopBudgetMs() {
+  return parsePositiveIntEnv(process.env.SHUTDOWN_RUNTIME_STOP_BUDGET_MS, 0, 2_500);
+}
+
 export function getEmbeddingRequestTimeoutMs() {
   return parsePositiveIntEnv(process.env.EMBEDDING_TIMEOUT_MS, 300_000, MAX_TIMEOUT_MS);
 }
@@ -631,6 +729,11 @@ export function isWebhookLocalUrlsEnabled() {
 
 export function isCustomToolScriptEnabled() {
   return isEnabledFlag(process.env.CUSTOM_TOOL_SCRIPT_ENABLED);
+}
+
+/** Overworld games (setting kits and generated worlds) are not ready for everyone yet: off unless set. */
+export function isOverworldGamesEnabled() {
+  return isEnabledFlag(process.env.MARINARA_OVERWORLD_GAMES);
 }
 
 export function isCustomAgentRepositoriesEnabled() {
@@ -788,4 +891,49 @@ export function isAutoCreateDefaultConnectionDisabled(value = process.env.AUTO_C
 export function logStorageDiagnostics(logger: { info(...args: any[]): void } = sharedLogger) {
   logger.info("[storage] DATA_DIR=%s", getDataDir());
   logger.info("[storage] FILE_STORAGE_DIR=%s", getFileStorageDir());
+}
+
+/** Kept beside the active .env, so server-wide preferences survive profile changes. */
+function requestTimeoutSettingsPath() {
+  return `${getEnvFilePath()}.timeouts.json`;
+}
+
+function applySavedRequestTimeouts() {
+  const path = requestTimeoutSettingsPath();
+  if (!existsSync(path)) return;
+  try {
+    const settings = requestTimeoutSettingsSchema.parse(JSON.parse(readFileSync(path, "utf8")));
+    for (const [key, spec] of Object.entries(REQUEST_TIMEOUTS)) {
+      process.env[spec.env] = String(settings[key as keyof RequestTimeoutSettings] * spec.unit);
+    }
+  } catch (error) {
+    setImmediate(() => sharedLogger.warn(error, "Ignoring invalid saved request timeout settings"));
+  }
+}
+
+export function getRequestTimeoutSettings(): RequestTimeoutSettings {
+  return Object.fromEntries(
+    Object.entries(REQUEST_TIMEOUTS).map(([key, spec]) => {
+      const seconds = Number(process.env[spec.env]) / spec.unit;
+      return [
+        key,
+        Number.isInteger(seconds) && seconds >= 10 && seconds <= spec.maxSeconds ? seconds : spec.defaultSeconds,
+      ];
+    }),
+  ) as RequestTimeoutSettings;
+}
+
+export function saveRequestTimeoutSettings(input: unknown): RequestTimeoutSettings {
+  const settings = requestTimeoutSettingsSchema.parse(input);
+  const path = requestTimeoutSettingsPath();
+  const temporaryPath = `${path}.${randomUUID()}.tmp`;
+  mkdirSync(dirname(path), { recursive: true });
+  try {
+    writeFileSync(temporaryPath, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600, flag: "wx" });
+    renameSync(temporaryPath, path);
+  } finally {
+    rmSync(temporaryPath, { force: true });
+  }
+  applySavedRequestTimeouts();
+  return settings;
 }

@@ -1,8 +1,27 @@
 import {
+  inferExpressionCandidates,
   normalizeSpriteExpressionKey as normalizeUnicodeSpriteExpressionKey,
   normalizeSpriteLookupToken,
 } from "@marinara-engine/shared";
 import { buildSpriteExpressionChoices } from "../../services/game/sprite.service.js";
+import { parseExtra } from "../../services/generation/prompt-attachments.js";
+
+/**
+ * Whether the player's latest message still needs the persona's expression: no reply after it has had its own
+ * Expression Engine result yet. A swipe, a continuation or a whole group turn keeps the persona. Later replies
+ * leave it to the Expression Engine, so a persona who has left the scene is not shown again (#7378).
+ */
+export function playerTurnAwaitsExpression(
+  messages: readonly { role?: unknown; content?: unknown; extra?: unknown }[],
+  before: number,
+): boolean {
+  for (let index = Math.min(before, messages.length) - 1; index >= 0; index--) {
+    const message = messages[index]!;
+    if (message.role === "user" && typeof message.content === "string" && message.content.trim()) return true;
+    if (message.role === "assistant" && Array.isArray(parseExtra(message.extra).expressionSpriteIds)) return false;
+  }
+  return false;
+}
 
 export type SpriteDisplayMode = "expressions" | "full-body";
 
@@ -221,47 +240,8 @@ function resolveExpression(expression: string, availableExpressions: string[]): 
   );
 }
 
-function inferExpressionCandidatesFromText(text: string): string[] {
-  const lower = text.toLowerCase();
-  const candidates: string[] = [];
-
-  const add = (...values: string[]) => {
-    for (const value of values) {
-      if (!candidates.includes(value)) candidates.push(value);
-    }
-  };
-
-  if (/\b(blush|blushing|fluster|flustered|embarrass|embarrassed|shy|bashful)\b/.test(lower)) {
-    add("blush", "embarrassed", "shy", "flustered");
-  }
-  if (/\b(angry|anger|rage|furious|annoyed|irritated|frustrated|glare|scowl)\b/.test(lower)) {
-    add("angry", "annoyed", "irritated");
-  }
-  if (/\b(sad|cry|crying|tears|sorrow|grief|hurt|heartbroken|melancholy)\b/.test(lower)) {
-    add("sad", "crying", "melancholy");
-  }
-  if (/\b(happy|smile|smiling|grin|grinning|laugh|laughing|joy|excited|delighted)\b/.test(lower)) {
-    add("happy", "smile", "joy", "excited");
-  }
-  if (/\b(surprised|surprise|shock|shocked|gasp|startled|stunned)\b/.test(lower)) {
-    add("surprised", "shocked", "startled");
-  }
-  if (/\b(scared|afraid|fear|fearful|terrified|panic|panicked|nervous|anxious)\b/.test(lower)) {
-    add("scared", "afraid", "nervous", "anxious");
-  }
-  if (/\b(disgust|disgusted|gross|repulsed|repulsing)\b/.test(lower)) {
-    add("disgusted", "disgust");
-  }
-  if (/\b(think|thinking|consider|considering|wonder|wondering|hmm|thoughtful|ponder)\b/.test(lower)) {
-    add("thinking", "thoughtful", "ponder");
-  }
-
-  add("neutral", "default", "normal", "calm", "idle");
-  return candidates;
-}
-
 function pickFallbackExpression(expressions: string[], sourceText: string): string | null {
-  for (const candidate of inferExpressionCandidatesFromText(sourceText)) {
+  for (const candidate of inferExpressionCandidates(sourceText)) {
     const resolved = resolveExpression(candidate, expressions);
     if (resolved) return resolved;
   }

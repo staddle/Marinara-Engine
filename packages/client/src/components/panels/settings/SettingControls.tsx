@@ -20,16 +20,22 @@ import {
   useUploadCustomNotificationSound,
 } from "../../../hooks/use-custom-notification-sound";
 import { cn } from "../../../lib/utils";
-import { api } from "../../../lib/api-client";
-import { enqueueMariPermissionsModeWrite } from "../../../lib/mari-permissions-write-chain";
-import {
-  DEFAULT_MARI_PERMISSIONS_MODE,
-  MARI_PERMISSIONS_MODE_LABELS,
-  MARI_PERMISSIONS_MODES,
-  type MariPermissionsMode,
-} from "@marinara-engine/shared";
 import { localizeStringNode, useLocalizedUiText } from "../../../localization/use-localized-ui-text";
 import { HelpTooltip } from "../../ui/HelpTooltip";
+
+/** Secondary: buttons in a row, a header, next to a field or on a list item; also toggle and segmented items (aria-pressed). */
+export const SETTINGS_BUTTON_CLASS = "mari-chrome-control mari-chrome-control--small text-[0.6875rem]";
+/** Primary: a section's or sub-form's one main action; prefer SETTINGS_PRIMARY_FULL_BUTTON_CLASS. */
+export const SETTINGS_PRIMARY_BUTTON_CLASS = "mari-chrome-control mari-chrome-control--primary text-xs";
+/** Primary on its own full-width line, with a leading 0.8125rem icon. */
+export const SETTINGS_PRIMARY_FULL_BUTTON_CLASS = `${SETTINGS_PRIMARY_BUTTON_CLASS} w-full`;
+/** Primary emphasis at secondary size, for the main action inside a dense row of secondary buttons. */
+export const SETTINGS_COMPACT_PRIMARY_BUTTON_CLASS =
+  "mari-chrome-control mari-chrome-control--primary mari-chrome-control--small text-[0.6875rem]";
+/** Square icon-only button with an aria-label and a 0.75rem icon; add mari-chrome-control--danger to delete. */
+export const SETTINGS_ICON_BUTTON_CLASS = "mari-chrome-control mari-chrome-control--small mari-chrome-control--icon";
+/** One-of-N choice card (title, description, optional preview); selected look comes from aria-pressed. */
+export const SETTINGS_CHOICE_CARD_CLASS = "mari-chrome-control mari-chrome-control--card text-xs";
 
 export function SettingsIntro({ children }: { children: ReactNode }) {
   const localize = useLocalizedUiText();
@@ -108,94 +114,6 @@ export function SettingsSection({
       </div>
       <div className={cn("border-t border-[var(--border)]/60 px-3 pb-3 pt-2.5", contentClassName)}>{children}</div>
     </section>
-  );
-}
-
-// #5725: Professor Mari's server-authoritative Permissions Mode. Fetched on
-// mount and written through the dedicated validated PUT; a change applies to
-// Mari's next run (an in-flight turn is never aborted by a mode switch).
-export function MariPermissionsModeSetting({ anchorId }: { anchorId?: string }) {
-  const { t: localizeUi } = useUiTranslation();
-  const localize = useLocalizedUiText();
-  const selectId = useId();
-  const [mode, setMode] = useState<MariPermissionsMode | null>(null);
-  // Sequence local writes so a stale GET (or a stale failure rollback) can
-  // never clobber a newer selection.
-  const writeSeqRef = useRef(0);
-  // Refetch on focus/visibility too: the Mari panel's header picker writes the
-  // same server setting, and a stale one-shot read would drift from it.
-  useEffect(() => {
-    let cancelled = false;
-    const load = () => {
-      const seqAtStart = writeSeqRef.current;
-      api
-        .get<{ mode: MariPermissionsMode }>("/professor-mari/workspace/permissions-mode")
-        .then((response) => {
-          // Drop reads that predate the latest local write.
-          if (!cancelled && writeSeqRef.current === seqAtStart) setMode(response.mode);
-        })
-        .catch(() => {
-          if (!cancelled) setMode((current) => current ?? DEFAULT_MARI_PERMISSIONS_MODE);
-        });
-    };
-    load();
-    const reload = () => {
-      if (document.visibilityState === "visible") load();
-    };
-    window.addEventListener("focus", reload);
-    document.addEventListener("visibilitychange", reload);
-    return () => {
-      cancelled = true;
-      window.removeEventListener("focus", reload);
-      document.removeEventListener("visibilitychange", reload);
-    };
-  }, []);
-  const currentMode = mode ?? DEFAULT_MARI_PERMISSIONS_MODE;
-  const handleChange = async (event: ChangeEvent<HTMLSelectElement>) => {
-    const next = event.target.value as MariPermissionsMode;
-    const previous = currentMode;
-    const writeSeq = ++writeSeqRef.current;
-    setMode(next);
-    try {
-      // The shared chain serializes this against the Mari panel's per-chat
-      // writes AND against runs - sendWorkspaceMessage awaits the whole chain,
-      // so a default change here can never race a prompt on an
-      // un-overridden chat.
-      await enqueueMariPermissionsModeWrite(() =>
-        api.put("/professor-mari/workspace/permissions-mode", { mode: next }),
-      );
-    } catch {
-      // Only the latest write may roll back.
-      if (writeSeqRef.current !== writeSeq) return;
-      setMode(previous);
-      toast.error(localizeUi("ui.chat.homeprofessormarichat.couldNotChangeThePermissionsMode"));
-    }
-  };
-  return (
-    <div id={anchorId} className="flex flex-col gap-1.5">
-      <div className="flex items-center gap-1.5">
-        <label htmlFor={selectId} className="text-xs font-medium">
-          {localizeUi("ui.chat.homeprofessormarichat.permissionsMode")}
-        </label>
-        <HelpTooltip text={localizeUi("settings.controls.mariPermissionsMode.help")} />
-      </div>
-      <select
-        id={selectId}
-        value={currentMode}
-        onChange={(event) => void handleChange(event)}
-        disabled={mode === null}
-        className="h-9 w-full rounded-md border border-[var(--border)] bg-[var(--secondary)] px-2.5 text-xs"
-      >
-        {MARI_PERMISSIONS_MODES.map((value) => (
-          <option key={value} value={value}>
-            {localize(MARI_PERMISSIONS_MODE_LABELS[value].label)}
-          </option>
-        ))}
-      </select>
-      <p className="text-[0.6875rem] text-[var(--muted-foreground)]">
-        {localize(MARI_PERMISSIONS_MODE_LABELS[currentMode].description)}
-      </p>
-    </div>
   );
 }
 
@@ -528,22 +446,18 @@ function CustomNotificationSoundSetting() {
             type="button"
             onClick={() => playNotificationPing()}
             disabled={isLoading}
-            className="mari-chrome-control inline-flex min-h-9 items-center gap-1.5 px-2.5 text-[0.625rem] disabled:opacity-50"
+            className={SETTINGS_BUTTON_CLASS}
           >
-            <Play size="0.6875rem" />
+            <Play size="0.75rem" />
             {t("settings.notifications.customSound.actions.preview")}
           </button>
           <button
             type="button"
             onClick={() => inputRef.current?.click()}
             disabled={isBusy}
-            className="mari-chrome-control inline-flex min-h-9 items-center gap-1.5 px-2.5 text-[0.625rem] disabled:opacity-50"
+            className={SETTINGS_BUTTON_CLASS}
           >
-            {uploadSound.isPending ? (
-              <Loader2 size="0.6875rem" className="animate-spin" />
-            ) : (
-              <Upload size="0.6875rem" />
-            )}
+            {uploadSound.isPending ? <Loader2 size="0.75rem" className="animate-spin" /> : <Upload size="0.75rem" />}
             {status?.configured
               ? t("settings.notifications.customSound.actions.replace")
               : t("settings.notifications.customSound.actions.choose")}
@@ -553,13 +467,9 @@ function CustomNotificationSoundSetting() {
               type="button"
               onClick={() => void handleRemove()}
               disabled={isBusy}
-              className="mari-chrome-control inline-flex min-h-9 items-center gap-1.5 px-2.5 text-[0.625rem] text-[var(--destructive)] disabled:opacity-50"
+              className={cn(SETTINGS_BUTTON_CLASS, "mari-chrome-control--danger")}
             >
-              {removeSound.isPending ? (
-                <Loader2 size="0.6875rem" className="animate-spin" />
-              ) : (
-                <Trash2 size="0.6875rem" />
-              )}
+              {removeSound.isPending ? <Loader2 size="0.75rem" className="animate-spin" /> : <Trash2 size="0.75rem" />}
               {t("settings.notifications.customSound.actions.remove")}
             </button>
           )}
@@ -678,7 +588,7 @@ export function SettingsCheckbox({
     <label
       id={anchorId}
       className={cn(
-        "flex scroll-mt-3 cursor-pointer rounded-lg transition-colors hover:bg-[var(--secondary)]/50",
+        "flex scroll-mt-3 cursor-pointer rounded-lg transition-colors hover:bg-[var(--accent)]/50",
         align === "between" ? "items-center justify-between gap-3 p-1.5" : "items-start gap-2.5 p-1.5",
         disabled && "cursor-not-allowed opacity-60 hover:bg-transparent",
         className,
@@ -817,7 +727,7 @@ export function SettingsSwitch({
       id={anchorId}
       title={localizedTitle}
       className={cn(
-        "flex scroll-mt-3 items-center gap-3 rounded-xl p-2 transition-colors hover:bg-[var(--secondary)]/50",
+        "flex scroll-mt-3 items-center gap-3 rounded-xl p-2 transition-colors hover:bg-[var(--accent)]/50",
         disabled && "cursor-not-allowed opacity-60 hover:bg-transparent",
         className,
       )}

@@ -1,5 +1,6 @@
 import {
   findImageStyleProfile,
+  removeCopiedPromptGuidance,
   resolveGameSetupArtStylePrompt,
   type GameState,
   type ImageStyleProfileSettings,
@@ -7,17 +8,28 @@ import {
 import type { DB } from "../../db/connection.js";
 import { logger } from "../../lib/logger.js";
 import type { ResolvedAgent } from "../agents/agent-pipeline.js";
-import { normalizeAgentContextSize } from "../agents/agent-executor.js";
+import {
+  agentRequestOptions,
+  gateAgentTemperature,
+  normalizeAgentContextSize,
+  resolveAgentCallMaxTokens,
+} from "../agents/agent-executor.js";
 import {
   buildBackgroundProviderPrompt,
   generateChatBackground,
   type ChatBackgroundGenRequest,
 } from "../game/game-asset-generation.js";
+import {
+  buildIllustratorCharacterPromptInstruction,
+  resolveNovelAiCharacterPromptLimit,
+  supportsNovelAiCharacterPrompts,
+} from "../image/character-prompts.js";
 import { resolveConnectionImageDefaults, resolveConnectionImageQuality } from "../image/image-generation-defaults.js";
 import { loadImageGenerationUserSettings } from "../image/image-generation-settings.js";
 import { resolveImagePromptReviewSize } from "../image/image-prompt-review.js";
 import { createConnectionsStorage } from "../storage/connections.storage.js";
 import { createPromptOverridesStorage } from "../storage/prompt-overrides.storage.js";
+import { appendImagePromptInstructions } from "./image-prompt-instructions.js";
 import { resolveImageConnectionFallback } from "./media-connection-fallback.js";
 
 const ROLEPLAY_BACKGROUND_MODES = new Set(["roleplay"]);
@@ -186,13 +198,19 @@ export function buildIllustratorBackgroundPlanUserPrompt(args: {
     .join("\n\n");
 }
 
-export function buildIllustratorBackgroundPlanSystemPrompt(styleInstruction?: string): string {
-  return [
-    BACKGROUND_PLAN_SYSTEM_PROMPT,
-    styleInstruction?.trim()
-      ? `Visual style instruction for the image prompt you write: ${styleInstruction.trim()}`
-      : "No visual style profile is selected. Keep the prompt style-neutral.",
-  ].join("\n");
+export function buildIllustratorBackgroundPlanSystemPrompt(
+  styleInstruction?: string,
+  imagePromptInstructions?: string | null,
+): string {
+  return appendImagePromptInstructions(
+    [
+      BACKGROUND_PLAN_SYSTEM_PROMPT,
+      styleInstruction?.trim()
+        ? `Visual style instruction for the image prompt you write: ${styleInstruction.trim()}\nExpress it as words for the image model; never copy its sentences into the prompt.`
+        : "No visual style profile is selected. Keep the prompt style-neutral.",
+    ].join("\n"),
+    imagePromptInstructions,
+  );
 }
 
 async function writeIllustratorBackgroundPlan(args: {
@@ -204,6 +222,7 @@ async function writeIllustratorBackgroundPlan(args: {
   gameState: GameState | null;
   recentMessages: Array<{ role: string; content: string; gameState?: GameState | null }>;
   styleInstruction?: string;
+  imagePromptInstructions?: string | null;
   signal?: AbortSignal;
   debugLog?: (message: string, ...args: unknown[]) => void;
 }): Promise<IllustratorBackgroundPlan> {
@@ -211,24 +230,27 @@ async function writeIllustratorBackgroundPlan(args: {
     -normalizeAgentContextSize(args.illustratorAgent.settings.contextSize),
   );
   const userPrompt = buildIllustratorBackgroundPlanUserPrompt({ ...args, recentMessages });
-  const systemPrompt = buildIllustratorBackgroundPlanSystemPrompt(args.styleInstruction);
+  const systemPrompt = buildIllustratorBackgroundPlanSystemPrompt(args.styleInstruction, args.imagePromptInstructions);
   args.debugLog?.("[debug/illustrator/background-prompt] system:\n%s", systemPrompt);
   args.debugLog?.("[debug/illustrator/background-prompt] user:\n%s", userPrompt);
 
   const callPromptWriter = async (messages: Array<{ role: "system" | "user" | "assistant"; content: string }>) =>
     args.illustratorAgent.provider.chatComplete(messages, {
       model: args.illustratorAgent.model,
-      temperature: 0.35,
-      maxTokens: Math.min(
+      // The prompt writer keeps its own temperature; the connection decides whether one is sent (#7131).
+      temperature: gateAgentTemperature(args.illustratorAgent, 0.35),
+      maxTokens: resolveAgentCallMaxTokens(
+        args.illustratorAgent.provider,
+        args.illustratorAgent,
         BACKGROUND_PLAN_MAX_TOKENS,
-        args.illustratorAgent.maxOutputTokens && args.illustratorAgent.maxOutputTokens > 0
-          ? args.illustratorAgent.maxOutputTokens
-          : BACKGROUND_PLAN_MAX_TOKENS,
+        {
+          messages,
+        },
       ),
       enableCaching: args.illustratorAgent.enableCaching,
       anthropicExtendedCacheTtl: args.illustratorAgent.anthropicExtendedCacheTtl,
       cachingAtDepth: args.illustratorAgent.cachingAtDepth,
-      customParameters: args.illustratorAgent.customParameters,
+      ...agentRequestOptions(args.illustratorAgent, false),
       signal: args.signal,
     });
 
@@ -316,6 +338,30 @@ export async function resolveIllustratorPromptStyle(args: {
   );
 }
 
+/**
+ * Resolve the native NovelAI character-caption instruction for the Illustrator's
+ * prompt writer. Empty unless the image connection this chat will render with is
+ * NovelAI's own host on a V4+ model; the limit follows the model generation.
+ */
+export async function resolveIllustratorCharacterPromptInstruction(args: {
+  connections: Pick<ConnectionsStorage, "getWithKey" | "getDefaultForImageGeneration">;
+  illustratorAgent: ResolvedAgent;
+  chatMode: unknown;
+  chatMetadata: Record<string, unknown>;
+}): Promise<{ instruction: string; limit: number }> {
+  const configuredImageConnectionId = resolveIllustratorImageConnectionId(
+    args.chatMode,
+    args.chatMetadata,
+    args.illustratorAgent.settings.imageConnectionId,
+  );
+  const imageConnection =
+    (configuredImageConnectionId ? await args.connections.getWithKey(configuredImageConnectionId) : null) ??
+    (await args.connections.getDefaultForImageGeneration());
+  if (!imageConnection || !supportsNovelAiCharacterPrompts(imageConnection)) return { instruction: "", limit: 0 };
+  const limit = resolveNovelAiCharacterPromptLimit(String(imageConnection.model ?? ""));
+  return { instruction: buildIllustratorCharacterPromptInstruction(limit), limit };
+}
+
 async function resolveIllustratorImageConnection(
   connections: ConnectionsStorage,
   illustratorAgent: ResolvedAgent,
@@ -364,11 +410,14 @@ async function prepareIllustratorSceneBackground(
     imageDefaults?.styleProfileId,
     imageSettings.styleProfiles,
   );
-  const plan = planOverride ?? (await writeIllustratorBackgroundPlan({ ...args, styleInstruction }));
+  // The background writer follows the image connection's instructions too (#7357).
+  const imagePromptInstructions = imageConnection.imagePromptInstructions;
+  const plan =
+    planOverride ?? (await writeIllustratorBackgroundPlan({ ...args, styleInstruction, imagePromptInstructions }));
   const request: ChatBackgroundGenRequest = {
     chatId: args.chatId,
     locationSlug: plan.locationName,
-    sceneDescription: plan.prompt,
+    sceneDescription: removeCopiedPromptGuidance(plan.prompt, [styleInstruction, imagePromptInstructions]),
     genre: readTrimmedString(setupConfig.genre) || undefined,
     setting: readTrimmedString(setupConfig.setting) || undefined,
     currentLocation: args.gameState?.location ?? null,

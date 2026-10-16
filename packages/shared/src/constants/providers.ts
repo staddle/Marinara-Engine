@@ -15,7 +15,33 @@ export interface ProviderDefinition {
   apiKeyHeader: string | null;
 }
 
+/** Connections that can't answer a chat request: pictures, video, audio and decisions. */
+export const NON_CHAT_PROVIDERS: readonly APIProvider[] = ["image_generation", "video_generation", "audio", "decision"];
+
+/** Whether a connection of this provider can answer a chat or agent request. */
+export function isChatProvider(provider: unknown): boolean {
+  return !(NON_CHAT_PROVIDERS as readonly unknown[]).includes(provider);
+}
+
 export const LOCAL_AUTH_PROVIDERS = ["openai_chatgpt", "claude_subscription", "grok_subscription"] as const;
+
+/** These subscription transports send text only; they ignore native tool schemas. */
+export function supportsNativeToolCalls(provider: string | null | undefined): boolean {
+  return !!provider && provider !== "claude_subscription" && provider !== "grok_subscription";
+}
+
+/**
+ * Providers whose usage meter shows a plan's rate-limit windows (a short one and
+ * a weekly one, as percentages) that the connection can switch on separately.
+ */
+export function hasPlanUsageWindows(provider: string | null | undefined): boolean {
+  return provider === "claude_subscription" || provider === "openai_chatgpt";
+}
+
+/** Providers whose connections can show a subscription usage meter. */
+export function supportsSubscriptionUsageWidget(provider: string | null | undefined): boolean {
+  return provider === "nanogpt" || hasPlanUsageWindows(provider);
+}
 
 export function isLocalAuthProvider(provider: string | null | undefined): boolean {
   return LOCAL_AUTH_PROVIDERS.includes(provider as (typeof LOCAL_AUTH_PROVIDERS)[number]);
@@ -136,7 +162,8 @@ export const PROVIDERS: Record<APIProvider, ProviderDefinition> = {
     id: "nanogpt",
     name: "NanoGPT",
     defaultBaseUrl: "https://nano-gpt.com/api/v1",
-    modelsEndpoint: "/models",
+    // Detailed catalog: the plain one omits context_length and max_output_tokens.
+    modelsEndpoint: "/models?detailed=true",
     supportsStreaming: true,
     usesAuthHeader: true,
     apiKeyHeader: null,
@@ -154,6 +181,28 @@ export const PROVIDERS: Record<APIProvider, ProviderDefinition> = {
     id: "arli",
     name: "Arli AI",
     defaultBaseUrl: "https://api.arliai.com/v1",
+    modelsEndpoint: "/models",
+    supportsStreaming: true,
+    usesAuthHeader: true,
+    apiKeyHeader: null,
+  },
+  zai: {
+    id: "zai",
+    name: "Z.AI",
+    // Pay-as-you-go endpoint. The Coding Plan endpoint (/api/coding/paas/v4)
+    // is licensed for Z.AI's listed tools only, so it is not the default here.
+    defaultBaseUrl: "https://api.z.ai/api/paas/v4",
+    modelsEndpoint: "/models",
+    supportsStreaming: true,
+    usesAuthHeader: true,
+    apiKeyHeader: null,
+  },
+  deepseek: {
+    id: "deepseek",
+    name: "DeepSeek",
+    // The OpenAI-format endpoint. DeepSeek also serves an Anthropic-format
+    // endpoint at /anthropic, which this provider does not use.
+    defaultBaseUrl: "https://api.deepseek.com/v1",
     modelsEndpoint: "/models",
     supportsStreaming: true,
     usesAuthHeader: true,
@@ -185,6 +234,15 @@ export const PROVIDERS: Record<APIProvider, ProviderDefinition> = {
     supportsStreaming: false,
     usesAuthHeader: false,
     apiKeyHeader: "x-goog-api-key",
+  },
+  decision: {
+    id: "decision",
+    name: "Decision",
+    defaultBaseUrl: "https://api.typesafe.ai",
+    modelsEndpoint: "",
+    supportsStreaming: false,
+    usesAuthHeader: true,
+    apiKeyHeader: null,
   },
   audio: {
     id: "audio",

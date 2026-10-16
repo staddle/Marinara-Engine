@@ -27,11 +27,20 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { dirname, join, resolve, sep } from "node:path";
-import { hostname, networkInterfaces } from "node:os";
+import { hostname, networkInterfaces, uptime } from "node:os";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { STORAGE_MIGRATION_NOTICE_SETTINGS_KEY, type StorageMigrationNotice } from "@marinara-engine/shared";
 import { logger } from "../lib/logger.js";
-import { getFileStorageDir, getMaxResidentChatUnits } from "../config/runtime-config.js";
+import {
+  getFileStorageDir,
+  getMaxResidentChatUnits,
+  getWindowsBootIdCachePath,
+  isStorageSkipUnchangedWritesEnabled,
+  isStorageYieldingSerializeEnabled,
+  isWindowsBootIdCacheEnabled,
+} from "../config/runtime-config.js";
+import { logRateLimited } from "../lib/log-rate-limit.js";
+import { cachedBootId } from "./writer-boot-id-cache.js";
 import * as schema from "./schema/index.js";
 import { inArray, isFileCondition, isFileOrdering, type FileCondition, type FileOrdering } from "./file-query.js";
 import { migrateLegacyNoodleAccountRow } from "./noodle-platform-migration.js";
@@ -183,6 +192,15 @@ export type QuarantinedStorageTable = {
   }>;
 };
 
+/** Counts-only view of the live store, for the admin runtime diagnostics endpoint. */
+export type FileStoreStats = {
+  tables: Record<string, { rows: number; lazy: boolean; fullyResident: boolean }>;
+  residentChatUnits: number;
+  dirtyTables: string[];
+  lastFlushError: string | null;
+  quarantinedTables: number;
+};
+
 export type FileNativeStoreController = {
   flush: () => Promise<void>;
   close: () => Promise<void>;
@@ -215,6 +233,13 @@ export type FileNativeStoreController = {
    * safe, a missed one is not. 0 = never written in this process.
    */
   getTableWriteGeneration: (table: string) => number;
+  /**
+   * Cheap read-only counters for the admin runtime diagnostics endpoint:
+   * in-memory row counts per table (resident rows only for lazy tables),
+   * resident chat units, pending dirty tables and the last flush failure.
+   * Optional so hand-built controllers in tests stay valid.
+   */
+  getStorageStats?: () => FileStoreStats;
   /**
    * Adds capability-package-owned file tables to the live store: host
    * integration for downloaded packages that declare their own storage.
@@ -259,6 +284,12 @@ export type FileNativeDB = {
 
 export type FileNativeStoreTestHooks = {
   beforeTableWrite?: (table: string, serializedRows: string) => Promise<void> | void;
+  /**
+   * Called instead of a disk write when a flush finds the serialized content
+   * identical to what this process last wrote to that still-unchanged file.
+   * `beforeTableWrite` still runs first, so failure-injection hooks keep firing.
+   */
+  onTableWriteSkipped?: (table: string) => void;
   writerLeaseScopeId?: string;
   writerLeaseBootId?: string;
   /** Overrides the filesystem check behind writerLeaseStorageIsMachineLocal (#5744). */
@@ -319,7 +350,7 @@ type InsertValuesBuilder = Executable<void> & {
 // Exported so regressions can pin behavior against the CURRENT version
 // without chasing literals on every bump. Must equal root storage-format.json
 // (the launcher-format-guard regression pins the pairing).
-export const STORAGE_VERSION = 6;
+export const STORAGE_VERSION = 7;
 export const STORAGE_WRITER_LEASE_FILENAME = ".writer-lease";
 export const STORAGE_WRITER_OWNER_FILENAME = "owner.json";
 export const STORAGE_WRITER_LIVENESS_FILENAME = "live.sock";
@@ -368,6 +399,7 @@ const BUILT_IN_FILE_BACKED_TABLES = [
   "lorebook_persona_links",
   "lorebook_folders",
   "lorebook_entries",
+  "lorebook_entry_activation_stats",
   "prompt_presets",
   "prompt_groups",
   "prompt_sections",
@@ -386,6 +418,14 @@ const BUILT_IN_FILE_BACKED_TABLES = [
   "game_scene_videos",
   "game_turn_storyboards",
   "game_turn_storyboard_keyframes",
+  "game_dice_pools",
+  "game_world_snapshots",
+  "game_rulesets",
+  "game_ruleset_catalogs",
+  "game_tile_packs",
+  "game_creature_packs",
+  "game_board_packs",
+  "game_worlds",
   "regex_scripts",
   "chat_images",
   "character_images",
@@ -396,7 +436,9 @@ const BUILT_IN_FILE_BACKED_TABLES = [
   "custom_stickers",
   "ooc_influences",
   "conversation_notes",
+  "message_trash",
   "memory_chunks",
+  "advanced_memory_records",
   "chat_folders",
   "api_connection_folders",
   "custom_themes",
@@ -459,6 +501,7 @@ const SHARD_KEY_COLUMNS: Record<string, string> = {
   lorebook_persona_links: "lorebookId",
   lorebook_folders: "lorebookId",
   lorebook_entries: "lorebookId",
+  lorebook_entry_activation_stats: "lorebookId",
   prompt_groups: "presetId",
   prompt_sections: "presetId",
   choice_blocks: "presetId",
@@ -471,12 +514,16 @@ const SHARD_KEY_COLUMNS: Record<string, string> = {
   game_scene_videos: "chatId",
   game_turn_storyboards: "chatId",
   game_turn_storyboard_keyframes: "storyboardId",
+  game_dice_pools: "chatId",
+  game_world_snapshots: "chatId",
   chat_images: "chatId",
   character_images: "characterId",
   persona_images: "personaId",
   ooc_influences: "targetChatId",
   conversation_notes: "targetChatId",
+  message_trash: "chatId",
   memory_chunks: "chatId",
+  advanced_memory_records: "chatId",
   mari_workspace_context: "chatId",
 };
 // Deliberately mutable, unlike the arrays it mirrors: SHARDED_TABLES aliases
@@ -511,6 +558,7 @@ const LAZY_UNIT_TABLES: ReadonlySet<string> =
         "messages",
         "message_swipes",
         "memory_chunks",
+        "advanced_memory_records",
         "agent_runs",
         "agent_memory",
         "chat_images",
@@ -520,9 +568,12 @@ const LAZY_UNIT_TABLES: ReadonlySet<string> =
         "game_checkpoints",
         "game_scene_videos",
         "game_turn_storyboards",
+        "game_dice_pools",
+        "game_world_snapshots",
         "mari_workspace_context",
         "ooc_influences",
         "conversation_notes",
+        "message_trash",
         "conversation_call_sessions",
         "conversation_call_messages",
       ]);
@@ -621,7 +672,7 @@ export function encodeShardKey(rawKey: string): string {
 export function decodeShardKey(encoded: string): string | null {
   if (!encoded || encoded.startsWith("%h")) return null;
   const bytes: number[] = [];
-  for (let i = 0; i < encoded.length; ) {
+  for (let i = 0; i < encoded.length;) {
     const char = encoded[i]!;
     if (char === "%") {
       const hex = encoded.slice(i + 1, i + 3);
@@ -784,6 +835,7 @@ export const CASCADES: Array<{ parent: FileBackedTable; child: FileBackedTable; 
     { parent: "chats", child: "agent_memory", parentKey: "id", childKey: "chatId" },
     { parent: "chats", child: "chat_images", parentKey: "id", childKey: "chatId" },
     { parent: "chats", child: "memory_chunks", parentKey: "id", childKey: "chatId" },
+    { parent: "chats", child: "advanced_memory_records", parentKey: "id", childKey: "chatId" },
     // #5073: a Mari workspace chat's attached context is scoped to it and must
     // not outlive it (a leaked shard + stale injection into a reused chat id).
     { parent: "chats", child: "mari_workspace_context", parentKey: "id", childKey: "chatId" },
@@ -795,12 +847,15 @@ export const CASCADES: Array<{ parent: FileBackedTable; child: FileBackedTable; 
     { parent: "chats", child: "ooc_influences", parentKey: "id", childKey: "targetChatId" },
     { parent: "chats", child: "conversation_notes", parentKey: "id", childKey: "sourceChatId" },
     { parent: "chats", child: "conversation_notes", parentKey: "id", childKey: "targetChatId" },
+    { parent: "chats", child: "message_trash", parentKey: "id", childKey: "chatId" },
     { parent: "chats", child: "game_state_snapshots", parentKey: "id", childKey: "chatId" },
     { parent: "chats", child: "spatial_context_snapshots", parentKey: "id", childKey: "chatId" },
     { parent: "chats", child: "game_engine_state", parentKey: "id", childKey: "chatId" },
     { parent: "chats", child: "game_checkpoints", parentKey: "id", childKey: "chatId" },
     { parent: "chats", child: "game_scene_videos", parentKey: "id", childKey: "chatId" },
     { parent: "chats", child: "game_turn_storyboards", parentKey: "id", childKey: "chatId" },
+    { parent: "chats", child: "game_dice_pools", parentKey: "id", childKey: "chatId" },
+    { parent: "chats", child: "game_world_snapshots", parentKey: "id", childKey: "chatId" },
     {
       parent: "game_turn_storyboards",
       child: "game_turn_storyboard_keyframes",
@@ -815,6 +870,11 @@ export const CASCADES: Array<{ parent: FileBackedTable; child: FileBackedTable; 
     { parent: "messages", child: "game_state_snapshots", parentKey: "id", childKey: "messageId" },
     { parent: "messages", child: "spatial_context_snapshots", parentKey: "id", childKey: "messageId" },
     { parent: "messages", child: "game_checkpoints", parentKey: "id", childKey: "messageId" },
+    // A pool row is the record of what ONE turn was dealt. A rewind that removes the
+    // message removes the turn, so the row must go with it: left behind, it would be the
+    // "latest" row the next turn refills from, and the chat would resume from a queue
+    // belonging to a turn that no longer exists.
+    { parent: "messages", child: "game_dice_pools", parentKey: "id", childKey: "messageId" },
     // Matched on messageId ALONE — never scoped by chatId. See
     // IMPORTED_GAME_ENGINE_ANCHOR_PREFIX above for why the experience-state import must not
     // store a foreign chat's message ids verbatim, and for its validate() exemption.
@@ -829,6 +889,7 @@ export const CASCADES: Array<{ parent: FileBackedTable; child: FileBackedTable; 
     { parent: "lorebooks", child: "lorebook_persona_links", parentKey: "id", childKey: "lorebookId" },
     { parent: "lorebooks", child: "lorebook_folders", parentKey: "id", childKey: "lorebookId" },
     { parent: "lorebooks", child: "lorebook_entries", parentKey: "id", childKey: "lorebookId" },
+    { parent: "lorebook_entries", child: "lorebook_entry_activation_stats", parentKey: "id", childKey: "entryId" },
     { parent: "prompt_presets", child: "prompt_groups", parentKey: "id", childKey: "presetId" },
     { parent: "prompt_presets", child: "prompt_sections", parentKey: "id", childKey: "presetId" },
     { parent: "prompt_presets", child: "choice_blocks", parentKey: "id", childKey: "presetId" },
@@ -860,6 +921,11 @@ const SET_NULL_RELATIONS: Array<{
 const tableMetasByObject = new WeakMap<object, TableMeta>();
 const columnMetasByObject = new WeakMap<object, ColumnMeta>();
 const tableMetasByName = new Map<string, TableMeta>();
+
+/** Live lookup, so consumers that snapshot the schema at load still see package tables registered later. */
+export function getRegisteredFileTable(name: string): Table | undefined {
+  return tableMetasByName.get(name)?.table;
+}
 
 function tableNameOf(table: Table): string {
   return getFileTableConfig(table).name;
@@ -1435,6 +1501,7 @@ function readStableMachineId() {
           stdio: ["ignore", "pipe", "ignore"],
           timeout: 1_000,
           maxBuffer: 64 * 1024,
+          windowsHide: true,
         },
       );
       return output.match(/MachineGuid\s+REG_SZ\s+([^\r\n]+)/i)?.[1]?.trim() ?? null;
@@ -1463,26 +1530,45 @@ function readBootId() {
     }
   }
   if (process.platform === "win32") {
-    try {
-      const executable = process.env.SystemRoot
-        ? join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
-        : "powershell.exe";
-      const output = execFileSync(
-        executable,
-        [
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('o')",
-        ],
-        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 2_000, maxBuffer: 8 * 1024 },
-      );
-      return output.trim() || null;
-    } catch {
-      return null;
+    // The PowerShell probe below blocks startup for about 1.5 to 2 s on every
+    // launch. Opt-in (STORAGE_CACHE_WINDOWS_BOOT_ID): reuse its exact output
+    // for the rest of this OS boot, cached inside DATA_DIR.
+    if (isWindowsBootIdCacheEnabled()) {
+      return cachedBootId(getWindowsBootIdCachePath(), Date.now() - uptime() * 1000, probeWindowsBootId);
     }
+    return probeWindowsBootId();
   }
   return null;
+}
+
+/** Exact LastBootUpTime string; its format must never change (writer leases compare it). */
+function probeWindowsBootId(): string | null {
+  try {
+    const executable = process.env.SystemRoot
+      ? join(process.env.SystemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+      : "powershell.exe";
+    const output = execFileSync(
+      executable,
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "(Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('o')",
+      ],
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 2_000,
+        maxBuffer: 8 * 1024,
+        // Without this, a server started without a console (tray app,
+        // shortcut, service) flashes a PowerShell window on every boot.
+        windowsHide: true,
+      },
+    );
+    return output.trim() || null;
+  } catch {
+    return null;
+  }
 }
 
 const CURRENT_HOST_ID = (() => {
@@ -1518,19 +1604,6 @@ const CURRENT_CLOCK_TICKS_PER_SECOND = (() => {
   }
 })();
 
-const CURRENT_CONTAINER_WRITER_SCOPE_ID = (() => {
-  if (process.platform !== "linux" || process.env.MARINARA_DOCKER !== "true") return null;
-  try {
-    const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
-    if (bootId) {
-      return createHash("sha256").update(`marinara-writer-lease-boot\n${bootId}`).digest("hex");
-    }
-  } catch {
-    return null;
-  }
-  return null;
-})();
-
 function writerLeaseBelongsToCurrentHost(record: StorageWriterLeaseRecord) {
   if (record.version === 2 || record.version === 4) {
     return Boolean(CURRENT_HOST_ID && record.hostId === CURRENT_HOST_ID);
@@ -1552,9 +1625,11 @@ async function startWriterLeaseLiveness(
   if (process.platform === "win32" || !scopeId) return null;
 
   const socketPath = writerLeaseLivenessPath(path);
-  // sockaddr_un is shortest on macOS (103 usable bytes). Stay below every
-  // supported POSIX limit instead of letting a platform silently truncate it.
-  if (Buffer.byteLength(socketPath) > 100) return null;
+  // Unix socket paths allow 107 bytes on Linux/Android, 103 on macOS.
+  // The default Termux install needs 101; reject oversized paths before
+  // Node can silently truncate them.
+  const maxPathBytes = process.platform === "linux" || process.platform === "android" ? 107 : 103;
+  if (Buffer.byteLength(socketPath) > maxPathBytes) return null;
 
   // Container PID namespaces can reuse the same internal PID after a recreation.
   // A socket on the shared data mount remains reachable while its writer lives,
@@ -1578,7 +1653,7 @@ async function startWriterLeaseLiveness(
     rmSync(socketPath, { force: true });
     logger.debug(
       { err: error, path: socketPath },
-      "[file-storage] Writer lease socket is unavailable; a stale container lease may require manual recovery.",
+      "[file-storage] Writer lease socket is unavailable; a stale writer lease may require manual recovery.",
     );
     return null;
   }
@@ -1713,7 +1788,13 @@ function pidWasReused(record: StorageWriterLeaseRecord) {
           "-Command",
           `(Get-Process -Id ${record.pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`,
         ],
-        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 2_000, maxBuffer: 8 * 1024 },
+        {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+          timeout: 2_000,
+          maxBuffer: 8 * 1024,
+          windowsHide: true,
+        },
       );
       const processTime = Date.parse(output.trim());
       return Number.isFinite(processTime) && processTime > leaseTime + 1_000;
@@ -1823,6 +1904,7 @@ function defaultForColumn(column: ColumnMeta) {
  */
 const VECTOR_TEXT_COLUMNS: Record<string, ReadonlySet<string>> = {
   memory_chunks: new Set(["embedding"]),
+  advanced_memory_records: new Set(["embedding"]),
   lorebook_entries: new Set(["embedding"]),
 };
 
@@ -1868,6 +1950,87 @@ function serializeTableRows(table: string, rows: Row[]): string {
       return row;
     }),
   );
+}
+
+/**
+ * Longest stretch (ms) the flush serializer runs before yielding the event
+ * loop. JSON.stringify of a large chat shard is one synchronous call (about
+ * 90 ms for a 9.5 MB shard on a desktop), which stalls every HTTP request and
+ * stream chunk for the duration of each flush during generation.
+ */
+const SERIALIZE_YIELD_BUDGET_MS = 12;
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+/**
+ * Byte-identical to serializeTableRows, but serializes row by row and yields
+ * to the event loop whenever a slice exceeds SERIALIZE_YIELD_BUDGET_MS, so a
+ * large shard no longer blocks requests while it is flushed. Small shards
+ * finish inside one slice and never yield. The content fingerprint is hashed
+ * incrementally in the same slices. Safe to interleave: the caller hands over
+ * a private bucket array and stored rows are immutable (every mutation
+ * replaces the object).
+ */
+async function serializeTableRowsYielding(
+  table: string,
+  rows: Row[],
+  withFingerprint = true,
+): Promise<{ text: string; fingerprint: string | null }> {
+  const vectorColumns = VECTOR_TEXT_COLUMNS[table];
+  const hash = withFingerprint ? createHash("sha1") : null;
+  let text = "[";
+  hash?.update(text);
+  let sliceStart = performance.now();
+  for (let index = 0; index < rows.length; index++) {
+    let row = rows[index]!;
+    if (vectorColumns) {
+      for (const key of vectorColumns) {
+        if (row[key] instanceof Float64Array) {
+          row = unpackVectorColumns(table, { ...row });
+          break;
+        }
+      }
+    }
+    // JSON.stringify(array) renders an unserializable element as null.
+    const part = (index > 0 ? "," : "") + (JSON.stringify(row) ?? "null");
+    text += part;
+    hash?.update(part);
+    if (performance.now() - sliceStart >= SERIALIZE_YIELD_BUDGET_MS) {
+      await yieldToEventLoop();
+      sliceStart = performance.now();
+    }
+  }
+  text += "]";
+  if (!hash) return { text, fingerprint: null };
+  hash.update("]");
+  return { text, fingerprint: `${text.length}:${hash.digest("hex")}` };
+}
+
+/** Serializer internals, exported only so regressions can compare them byte for byte. */
+export const storageSerializationForTests = { serializeTableRows, serializeTableRowsYielding };
+
+/** Same fingerprint format as serializeTableRowsYielding, for small payloads. */
+function contentFingerprint(content: string): string {
+  return `${content.length}:${createHash("sha1").update(content).digest("hex")}`;
+}
+
+/**
+ * What this process last wrote durably to a snapshot path: the content
+ * fingerprint plus the file's size and mtime right after the rename, so a
+ * file changed or removed behind the store's back is never treated as current.
+ */
+type WrittenFileFingerprint = { fingerprint: string; size: number; mtimeMs: number };
+
+function fileStillMatches(path: string, written: WrittenFileFingerprint): boolean {
+  try {
+    const stats = statSync(path);
+    return stats.isFile() && stats.size === written.size && stats.mtimeMs === written.mtimeMs;
+  } catch {
+    // Missing or unreadable: not a match, so the flush writes it again.
+    return false;
+  }
 }
 
 function normalizeRow(meta: TableMeta, row: Row) {
@@ -2083,6 +2246,63 @@ function membershipSet(condition: { values: unknown[] }): Set<unknown> | null {
   return set;
 }
 
+/**
+ * The equality between a column of the table being joined and a column of a
+ * table already in the context, if the join condition carries one.
+ */
+function equiJoinKey(
+  condition: Condition,
+  joinTable: string,
+  boundTables: ReadonlySet<string>,
+): { probe: Column; buildKey: string } | null {
+  // Rejoining a table replaces its row in the context; it is not a bound probe.
+  if (boundTables.has(joinTable)) return null;
+  if (!condition || !isFileCondition(condition)) return null;
+  if (condition.kind === "file-logical") {
+    if (condition.operator !== "and") return null;
+    for (const entry of condition.conditions) {
+      const key = equiJoinKey(entry, joinTable, boundTables);
+      if (key) return key;
+    }
+    return null;
+  }
+  if (condition.kind !== "file-comparison" || condition.operator !== "eq") return null;
+  const sides = [condition.left, condition.right];
+  for (const [side, other] of [sides, [sides[1], sides[0]]]) {
+    if (!isColumn(side) || !isColumn(other) || !side.table || !other.table) continue;
+    if (tableNameOf(side.table) !== joinTable || !boundTables.has(tableNameOf(other.table))) continue;
+    const meta = getColumnMeta(side);
+    if (meta) return { probe: other, buildKey: meta.key };
+  }
+  return null;
+}
+
+/**
+ * Rows of the joined table worth testing against each context. With an
+ * equality key the rows are bucketed by that column once, so a join costs
+ * one lookup per context instead of one pass over the whole table; the full
+ * join condition is still evaluated on every candidate. Without a key every
+ * row is a candidate.
+ */
+function joinCandidates(
+  join: JoinSpec,
+  joinRows: readonly Row[],
+  boundTables: ReadonlySet<string>,
+): (ctx: RowContext) => readonly Row[] {
+  const key = equiJoinKey(join.condition, join.table.name, boundTables);
+  if (!key) return () => joinRows;
+  const buckets = new Map<unknown, Row[]>();
+  for (const row of joinRows) {
+    const value = row[key.buildKey];
+    if (typeof value === "number" && Number.isNaN(value)) continue;
+    const bucket = buckets.get(value);
+    if (bucket) bucket.push(row);
+    else buckets.set(value, [row]);
+  }
+  const none: Row[] = [];
+  return (ctx) => buckets.get(valueForColumn(ctx, key.probe)) ?? none;
+}
+
 function evaluateCondition(condition: Condition, ctx: RowContext): boolean {
   if (!condition) return true;
   if (!isFileCondition(condition)) return false;
@@ -2296,6 +2516,14 @@ class FileTableStore {
   /** Monotonic per-table write counters (#4705); bumped in markDirty, never rolled back. */
   private tableWriteGenerations = new Map<string, number>();
   private backupRecoveredPaths = new Set<string>();
+  /**
+   * Last durable write per snapshot path (shards and manifest). A flush whose
+   * serialized content matches, while the file on disk still has the recorded
+   * size and mtime, skips the tmp + fsync + rename and the .bak refresh: a
+   * dirty mark that changed nothing (an update that set the same values, a
+   * re-marked shard) no longer rewrites a multi-megabyte chat.
+   */
+  private writtenFingerprints = new Map<string, WrittenFileFingerprint>();
   private dirty = false;
   private activeFlush: Promise<void> | null = null;
   private lastFlushError: unknown = null;
@@ -2343,8 +2571,18 @@ class FileTableStore {
 
   private async acquireWriterLease() {
     const path = writerLeasePath(this.rootDir);
-    const writerScopeId = this.testHooks?.writerLeaseScopeId ?? CURRENT_CONTAINER_WRITER_SCOPE_ID;
     const writerBootId = this.testHooks?.writerLeaseBootId ?? CURRENT_BOOT_ID;
+    // Container PID reuse and Android's restricted process visibility can
+    // make PID ownership uncertain. Reuse the kernel-owned socket proof,
+    // scoped to this boot; Termux enables it only for its app-private HOME.
+    const useLiveness =
+      (process.platform === "linux" && process.env.MARINARA_DOCKER === "true") ||
+      isTermuxPrivateHomeStorage(this.rootDir);
+    const writerScopeId =
+      this.testHooks?.writerLeaseScopeId ??
+      (useLiveness && writerBootId
+        ? createHash("sha256").update(`marinara-writer-lease-boot\n${writerBootId}`).digest("hex")
+        : null);
     const writerPidNamespace = this.testHooks?.writerLeasePidNamespace ?? CURRENT_PID_NAMESPACE;
     for (let attempt = 0; attempt < 10; attempt++) {
       const token = randomUUID();
@@ -3335,6 +3573,13 @@ class FileTableStore {
     if (transactionContext && force) transactionContext.flushed = true;
     if (this.activeFlush) {
       await this.activeFlush;
+      // An admitted flush joins shutdown's drain instead of starting a new flush after close.
+      if (this.closePromise && !allowClosed && !transactionContext) {
+        const activeFlushError = this.lastFlushError;
+        await this.closePromise;
+        if (throwOnError && activeFlushError) throw activeFlushError;
+        return;
+      }
       if (this.dirty || this.dirtyTables.size > 0) await this.flush(force, throwOnError, allowClosed);
       else if (throwOnError && this.lastFlushError) throw this.lastFlushError;
       return;
@@ -3689,6 +3934,26 @@ class FileTableStore {
       if (LAZY_UNIT_TABLES.has(table)) leased.add(table);
     }
     return leased;
+  }
+
+  getStorageStats(): FileStoreStats {
+    // Counts only: no row data leaves the store, and nothing is loaded from disk.
+    const tables: FileStoreStats["tables"] = {};
+    for (const [name, rows] of this.tables) {
+      tables[name] = {
+        rows: rows.length,
+        lazy: LAZY_UNIT_TABLES.has(name),
+        fullyResident: this.fullyResidentTables.has(name),
+      };
+    }
+    const flushError = this.lastFlushError;
+    return {
+      tables,
+      residentChatUnits: this.loadedUnits.size,
+      dirtyTables: [...this.dirtyTables].sort(),
+      lastFlushError: flushError ? (flushError instanceof Error ? flushError.message : String(flushError)) : null,
+      quarantinedTables: this.quarantinedTables.length,
+    };
   }
 
   getResidentLazyRows(table: string): ReadonlyArray<Row> {
@@ -5055,10 +5320,27 @@ class FileTableStore {
     for (const [key, shardRows] of rowsByShard) {
       const encoded = encodeShardKey(key);
       if (!effectiveDirty.has(key) && known.has(encoded)) continue;
-      const serializedRows = serializeTableRows(table, shardRows);
-      await this.testHooks?.beforeTableWrite?.(`${table}/${encoded}`, serializedRows);
+      // Both are opt-in; with both off this is the plain serializeTableRows +
+      // atomicWriteFile it always was.
+      const skipUnchanged = isStorageSkipUnchangedWritesEnabled();
+      let text: string;
+      let fingerprint: (() => string) | null = null;
+      if (isStorageYieldingSerializeEnabled()) {
+        const serialized = await serializeTableRowsYielding(table, shardRows, skipUnchanged);
+        text = serialized.text;
+        if (serialized.fingerprint !== null) {
+          const digest = serialized.fingerprint;
+          fingerprint = () => digest;
+        }
+      } else {
+        text = serializeTableRows(table, shardRows);
+      }
       const path = shardFilePath(this.rootDir, table, encoded);
-      await atomicWriteFile(path, serializedRows, { refreshBackup: !recoveredPaths.has(path) });
+      await this.writeSnapshotFile(path, text, fingerprint ?? (() => contentFingerprint(text)), {
+        recoveredFromBackup: recoveredPaths.has(path),
+        hookLabel: `${table}/${encoded}`,
+        skipUnchanged,
+      });
       known.add(encoded);
       // Register the shard in the lazy discovery index too (#5592 PR-B):
       // discovery was boot-only, which was invisible while units never
@@ -5095,6 +5377,7 @@ class FileTableStore {
         // propagate so the flush error path keeps the dirty/stale marks and
         // retries — swallowing it would let `known` claim the file is gone
         // while its rows reload on the next restart.
+        this.writtenFingerprints.delete(path);
         await unlinkIgnoringMissing(path);
         await unlinkIgnoringMissing(`${path}.bak`);
         known.delete(encoded);
@@ -5132,6 +5415,7 @@ class FileTableStore {
       const encoded = encodeShardKey(key);
       if (!known.has(encoded)) continue;
       const path = shardFilePath(this.rootDir, table, encoded);
+      this.writtenFingerprints.delete(path);
       await unlinkIgnoringMissing(path);
       await unlinkIgnoringMissing(`${path}.bak`);
       known.delete(encoded);
@@ -5180,8 +5464,11 @@ class FileTableStore {
       }
       const path = tableFilePath(this.rootDir, table);
       if (dirtyTables.has(table) || !existsSync(path)) {
+        // Kept as the plain full rewrite (no skip, no yield): every built-in
+        // table is sharded, so this path has no fingerprint to trust.
         const serializedRows = serializeTableRows(table, rows);
         await this.testHooks?.beforeTableWrite?.(table, serializedRows);
+        this.writtenFingerprints.delete(path);
         await atomicWriteFile(path, serializedRows, { refreshBackup: !recoveredPaths.has(path) });
       }
     }
@@ -5195,12 +5482,67 @@ class FileTableStore {
     };
     const path = manifestPath(this.rootDir);
     const serializedManifest = JSON.stringify(manifest, null, 2);
-    await atomicWriteFile(path, serializedManifest, {
-      refreshBackup: !recoveredPaths.has(path),
+    // savedAt changes on every flush, so the fingerprint covers everything
+    // EXCEPT it: a flush that changed no shard list keeps the manifest file
+    // (and its fsyncs) untouched. Nothing reads savedAt back.
+    const { savedAt: _savedAt, ...manifestIdentity } = manifest;
+    await this.writeSnapshotFile(path, serializedManifest, () => contentFingerprint(JSON.stringify(manifestIdentity)), {
+      recoveredFromBackup: recoveredPaths.has(path),
+      skipUnchanged: isStorageSkipUnchangedWritesEnabled(),
     });
     // No whole-set clear: the captured marks die with this batch on success,
     // and marks added DURING this flush (lazy unit loads recovering shards
     // from .bak) stay in the live set for the flush that writes them.
+  }
+
+  /**
+   * Durable snapshot write. With `skipUnchanged` off (the default) this is
+   * exactly the atomicWriteFile call it replaces. With it on
+   * (STORAGE_SKIP_UNCHANGED_WRITES), the disk is skipped entirely when the
+   * content fingerprint matches this process's last durable write to `path`
+   * and the file still carries that write's size and mtime. Crash safety is
+   * unchanged: a real write still goes through atomicWriteFile (.bak refresh,
+   * tmp, fsync, rename), and a skipped write leaves the already-durable
+   * identical file. A path recovered from .bak this flush is never skipped:
+   * its primary is the corrupt copy that must be repaired.
+   */
+  private async writeSnapshotFile(
+    path: string,
+    content: string,
+    fingerprint: () => string,
+    options: { recoveredFromBackup: boolean; hookLabel?: string; skipUnchanged: boolean },
+  ): Promise<void> {
+    const { recoveredFromBackup, hookLabel, skipUnchanged } = options;
+    if (hookLabel !== undefined) await this.testHooks?.beforeTableWrite?.(hookLabel, content);
+    // Forget the old record BEFORE writing: a failed or partial write (or a
+    // write made while the setting was off) must never leave a fingerprint
+    // vouching for content that is not on disk.
+    const previous = this.writtenFingerprints.get(path);
+    this.writtenFingerprints.delete(path);
+    if (!skipUnchanged) {
+      await atomicWriteFile(path, content, { refreshBackup: !recoveredFromBackup });
+      return;
+    }
+    const current = fingerprint();
+    if (!recoveredFromBackup && previous && previous.fingerprint === current && fileStillMatches(path, previous)) {
+      this.writtenFingerprints.set(path, previous);
+      if (hookLabel !== undefined) this.testHooks?.onTableWriteSkipped?.(hookLabel);
+      return;
+    }
+    await atomicWriteFile(path, content, { refreshBackup: !recoveredFromBackup });
+    try {
+      const stats = statSync(path);
+      this.writtenFingerprints.set(path, { fingerprint: current, size: stats.size, mtimeMs: stats.mtimeMs });
+    } catch (err) {
+      // Non-fatal: no record only means the next flush writes this file again.
+      logRateLimited(
+        "warn",
+        "file-storage.fingerprint-stat",
+        err,
+        "[file-storage] Could not record the written fingerprint for %s",
+        path,
+      );
+    }
   }
 
   private installAutosave() {
@@ -5282,11 +5624,13 @@ class SelectQuery implements SelectQueryBuilder<any> {
     for (const join of this.joins) this.store.ensureQueryScopeLoaded(join.table, combined);
     let contexts = this.store.rows(this.fromMeta.name).map((row) => this.store.contextForRow(this.fromMeta, row));
 
+    const boundTables = new Set([this.fromMeta.name]);
     for (const join of this.joins) {
       const joinedContexts: RowContext[] = [];
       const joinRows = this.store.rows(join.table.name);
+      const candidatesFor = joinCandidates(join, joinRows, boundTables);
       for (const ctx of contexts) {
-        joinRows.forEach((row) => {
+        for (const row of candidatesFor(ctx)) {
           const candidate: RowContext = {
             rows: { ...ctx.rows, [join.table.name]: row },
             baseTable: ctx.baseTable,
@@ -5295,9 +5639,10 @@ class SelectQuery implements SelectQueryBuilder<any> {
           if (evaluateCondition(join.condition, candidate)) {
             joinedContexts.push(candidate);
           }
-        });
+        }
       }
       contexts = joinedContexts;
+      boundTables.add(join.table.name);
     }
 
     contexts = contexts.filter((ctx) => evaluateCondition(this.condition, ctx));
@@ -5346,6 +5691,7 @@ export async function createFileNativeDB(testHooks?: FileNativeStoreTestHooks): 
     getResidentChatUnits: () => store.getResidentChatUnits(),
     getFullyResidentLazyTables: () => store.getFullyResidentLazyTables(),
     getResidentLazyRows: (table) => store.getResidentLazyRows(table),
+    getStorageStats: () => store.getStorageStats(),
     ...(testHooks
       ? { markShardDirty: (table: string, shardKeys: Iterable<string>) => store.markDirty(table, shardKeys) }
       : {}),

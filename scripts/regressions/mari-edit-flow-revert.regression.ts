@@ -22,7 +22,9 @@ import { fileURLToPath } from "node:url";
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const readSource = (path: string) => readFileSync(join(repositoryRoot, path), "utf8");
 
-const workspaceAgent = readSource("packages/server/src/services/professor-mari/workspace-agent.service.ts");
+const workspaceAgent =
+  readSource("packages/server/src/services/professor-mari/workspace-agent.service.ts") +
+  readSource("packages/server/src/services/professor-mari/workspace-commands.ts");
 
 // ── The gate is gone ────────────────────────────────────────────────────────
 assert.doesNotMatch(

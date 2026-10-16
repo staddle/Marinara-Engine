@@ -13,6 +13,7 @@ import { createEmptyGameState, useGameStatePatcher } from "../../../hooks/use-ga
 import { getCssBackgroundStyle, getCssColorFallback, isCssGradient } from "../../../lib/css-colors";
 import { useRenderTimer } from "../../../lib/perf-diagnostics";
 import { cn } from "../../../lib/utils";
+import { closeTrackerPanel } from "../../../lib/tracker-panel-surface";
 import { useTrackerGameState } from "../hooks/use-tracker-game-state";
 import { useTrackerFieldLockUpdater } from "../hooks/use-tracker-field-lock-updater";
 import { useTrackerPanelModel } from "../hooks/use-tracker-panel-model";
@@ -23,14 +24,16 @@ import { EmptySection, TRACKER_SECTION_SHELL_CLASS } from "./controls/SectionCon
 import { TrackerReadabilityVeil } from "./controls/TrackerProfileChrome";
 import { TrackerSectionList } from "./TrackerSectionList";
 import { TrackerSkeleton } from "./TrackerSkeleton";
-import { TrackerSidebarHeader } from "./TrackerSidebarHeader";
+import { TRACKER_HEADER_PACKAGE_BUTTON_CLASS, TrackerSidebarHeader } from "./TrackerSidebarHeader";
 import { TrackerLockProvider } from "./TrackerLockContext";
+import { TrackerAgentActivitySection } from "./TrackerAgentActivitySection";
 import { Translation, useTranslation as useUiTranslation } from "react-i18next";
 import {
   partitionTrackerCapabilityPackages,
   useInstalledCapabilityPackages,
 } from "../../../hooks/use-capability-packages";
 import { CapabilityElement } from "../../../components/capabilities/CapabilityElement";
+import { RoleplayTrackerCapability, selectRoleplayTrackerPackages } from "../../../components/chat/RoleplayHUD";
 
 const TRACKER_PANEL_NEUTRAL_VARS =
   "[--accent:rgb(39_39_42)] [--accent-foreground:rgb(244_244_245)] [--background:rgb(18_18_21)] [--border:rgb(63_63_70)] [--card:rgb(24_24_27)] [--foreground:rgb(244_244_245)] [--input:rgb(63_63_70)] [--muted:rgb(39_39_42)] [--muted-foreground:rgb(161_161_170)] [--popover:rgb(24_24_27)] [--popover-foreground:rgb(244_244_245)] [--primary:rgb(212_212_216)] [--primary-foreground:rgb(18_18_21)] [--ring:rgb(161_161_170)] [--secondary:rgb(39_39_42)] [--tracker-panel-card-background:color-mix(in_srgb,var(--background)_22%,transparent)] [--tracker-panel-section-background:color-mix(in_srgb,var(--card)_6%,transparent)]";
@@ -57,7 +60,7 @@ class TrackerPanelErrorBoundary extends Component<{ children: ReactNode; resetKe
     if (this.state.hasError) {
       return (
         <Translation>
-          {(t) => <EmptySection>{t("ui.tracker.trackerDataSidebar.renderError")}</EmptySection>}
+          {(t) => <EmptySection>{t("ui.trackerPanel.trackerdatasidebar.renderError")}</EmptySection>}
         </Translation>
       );
     }
@@ -96,7 +99,6 @@ export function TrackerDataSidebar({
   const trackerPanelBackgroundColor = useUIStore((s) => s.trackerPanelBackgroundColor);
   const trackerTemperatureUnit = useUIStore((s) => s.trackerTemperatureUnit);
   const toggleTrackerPanelSectionCollapsed = useUIStore((s) => s.toggleTrackerPanelSectionCollapsed);
-  const setTrackerPanelOpen = useUIStore((s) => s.setTrackerPanelOpen);
   const setTrackerPanelSide = useUIStore((s) => s.setTrackerPanelSide);
   const setTrackerPanelSizeProfile = useUIStore((s) => s.setTrackerPanelSizeProfile);
   const setTrackerStatDisplayMode = useUIStore((s) => s.setTrackerStatDisplayMode);
@@ -152,6 +154,11 @@ export function TrackerDataSidebar({
       </div>
     </div>
   );
+  // The package buttons the phone tracker strip shows, such as the one that opens Quartermaster's dock (#7280).
+  // Beholder has its own window and Memory Nag its own section.
+  const launcherPackages = partitionTrackerCapabilityPackages(
+    selectRoleplayTrackerPackages(installedCapabilities, enabledAgentTypes),
+  ).other;
   const resolveStatIcon = useStatIcons({
     activeChatId,
     trackerStatIconOverrides,
@@ -221,7 +228,7 @@ export function TrackerDataSidebar({
       data-component="TrackerDataSidebar"
       data-tracker-size-profile={trackerPanelSizeProfile}
       className={cn(
-        "@container relative flex flex-col bg-zinc-950/95 text-zinc-100 backdrop-blur-sm",
+        "@container relative flex flex-col bg-zinc-950 text-zinc-100 backdrop-blur-sm",
         TRACKER_PANEL_NEUTRAL_VARS,
         fillHeight ? "overflow-hidden" : "overflow-visible",
         fillHeight ? "h-full" : "min-h-0",
@@ -249,7 +256,19 @@ export function TrackerDataSidebar({
           onSetSizeProfile={setTrackerPanelSizeProfile}
           onSetStatDisplayMode={setTrackerStatDisplayMode}
           onToggleDetached={onToggleDetached}
-          onClose={() => setTrackerPanelOpen(false, activeChatId)}
+          onClose={closeTrackerPanel}
+          launchers={
+            activeChatId && launcherPackages.length > 0
+              ? launcherPackages.map((item) => (
+                  <RoleplayTrackerCapability
+                    key={item.id}
+                    packageId={item.id}
+                    chatId={activeChatId}
+                    buttonClassName={TRACKER_HEADER_PACKAGE_BUTTON_CLASS}
+                  />
+                ))
+              : null
+          }
         />
 
         <div className={cn("relative z-10", fillHeight && "min-h-0 flex-1 overflow-y-auto")}>
@@ -328,6 +347,8 @@ export function TrackerDataSidebar({
           ) : !hasFixedTrackerPanel ? (
             <EmptySection>{localizeUi("ui.trackerPanel.trackerdatasidebar.noEnabledTrackerPanels")}</EmptySection>
           ) : null}
+
+          {activeChatId ? <TrackerAgentActivitySection chatId={activeChatId} /> : null}
         </div>
       </TrackerLockProvider>
     </section>

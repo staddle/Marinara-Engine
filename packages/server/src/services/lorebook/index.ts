@@ -3,19 +3,26 @@
 // Ties together storage, scanning, and injection.
 // ──────────────────────────────────────────────
 import type { DB } from "../../db/connection.js";
-import { LIMITS } from "@marinara-engine/shared";
+import { inArray } from "../../db/file-query.js";
+import { messages as messagesTable } from "../../db/schema/index.js";
+import { LIMITS, estimateTextTokens, expandLorebookIncludes, usesLorebookIncludes } from "@marinara-engine/shared";
 import { logger } from "../../lib/logger.js";
+import { isFeatureEnabled } from "../features/feature-settings.js";
 import type {
   CharacterData,
   LorebookActivationSource,
   Lorebook,
   LorebookEntry,
   LorebookEntryTimingState,
+  LorebookIncludeSource,
   LorebookMatchingSource,
 } from "@marinara-engine/shared";
 import { createCharactersStorage } from "../storage/characters.storage.js";
+import { createChatsStorage } from "../storage/chats.storage.js";
 import { createLorebooksStorage } from "../storage/lorebooks.storage.js";
+import { resolveLorebookScopeExclusions } from "./game-lorebook-scope.js";
 import {
+  recursiveScan,
   scanForActivatedEntries,
   lorebookEntryPassesContextFilters,
   passesForcedEntryActivationGates,
@@ -26,18 +33,26 @@ import {
   type EntryTimingState,
   updateTimingStatesForScan,
 } from "./keyword-scanner.js";
-import { applyTokenBudget, processActivatedEntries } from "./prompt-injector.js";
+import type { LorebookImageEntry } from "../generation/lorebook-image-prompt.js";
+import {
+  applyTokenBudget,
+  estimateLorebookEntryTokens,
+  fitLorebookEntryToBudget,
+  processActivatedEntries,
+} from "./prompt-injector.js";
 
 export interface LorebookScanResult {
   worldInfoBefore: string;
   worldInfoAfter: string;
   depthEntries: Array<{ content: string; role: "system" | "user" | "assistant"; depth: number; order: number }>;
   outlets: Record<string, string>;
+  imageEntries?: LorebookImageEntry[];
   totalEntries: number;
   totalTokensEstimate: number;
   activatedEntryIds: string[];
   activatedEntries: Array<{
     id: string;
+    name?: string;
     content: string;
     matchedKeys: string[];
     activationSources: LorebookActivationSource[];
@@ -105,6 +120,7 @@ export function scopeLorebookScanResultToCharacterContext(
   return {
     ...result,
     ...processed,
+    ...(result.imageEntries ? { imageEntries: result.imageEntries.filter((entry) => scopedIds.has(entry.id)) } : {}),
     activatedEntryIds: scopedActivatedEntries.map((entry) => entry.entry.id),
     activatedEntries: result.activatedEntries.filter((entry) => scopedIds.has(entry.id)),
     budgetSkippedEntries: scopedSkippedEntries,
@@ -135,7 +151,33 @@ export async function scopeLorebookScanResultToCharacter(
 }
 
 export type LorebookBudgetSkipReason = "lorebook" | "chat" | "both" | "location";
-export type LorebookMatchType = "keyword" | "semantic" | "constant" | "sticky";
+export type LorebookMatchType = "keyword" | "semantic" | "constant" | "sticky" | "decision";
+
+/** Answers entries' decision statements (#6570); see `resolveDecisions` on `processLorebooks`. */
+export interface LorebookDecisionResolver {
+  (requests: Array<{ entryId: string; statement: string }>): Promise<ReadonlyMap<string, boolean>>;
+  /**
+   * Asks the `{{#if decision}}` statements in the text of entries about to activate,
+   * so they have answers before that text is resolved. Only activating entries are
+   * asked about: the rest of a lorebook never reaches the prompt (#6582).
+   */
+  answerStatements?: (texts: string[]) => Promise<void>;
+  /**
+   * An entry's text for keyword discovery, with only the branches its decisions have
+   * already settled. Nothing is asked or written.
+   */
+  planText?: (text: string) => string;
+}
+
+const DECISION_STATEMENT_RE = /decision(?:_choice)?\s*:/iu;
+
+/** Whether an entry's activation depends on a decision statement (#6570). */
+export function hasDecisionActivation(entry: Pick<LorebookEntry, "decisionMode" | "decisionStatement">): boolean {
+  return (
+    (entry.decisionMode === "require" || entry.decisionMode === "trigger") &&
+    (entry.decisionStatement ?? "").trim().length > 0
+  );
+}
 
 export interface LorebookBudgetSkippedEntry {
   id: string;
@@ -326,6 +368,44 @@ export function filterRelevantLorebooks(lorebooks: RelevantLorebook[], filters?:
   });
 }
 
+function parseJsonValue(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every lorebook and entry `{{include::...}}` can read (#6912). With a chat, the short
+ * form looks for names in the lorebooks that chat uses: its own and the ones added to it,
+ * its characters' and persona's, and global ones. Loaded only when some text uses it.
+ */
+export async function loadLorebookIncludes(db: DB, chatId?: string): Promise<LorebookIncludeSource> {
+  const storage = createLorebooksStorage(db);
+  const books = (await storage.list()) as unknown as RelevantLorebook[];
+  const entries = (await storage.listEntriesByLorebooks(books.map((book) => book.id))) as unknown as LorebookEntry[];
+  const chat = chatId ? await createChatsStorage(db).getById(chatId) : null;
+  const metadata = parseJsonValue(chat?.metadata);
+  const meta = metadata && typeof metadata === "object" ? (metadata as Record<string, unknown>) : {};
+  const characterIds = parseJsonValue(chat?.characterIds);
+  const chatBooks = chat
+    ? filterRelevantLorebooks(books, {
+        chatId: chat.id,
+        characterIds: Array.isArray(characterIds) ? characterIds.map(String) : [],
+        personaId: chat.personaId,
+        activeLorebookIds: Array.isArray(meta.activeLorebookIds) ? meta.activeLorebookIds.map(String) : [],
+        ...resolveLorebookScopeExclusions(chat.mode, meta),
+      })
+    : [];
+  return {
+    books: books.map(({ id, name }) => ({ id, name })),
+    entries: entries.map(({ id, lorebookId, name, content }) => ({ id, lorebookId, name, content })),
+    currentBookIds: chatBooks.map((book) => book.id),
+  };
+}
+
 function readLorebookScope(value: unknown): { mode: "all" | "disabled" | "specific"; chatIds: string[] } {
   if (value && typeof value === "object") {
     const raw = value as Record<string, unknown>;
@@ -479,12 +559,6 @@ function lorebookInjectionOrder(a: ActivatedEntry, b: ActivatedEntry): number {
   return a.injectionOrder - b.injectionOrder;
 }
 
-// Lorebook budgets currently use the project-wide chars/4 approximation.
-// This can drift for CJK, emoji, and long-tail vocabulary until a canonical tokenizer is available here.
-function estimateLorebookTokens(content: string): number {
-  return Math.ceil(content.length / 4);
-}
-
 type LorebookBudgetSelectionState = {
   selected: ActivatedEntry[];
   selectedIds: Set<string>;
@@ -529,8 +603,7 @@ type LorebookResolutionPass = {
 };
 
 type BudgetedLorebookEntrySelection =
-  | { selected: true; entry: ActivatedEntry }
-  | { selected: false; skipped?: LorebookBudgetSkipCandidate };
+  { selected: true; entry: ActivatedEntry } | { selected: false; skipped?: LorebookBudgetSkipCandidate };
 
 function resolveLorebookResolutionPass(
   candidates: ActivatedEntry[],
@@ -573,6 +646,20 @@ function sameActivatedEntrySet(a: ActivatedEntry[], b: ActivatedEntry[]): boolea
   return a.every((entry) => bIds.has(entry.entry.id));
 }
 
+/**
+ * The selected entries plus the ones macros turned into nothing. Those add no text, but their
+ * macros ({{setvar}}) still apply, so entries that read those variables keep their text (#7325).
+ * ponytail: they are not activated, so their sticky/cooldown/ephemeral counters do not tick; return
+ * them from the batch to processLorebooks if a {{setvar}}-only entry ever needs a cooldown.
+ */
+function keptLorebookPassEntries(pass: LorebookResolutionPass, selected: ActivatedEntry[]): ActivatedEntry[] {
+  const selectedIds = new Set(selected.map((entry) => entry.entry.id));
+  const emptied = pass.entries.filter(
+    (entry) => !selectedIds.has(entry.entry.id) && !entry.entry.content.trim() && !entry.entry.images?.length,
+  );
+  return [...selected, ...emptied];
+}
+
 function getBudgetSkipReason(exceedsLorebookBudget: boolean, exceedsGlobalBudget: boolean): LorebookBudgetSkipReason {
   if (exceedsLorebookBudget && exceedsGlobalBudget) return "both";
   if (exceedsLorebookBudget) return "lorebook";
@@ -580,6 +667,8 @@ function getBudgetSkipReason(exceedsLorebookBudget: boolean, exceedsGlobalBudget
 }
 
 function normalizeLorebookEntryLimit(value: unknown): number {
+  // Exact selections supply an unbounded in-memory limit; persisted limits still normalize below.
+  if (value === Number.POSITIVE_INFINITY) return value;
   const parsed = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(parsed)) return LIMITS.LOREBOOK_ENTRY_LIMIT_DEFAULT;
   return Math.max(LIMITS.LOREBOOK_ENTRY_LIMIT_MIN, Math.min(LIMITS.LOREBOOK_ENTRY_LIMIT_MAX, Math.trunc(parsed)));
@@ -611,6 +700,7 @@ function getLorebookMatchType(matchedKeys: string[]): LorebookMatchType {
   if (matchedKeys.some((key) => key.startsWith("[semantic:"))) return "semantic";
   if (matchedKeys.includes("[constant]")) return "constant";
   if (matchedKeys.includes("[sticky]")) return "sticky";
+  if (matchedKeys.includes("[decision]")) return "decision";
   return "keyword";
 }
 
@@ -647,8 +737,14 @@ function applyCurrentLocationLoreBudget(
   const skipped: LorebookBudgetSkippedEntry[] = [];
   let usedTokens = 0;
   for (const candidate of [...candidates].sort(lorebookSelectionOrder)) {
-    const estimatedTokens = estimateLorebookTokens(candidate.entry.content);
-    if (tokenBudget > 0 && usedTokens + estimatedTokens > tokenBudget) {
+    const fitted = fitLorebookEntryToBudget(
+      candidate,
+      (tokens) => tokenBudget <= 0 || usedTokens + tokens <= tokenBudget,
+    );
+    if (!fitted) {
+      // An entry with nothing to add was not skipped by the cap (#7325).
+      if (!candidate.entry.content.trim() && !candidate.entry.images?.length) continue;
+      const estimatedTokens = estimateLorebookEntryTokens(candidate.entry);
       skipped.push({
         id: candidate.entry.id,
         name: candidate.entry.name,
@@ -666,8 +762,8 @@ function applyCurrentLocationLoreBudget(
       });
       continue;
     }
-    selected.push(candidate);
-    usedTokens += estimatedTokens;
+    selected.push(fitted.candidate);
+    usedTokens += fitted.tokens;
   }
   return { selected: selected.sort(lorebookInjectionOrder), skipped };
 }
@@ -678,6 +774,7 @@ function trySelectBudgetedLorebookEntry(
   lorebooksById: ReadonlyMap<string, Pick<Lorebook, "name" | "tokenBudget" | "entryLimit">>,
   tokenBudget: number,
   maxEntries: number,
+  includeImages = false,
 ): BudgetedLorebookEntrySelection {
   if (state.selectedIds.has(candidate.entry.id)) return { selected: false };
   if (maxEntries > 0 && state.selected.length >= maxEntries) return { selected: false };
@@ -688,13 +785,24 @@ function trySelectBudgetedLorebookEntry(
   const lorebookEntryCount = state.perLorebookEntryCounts.get(lorebookId) ?? 0;
   if (lorebookEntryCount >= lorebookEntryLimit) return { selected: false };
 
-  const entryTokens = estimateLorebookTokens(candidate.entry.content);
   const lorebookBudget = lorebook?.tokenBudget ?? 0;
   const lorebookTokens = state.perLorebookTokens.get(lorebookId) ?? 0;
-  const exceedsLorebookBudget = lorebookBudget > 0 && lorebookTokens + entryTokens > lorebookBudget;
-  const exceedsGlobalBudget = tokenBudget > 0 && state.totalTokens + entryTokens > tokenBudget;
+  const exceedsLorebookBudget = (tokens: number) => lorebookBudget > 0 && lorebookTokens + tokens > lorebookBudget;
+  const exceedsGlobalBudget = (tokens: number) => tokenBudget > 0 && state.totalTokens + tokens > tokenBudget;
+  const fitted = fitLorebookEntryToBudget(
+    candidate,
+    (tokens) => !exceedsLorebookBudget(tokens) && !exceedsGlobalBudget(tokens),
+    includeImages,
+  );
 
-  if (exceedsLorebookBudget || exceedsGlobalBudget) {
+  if (!fitted) {
+    // Blank text, or text that macros resolved to nothing, has nothing to add, so no budget
+    // skipped it (#7325). An entry with only images is judged by the images pass.
+    const hasText = candidate.entry.content.trim().length > 0;
+    if (!hasText && (!includeImages || !candidate.entry.images?.length)) return { selected: false };
+    const entryTokens = hasText
+      ? estimateTextTokens(candidate.entry.content)
+      : estimateLorebookEntryTokens(candidate.entry);
     return {
       selected: false,
       skipped: {
@@ -704,18 +812,56 @@ function trySelectBudgetedLorebookEntry(
         lorebookUsedTokens: lorebookTokens,
         chatBudget: tokenBudget,
         chatUsedTokens: state.totalTokens,
-        blockedBy: getBudgetSkipReason(exceedsLorebookBudget, exceedsGlobalBudget),
+        blockedBy: getBudgetSkipReason(exceedsLorebookBudget(entryTokens), exceedsGlobalBudget(entryTokens)),
       },
     };
   }
 
-  state.selected.push(candidate);
+  const entryTokens = fitted.tokens;
+  const selectedEntry = includeImages ? fitted.candidate : candidate;
+  state.selected.push(selectedEntry);
   state.selectedIds.add(candidate.entry.id);
   state.perLorebookTokens.set(lorebookId, lorebookTokens + entryTokens);
   state.perLorebookEntryCounts.set(lorebookId, lorebookEntryCount + 1);
   state.totalTokens += entryTokens;
 
-  return { selected: true, entry: candidate };
+  return { selected: true, entry: selectedEntry };
+}
+
+function addImagesToBudgetedEntries(
+  selected: ActivatedEntry[],
+  state: LorebookBudgetSelectionState,
+  lorebooksById: ReadonlyMap<string, Pick<Lorebook, "tokenBudget">>,
+  tokenBudget: number,
+): ActivatedEntry[] {
+  return selected.map((candidate) => {
+    const current = state.selected.find((entry) => entry.entry.id === candidate.entry.id) ?? candidate;
+    const oldTokens = candidate.entry.content.trim()
+      ? estimateTextTokens(candidate.entry.content)
+      : estimateLorebookEntryTokens(candidate.entry);
+    const lorebookId = candidate.entry.lorebookId;
+    const lorebook = lorebooksById.get(lorebookId);
+    const lorebookTokens = state.perLorebookTokens.get(lorebookId) ?? 0;
+    const fitted = fitLorebookEntryToBudget(
+      candidate,
+      (tokens) => {
+        const nextLorebookTokens = lorebookTokens - oldTokens + tokens;
+        const nextGlobalTokens = state.totalTokens - oldTokens + tokens;
+        return (
+          ((lorebook?.tokenBudget ?? 0) <= 0 || nextLorebookTokens <= (lorebook?.tokenBudget ?? 0)) &&
+          (tokenBudget <= 0 || nextGlobalTokens <= tokenBudget)
+        );
+      },
+      true,
+    );
+    if (!fitted) return current;
+    const delta = fitted.tokens - oldTokens;
+    state.perLorebookTokens.set(lorebookId, lorebookTokens + delta);
+    state.totalTokens += delta;
+    const index = state.selected.findIndex((entry) => entry.entry.id === candidate.entry.id);
+    if (index >= 0) state.selected[index] = fitted.candidate;
+    return fitted.candidate;
+  });
 }
 
 function toBudgetSkippedEntries(
@@ -758,6 +904,7 @@ function selectBudgetedLorebookEntryBatch(
   tokenBudget: number,
   maxEntries: number,
   resolveContent?: LorebookFinalContentResolver,
+  includeOptionalImages = true,
 ): {
   selectedFromCandidates: ActivatedEntry[];
   state: LorebookBudgetSelectionState;
@@ -787,12 +934,30 @@ function selectBudgetedLorebookEntryBatch(
       }
     }
 
-    selectedFromCandidates.sort(lorebookInjectionOrder);
+    for (const candidate of [...pass.entries].sort(lorebookSelectionOrder)) {
+      if (candidate.entry.content.trim() || nextState.selectedIds.has(candidate.entry.id)) continue;
+      if (maxEntries > 0 && nextState.selected.length >= maxEntries) break;
+      const selected = trySelectBudgetedLorebookEntry(
+        { ...candidate, entry: { ...candidate.entry, content: "" } },
+        nextState,
+        lorebooksById,
+        tokenBudget,
+        maxEntries,
+        true,
+      );
+      if (selected.selected) selectedFromCandidates.push(selected.entry);
+      else if (selected.skipped) skippedFromCandidates.push(selected.skipped);
+    }
 
-    if (sameActivatedEntrySet(pool, selectedFromCandidates)) {
+    selectedFromCandidates.sort(lorebookInjectionOrder);
+    const kept = keptLorebookPassEntries(pass, selectedFromCandidates);
+
+    if (sameActivatedEntrySet(pool, kept)) {
       commitLorebookResolutionPass(pass);
       return {
-        selectedFromCandidates,
+        selectedFromCandidates: includeOptionalImages
+          ? addImagesToBudgetedEntries(selectedFromCandidates, nextState, lorebooksById, tokenBudget)
+          : selectedFromCandidates,
         state: nextState,
         budgetSkippedEntries: toBudgetSkippedEntries(lastSkippedBudgetEntries, lorebooksById),
       };
@@ -800,7 +965,7 @@ function selectBudgetedLorebookEntryBatch(
 
     rollbackLorebookResolutionPass(pass);
     lastSkippedBudgetEntries = skippedFromCandidates;
-    pool = selectedFromCandidates;
+    pool = kept;
   }
 
   const pass = resolveLorebookResolutionPass(pool, resolveContent);
@@ -820,11 +985,28 @@ function selectBudgetedLorebookEntryBatch(
     }
   }
 
+  for (const candidate of [...pass.entries].sort(lorebookSelectionOrder)) {
+    if (candidate.entry.content.trim() || nextState.selectedIds.has(candidate.entry.id)) continue;
+    if (maxEntries > 0 && nextState.selected.length >= maxEntries) break;
+    const selected = trySelectBudgetedLorebookEntry(
+      { ...candidate, entry: { ...candidate.entry, content: "" } },
+      nextState,
+      lorebooksById,
+      tokenBudget,
+      maxEntries,
+      true,
+    );
+    if (selected.selected) selectedFromCandidates.push(selected.entry);
+    else if (selected.skipped) skippedFromCandidates.push(selected.skipped);
+  }
+
   selectedFromCandidates.sort(lorebookInjectionOrder);
-  if (sameActivatedEntrySet(pool, selectedFromCandidates)) {
+  if (sameActivatedEntrySet(pool, keptLorebookPassEntries(pass, selectedFromCandidates))) {
     commitLorebookResolutionPass(pass);
     return {
-      selectedFromCandidates,
+      selectedFromCandidates: includeOptionalImages
+        ? addImagesToBudgetedEntries(selectedFromCandidates, nextState, lorebooksById, tokenBudget)
+        : selectedFromCandidates,
       state: nextState,
       budgetSkippedEntries: toBudgetSkippedEntries(lastSkippedBudgetEntries, lorebooksById),
     };
@@ -928,6 +1110,7 @@ export function resolveBudgetAndRecursivelyActivateLorebookEntriesWithDiagnostic
       tokenBudget,
       maxEntries,
       resolveContent,
+      false,
     );
     state = selectedBatch.state;
     budgetSkippedEntries.push(...selectedBatch.budgetSkippedEntries);
@@ -963,7 +1146,9 @@ export function resolveBudgetAndRecursivelyActivateLorebookEntriesWithDiagnostic
   }
 
   return {
-    selected: state.selected.sort(lorebookInjectionOrder),
+    selected: addImagesToBudgetedEntries(state.selected, state, lorebooksById, tokenBudget).sort(
+      lorebookInjectionOrder,
+    ),
     budgetSkippedEntries,
   };
 }
@@ -1013,12 +1198,28 @@ export async function processLorebooks(
     excludedSourceAgentIds?: string[];
     /** Entries explicitly attached to the exact current hierarchical location. */
     forcedEntryIds?: string[];
+    /** Assemble `forcedEntryIds` and NOTHING else: the ordinary scope-based scan is
+     *  not run at all, so no global book, no party/persona/chat-bound book and no
+     *  constant entry can join the result. For a caller whose ids are a person's own
+     *  selection rather than a turn's context — ambient additions there are content
+     *  nobody asked for. Exact player selections bypass automatic token/count
+     *  budgets; the caller must check the completed prompt against model context.
+     *  Omitted keeps the ordinary scan, so every existing caller is unchanged. */
+    forcedEntriesOnly?: boolean;
+    /** Token ceiling for the forced entries alone. Omitted keeps the 2,048-token
+     *  current-location default, which is sized for a location's own lore rather
+     *  than for a caller that hands over a deliberate, player-made selection. */
+    currentLocationTokenBudget?: number;
+    /** Let forced entries skip the probability roll. A caller that resolves ids
+     *  from the world (a location's attached lore) still wants the roll; a caller
+     *  passing a selection a person made by hand does not. Omitted keeps the roll. */
+    ignoreForcedEntryProbability?: boolean;
     tokenBudget?: number;
     enableRecursive?: boolean;
     /** Pre-computed embedding of the chat context for semantic matching. */
     chatEmbedding?: number[] | null;
     /** Per-lorebook pre-computed embeddings for semantic matching. */
-    semanticEmbeddingsByLorebookId?: ReadonlyMap<string, number[] | null>;
+    semanticEmbeddingsByLorebookId?: ReadonlyMap<string, number[] | number[][] | null>;
     /** Provider/model/profile identity used to create semantic query vectors. */
     semanticEmbeddingSpaceId?: string | null;
     /** Cosine similarity threshold for semantic matching (0-1, default 0.3). */
@@ -1036,6 +1237,13 @@ export async function processLorebooks(
     generationTriggers?: string[];
     /** Resolves prompt macros for final included lorebook entries. May apply macro side effects. */
     resolveContent?: LorebookFinalContentResolver;
+    /**
+     * Answers entries' decision statements (#6570): the entry id to true or false for
+     * each statement it could answer. Generation asks the Decision model; a preview
+     * passes answers this turn already has and never asks. Omitted, decision entries
+     * read as no.
+     */
+    resolveDecisions?: LorebookDecisionResolver;
     /** Optional random source for probability and weighted group selection. */
     random?: () => number;
   },
@@ -1057,13 +1265,20 @@ export async function processLorebooks(
       }
     : undefined;
 
+  // An exact selection admits its own entries by id and nothing by scope, so the
+  // scope-based book filter is skipped outright rather than narrowed. Narrowing it
+  // would not close the hole: filterRelevantLorebooks admits every global book
+  // BEFORE it consults activeLorebookIds, so an empty list is not a refusal.
+  const forcedEntriesOnly = options?.forcedEntriesOnly === true;
   const allLorebooks = (await storage.list()) as unknown as Lorebook[];
-  const requestedForcedEntryIds = uniqueStrings(options?.forcedEntryIds ?? []).slice(0, LIMITS.MAX_LOREBOOK_ENTRIES);
+  const forcedIds = uniqueStrings(options?.forcedEntryIds ?? []);
+  const requestedForcedEntryIds = forcedEntriesOnly ? forcedIds : forcedIds.slice(0, LIMITS.MAX_LOREBOOK_ENTRIES);
   let forcedEntries = (await storage.listEligibleEntriesByIds(requestedForcedEntryIds, {
+    unlimited: forcedEntriesOnly,
     excludedLorebookIds: options?.excludedLorebookIds,
     excludedSourceAgentIds: options?.excludedSourceAgentIds,
   })) as unknown as LorebookEntry[];
-  const relevantLorebooks = filterRelevantLorebooks(allLorebooks, filters);
+  const relevantLorebooks = forcedEntriesOnly ? [] : filterRelevantLorebooks(allLorebooks, filters);
   const forcedLorebookIds = new Set(forcedEntries.map((entry) => entry.lorebookId));
   const effectiveLorebooks = Array.from(
     new Map(
@@ -1073,14 +1288,62 @@ export async function processLorebooks(
       ]),
     ).values(),
   );
-  const relevantLorebooksById = new Map(effectiveLorebooks.map((lorebook) => [lorebook.id, lorebook]));
+  const relevantLorebooksById = new Map(
+    effectiveLorebooks.map((lorebook) => [
+      lorebook.id,
+      forcedEntriesOnly ? { ...lorebook, tokenBudget: 0, entryLimit: Number.POSITIVE_INFINITY } : lorebook,
+    ]),
+  );
 
-  // Forced entries bypass normal ownership scope, but share the same active-entry safeguards and budgets.
-  const normallyActiveEntries = (await storage.listActiveEntries(filters)) as unknown as LorebookEntry[];
+  // Forced entries bypass ownership scope while retaining active-entry safeguards.
+  // Under an exact selection there is no ordinary set to merge with: allEntries is
+  // the forced entries alone, which is what keeps unpicked content out of the
+  // keyword scan, out of the recursion pool and out of the budgets below.
+  const normallyActiveEntries = forcedEntriesOnly
+    ? []
+    : ((await storage.listActiveEntries(filters)) as unknown as LorebookEntry[]);
   let allEntries = applyLorebookDefaults(
     Array.from(new Map([...normallyActiveEntries, ...forcedEntries].map((entry) => [entry.id, entry])).values()),
     relevantLorebooksById,
   );
+
+  // Lazy staleness for agent-authored entries (deleted-turn lore must not keep
+  // steering generations). The storage cascade handles message DELETION; this
+  // check covers the regenerate path, where a swipe switch changes the active
+  // content without deleting any row: a keeper entry anchored to a swipe that
+  // is no longer active is excluded here, and re-included if the user swipes
+  // back (same derived-validity semantics as Advanced Memory's recordValid).
+  const hasAttributedEntries = allEntries.some(
+    (entry) => Array.isArray(entry.sourceMessageRefs) && entry.sourceMessageRefs.length > 0,
+  );
+  if (hasAttributedEntries) {
+    // Look the anchors up BY ID, not by chat: agent books can be shared or
+    // global, so an entry injected into chat B may reference chat A's turn —
+    // it must still be swipe-validated there (and a missing id means the
+    // message is gone everywhere, which stays fail-closed).
+    const refIds = Array.from(
+      new Set(allEntries.flatMap((entry) => (entry.sourceMessageRefs ?? []).map((ref) => ref.id))),
+    );
+    const swipeByMessageId = new Map(
+      (
+        await db
+          .select({ id: messagesTable.id, activeSwipeIndex: messagesTable.activeSwipeIndex })
+          .from(messagesTable)
+          .where(inArray(messagesTable.id, refIds))
+      ).map((row) => [row.id, row.activeSwipeIndex ?? 0]),
+    );
+    allEntries = allEntries.filter((entry) => {
+      if (!Array.isArray(entry.sourceMessageRefs) || entry.sourceMessageRefs.length === 0) return true;
+      return entry.sourceMessageRefs.every((ref) => {
+        const activeSwipeIndex = swipeByMessageId.get(ref.id);
+        // A ref to a message that no longer exists anywhere is stale even if
+        // the delete cascade somehow missed the entry (fail-closed, matching
+        // recordValid's treatment of missing covered messages).
+        if (activeSwipeIndex === undefined) return false;
+        return ref.swipeIndex === null || activeSwipeIndex === ref.swipeIndex;
+      });
+    });
+  }
 
   // Apply per-chat entry state overrides — an entry that was disabled by ephemeral
   // countdown in *this* chat should be excluded, and ephemeral values should
@@ -1102,6 +1365,26 @@ export async function processLorebooks(
         }
         return e;
       });
+  }
+
+  // `{{include::...}}` in an entry (#6912): the short form looks in the entry's own
+  // lorebook, and an entry never includes itself. Done before the scan, so recursion,
+  // budgets and macros all see the included text.
+  if (allEntries.some((entry) => usesLorebookIncludes(entry.content))) {
+    try {
+      // ponytail: reads every lorebook once per scan, and only when an entry uses include. If chats
+      // with includes get slow, load this once per request and pass it in through the scan options.
+      const includes = await loadLorebookIncludes(db);
+      allEntries = allEntries.map((entry) => ({
+        ...entry,
+        content: expandLorebookIncludes(entry.content, includes, {
+          currentBookIds: [entry.lorebookId],
+          seen: new Set([entry.id]),
+        }),
+      }));
+    } catch (err) {
+      logger.warn(err, "Failed to load lorebooks for include macros; leaving them as written");
+    }
   }
 
   const activeEntriesById = new Map(allEntries.map((entry) => [entry.id, entry]));
@@ -1138,7 +1421,7 @@ export async function processLorebooks(
     resolveContent = (value) => originalResolver(value, lorebookEntryCounts);
   }
 
-  const tokenBudget = options?.tokenBudget ?? LIMITS.DEFAULT_LOREBOOK_TOKEN_BUDGET;
+  const tokenBudget = forcedEntriesOnly ? 0 : (options?.tokenBudget ?? LIMITS.DEFAULT_LOREBOOK_TOKEN_BUDGET);
   const timingStates = toTimingStateMap(options?.entryTimingStates);
   const currentMessageIndex = messages.length;
   const matchingContext = await buildLorebookMatchingContext(
@@ -1175,12 +1458,16 @@ export async function processLorebooks(
     timingStates,
     currentMessageIndex,
     ...(options?.random ? { random: options.random } : {}),
+    // Opt-in: same chat and same group candidates give the same group winner every turn (prompt-cache stable).
+    ...(options?.chatId && isFeatureEnabled("stableLorebookGroupPicks") ? { groupSeed: options.chatId } : {}),
   };
 
   // Determine recursion settings from relevant enabled lorebooks only.
   const recursiveLorebooks = effectiveLorebooks.filter((b: { recursiveScanning: boolean }) => b.recursiveScanning);
   const recursiveLorebookIds = new Set(recursiveLorebooks.map((b) => b.id));
-  const anyRecursive = options?.enableRecursive || recursiveLorebookIds.size > 0;
+  // Exact selections are already activated explicitly. Re-scanning them can
+  // reintroduce constant entries that the selection budget has just excluded.
+  const anyRecursive = !forcedEntriesOnly && (options?.enableRecursive || recursiveLorebookIds.size > 0);
   const maxRecursionDepth =
     recursiveLorebooks.length > 0
       ? recursiveLorebooks.reduce((max: number, b: { maxRecursionDepth?: number }) => {
@@ -1188,21 +1475,151 @@ export async function processLorebooks(
         }, 1)
       : 3;
 
+  // Decision activation (#6570). The scan is synchronous and the budget pass below
+  // commits macro side effects, so neither can wait for a model. A pure pre-scan
+  // (recursion included) collects the entries whose activation waits on a statement,
+  // and they are asked in one request; a second pass catches entries that only appear
+  // once another decision entry is in. The real scan then runs once with the answers,
+  // and anything still unanswered reads as no. The probability rolls are shared, so a
+  // pre-scan and the real scan roll the same. An explicit selection (forcedEntriesOnly)
+  // is a person's choice and is never gated.
+  const usesDecisions = !forcedEntriesOnly && allEntries.some(hasDecisionActivation);
+  // Statements inside entries' text (#6582) are asked only for entries about to
+  // activate, found by the same pure pre-scan, before the real scan resolves them.
+  const resolver = options?.resolveDecisions;
+  const contentDecisions =
+    !!resolver?.answerStatements && allEntries.some((entry) => DECISION_STATEMENT_RE.test(entry.content));
+  const decisionAnswers = new Map<string, boolean>();
+  if (usesDecisions) scanOpts.decisionAnswers = decisionAnswers;
+  // One set of probability rolls for the pre-scan and the real scan, so an entry the
+  // real scan activates is one the pre-scan found and asked about.
+  if (usesDecisions || contentDecisions) scanOpts.probabilityDecisions ??= new Map();
+  const requiresDecisionAnswer = (entry: LorebookEntry) =>
+    entry.decisionMode === "require" && hasDecisionActivation(entry);
+
+  // The one place `ignoreProbability` is ever set. It rides a copy of the scan
+  // options so it cannot reach `scanForActivatedEntries` below, and it is off
+  // unless the caller asked — every existing caller keeps its rolls.
+  const forcedEntryScanOpts: ScanOptions = {
+    ...scanOpts,
+    ...(options?.ignoreForcedEntryProbability ? { ignoreProbability: true } : {}),
+  };
+
+  if ((usesDecisions && resolver) || contentDecisions) {
+    const statementsById = new Map(allEntries.map((entry) => [entry.id, entry.decisionStatement]));
+    // Recursion reads each activated entry's macro-resolved text, so discovery does
+    // too. With a planning resolver, only branches already settled are followed, so an
+    // entry reached through an undecided branch waits for a later round and is never
+    // asked about for a branch that turns out not to be taken. Otherwise a resolution
+    // is rolled back at once, so nothing is committed here; a preview's plain resolver
+    // commits nothing either.
+    const discoveryText = (content: string) => {
+      if (!content.includes("{{")) return content;
+      if (resolver?.planText) return resolver.planText(content);
+      if (!resolveContent) return content;
+      const resolved = resolveContent(content);
+      if (typeof resolved === "string") return resolved;
+      resolved.rollback?.();
+      return resolved.content;
+    };
+    // An entry a location attaches skips the keyword scan, but Require still applies.
+    const locationRequireIds = usesDecisions
+      ? forcedEntries
+          .filter(
+            (entry) => requiresDecisionAnswer(entry) && passesForcedEntryActivationGates(entry, forcedEntryScanOpts),
+          )
+          .map((entry) => entry.id)
+      : [];
+    const askedForText = new Set<string>();
+    // Each round asks what the answers so far have brought in: Require and Trigger
+    // statements newly waiting, and the statements in the text of entries newly about to
+    // activate. A round with nothing new ends it, so a turn without recursion through a
+    // decision asks once; three rounds follow a chain two decisions deep.
+    // Only text holding a decision can read differently once more answers are in; the
+    // rest is resolved once, so a random macro in it keeps its roll across rounds.
+    const fixedDiscoveryEntries = new Map(
+      allEntries
+        .filter((entry) => !DECISION_STATEMENT_RE.test(entry.content))
+        .map((entry) => [entry.id, { ...entry, content: discoveryText(entry.content) }]),
+    );
+    for (let round = 0; round < 3; round++) {
+      const discoveryEntries = allEntries.map(
+        (entry) => fixedDiscoveryEntries.get(entry.id) ?? { ...entry, content: discoveryText(entry.content) },
+      );
+      const pendingDecisions =
+        usesDecisions && resolver !== undefined ? new Set<string>(round === 0 ? locationRequireIds : []) : undefined;
+      const preScanOpts: ScanOptions = pendingDecisions ? { ...scanOpts, pendingDecisions } : { ...scanOpts };
+      // Recursion scoped exactly as the real scan scopes it, so discovery never asks
+      // about an entry recursion cannot reach there.
+      const activated = forcedEntriesOnly
+        ? []
+        : anyRecursive
+          ? recursiveScan(
+              messages,
+              discoveryEntries,
+              preScanOpts,
+              maxRecursionDepth,
+              options?.enableRecursive ? undefined : (entry) => recursiveLorebookIds.has(entry.lorebookId),
+            )
+          : scanForActivatedEntries(messages, discoveryEntries, preScanOpts);
+      let asked = false;
+      const toAsk = pendingDecisions ? [...pendingDecisions].filter((id) => !decisionAnswers.has(id)) : [];
+      if (toAsk.length > 0) {
+        asked = true;
+        const answers = await resolver!(
+          toAsk.map((entryId) => ({ entryId, statement: statementsById.get(entryId) ?? "" })),
+        );
+        for (const entryId of toAsk) decisionAnswers.set(entryId, answers.get(entryId) === true);
+      }
+      if (contentDecisions) {
+        const activatingIds = new Set(activated.map((entry) => entry.entry.id));
+        for (const entry of forcedEntries)
+          if (
+            passesForcedEntryActivationGates(entry, forcedEntryScanOpts) &&
+            (!usesDecisions || !requiresDecisionAnswer(entry) || decisionAnswers.get(entry.id) === true)
+          )
+            activatingIds.add(entry.id);
+        const newlyActivating = allEntries.filter(
+          (entry) =>
+            activatingIds.has(entry.id) && !askedForText.has(entry.id) && DECISION_STATEMENT_RE.test(entry.content),
+        );
+        if (newlyActivating.length > 0) {
+          asked = true;
+          for (const entry of newlyActivating) askedForText.add(entry.id);
+          await resolver!.answerStatements!(newlyActivating.map((entry) => entry.content));
+        }
+      }
+      if (!asked) break;
+    }
+  }
+
   const forcedActivatedEntries: ActivatedEntry[] = forcedEntries
-    .filter((entry) => passesForcedEntryActivationGates(entry, scanOpts))
+    .filter((entry) => passesForcedEntryActivationGates(entry, forcedEntryScanOpts))
+    .filter((entry) => !usesDecisions || !requiresDecisionAnswer(entry) || decisionAnswers.get(entry.id) === true)
     .map((entry) => ({
       entry,
       matchedKeys: ["[current_location]"],
       activationSources: ["current_location"],
       injectionOrder: entry.order,
     }));
-  const locationBudgetResult = applyCurrentLocationLoreBudget(forcedActivatedEntries, relevantLorebooksById);
-  const ordinaryActivatedEntries = scanForActivatedEntries(messages, allEntries, scanOpts);
+  // Undefined keeps the parameter's own CURRENT_LOCATION_LORE_TOKEN_BUDGET default.
+  const locationBudgetResult = applyCurrentLocationLoreBudget(
+    forcedActivatedEntries,
+    relevantLorebooksById,
+    forcedEntriesOnly ? 0 : options?.currentLocationTokenBudget,
+  );
+  // Declined constants must not bypass the location reserve automatically.
+  // Nonconstant entries may still earn an independent ordinary activation.
+  const locationBudgetSkippedIds = new Set(locationBudgetResult.skipped.map((entry) => entry.id));
+  const scannableEntries = allEntries.filter((entry) => !entry.constant || !locationBudgetSkippedIds.has(entry.id));
+  const ordinaryActivatedEntries = forcedEntriesOnly
+    ? []
+    : scanForActivatedEntries(messages, scannableEntries, scanOpts);
   const initialActivatedEntries = mergeActivatedEntries(ordinaryActivatedEntries, locationBudgetResult.selected);
   const baseBudgetResult = anyRecursive
     ? resolveBudgetAndRecursivelyActivateLorebookEntriesWithDiagnostics(
         messages,
-        allEntries,
+        scannableEntries,
         scanOpts,
         maxRecursionDepth,
         relevantLorebooksById,
@@ -1221,7 +1638,12 @@ export async function processLorebooks(
       );
   const budgetResult = {
     ...baseBudgetResult,
-    budgetSkippedEntries: [...locationBudgetResult.skipped, ...baseBudgetResult.budgetSkippedEntries],
+    budgetSkippedEntries: [
+      ...locationBudgetResult.skipped.filter(
+        (entry) => !baseBudgetResult.selected.some((selected) => selected.entry.id === entry.id),
+      ),
+      ...baseBudgetResult.budgetSkippedEntries,
+    ],
   };
   const finalActivated = budgetResult.selected;
 
@@ -1281,6 +1703,7 @@ export async function processLorebooks(
       const semanticScore = readSemanticScore(a.matchedKeys);
       return {
         id: a.entry.id,
+        name: a.entry.name,
         content: a.entry.content,
         activationSources: a.activationSources,
         matchedKeys: a.matchedKeys,

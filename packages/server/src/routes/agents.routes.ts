@@ -32,6 +32,8 @@ import {
 import { createAgentsStorage } from "../services/storage/agents.storage.js";
 import { createChatsStorage } from "../services/storage/chats.storage.js";
 import { createConnectionsStorage } from "../services/storage/connections.storage.js";
+import { withLongTermMemoryEmbeddingChange } from "../services/generation/long-term-memory-runtime.js";
+import { applyIllustratorChatRunInterval } from "../services/generation/agent-cadence.js";
 import { createLLMProvider } from "../services/llm/provider-registry.js";
 import { normalizeBeholderState } from "../services/agents/beholder-state.js";
 import { DATA_DIR } from "../utils/data-dir.js";
@@ -433,8 +435,16 @@ export async function agentsRoutes(app: FastifyInstance) {
     }
     const fallback = normalizeRunInterval(defaults.runInterval, 1);
     const config = await storage.getByType(agentType);
-    const settings = { ...defaults, ...parseAgentSettings(config?.settings) };
-    const runInterval = normalizeRunInterval(settings.runInterval, fallback);
+    const chat = await chats.getById(chatId);
+    const settings = applyIllustratorChatRunInterval(
+      agentType,
+      { ...defaults, ...parseAgentSettings(config?.settings) },
+      parseAgentSettings(chat?.metadata),
+      chat?.mode,
+    );
+    // Illustrator's 0 means it only runs when the user asks, matching shouldSkipAgentByMessageInterval.
+    const manualOnly = agentType === "illustrator" && (settings.runInterval === 0 || settings.runInterval === "0");
+    const runInterval = manualOnly ? 0 : normalizeRunInterval(settings.runInterval, fallback);
 
     const lastRun = await storage.getLastSuccessfulRunByType(agentType, chatId);
     const messages = await chats.listMessages(chatId);
@@ -461,7 +471,7 @@ export async function agentsRoutes(app: FastifyInstance) {
       lastSuccessfulRun: lastRun ? { messageId: lastRun.messageId, createdAt: lastRun.createdAt } : null,
       messagesSinceLastRun,
       remainingMessages,
-      runsNextMessage: remainingMessages === 0,
+      runsNextMessage: !manualOnly && remainingMessages === 0,
       lastRunMessageFound,
     };
   });
@@ -483,6 +493,12 @@ export async function agentsRoutes(app: FastifyInstance) {
     return agent;
   });
 
+  app.get<{ Params: { id: string; widgetId: string } }>("/:id/home-widgets/:widgetId/state", async (req, reply) => {
+    const state = await storage.readHomeWidgetState(req.params.id, req.params.widgetId);
+    if (!state) return reply.status(404).send({ error: "Widget unavailable" });
+    return state;
+  });
+
   app.post("/", async (req) => {
     const input = createAgentConfigSchema.parse(req.body);
     return storage.create(input);
@@ -494,11 +510,17 @@ export async function agentsRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: "Agent is not configured" });
     }
     const data = updateAgentConfigSchema.parse(req.body);
+    if (config.type === "long-term-memory" && data.connectionId !== undefined) {
+      return withLongTermMemoryEmbeddingChange(app.db, reply, () => storage.update(config.id, data));
+    }
     return storage.update(config.id, data);
   });
 
-  app.patch<{ Params: { id: string } }>("/:id", async (req) => {
+  app.patch<{ Params: { id: string } }>("/:id", async (req, reply) => {
     const data = updateAgentConfigSchema.parse(req.body);
+    if (data.connectionId !== undefined && (await storage.getById(req.params.id))?.type === "long-term-memory") {
+      return withLongTermMemoryEmbeddingChange(app.db, reply, () => storage.update(req.params.id, data));
+    }
     return storage.update(req.params.id, data);
   });
 

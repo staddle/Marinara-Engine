@@ -5,81 +5,36 @@ import { DATA_DIR } from "../../utils/data-dir.js";
 import { newId } from "../../utils/id-generator.js";
 import { logger, logDebugOverride } from "../../lib/logger.js";
 import { assertInsideDir, safeFetch } from "../../utils/security.js";
-import { notifyGenerationFallback, type GenerationFallbackNotifier } from "../generation/fallback-notification.js";
-import { runMediaGenerationRequest } from "../image/image-generation-queue.js";
+import { notifyGenerationFallback } from "../generation/fallback-notification.js";
+import {
+  mediaProviderLaneKey,
+  runInMediaProviderLane,
+  runMediaGenerationRequest,
+} from "../image/image-generation-queue.js";
 import {
   COMFYUI_MAX_REFERENCE_IMAGES,
   numberedComfyReferencePlaceholder,
 } from "../image/comfyui-reference-placeholders.js";
 import { buildAtlasCloudVideoRequest, runAtlasCloudPrediction } from "../media/atlas-cloud.js";
-import { buildComfyUiLoraWorkflowReplacements, type ComfyUiLoraSetting } from "@marinara-engine/shared";
+import { adaptAtlasCloudVideoRequest, fetchAtlasCloudModelSchema } from "../media/atlas-cloud-video-schema.js";
+import { buildComfyUiLoraWorkflowReplacements } from "@marinara-engine/shared";
 
-export interface VideoReferenceImage {
-  base64: string;
-  mimeType: "image/png" | "image/jpeg";
-  url?: string | null;
-}
-
-export type VideoReferencePublicUploadExpiry = "1h" | "12h" | "24h" | "72h";
-
-export interface VideoReferencePublicUploadOptions {
-  enabled?: boolean;
-  expiry?: VideoReferencePublicUploadExpiry | string | null;
-}
-
-export interface LtxDirectorPromptInput {
-  globalPrompt: string;
-  localPrompts: string;
-  segmentLengths: string;
-}
-
-export interface VideoGenerationRequest {
-  prompt: string;
-  model?: string;
-  // Gemini Omni currently takes duration guidance through the prompt, not video_config.
-  durationSeconds: number;
-  aspectRatio: "16:9" | "9:16";
-  resolution?: "480p" | "720p" | "1080p";
-  referenceImage?: VideoReferenceImage | null;
-  /** API-format workflow JSON for local ComfyUI video generation. */
-  comfyWorkflow?: string;
-  /** Optional LTX Director global/local prompt inputs for workflows using the matching placeholders. */
-  ltxDirectorPrompt?: LtxDirectorPromptInput;
-  /** Up to five connection-scoped LoRAs for custom ComfyUI workflow placeholders. */
-  comfyLoras?: ComfyUiLoraSetting[];
-  /** ComfyUI workflow frame rate exposed through %fps% and used by the legacy %length% macro. */
-  fps?: number;
-  lastFrameImage?: VideoReferenceImage | null;
-  publicReferenceUpload?: VideoReferencePublicUploadOptions | null;
-  signal?: AbortSignal;
-  /** UI debug mode: surface provider payload logging without LOG_LEVEL=debug. */
-  debugMode?: boolean;
-  /** Serialize this request with other media jobs using the same configured connection. */
-  queue?: boolean;
-  /** Stable configured connection ID used to scope queued media jobs. */
-  connectionKey?: string;
-  /** Called immediately before a configured fallback connection is attempted. */
-  onFallback?: GenerationFallbackNotifier;
-  /** Optional one-shot backup connection used only when the primary video request fails. */
-  fallback?: {
-    connectionId: string;
-    connectionName: string;
-    source: string;
-    baseUrl: string;
-    apiKey: string;
-    serviceHint: string;
-    model: string;
-    comfyWorkflow?: string;
-    comfyLoras?: ComfyUiLoraSetting[];
-    fps?: number;
-  };
-}
-
-export interface VideoGenerationResult {
-  base64: string;
-  mimeType: "video/mp4";
-  ext: "mp4";
-}
+import type {
+  VideoReferenceImage,
+  VideoReferencePublicUploadExpiry,
+  VideoReferencePublicUploadOptions,
+  LtxDirectorPromptInput,
+  VideoGenerationRequest,
+  VideoGenerationResult,
+} from "@marinara-engine/shared";
+export type {
+  VideoReferenceImage,
+  VideoReferencePublicUploadExpiry,
+  VideoReferencePublicUploadOptions,
+  LtxDirectorPromptInput,
+  VideoGenerationRequest,
+  VideoGenerationResult,
+} from "@marinara-engine/shared";
 
 const GAME_SCENE_VIDEOS_DIR = join(DATA_DIR, "game-scene-videos");
 const VIDEO_GEN_TIMEOUT = Number(process.env.VIDEO_GEN_TIMEOUT_MS ?? 1_800_000);
@@ -129,74 +84,24 @@ export async function generateVideo(
   request: VideoGenerationRequest,
 ): Promise<VideoGenerationResult> {
   // The request deadline begins when the queued task starts; queue wait time is
-  // governed separately by the shared media-generation queue.
-  return runMediaGenerationRequest({
-    connectionKey: request.connectionKey ?? `${serviceHint || source}:${baseUrl}`,
-    queue: request.queue === true,
-    signal: request.signal,
-    task: () => generateVideoUnqueued(source, baseUrl, apiKey, serviceHint, request),
-  });
-}
-
-async function generateVideoUnqueued(
-  source: string,
-  baseUrl: string,
-  apiKey: string,
-  serviceHint: string,
-  request: VideoGenerationRequest,
-): Promise<VideoGenerationResult> {
-  const resolvedService =
-    normalizeVideoService(source) === "swarmui" || normalizeVideoService(source) === "nanogpt"
-      ? normalizeVideoService(source)
-      : normalizeVideoService(serviceHint || source);
-  const primaryRequest = { ...request, fallback: undefined };
+  // governed separately by the shared media-generation queue. The provider lane
+  // (#7662) comes first, so its waiters hold neither a connection turn nor a permit.
+  // Video lanes are their own keyspace: a minutes-long video must not hold up images.
+  // Only the primary attempt holds the lane and permit: the fallback connection
+  // queues after both are released, so a fallback never waits on another lane
+  // while holding capacity that lane's request needs.
   try {
-    if (resolvedService === "gemini_omni") {
-      return await withVideoGenerationDeadline(request.signal, VIDEO_GEN_TIMEOUT, (signal) =>
-        generateGeminiOmniVideo(baseUrl, apiKey, { ...primaryRequest, signal }),
-      );
-    }
-    if (resolvedService === "google_veo") {
-      return await withVideoGenerationDeadline(request.signal, VIDEO_GEN_TIMEOUT, (signal) =>
-        generateGoogleVeoVideo(baseUrl, apiKey, { ...primaryRequest, signal }),
-      );
-    }
-    if (resolvedService === "xai") {
-      return await withVideoGenerationDeadline(request.signal, VIDEO_GEN_TIMEOUT, (signal) =>
-        generateXaiVideo(baseUrl, apiKey, { ...primaryRequest, signal }),
-      );
-    }
-    if (resolvedService === "openrouter") {
-      return await withVideoGenerationDeadline(request.signal, VIDEO_GEN_TIMEOUT, (signal) =>
-        generateOpenRouterVideo(baseUrl, apiKey, { ...primaryRequest, signal }),
-      );
-    }
-    if (resolvedService === "nanogpt") {
-      return await withVideoGenerationDeadline(request.signal, VIDEO_GEN_TIMEOUT, (signal) =>
-        generateNanoGptVideo(baseUrl, apiKey, { ...primaryRequest, signal }),
-      );
-    }
-    if (resolvedService === "atlas") {
-      return await withVideoGenerationDeadline(request.signal, VIDEO_GEN_TIMEOUT, (signal) =>
-        generateAtlasCloudVideo(baseUrl, apiKey, { ...primaryRequest, signal }),
-      );
-    }
-    if (resolvedService === "seedance") {
-      return await withVideoGenerationDeadline(request.signal, VIDEO_GEN_TIMEOUT, (signal) =>
-        generateSeedanceVideo(baseUrl, apiKey, { ...primaryRequest, signal }),
-      );
-    }
-    if (resolvedService === "comfyui") {
-      return await withVideoGenerationDeadline(request.signal, VIDEO_GEN_TIMEOUT, (signal) =>
-        generateComfyUiVideo(baseUrl, { ...primaryRequest, signal }),
-      );
-    }
-    if (resolvedService === "swarmui") {
-      return await withVideoGenerationDeadline(request.signal, VIDEO_GEN_TIMEOUT, (signal) =>
-        generateSwarmUiVideo(baseUrl, apiKey, { ...primaryRequest, signal }),
-      );
-    }
-    throw new Error(`Unsupported video generation service: ${resolvedService || serviceHint || source}`);
+    return await runInMediaProviderLane({
+      laneKey: mediaProviderLaneKey(`video:${resolveVideoService(source, serviceHint)}:${baseUrl.trim()}`, apiKey),
+      signal: request.signal,
+      task: () =>
+        runMediaGenerationRequest({
+          connectionKey: request.connectionKey ?? `${serviceHint || source}:${baseUrl}`,
+          queue: request.queue === true,
+          signal: request.signal,
+          task: () => generatePrimaryVideo(source, baseUrl, apiKey, serviceHint, { ...request, fallback: undefined }),
+        }),
+    });
   } catch (error) {
     const fallback = request.fallback;
     if (!fallback || request.signal?.aborted) throw error;
@@ -222,10 +127,73 @@ async function generateVideoUnqueued(
       model: fallback.model,
       comfyWorkflow: fallback.comfyWorkflow,
       comfyLoras: fallback.comfyLoras,
+      atlasModelOptions: fallback.atlasModelOptions,
       fps: fallback.fps,
       connectionKey: fallback.connectionId,
     });
   }
+}
+
+function resolveVideoService(source: string, serviceHint: string): string {
+  return normalizeVideoService(source) === "swarmui" || normalizeVideoService(source) === "nanogpt"
+    ? normalizeVideoService(source)
+    : normalizeVideoService(serviceHint || source);
+}
+
+async function generatePrimaryVideo(
+  source: string,
+  baseUrl: string,
+  apiKey: string,
+  serviceHint: string,
+  request: VideoGenerationRequest,
+): Promise<VideoGenerationResult> {
+  const resolvedService = resolveVideoService(source, serviceHint);
+  if (resolvedService === "gemini_omni") {
+    return await withVideoGenerationDeadline(request.signal, VIDEO_GEN_TIMEOUT, (signal) =>
+      generateGeminiOmniVideo(baseUrl, apiKey, { ...request, signal }),
+    );
+  }
+  if (resolvedService === "google_veo") {
+    return await withVideoGenerationDeadline(request.signal, VIDEO_GEN_TIMEOUT, (signal) =>
+      generateGoogleVeoVideo(baseUrl, apiKey, { ...request, signal }),
+    );
+  }
+  if (resolvedService === "xai") {
+    return await withVideoGenerationDeadline(request.signal, VIDEO_GEN_TIMEOUT, (signal) =>
+      generateXaiVideo(baseUrl, apiKey, { ...request, signal }),
+    );
+  }
+  if (resolvedService === "openrouter") {
+    return await withVideoGenerationDeadline(request.signal, VIDEO_GEN_TIMEOUT, (signal) =>
+      generateOpenRouterVideo(baseUrl, apiKey, { ...request, signal }),
+    );
+  }
+  if (resolvedService === "nanogpt") {
+    return await withVideoGenerationDeadline(request.signal, VIDEO_GEN_TIMEOUT, (signal) =>
+      generateNanoGptVideo(baseUrl, apiKey, { ...request, signal }),
+    );
+  }
+  if (resolvedService === "atlas") {
+    return await withVideoGenerationDeadline(request.signal, VIDEO_GEN_TIMEOUT, (signal) =>
+      generateAtlasCloudVideo(baseUrl, apiKey, { ...request, signal }),
+    );
+  }
+  if (resolvedService === "seedance") {
+    return await withVideoGenerationDeadline(request.signal, VIDEO_GEN_TIMEOUT, (signal) =>
+      generateSeedanceVideo(baseUrl, apiKey, { ...request, signal }),
+    );
+  }
+  if (resolvedService === "comfyui") {
+    return await withVideoGenerationDeadline(request.signal, VIDEO_GEN_TIMEOUT, (signal) =>
+      generateComfyUiVideo(baseUrl, { ...request, signal }),
+    );
+  }
+  if (resolvedService === "swarmui") {
+    return await withVideoGenerationDeadline(request.signal, VIDEO_GEN_TIMEOUT, (signal) =>
+      generateSwarmUiVideo(baseUrl, apiKey, { ...request, signal }),
+    );
+  }
+  throw new Error(`Unsupported video generation service: ${resolvedService || serviceHint || source}`);
 }
 
 export function resolveVideoReferencePublicUploadOptions(
@@ -647,8 +615,12 @@ async function generateSwarmUiVideo(
   if (videoReference.startsWith("data:video/mp4")) {
     videoBuffer = Buffer.from(stripDataUrl(videoReference), "base64");
   } else {
+    const videoUrl = new URL(videoReference, `${base}/`);
+    if (videoUrl.origin !== new URL(base).origin) {
+      throw new Error("SwarmUI returned a video URL outside the configured server");
+    }
     const videoResponse = await comfyUiVideoFetch(
-      new URL(videoReference, `${base}/`),
+      videoUrl,
       { headers: swarmUiVideoHeaders(apiKey), signal: request.signal },
       MAX_VIDEO_RESPONSE_BYTES,
     );
@@ -930,7 +902,9 @@ async function generateGoogleVeoVideo(
     const videoUri = findVideoUri(pollJson);
     if (!videoUri) {
       const reason = summarizeGoogleVeoMissingVideoReason(pollJson);
-      logger.warn("[video-gen/google-veo] completed response without video URI: %s", pollText.slice(0, 2000));
+      // Poll bodies can echo the prompt: their size at warn, the body at debug.
+      logger.warn({ bodyLength: pollText.length }, "[video-gen/google-veo] completed response without video URI");
+      logger.debug("[video-gen/google-veo] completed response body: %s", pollText.slice(0, 2000));
       throw new Error(
         reason
           ? `Google Veo completed without a downloadable video: ${reason}`
@@ -1403,7 +1377,8 @@ async function generateSeedanceVideo(
       if (status && ["completed", "succeeded", "success", "done"].includes(status)) {
         const url = findVideoUri(pollJson);
         if (!url) {
-          logger.warn("[video-gen/seedance] completed response without video URL: %s", pollText.slice(0, 2000));
+          logger.warn({ bodyLength: pollText.length }, "[video-gen/seedance] completed response without video URL");
+          logger.debug("[video-gen/seedance] completed response body: %s", pollText.slice(0, 2000));
           throw new Error("Seedance response did not include a downloadable video");
         }
         return downloadSeedanceVideo(url, baseUrl, apiKey, request.signal);
@@ -1441,14 +1416,28 @@ async function generateAtlasCloudVideo(
   const referenceImageDataUrl = request.referenceImage
     ? `data:${request.referenceImage.mimeType};base64,${stripDataUrl(request.referenceImage.base64)}`
     : undefined;
-  const body = buildAtlasCloudVideoRequest({
+  const requestInput = {
     model: request.model?.trim() || DEFAULT_ATLAS_CLOUD_VIDEO_MODEL,
     prompt: request.prompt,
     durationSeconds: request.durationSeconds,
     aspectRatio: request.aspectRatio,
     resolution: request.resolution,
     referenceImageDataUrl,
-  });
+    modelOptions: request.atlasModelOptions,
+  };
+  // Atlas Cloud models do not share one input shape; fit the request to the model's published schema when it has one.
+  const schema = await fetchAtlasCloudModelSchema(requestInput.model, request.signal);
+  const adapted = schema ? adaptAtlasCloudVideoRequest(requestInput, schema) : null;
+  // Without a schema there is nothing to check the user's options against, so they are sent as chosen.
+  const body = adapted?.body ?? { ...request.atlasModelOptions, ...buildAtlasCloudVideoRequest(requestInput) };
+  if (adapted && adapted.adjustments.length > 0) {
+    // A dropped illustration changes what the user gets back, so it is a warning rather than routine fitting.
+    logger[adapted.referenceImageDropped ? "warn" : "info"](
+      "[video-gen/atlas-cloud] fitted request to %s: %s",
+      requestInput.model,
+      adapted.adjustments.join("; "),
+    );
+  }
   logDebugOverride(
     request.debugMode === true,
     "[video-gen/atlas-cloud] final request payload:\n%s",

@@ -49,6 +49,245 @@ function localizedCopy(key: string): ReleaseCopy {
 // Add each release here before its version ships. Versions without a tailored
 // entry still get a one-time update notice and a link to their full release.
 const RELEASE_ANNOUNCEMENTS: Record<string, ReleaseAnnouncement> = {
+  "2.5.0": {
+    headline: localizedCopy("ui.modals.whatsnewmodal.release250.headline"),
+    intro: localizedCopy("ui.modals.whatsnewmodal.release250.intro"),
+    highlights: [],
+    story: [
+      {
+        id: "chat-window",
+        copyKey: "ui.modals.whatsnewmodal.release250.paragraphs.chatWindow",
+        media: [
+          {
+            url: "/releases/2.5.0/chat-ui.mp4",
+            altKey: "ui.modals.whatsnewmodal.release250.media.chatWindow",
+            kind: "video",
+          },
+        ],
+      },
+      {
+        id: "chat-layouts",
+        copyKey: "ui.modals.whatsnewmodal.release250.paragraphs.chatLayouts",
+      },
+      {
+        id: "chat-phones",
+        copyKey: "ui.modals.whatsnewmodal.release250.paragraphs.chatPhones",
+        media: [
+          {
+            url: "/releases/2.5.0/chat-ui-phone.jpg",
+            altKey: "ui.modals.whatsnewmodal.release250.media.chatPhone",
+          },
+        ],
+      },
+      {
+        id: "widget-styles",
+        copyKey: "ui.modals.whatsnewmodal.release250.paragraphs.widgetStyles",
+        media: [
+          {
+            url: "/releases/2.5.0/chat-ui-dottore.jpg",
+            altKey: "ui.modals.whatsnewmodal.release250.media.widgetStyleDottore",
+          },
+          {
+            url: "/releases/2.5.0/chat-ui-mari.jpg",
+            altKey: "ui.modals.whatsnewmodal.release250.media.widgetStyleMari",
+          },
+        ],
+      },
+      {
+        id: "widget-customizing",
+        copyKey: "ui.modals.whatsnewmodal.release250.paragraphs.widgetCustomizing",
+      },
+      {
+        id: "gacha-forge",
+        copyKey: "ui.modals.whatsnewmodal.release250.paragraphs.gachaForge",
+        media: [
+          {
+            url: "/releases/2.5.0/gacha-forge.jpg",
+            altKey: "ui.modals.whatsnewmodal.release250.media.gachaForgeBanner",
+          },
+          {
+            url: "/releases/2.5.0/gacha-forge.mp4",
+            altKey: "ui.modals.whatsnewmodal.release250.media.gachaForgePull",
+            kind: "video",
+          },
+        ],
+      },
+      {
+        id: "quartermaster",
+        copyKey: "ui.modals.whatsnewmodal.release250.paragraphs.quartermaster",
+        media: [
+          {
+            url: "/releases/2.5.0/quartermaster.jpg",
+            altKey: "ui.modals.whatsnewmodal.release250.media.quartermaster",
+          },
+        ],
+      },
+      {
+        id: "relationship-tracker",
+        copyKey: "ui.modals.whatsnewmodal.release250.paragraphs.relationshipTracker",
+        media: [
+          {
+            url: "/releases/2.5.0/relationship-tracker.jpg",
+            altKey: "ui.modals.whatsnewmodal.release250.media.relationshipTracker",
+          },
+        ],
+      },
+      {
+        id: "agents-setup",
+        copyKey: "ui.modals.whatsnewmodal.release250.paragraphs.agentsSetup",
+      },
+      {
+        id: "decision-models",
+        copyKey: "ui.modals.whatsnewmodal.release250.paragraphs.decisionModels",
+      },
+      {
+        id: "decision-setup",
+        copyKey: "ui.modals.whatsnewmodal.release250.paragraphs.decisionSetup",
+        media: [
+          {
+            url: "/releases/2.5.0/decision-models.jpg",
+            altKey: "ui.modals.whatsnewmodal.release250.media.decisionModels",
+          },
+        ],
+      },
+      {
+        id: "open-jev",
+        copyKey: "ui.modals.whatsnewmodal.release250.paragraphs.openJev",
+      },
+      {
+        id: "advanced-memory",
+        copyKey: "ui.modals.whatsnewmodal.release250.paragraphs.advancedMemory",
+        media: [
+          {
+            url: "/releases/2.5.0/advanced-memory.jpg",
+            altKey: "ui.modals.whatsnewmodal.release250.media.advancedMemory",
+          },
+        ],
+      },
+      {
+        id: "advanced-memory-setup",
+        copyKey: "ui.modals.whatsnewmodal.release250.paragraphs.advancedMemorySetup",
+      },
+      {
+        id: "bookmarks",
+        copyKey: "ui.modals.whatsnewmodal.release250.paragraphs.bookmarks",
+      },
+      {
+        id: "smaller-improvements",
+        copyKey: "ui.modals.whatsnewmodal.release250.paragraphs.smallerImprovements",
+      },
+      {
+        id: "thanks",
+        copyKey: "ui.modals.whatsnewmodal.release250.paragraphs.thanks",
+      },
+    ],
+    outro: localizedCopy("ui.modals.whatsnewmodal.release250.outro"),
+  },
+  "2.4.6": {
+    headline: localizedCopy("ui.modals.whatsnewmodal.release246.headline"),
+    intro: localizedCopy("ui.modals.whatsnewmodal.release246.intro"),
+    highlights: [],
+    story: [
+      {
+        id: "advanced-memory",
+        copyKey: "ui.modals.whatsnewmodal.release246.paragraphs.advancedMemory",
+        media: [
+          {
+            url: "/releases/2.4.6/mari-memory-wheel.mp4",
+            altKey: "ui.modals.whatsnewmodal.release246.media.memoryWheel",
+            kind: "video",
+          },
+        ],
+      },
+      {
+        id: "advanced-memory-setup",
+        copyKey: "ui.modals.whatsnewmodal.release246.paragraphs.advancedMemorySetup",
+        media: [
+          {
+            url: "/releases/2.4.6/advanced-memory.jpeg",
+            altKey: "ui.modals.whatsnewmodal.release246.media.advancedMemory",
+          },
+        ],
+      },
+      {
+        id: "roleplay-commands",
+        copyKey: "ui.modals.whatsnewmodal.release246.paragraphs.roleplayCommands",
+        media: [
+          {
+            url: "/releases/2.4.6/roleplay-commands.jpeg",
+            altKey: "ui.modals.whatsnewmodal.release246.media.roleplayCommands",
+          },
+        ],
+      },
+      {
+        id: "interrupt",
+        copyKey: "ui.modals.whatsnewmodal.release246.paragraphs.interrupt",
+      },
+      {
+        id: "visual-novel",
+        copyKey: "ui.modals.whatsnewmodal.release246.paragraphs.visualNovel",
+        media: [
+          {
+            url: "/releases/2.4.6/roleplay-vn.mp4",
+            altKey: "ui.modals.whatsnewmodal.release246.media.visualNovelSetup",
+            kind: "video",
+          },
+          {
+            url: "/releases/2.4.6/roleplay-vn.jpeg",
+            altKey: "ui.modals.whatsnewmodal.release246.media.visualNovel",
+          },
+        ],
+      },
+      {
+        id: "character-library",
+        copyKey: "ui.modals.whatsnewmodal.release246.paragraphs.characterLibrary",
+        media: [
+          {
+            url: "/releases/2.4.6/character-library.png",
+            altKey: "ui.modals.whatsnewmodal.release246.media.characterLibrary",
+          },
+        ],
+      },
+      {
+        id: "scrollable-editors",
+        copyKey: "ui.modals.whatsnewmodal.release246.paragraphs.scrollableEditors",
+        media: [
+          {
+            url: "/releases/2.4.6/scrollable-editors.mp4",
+            altKey: "ui.modals.whatsnewmodal.release246.media.scrollableEditors",
+            kind: "video",
+          },
+        ],
+      },
+      {
+        id: "conversation",
+        copyKey: "ui.modals.whatsnewmodal.release246.paragraphs.conversation",
+      },
+      {
+        id: "game",
+        copyKey: "ui.modals.whatsnewmodal.release246.paragraphs.game",
+      },
+      {
+        id: "slurp",
+        copyKey: "ui.modals.whatsnewmodal.release246.paragraphs.slurp",
+        media: [
+          {
+            url: "/releases/2.4.6/slurp.png",
+            altKey: "ui.modals.whatsnewmodal.release246.media.slurp",
+          },
+        ],
+      },
+      {
+        id: "smaller-improvements",
+        copyKey: "ui.modals.whatsnewmodal.release246.paragraphs.smallerImprovements",
+      },
+      {
+        id: "thanks",
+        copyKey: "ui.modals.whatsnewmodal.release246.paragraphs.thanks",
+      },
+    ],
+    outro: localizedCopy("ui.modals.whatsnewmodal.release246.outro"),
+  },
   "2.4.4": {
     headline: localizedCopy("ui.modals.whatsnewmodal.release244.headline"),
     intro: localizedCopy("ui.modals.whatsnewmodal.release244.intro"),

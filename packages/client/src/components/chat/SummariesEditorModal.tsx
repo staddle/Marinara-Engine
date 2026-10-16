@@ -4,13 +4,22 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { X, Plus, Trash2, CalendarClock, ChevronRight, ChevronsDownUp, ChevronsUpDown, RefreshCw } from "lucide-react";
 import { cn } from "../../lib/utils";
-import type { Chat, ChatMetadata, DaySummaryEntry, WeekSummaryEntry } from "@marinara-engine/shared";
+import { useBackdropDismiss } from "../../hooks/use-backdrop-dismiss";
+import { isBrowserExtensionUi } from "../../lib/chat-floating-ui-events";
+import {
+  estimateTextTokens,
+  type Chat,
+  type ChatMetadata,
+  type DaySummaryEntry,
+  type WeekSummaryEntry,
+} from "@marinara-engine/shared";
 import { useQueryClient } from "@tanstack/react-query";
 import { chatKeys, useBackfillConversationSummaries, useUpdateChatSummaries } from "../../hooks/use-chats";
 import { useTranslation as useUiTranslation } from "react-i18next";
+import { useDialogFocusScope } from "../../hooks/use-dialog-focus-scope";
 
 function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  return estimateTextTokens(text);
 }
 
 function fmtTokens(n: number): string {
@@ -113,6 +122,7 @@ function computeDelta(
 
 export function SummariesEditorModal({ chat, open, onClose }: SummariesEditorModalProps) {
   const { t: localizeUi } = useUiTranslation();
+  const backdropDismiss = useBackdropDismiss(onClose);
   const metadata = useMemo(
     () => (typeof chat.metadata === "string" ? JSON.parse(chat.metadata) : (chat.metadata ?? {})),
     [chat.metadata],
@@ -125,6 +135,19 @@ export function SummariesEditorModal({ chat, open, onClose }: SummariesEditorMod
   const qc = useQueryClient();
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [backfillNotice, setBackfillNotice] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useDialogFocusScope(open, dialogRef);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      // Escape in a browser extension's card (Grammarly's) closes that card, not this editor and its drafts.
+      if (event.key === "Escape" && !isBrowserExtensionUi(event.target)) onClose();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onClose, open]);
 
   // Reinitialize drafts whenever the modal opens, refetching the chat first so
   // auto-summaries written during a prior generation show up without a page refresh.
@@ -274,9 +297,13 @@ export function SummariesEditorModal({ chat, open, onClose }: SummariesEditorMod
     <div
       data-chat-floating-panel
       className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm max-md:pt-[env(safe-area-inset-top)]"
-      onClick={onClose}
+      {...backdropDismiss}
     >
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="summaries-editor-title"
         className="mx-4 flex max-h-[85vh] w-full max-w-3xl flex-col rounded-2xl border border-[var(--border)] bg-[var(--background)] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
@@ -284,7 +311,9 @@ export function SummariesEditorModal({ chat, open, onClose }: SummariesEditorMod
         <div className="shrink-0 flex items-center justify-between border-b border-[var(--border)] px-5 py-3">
           <div className="flex items-center gap-2">
             <CalendarClock size="1rem" className="text-[var(--muted-foreground)]" />
-            <h3 className="text-sm font-bold">{localizeUi("ui.chat.chatsettingsdrawer.automaticSummarization")}</h3>
+            <h3 id="summaries-editor-title" className="text-sm font-bold">
+              {localizeUi("ui.chat.chatsettingsdrawer.automaticSummarization")}
+            </h3>
             <span className="text-[0.625rem] text-[var(--muted-foreground)]">
               {entries.length}{" "}
               {entries.length === 1

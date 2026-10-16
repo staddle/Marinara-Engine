@@ -3,10 +3,7 @@
 // ──────────────────────────────────────────────
 
 export type MarinaraFolderKind =
-  | "marinara.agent-folder"
-  | "marinara.function-folder"
-  | "marinara.theme-folder"
-  | "marinara.preset-folder";
+  "marinara.agent-folder" | "marinara.function-folder" | "marinara.theme-folder" | "marinara.preset-folder";
 
 export interface MarinaraItemManifest<T = unknown> {
   kind: string;
@@ -52,20 +49,38 @@ export function sanitizeFolderSegment(value: string, fallback: string): string {
   return safe || fallback;
 }
 
+/** A folder segment not used yet in one package: a repeated name gets "-2", "-3" … instead of replacing an item. */
+export function reservePackageFolderSegment(value: string, fallback: string, usedSegments: Set<string>) {
+  const baseSegment = sanitizeFolderSegment(value, fallback);
+  let segment = baseSegment;
+  let suffix = 2;
+  while (usedSegments.has(segment.toLowerCase())) {
+    segment = `${baseSegment}-${suffix}`;
+    suffix++;
+  }
+  usedSegments.add(segment.toLowerCase());
+  return segment;
+}
+
 export function createFolderEntry<T>({
   folderName,
   itemName,
   itemKind,
   config,
   fallbackName,
+  usedSegments,
 }: {
   folderName: string;
   itemName: string;
   itemKind: string;
   config: T;
   fallbackName: string;
+  /** Pass one set per package so items that share a name keep separate folders. */
+  usedSegments?: Set<string>;
 }): MarinaraFolderEntry<T> {
-  const segment = sanitizeFolderSegment(itemName, fallbackName);
+  const segment = usedSegments
+    ? reservePackageFolderSegment(itemName, fallbackName, usedSegments)
+    : sanitizeFolderSegment(itemName, fallbackName);
   return {
     path: `${folderName}/${segment}/manifest.json`,
     manifest: {

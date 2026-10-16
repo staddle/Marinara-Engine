@@ -43,6 +43,9 @@ export const sceneAnalysisContextSchema = z.object({
   currentTimeOfDay: z.string().nullable(),
   genre: z.string().nullable().optional().default(null),
   setting: z.string().nullable().optional().default(null),
+  /** The game's art family (worldgen W6f), from its setting kit: music of another family is left out.
+   *  Scoring-only, never sent to the analyzer model. */
+  artFamily: z.string().max(40).nullable().optional().default(null),
   worldOverview: z.string().nullable().optional().default(null),
   canGenerateBackgrounds: z.boolean().optional(),
   canGenerateIllustrations: z.boolean().optional(),

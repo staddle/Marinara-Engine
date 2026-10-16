@@ -85,7 +85,11 @@ The AI context is the set of messages the app sends to the AI on each turn. Clic
 
 In a Roleplay group chat with more than one character, **Hide from AI** opens a compact avatar chooser. Select the group avatar to hide the message from everyone, or select one or more character avatars to hide it only from those characters. Selecting everyone clears individual selections, while selecting an individual character turns off the everyone option. The crossed-eye marker on the message shows the avatars of the characters who cannot see it. In a one-character chat, the button continues to hide or unhide the message directly.
 
-You can also hide or unhide messages by number with the `/hide` and `/unhide` slash commands. Message numbers start at 1, counting from the first message in the chat.
+A whisper inside a message still reaches its recipient when you hide the message only from that character. They get the whisper, but none of the rest of the message. Hiding the message from everyone removes its whispers too. See [Whispers and secrets](../roleplay/getting-started.md#whispers-and-secrets).
+
+You can also hide messages with `/hide [range] [name (optional)]`, for example `/hide 3-8`. In Roleplay, `/hide 3-8 Maukie` hides them only from Maukie; omitting the name hides them from everyone. `/unhide [range]` restores globally hidden messages. To undo character-specific hiding, use the avatar chooser in a group Roleplay chat, or the message's **Unhide from AI** action in a one-character Roleplay chat. Message numbers start at 1, counting from the first message in the chat. See [Slash Commands Reference](slash-commands.md) for formats and examples.
+
+When Advanced Memory's **Decide who sees new messages** is on, new messages in a group chat where characters reply one by one are hidden from absent characters automatically, with the same marker. Changing a message's choice yourself always wins; see [Deciding who sees new messages](../agents/memory.md#deciding-who-sees-new-messages).
 
 ## Message display toggles
 

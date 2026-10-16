@@ -820,7 +820,7 @@ export function GameSessionHistory({
                                 >
                                   <RefreshCw size={11} className={isRegenerating ? "animate-spin" : undefined} />
                                   {isRegenerating
-                                    ? localizeUi("ui.game.gamecharactersheet.regenerating")
+                                    ? localizeUi("ui.chat.chatsettingsdrawer.regenerating")
                                     : localizeUi("ui.agents.secretplotpanel.regenerate")}
                                 </button>
                               )}

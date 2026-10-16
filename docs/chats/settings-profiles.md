@@ -23,9 +23,11 @@ A profile stores how the chat talks to the AI:
 - Translation
 - Memory Recall
 - Advanced Parameters
+- Window and button layout: window positions and sizes, pins and locks, which tools are inside Chat Settings or popped out, open control windows, and button positions on computers and phones. Profiles without a saved layout, such as **Default**, leave the chat's layout as it is.
+- Whether the layout tips in Chat Settings are hidden. Applying **Default**, or an older profile without this choice, shows the tips again.
 - Other reusable chat options
 
-A profile does not replace chat-owned content such as characters, persona, lorebooks, sprites, summary, tags, or scene prompt. It also does not contain the conversation history.
+A profile does not replace chat-owned content such as characters, persona, lorebooks, sprites, summary, tags, or scene prompt. It also does not contain the conversation history, or a chat's running state such as its macro variables, the characters you turned off in it, or its multiplayer room.
 
 ## Applying a profile
 
@@ -53,6 +55,36 @@ The icon row below the dropdown contains these actions:
 
 To create your first profile, configure a chat and choose **Save current chat settings as a new profile**. To update it later, apply the profile, change the chat, then choose **Save current chat settings into this profile**.
 
+### Updating other chats that use the profile
+
+Each chat keeps its own copy of the profile's settings, so saving a profile does not change other chats by itself. When other chats of the same mode use the profile, saving asks what to do:
+
+- **Save to this profile only** saves the profile and leaves the other chats as they are.
+- **Save and update** followed by the number of chats, such as **Save and update 3 other chats**, also copies the profile's Chat Settings into those chats. Their own changes to those settings are replaced, and a setting you left at its default in the chat you save from goes back to its default in them.
+
+**Save and update** copies:
+
+- Generation and context options
+- Group chat options
+- Feature and command switches
+- Agents and their options
+- Memory and summary settings
+- Translation
+- The window layout
+
+Everything else stays as each chat has it, including:
+
+- Its connection, prompt preset and custom prompt
+- Its story and characters
+- Its lorebooks and background
+- Its notes and its progress
+- Which Roleplay commands only its narrator may use
+- Whether Noodle may use its messages
+
+Advanced Parameters and image captioning (on or off, and which connection describes images) change only in chats that use the profile's connection, because they are set for that connection. Character schedules change only if they were turned on or off in the chat you save from; otherwise each chat keeps its own choice. Knowledge Retrieval, Knowledge Router, Lorebook Keeper and Expression Engine stay on or off, with their prompt templates, as each chat has them. Each chat picks their sources, lorebook or sprites itself.
+
+Multiplayer rooms are never updated this way. When no other chat uses the profile, **Save** works without asking.
+
 ## Choosing the default profile
 
 The star beside the dropdown marks the profile used automatically for new chats in that mode. Only one profile per mode can be the default.
@@ -62,6 +94,18 @@ Its tooltips describe the current state:
 - **Mark this profile as default for new chats in this mode**
 - **This profile is the default for new chats in this mode**
 - **Select a profile to mark it as default**
+
+## Favorite window layouts
+
+The star beside **Reset View** in the Chat Settings title bar saves a favorite window layout for new chats in the current mode. It also remembers whether you hid the layout tips. You can use this star in Conversation, Roleplay and Game. The star beside the **Profile** dropdown still chooses the default settings profile.
+
+Upgrading an existing installation makes the familiar tool-button layout the favorite for new chats in all three modes. This happens once and keeps any favorite you already saved or cleared. The layout stays the default until you change it yourself. A fresh installation starts with the chat tools inside Chat Settings and no favorite layout selected.
+
+Arrange your windows and buttons, then click the title-bar star to save them. The star fills in while the current arrangement and tips match the favorite. If you move a window or change the arrangement, click the star again to replace the favorite. Click the filled star to clear it and use the standard layout for future chats. These changes leave existing chats as they are.
+
+When a new chat uses a default settings profile, that profile's saved layout takes priority over the favorite layout. Profiles without a saved layout keep the chat's arrangement, including one supplied by a favorite. A profile still applies its own layout tips setting; older profiles without that setting show the tips.
+
+See [Choosing a layout for new chats](chat-settings.md#choosing-a-layout-for-new-chats) for the steps.
 
 ## Importing and exporting profiles
 

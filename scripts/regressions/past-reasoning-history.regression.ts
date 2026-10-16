@@ -78,6 +78,25 @@ assert.deepEqual(
   ["a"],
   "hidden messages must neither replay nor consume the visible reasoning allowance",
 );
+assert.deepEqual(
+  [
+    ...collectPastReasoningMetadata(
+      [
+        history[0]!,
+        {
+          id: "split-first",
+          role: "assistant",
+          extra: { continuesAfterSceneBreak: true, chatCompletionsReasoning: { reasoning_content: "PART_TWO_PLAN" } },
+        },
+      ],
+      { excludePastReasoning: false },
+      "custom",
+      "local-model",
+    ).keys(),
+  ],
+  ["a"],
+  "a split reply's first part never replays reasoning about later parts that may be hidden (#7481)",
+);
 const localHistory = [
   { id: "a", role: "assistant", extra: { thinking: "from custom thinking tags" } },
   { id: "b", role: "assistant", extra: "invalid JSON" },

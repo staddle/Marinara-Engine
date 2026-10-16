@@ -35,6 +35,8 @@ import { api } from "../../lib/api-client";
 import { audioManager } from "../../lib/game-audio";
 import { resolveAssetTag } from "../../lib/asset-fuzzy-match";
 import { parseChatMetadata } from "../../lib/chat-display";
+import { GAME_SECTION_CLASS } from "../../lib/chat-widget-colors";
+import { cn } from "../../lib/utils";
 import { findReplayableGameSessionChat } from "../../lib/game-session-resolution";
 import { findReplayStoryboardKeyframe } from "../../lib/game-storyboard-keyframes";
 import type { AvatarCrop } from "@marinara-engine/shared";
@@ -253,7 +255,13 @@ function ReplayStoryboardMedia({
       className="pointer-events-auto absolute right-3 top-20 z-30 max-w-[calc(100%-1.5rem)] md:right-4"
       style={{ width: viewerWidth }}
     >
-      <aside className="overflow-hidden rounded-xl border border-white/15 bg-black/80 text-white shadow-2xl backdrop-blur-md">
+      <aside
+        data-game-section="replay-storyboard"
+        className={cn(
+          GAME_SECTION_CLASS,
+          "overflow-hidden rounded-xl border border-white/15 bg-black/80 text-white shadow-2xl backdrop-blur-md",
+        )}
+      >
         <div className="flex items-center justify-between gap-2 border-b border-white/10 px-3 py-2">
           <span className="truncate text-[0.6875rem] font-semibold uppercase tracking-wide text-white/75">
             {localizeUi("ui.game.gamesurfacecomponent.storyboard")}
@@ -523,7 +531,13 @@ export function GameSessionReplay({
   if (gameSessionsQuery.isLoading || (sessionChat && replayMessagesQuery.isLoading)) {
     return (
       <div className="flex h-full flex-1 items-center justify-center">
-        <div className="flex items-center gap-2 rounded-xl border border-white/15 bg-black/70 px-4 py-3 text-sm text-white/80 shadow-lg">
+        <div
+          data-game-section="replay-status"
+          className={cn(
+            GAME_SECTION_CLASS,
+            "flex items-center gap-2 rounded-xl border border-white/15 bg-black/70 px-4 py-3 text-sm text-white/80 shadow-lg",
+          )}
+        >
           <Loader2 size={15} className="animate-spin" />
           {localizeUi("ui.game.gamesessionreplay.loadingSession")} {sessionNumber}{" "}
           {localizeUi("ui.game.gamesessionreplay.replay")}
@@ -542,7 +556,13 @@ export function GameSessionReplay({
   if (replayError || !sessionChat || !turn) {
     return (
       <div className="flex h-full flex-1 items-center justify-center px-6">
-        <div className="max-w-md rounded-xl border border-white/15 bg-black/75 px-5 py-4 text-center shadow-lg">
+        <div
+          data-game-section="replay-status"
+          className={cn(
+            GAME_SECTION_CLASS,
+            "max-w-md rounded-xl border border-white/15 bg-black/75 px-5 py-4 text-center shadow-lg",
+          )}
+        >
           <History size={22} className="mx-auto text-white/55" />
           <h2 className="mt-3 text-sm font-semibold text-white">
             {localizeUi("ui.game.gamesessionreplay.replayUnavailable")}
@@ -638,7 +658,13 @@ export function GameSessionReplay({
       />
 
       <div className="pointer-events-auto absolute left-3 right-3 top-3 z-40 flex items-center justify-between gap-3 md:left-4 md:right-4">
-        <div className="flex min-w-0 items-center gap-2 rounded-xl border border-white/15 bg-black/70 px-3 py-2 text-white shadow-lg backdrop-blur-md">
+        <div
+          data-game-section="replay-bar"
+          className={cn(
+            GAME_SECTION_CLASS,
+            "flex min-w-0 items-center gap-2 rounded-xl border border-white/15 bg-black/70 px-3 py-2 text-white shadow-lg backdrop-blur-md",
+          )}
+        >
           <History size={14} className="shrink-0 text-[var(--primary)]" />
           <div className="min-w-0">
             <div className="truncate text-xs font-semibold">
@@ -653,7 +679,7 @@ export function GameSessionReplay({
         <button
           type="button"
           onClick={exitReplay}
-          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-white/15 bg-black/70 text-white/70 shadow-lg backdrop-blur-md transition-colors hover:bg-black/85 hover:text-white"
+          className="mari-chat-style-control mari-game-scene-control flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-white/15 bg-black/70 text-white/70 shadow-lg backdrop-blur-md transition-colors hover:bg-black/85 hover:text-white"
           title={localizeUi("ui.game.gamesessionreplay.returnToCurrentSession")}
           aria-label={localizeUi("ui.game.gamesessionreplay.returnToCurrentSession")}
         >

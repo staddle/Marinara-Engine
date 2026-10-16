@@ -49,10 +49,15 @@ import {
   workspacePolicyPaths,
 } from "../../packages/server/src/services/professor-mari/workspace-shell-sandbox.js";
 
-const workspaceAgentSource = readFileSync(
-  new URL("../../packages/server/src/services/professor-mari/workspace-agent.service.ts", import.meta.url),
-  "utf8",
-);
+const workspaceAgentSource =
+  readFileSync(
+    new URL("../../packages/server/src/services/professor-mari/workspace-agent.service.ts", import.meta.url),
+    "utf8",
+  ) +
+  readFileSync(
+    new URL("../../packages/server/src/services/professor-mari/workspace-commands.ts", import.meta.url),
+    "utf8",
+  );
 const flatAgentSource = workspaceAgentSource.replace(/\s+/gu, " ");
 
 // --- #5776: bash mari CLI dry-run sentinel ---------------------------------
@@ -185,14 +190,14 @@ const NO_SPAWN_BRIDGE = /(?:(?!spawnWorkspaceSandboxedShell)[^])*?/u.source;
 assert.match(
   flatAgentSource,
   new RegExp(
-    `if \\(directMariArgv\\) return this\\.commandMariDirect\\(command, directMariArgv\\);${NO_SPAWN_BRIDGE}if \\(commandEmbedsMariCliMutation\\(command\\.toLowerCase\\(\\)\\)\\) \\{ throw new Error\\(${NO_SPAWN_BRIDGE}cannot run inside the shell sandbox`,
+    `if \\(directMariArgv && !codeCheck\\) return this\\.commandMariDirect\\(command, directMariArgv\\);${NO_SPAWN_BRIDGE}if \\(commandEmbedsMariCliMutation\\(command\\.toLowerCase\\(\\)\\)\\) \\{ throw new Error\\(${NO_SPAWN_BRIDGE}cannot run inside the shell sandbox`,
     "u",
   ),
 );
 assert.match(
   flatAgentSource,
   new RegExp(
-    `if \\(directMariArgv\\) return this\\.commandMariDirect\\(command, directMariArgv\\);${NO_SPAWN_BRIDGE}if \\(bashCommandTargetsSensitivePath\\(command\\)\\) \\{ throw new Error\\(${NO_SPAWN_BRIDGE}The shell sandbox blocks writes to those silently${NO_SPAWN_BRIDGE}spawnWorkspaceSandboxedShell`,
+    `if \\(directMariArgv && !codeCheck\\) return this\\.commandMariDirect\\(command, directMariArgv\\);${NO_SPAWN_BRIDGE}if \\(bashCommandTargetsSensitivePath\\(command\\)\\) \\{ throw new Error\\(${NO_SPAWN_BRIDGE}The shell sandbox blocks writes to those silently${NO_SPAWN_BRIDGE}spawnWorkspaceSandboxedShell`,
     "u",
   ),
 );
@@ -710,7 +715,7 @@ assert.match(sandboxFlat, /process\.kill\(-child\.pid, signal\);/u);
 // link: in-workspace directory targets get the rule, outside targets are
 // rejected (never sandbox-writable anyway), dangling links protect nothing.
 {
-  const workspace = mkdtempSync(join(tmpdir(), "store-symlink-"));
+  const workspace = realpathSync(mkdtempSync(join(tmpdir(), "store-symlink-")));
   const outside = mkdtempSync(join(tmpdir(), "store-outside-"));
   try {
     mkdirSync(join(workspace, "real-store"));

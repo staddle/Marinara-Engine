@@ -11,7 +11,54 @@ Many problems clear up with two quick steps.
 
 If you are asking the team for help, turn on **Debug mode** first so the server logs the prompt and response. See Getting more help at the end of this guide.
 
+## Multiplayer connection or turn problems
+
+- **Controls unavailable:** confirm `MULTIPLAYER_ENABLED=true` is in the correct Engine's `.env`, restart that Engine, then enable Settings separately. A saved toggle cannot override a missing/invalid environment flag. The Android native wrapper deliberately cannot join.
+- **Host unavailable:** use a separate reachable HTTPS room port, a valid certificate chain/hostname and the matching invitation fingerprint. Do not disable TLS validation, add `null` to trusted origins, expose the normal Engine API or open a host-supplied client to work around an error.
+- **Awaiting approval:** the host must approve the request in Players. No transcript is available before approval. Ask for a fresh invitation if it expired or was revoked.
+- **Disconnected:** keep the guest's own Engine running. The client reconnects to the same pinned host while the explicit session is alive; unsent drafts stay in the current view. Restart ends credentials and needs a fresh join. Stop/Leave remain available when the network fails.
+- **Game waiting:** inspect Players. Disconnected participants are not automatically passed. The host can explicitly Pass/Kick or Pause. Submitting one of two required actions must not run the GM.
+- **Interrupted generation:** do not repeatedly resubmit the round. The host should inspect committed narration/state and explicitly resume forward, or stop the room. Multiplayer does not silently replay an ambiguous model request or apply its world effects twice.
+- **Restricted command or missing media:** the initial room protocol intentionally carries only text. Use the [compatibility matrix](development/multiplayer.md#command-and-feature-compatibility); do not install a peer-provided file or extension as a workaround.
+
+When reporting a connection error, include mode, platform, the visible error and whether approval succeeded. Do not post invitations, room passwords, session tokens, private transcripts or provider credentials.
+
 ## Install and launch problems
+
+### Termux: JavaScript heap out of memory while building the client
+
+If Vite stops with `Reached heap limit` or `JavaScript heap out of memory`, the client build ran out of Node.js heap. This is different from a missing native Rollup binary. Update and rerun `start-termux.sh`: client builds, including in-app updates, now run with their own 1536 MiB heap, capped at half of known device RAM but never below the 1280 MiB the build needs. The RAM cap is rounded down in 128 MiB steps. The running server keeps its smaller profile-based limit. An explicit heap limit in `NODE_OPTIONS` takes precedence for both processes, so check for a previously configured 1024 MiB override: the client no longer builds in 1024 MiB.
+
+Close other apps before retrying. Phones with less than about 3 GB of RAM can still run out of memory or be stopped by Android; keep the complete launcher output when reporting that case. Do not delete your chats or profile to repair a build failure.
+
+### Termux: missing multiplayer guest asset
+
+If startup still reports a missing `packages/client/dist/multiplayer/guest.js` after rebuilding, update Engine and rerun `./start-termux.sh`. The launcher now runs the complete low-memory client build, including the guest assets checked at startup. You do not need to enable multiplayer to repair this build error.
+
+### Termux: server stops when you open Engine, or Sharp cannot load
+
+Sharp is the image library Engine uses for thumbnails and sprites. On Android it runs through a WebAssembly fallback. Updating in place from 2.4.6 could leave part of that fallback uninstalled, and the server then stopped the first time a browser opened Engine.
+
+Update Engine and let the launcher reinstall dependencies. The update installs the missing part, and Engine keeps it through later updates. If the server keeps stopping when you open Engine before you can update, repair the install by hand in Termux:
+
+```bash
+cd ~/Marinara-Engine
+rm -f node_modules/.modules.yaml
+SHARP_IGNORE_GLOBAL_LIBVIPS=1 pnpm --config.trustPolicy=off --config.confirmModulesPurge=false install --frozen-lockfile --prefer-offline
+./start-termux.sh
+```
+
+This clears pnpm's outdated install record and reinstalls the dependencies. Your chats and settings are not touched.
+
+If Sharp still cannot load, Engine now keeps running with image processing off: thumbnails it has already made still show, new ones show the full-size image instead, and sprite generation and the built-in background removal are unavailable. Do not replace Sharp with an unrelated version. Keep the complete error output when you report the problem.
+
+### Blank page or JavaScript served as HTML after an update
+
+An error such as "Failed to load module script" with a `text/html` MIME type can mean the browser requested a JavaScript file that is missing from the installed build. The previous-session shutdown warning does not identify this problem, and deleting a writer lease or your data will not repair the assets.
+
+Stop the running server, then run `start.bat`, `start.sh` or `start-termux.sh` again. The launcher checks Vite's build inventory, including lazy JavaScript chunks, and rebuilds incomplete client assets before starting. A build made before this check was added is rebuilt once to create its inventory. If rebuilding fails, keep the terminal error for support. For a manual install, run `pnpm build` from the repository root before starting again.
+
+If the launcher check passes but the page is still blank, hard-refresh or try a private browser window. Report the failing asset's full URL, HTTP status, Content-Type and first response line, together with the launcher output. Missing assets now return HTTP 404 instead of the app's HTML page.
 
 ### Windows: EPERM or corepack signature error when installing pnpm
 
@@ -128,6 +175,7 @@ Generation errors appear as a toast at the bottom of the screen. If a connection
 - **No API connection configured for this chat**: the chat has no connection selected. Open the **Connections** panel, create one, then pick it for the chat. See [Connecting to an AI Provider](connections/connecting-to-a-provider.md). An API key is a secret code from a provider that lets Marinara use their models.
 - The model does not accept a parameter: the toast tells you which one. Open **Chat Settings** > **Advanced Parameters** and find that parameter. Turn off the switch next to its name (the tooltip reads "This parameter is sent to the model").
 - The model says a parameter is required: do the same, but turn the switch next to that parameter on.
+- **This model's chat template needs user and assistant messages to take turns**: some local models, such as Mistral-based models served by llama.cpp, only accept messages that alternate between you and the AI. Marinara already merges back-to-back messages for these models and tries once more. If you still see this, open **Chat Settings** > **Advanced Parameters** and set **Post-Processing Messages** to **Single User Message**, or serve the model with a less strict chat template.
 - **The AI returned an empty response. Try sending your message again.**: send your message again. If it keeps happening, try a different model or connection.
 - **A generation is already in progress for this chat**: one reply is still streaming. Wait for it to finish or click the Stop button, then try again.
 - **No connections are marked for the random pool**: you turned on random connection routing but marked no connections for the pool. Add at least one connection to the pool, or turn random routing off.
@@ -165,11 +213,21 @@ For full setup, see [Local Model Setup](connections/local-model.md).
 
 A memory needs at least 5 new messages before it is created. Recall also only shows memories that closely match your new message, so it can return nothing even when memories exist.
 
+### Advanced Memory says scenes need attention
+
+A steady dot on the **Chat Settings** button, or a notice that Advanced Memory found problems, means some scene memories are unclear, out of date or missing.
+
+1. Open **Chat Settings** > **Memory Recall**, or press **Fix** in the notice.
+2. Press **Fix**. It repairs every scene it can with the Helper model and never changes summaries you edited.
+3. Select each scene number under **need your review** to open it in **Access memories for this chat**, then check its text and characters and press **Save correction**.
+
+If Fix stops with an error, check the Helper model's connection, then press **Resume processing** or **Fix** again. See [Fixing memory problems](agents/memory.md#fixing-memory-problems).
+
 ### Summaries are not generating
 
 Chat summaries need a working text connection to write them.
 
-- In Roleplay mode, open the **Chat Summary** popover and confirm a connection is set. Use **Backfill Summary** to catch up an older chat.
+- In Roleplay mode, open **Chat Settings** > **Chat Summary** and confirm a connection is set. Use **Backfill Summary** to catch up an older chat.
 - In Conversation mode, open **Automatic Summarization** and use **Backfill** to retry days that failed.
 - If your chat requires agent write approval, an AI summary waits for your review before it takes effect.
 - A summary that keeps failing (for example, a bad API key) is retried on a delay. Fix the connection, then use **Backfill**.
@@ -179,7 +237,8 @@ Chat summaries need a working text connection to write them.
 The **Card Browser** lets you search public character sites and import characters. Open it from the **Card Browser** icon in the top bar, then click **Download Cards**.
 
 - If JannyAI search or a character page fails with a Cloudflare block, Marinara shows a message. It asks you to visit the JannyAI site once in the same browser to clear the challenge, then retry.
-- If your CharacterTavern or Pygmalion login stops working after you restart the server, that is expected. Those logins live only in server memory and clear on restart. Open the login window and paste your cookie or token again.
+- If your Pygmalion login stops working after you restart the server, that is expected. That login lives only in server memory and clears on restart. Open the login window and paste your token again.
+- If CharacterTavern shows a notice instead of search results, that is expected. Its rebuilt website no longer offers the connection Marinara used. Download the card from character-tavern.com and import the file instead.
 
 ## Media generation problems
 
@@ -202,12 +261,13 @@ Then restart Marinara and click **Reapply Cleanup** in the sprite generation win
 Game Mode Storyboards turn a completed GM narration into keyframe images and optional clips. Roleplay Storyboards combine completed exchanges and display the result inline after the assistant response.
 
 - Confirm **Storyboard** is installed from **Agents** > **Download Agents**, then turn on **Enable Agents** and **Enable Storyboards** for the chat.
-- For a manual scene video, generate or upload a **Gallery** image first, then use its **Video** or **Animate** action. The **Gallery** splits **Images** and **Videos** into tabs, so check the **Videos** tab.
+- For a manual scene video, open **Chat Settings** > **Gallery**, generate or upload an image, then use its **Video** or **Animate** action. The **Gallery** splits **Images** and **Videos** into tabs, so check the **Videos** tab.
 - For automatic Game Mode Storyboards, open **Chat Settings** > **Agents** > **Storyboards** and confirm **Automatic Storyboard Illustrations** is on. Turn on **Automatic Storyboard Animations** too if you also want clips.
-- In Roleplay, add the **Storyboard** Agent to the chat. Choose **Still images** or **Animations**, set **Messages per episode**, and select the Storyboard image connection. **Manual only** runs from **Create storyboard** in the Gallery instead.
+- In Roleplay, add the **Storyboard** Agent to the chat. Choose **Still images** or **Animations**, set **Messages per episode**, and select the Storyboard image connection. **Manual only** runs from **Create storyboard** in the **Gallery** section of **Chat Settings** instead.
 - Keyframe images need an image connection. Clips also need a video connection.
 - If a custom prompt works better with all characters combined, turn off **Use NovelAI Character Prompts**.
 - Slow providers can hit a timeout. Raise `IMAGE_GEN_TIMEOUT_MS` or `VIDEO_GEN_TIMEOUT_MS` in `.env`, then restart Marinara. The server only reads these values at startup.
+- By default, an image provider response larger than 30 MiB fails with `Outbound response exceeded 31457280 bytes`. Local ComfyUI output files that embed the workflow and reference images as metadata can reach this size. Raise `IMAGE_GEN_MAX_RESPONSE_BYTES` in `.env` and restart Marinara, or turn off metadata in ComfyUI.
 
 See the [Storyboard Agent Guide](game/storyboard.md) for both workflows and [Game Mode: Getting Started](game/getting-started.md) for Game setup.
 
@@ -237,6 +297,12 @@ The Music DJ agent's Spotify mode uses OAuth. OAuth is a login handoff where Spo
 The cleanest long-term fix is to put the server behind HTTPS. Last checked against Marinara Engine 2.2.0. Spotify tightened these rules in February 2025.
 
 ## Storage and data
+
+### Restart Server does not return
+
+Start Marinara using `start.bat`, `start-local.bat`, `start.sh`, `start-termux.sh`, or `pnpm start`. These keep the server attached to its launcher and wait for the old process to exit before starting its replacement. In-app restart closes lingering connections after four seconds and forces exit after eight seconds if shutdown is still stuck; a forced shutdown can interrupt pending writes and is recorded as forced in diagnostics. Direct `node` runs and development watchers are not automatically replaced: stop and restart them from their terminal. Docker continues to use its container restart policy. On Windows, press Ctrl+C in the launcher console and wait for **Shutdown complete** before closing it. Closing or force-killing the terminal can interrupt pending saves.
+
+Do not launch another server against the same data directory while the old one is still running. If an older build left a process behind, stop that process first; do not remove a live server's writer lease.
 
 ### Startup says another process may be using the data directory
 
@@ -280,6 +346,12 @@ Docker and Podman keep data in the `marinara-data` volume, so run the command in
 
 Loopback sessions can make backups without an admin secret. From another device, a network address, or Docker, backups and profile exports need more. Set `ADMIN_SECRET` on the server and save the same value in **Settings** > **Advanced** > **Admin Access**. If you want loopback to require the secret too, set `MARINARA_REQUIRE_ADMIN_SECRET_ON_LOOPBACK=true`.
 
+### Import says the file is not a readable ZIP archive
+
+Marinara reads `.charx` cards, `.marinara` packages, Agent packages and custom Agent repositories as ZIP archives. It refuses an archive that is damaged or whose contents do not match its own file list, and shows **The file is not a readable ZIP archive** (or **Could not read .marinara package** for a `.marinara` package). A partial download is the usual cause, so download the file again. If you made the archive yourself, create it again with a standard tool such as your system's compress option, `zip`, or 7-Zip. Zero padding or a line break added after the archive during a transfer is fine.
+
+**Package contains too many files** means an Agent package or custom repository holds more than 8,192 files. **.marinara package has too many entries** means a `.marinara` package holds more than 8 files. These limits are not new. Remove the extra files and try again.
+
 ## Android and Docker
 
 ### Android app stuck on Connecting or Waiting for Server
@@ -301,11 +373,9 @@ APK-managed Termux installs protect localhost with a private per-install secret.
 
 An error naming origin `null` means an older APK/server pair let Android's opaque WebView origin reach the general CSRF gate before the private handshake. Editing `.env` cannot fix that: literal `null` is deliberately ignored, and trusting an opaque origin globally would weaken every unsafe API route. Update the APK and Engine instead; current Android login routes verify their own one-time proof or per-install secret while `null` remains rejected everywhere else.
 
-Only a separate browser on the same phone needs manual local-browser authentication. In that browser, open `/android-login` and paste the value shown by this Termux command:
+To open a browser on the same phone, select **Open in browser** on the Android launcher and tap **Retry connection**. A current APK and Engine authenticate it automatically; no secret entry is needed. Reopen through this action after a server restart or an expired session. From inside the app, return to the launcher through **Settings > General > App Behavior > Open Android launcher (app or browser)**.
 
-```bash
-cat ~/.marinara-engine/android-secret
-```
+Older APKs can still use `/android-login` with the value from `cat ~/.marinara-engine/android-secret`. A browser link expires after one minute and works once; an expired link should be opened again through the launcher, not reused from history.
 
 The local `mari` CLI reads the same file automatically. A 401 means the pasted secret or an authentication challenge was rejected; reload `/android-login` and paste the current value. A 503 means the server received a malformed configured secret. Restart through `./start-termux.sh`; if the launcher reports that its secret file is invalid or empty, return to the Android app and tap **Install / Start Marinara** so the APK provisions it again. Do not put this secret in screenshots or issue reports.
 
@@ -443,3 +513,7 @@ Then reach the community:
 - [Local Model Setup](connections/local-model.md)
 - [Game Mode: Getting Started](game/getting-started.md)
 - [Settings Overview](settings/settings-overview.md)
+
+### Android Chrome does not offer PWA installation behind Basic Auth
+
+Use an HTTPS address, sign in, and reload after updating Marinara. The app requests its manifest with credentials so Basic Auth can remain enabled. If installation is still unavailable, check that your proxy serves `/manifest.json` as JSON rather than a login page or an error.

@@ -17,17 +17,71 @@ export type APIProvider =
   | "nanogpt"
   | "xai"
   | "arli"
+  | "zai"
+  | "deepseek"
   | "custom"
   | "image_generation"
   | "video_generation"
-  | "audio";
+  | "audio"
+  | "decision";
+
+/**
+ * `custom` is a System One server; `openai_compatible` is an ordinary chat model on a
+ * server the user already runs (Ollama, LM Studio, llama.cpp), asked for one yes/no
+ * token and read from its log-probabilities, the way the local slots are.
+ */
+export const DECISION_SOURCES = ["typesafe", "openrouter", "custom", "openai_compatible"] as const;
+export type DecisionSource = (typeof DECISION_SOURCES)[number];
+
+export const DECISION_SOURCE_BASE_URLS = {
+  typesafe: "https://api.typesafe.ai",
+  openrouter: "https://openrouter.ai/api",
+  custom: "",
+  openai_compatible: "",
+} as const;
+
+/**
+ * Sources that run on a server the user names: the base URL is required, the key is
+ * optional and may be borrowed from a same-origin custom chat connection, and the state
+ * budget defaults to 3,500 tokens. TypeSafe may also be given a base URL (#7084) but keeps
+ * the hosted rules.
+ */
+export function decisionSourceTakesUrl(source: string | null | undefined): boolean {
+  return source === "custom" || source === "openai_compatible";
+}
+
+export function defaultDecisionStateTokens(source: string | null | undefined): number {
+  return decisionSourceTakesUrl(source) ? 3500 : 30000;
+}
 
 /** Audio backends an audio connection can target (the former TTS sources). */
 export const AUDIO_GENERATION_SOURCES = ["openai", "elevenlabs", "pockettts", "xai"] as const;
 export type AudioGenerationSource = (typeof AUDIO_GENERATION_SOURCES)[number];
 
-export const IMAGE_GENERATION_QUALITIES = ["auto", "low", "medium", "high"] as const;
+export const IMAGE_GENERATION_QUALITIES = ["auto", "low", "medium", "high", "xhigh", "max"] as const;
 export type ImageGenerationQuality = (typeof IMAGE_GENERATION_QUALITIES)[number];
+
+/** Limits for model IDs pinned in a connection's model picker. */
+export const MAX_PINNED_MODELS = 100;
+export const MAX_MODEL_ID_LENGTH = 512;
+
+/** A connection's pinned model IDs, stored as a JSON array; anything malformed reads as none. */
+export function parsePinnedModels(value: unknown): string[] {
+  let parsed = value;
+  if (typeof parsed === "string") {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      return [];
+    }
+  }
+  if (!Array.isArray(parsed)) return [];
+  const ids = parsed
+    .filter((id): id is string => typeof id === "string")
+    .map((id) => id.trim())
+    .filter((id) => id && id.length <= MAX_MODEL_ID_LENGTH);
+  return [...new Set(ids)].slice(0, MAX_PINNED_MODELS);
+}
 
 /** An API connection configuration. */
 export interface APIConnection {
@@ -38,6 +92,8 @@ export interface APIConnection {
   baseUrl: string;
   /** Model identifier (e.g. "gpt-4o", "claude-sonnet-4-20250514") */
   model: string;
+  /** Model IDs pinned to the top of this connection's model picker, as a JSON array (see `parsePinnedModels`). */
+  pinnedModels: string;
   /** Optional custom picture shown in the Connections panel */
   imagePath: string | null;
   /** Maximum context window size for this model */
@@ -54,7 +110,7 @@ export interface APIConnection {
   fallbackForAgents: boolean;
   /** Whether provider-native prompt caching is enabled */
   enableCaching: boolean;
-  /** Anthropic only: use the 1-hour prompt-cache TTL instead of the default 5-minute TTL */
+  /** Anthropic and Claude Subscription: request a 1-hour prompt-cache TTL. */
   anthropicExtendedCacheTtl: boolean;
   /** Conversation message depth for Anthropic cache breakpoints */
   cachingAtDepth: number;
@@ -82,8 +138,16 @@ export interface APIConnection {
   videoGenerationSource: string | null;
   /** Explicitly selected video generation service ID. Overrides URL/model inference when set. */
   videoService: string | null;
+  /** Instructions for the language model that writes video prompts for this video connection. */
+  videoPromptInstructions: string | null;
   /** Audio backend for audio connections (e.g. "elevenlabs"). Null for non-audio providers. */
   audioSource: AudioGenerationSource | null;
+  /** System One backend; absent on older connections. */
+  decisionSource?: DecisionSource | null;
+  credentialsFromConnectionId?: string | null;
+  maxStateTokens?: number | null;
+  /** How long a Decision connection may take to answer, in milliseconds; null is the default. */
+  decisionTimeoutMs?: number | null;
   /** Default voice id/name for speech synthesis on this audio connection. */
   audioVoice: string | null;
   /** Whether this audio connection may generate game sound effects (ElevenLabs only today). */
@@ -104,6 +168,11 @@ export interface APIConnection {
   treatAsLocalEndpoint: boolean;
   /** Folder this connection belongs to (null = root/unfiled). */
   folderId: string | null;
+  /** NanoGPT, Claude (Subscription) and OpenAI (ChatGPT): whether the subscription usage widget is shown. */
+  showUsageWidget: boolean;
+  /** Claude (Subscription) and OpenAI (ChatGPT): which plan windows the usage widget shows. */
+  showUsageFiveHour: boolean;
+  showUsageWeekly: boolean;
   /** Manual sort order within a folder (lower = higher). 0 = use default sort. */
   sortOrder: number;
   createdAt: string;
@@ -144,4 +213,49 @@ export interface ConnectionTestResult {
   message: string;
   latencyMs: number;
   modelName: string | null;
+  decisionProbability?: number;
+  errorCode?: string;
+  /** A Decision connection's limit during chats, to compare `latencyMs` with. */
+  timeLimitMs?: number;
+  /** How long this Decision test waited before giving up. */
+  testTimeoutMs?: number;
+  /** A chat-model Decision connection: whether the server returned log-probabilities. */
+  logprobs?: boolean;
+  /** A chat-model Decision connection: whether the model answered without thinking first. */
+  answersDirectly?: boolean;
+}
+
+/**
+ * App-wide default embedding source: a connection id, or LOCAL_SIDECAR_CONNECTION_ID.
+ *
+ * Used only when the connection in play sets neither an embedding model nor an Embedding
+ * Connection of its own, so per-connection settings keep winning. Empty means no default:
+ * those connections fall back to the built-in local embedder as before.
+ */
+export const DEFAULT_EMBEDDING_CONNECTION_SETTINGS_KEY = "default-embedding-connection";
+
+export type PlanUsageWindowId = "five_hour" | "seven_day";
+
+/**
+ * One rate-limit window of a subscription plan, in the shape the NanoGPT quota
+ * windows use so the usage widget draws both with one bar. Plans report
+ * percentages only, so `used` and `remaining` are always null.
+ */
+export interface PlanUsageWindow {
+  id: PlanUsageWindowId;
+  used: null;
+  remaining: null;
+  /** A fraction, not a percentage. Null means the plan did not report it. */
+  percentUsed: number | null;
+  /** UNIX epoch milliseconds. */
+  resetAt: number | null;
+  degraded: false;
+}
+
+/** The rate-limit windows of the plan behind a Claude (Subscription) or OpenAI (ChatGPT) connection. */
+export interface PlanUsage {
+  provider: "claude_subscription" | "openai_chatgpt";
+  /** The plan name the provider reports ("pro", "plus", ...), or null. */
+  plan: string | null;
+  windows: PlanUsageWindow[];
 }

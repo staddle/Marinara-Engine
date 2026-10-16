@@ -33,8 +33,8 @@ A semi-transparent color lets some of the background show through the bubble. Th
 Each color affects a different part of the chat:
 
 - The name color colors the display name in chat messages. For a character it also colors the name in the sidebar tabs. For a persona it also colors the name in the persona pickers.
-- The dialogue color colors text inside dialogue quotation marks. It works with straight quotes and other quote styles. You can also make this text bold from **Settings**.
-- The message box color sets the background of that character or persona's chat message bubbles. It applies in both Conversation and Roleplay chats.
+- The dialogue color colors text inside dialogue quotation marks. It works with straight quotes and other quote styles. You can also make this text bold from **Settings**. Conversation chats do not use it.
+- The message box color sets the background of that character or persona's chat message bubbles in Roleplay chats. Conversation and Game chats do not use it.
 
 ## The Stats tab
 
@@ -56,6 +56,27 @@ A persona **Stats** tab has two separate blocks, each with its own toggle.
 The first block is **Persona Status Bars**, turned on with **Enable Persona Stats**. These bars track physical and mental needs. When you enable it, the starter bars are Satiety, Energy, Hygiene, and Mood, each at 100 out of 100. Under **Status Bars** you manage the list. Each bar has a name, a current value, a maximum, and a color. Click **Add** to create a bar and the X to remove one.
 
 The second block is **RPG Attributes**, turned on with **Enable RPG Attributes**. This works like a character card. It gives your persona **Pools** (starting with HP and MP at 100 out of 100) and **Attributes** (starting with STR, DEX, CON, INT, WIS, and CHA at 10).
+
+### Ruleset sheets
+
+When a Game Mode ruleset is installed, such as 5e (SRD 5.1), both **Stats** tabs gain a **Ruleset sheets** block below the sections above. It has one collapsible entry per installed ruleset. The block also appears when a card still holds a sheet for a ruleset you no longer have.
+
+1. Open the entry and click **Add a sheet**. You get a blank sheet with every value at the ruleset's default.
+2. Fill it in. The layout comes from the ruleset itself: ability scores with their modifiers, fields grouped by section, lists such as attacks and spells, and the skills and saves with a training level and an extra bonus each. Calculated values, such as a proficiency bonus or passive Perception, update as you type and cannot be edited.
+3. Save the character or persona as usual.
+
+A sheet here is that character's **starting build** for that ruleset. A new game on the ruleset takes a copy. Changes made inside a game stay in that game and never come back to the card.
+
+Some rulesets ship ready-made spells, attacks and features. Lists they fill have an **Add from catalog** button that opens a searchable picker, and the rows it adds are copies you can edit like any other. Two things follow from that:
+
+- A cell the ruleset keeps for you, such as uses that follow an ability score or a class resource that grows with your level, is shown in place but cannot be typed in, with the note "Set by the ruleset". It is worked out from the rest of the sheet every time you edit it.
+- When the ruleset's own text for one of those rows has changed since you picked it, a line under the list says how many rows have newer text, with a **Review** button. The review shows each row with what your sheet holds beside what the ruleset says, and a tick per row. **Update selected** writes the ticked rows and nothing else. Only text is compared: numbers, switches and anything you typed in another column are left alone, and so is every row you untick.
+
+A sheet for a ruleset you do not have installed is kept, not deleted. It shows as one line with a **Remove** button, it is never sent to the AI, and it becomes editable again when you install that ruleset. It also travels with the card when you export it. Each sheet is limited to 64 KB.
+
+A sheet for an installed ruleset that this version of Marinara cannot read, for example one saved by a newer version, is also kept as it is. Its entry offers **Remove this sheet** only, so adding a new sheet can never overwrite it by accident.
+
+Ruleset sheets are separate from **Enable RPG Stats** and **Enable RPG Attributes**. A game that uses Marinara's own rules ignores them, and a game on a ruleset uses them instead of the Attributes above for its checks.
 
 ## How agents update your stats
 

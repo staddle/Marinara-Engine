@@ -58,6 +58,22 @@ When **Secret Plot** is on, a **Run Interval** field appears. This sets how many
 
 The default is 8. You can set any whole number from 1 to 100. A lower number updates the plan more often. A higher number updates it less often.
 
+### Secret Plot prompt
+
+The **Secret Plot Prompt** holds the instructions the Narrative Director follows when it writes and updates the hidden arc. The built-in prompt frames each arc as a mystery to uncover. That suits adventure and intrigue, but it may not fit a story driven by the characters.
+
+To use your own instructions, follow these steps.
+
+1. Open **Agents** and edit the **Narrative Director**.
+2. In the **Secret Plot** section, click **Copy default to edit**.
+3. Change the text, then save the agent.
+
+Click **Reset to default** to go back to the built-in prompt.
+
+Keep the JSON reply format at the end of the prompt: an `overarchingArc` object with `description`, `protagonistArc`, an optional `characterArc`, and `completed`. Without it, the arc can't be read.
+
+This prompt is saved on the agent, so it applies to every chat that uses that Narrative Director.
+
 ### Reveal and edit the hidden arc
 
 Below the **Run Interval** field is the **Secret plot** panel. Use it to look at and change the hidden plan.

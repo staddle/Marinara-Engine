@@ -6,7 +6,11 @@ import {
   isChannelCheckoutBranch,
   isGitUpdateApplyAllowed,
 } from "../../packages/server/src/services/updates/update-apply-policy.js";
-import { getManualGitApplyCommand, getManualUpdateHint } from "../../packages/server/src/routes/updates.routes.js";
+import {
+  getManualGitApplyCommand,
+  getManualUpdateHint,
+  getUpdateInstallStep,
+} from "../../packages/server/src/routes/updates.routes.js";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -73,6 +77,44 @@ assert.ok(
   "a null root must fall back to the bare command instead of a broken cd",
 );
 
+// ── #7214: Termux installs without --force, exactly like start-termux.sh ──
+// --force skips pnpm's platform filter and pulled every platform's binaries
+// (about 1.7 GB) onto phones. Other platforms keep the forced frozen install.
+const androidInstall = getUpdateInstallStep("android-termux");
+assert.deepEqual(
+  androidInstall,
+  { env: { SHARP_IGNORE_GLOBAL_LIBVIPS: "1" }, args: ["install", "--frozen-lockfile", "--prefer-offline"] },
+  "the Android in-app update must install without --force",
+);
+for (const platform of ["windows", "macos", "linux", "unknown"] as const) {
+  assert.deepEqual(
+    getUpdateInstallStep(platform),
+    { env: {}, args: ["install", "--force", "--frozen-lockfile"] },
+    `${platform} in-app updates must keep the forced frozen install`,
+  );
+}
+const termuxLauncherLines = readFileSync(join(repositoryRoot, "start-termux.sh"), "utf8")
+  .split(/\r?\n/u)
+  .map((line) => line.trim());
+assert.ok(
+  termuxLauncherLines.includes(`SHARP_IGNORE_GLOBAL_LIBVIPS=1 run_pnpm ${androidInstall.args.join(" ")}`),
+  "the Android in-app install must match start-termux.sh's install_workspace_dependencies",
+);
+const androidCommand = getManualGitApplyCommand(stagingChannel, "android-termux", "corepack pnpm", "/data/marinara");
+assert.match(
+  androidCommand,
+  / && SHARP_IGNORE_GLOBAL_LIBVIPS=1 corepack pnpm --config\.trustPolicy=off --config\.confirmModulesPurge=false install --frozen-lockfile --prefer-offline && /u,
+  "the Android manual recipe must use the same install as the in-app update",
+);
+assert.doesNotMatch(androidCommand, /--force/u, "the Android manual recipe must not force a reinstall");
+for (const command of [windowsCommand, linuxCommand]) {
+  assert.match(
+    command,
+    / && corepack pnpm --config\.trustPolicy=off --config\.confirmModulesPurge=false install --force --frozen-lockfile && /u,
+    "desktop manual recipes must keep the forced frozen install",
+  );
+}
+
 // ── #5645: Windows users are told which shell can actually run it ──
 const windowsHint = getManualUpdateHint("git", "windows", stagingChannel);
 assert.match(windowsHint, /Command Prompt/u, "the Windows hint must name a shell that accepts && chains");
@@ -116,6 +158,16 @@ assert.match(
   updatesRoutesSource,
   /const applyHardDisabled = isUpdatesApplyHardDisabled\(\);\s*const devBranchCheckout = !isChannelCheckoutBranch\(currentBranch\);\s*if \(applyHardDisabled \|\| devBranchCheckout\) \{/u,
   "the apply route must hard-refuse BEFORE the ordinary gate so no bypass can reach a dev checkout",
+);
+assert.match(
+  updatesRoutesSource,
+  /const installStep = getUpdateInstallStep\(serverPlatform\);\s*await runPinnedPnpm\(root, installStep\.args, 300_000, installStep\.env\);/u,
+  "the apply route must run the platform's install step (#7214)",
+);
+assert.match(
+  updatesRoutesSource,
+  /env: \{ \.\.\.process\.env, \.\.\.env \},/u,
+  "runPinnedPnpm must pass the install step's environment to pnpm (#7214)",
 );
 assert.match(
   updatesRoutesSource,

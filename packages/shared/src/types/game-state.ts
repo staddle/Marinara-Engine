@@ -47,6 +47,14 @@ export interface GameState {
   /** JSON object of tracker field keys hidden from the UI. */
   hiddenTrackerFields?: TrackerHiddenFields | null;
 
+  /** Live ruleset sheet state per party card, keyed by normalized card name. Only games that
+   *  pinned a ruleset carry it. It is part of the snapshot so a swipe or a regenerated turn
+   *  rewinds it: sheet commands are relative, and a regenerated turn must not spend twice. */
+  rulesetLive?: import("../features/rulesets/live-state.js").RulesetLiveStates | null;
+
+  /** Party/scene progress clocks, restored with the snapshot. Missing means no clocks. */
+  rulesetClocks?: import("../features/rulesets/clocks.js").RulesetClocks | null;
+
   createdAt: string;
 }
 
@@ -109,6 +117,9 @@ export interface InventoryTrackerRow {
   name: string;
   /** Omitted when the quantity is one. */
   qty?: number;
+  description?: string;
+  /** Where this item is kept, such as a backpack pocket or a storage chest. */
+  location?: string;
 }
 
 /** Player-specific stats and inventory. */
@@ -147,6 +158,9 @@ export interface RPGAttributes {
 
 /** An item in the player's inventory. */
 export interface InventoryItem {
+  /** Which item of Game Mode's inventory this entry follows (see `gameInventoryItemId`), stamped the
+   *  first time the Engine moves it. Entries written without one are matched by name. */
+  item?: string;
   name: string;
   description: string;
   quantity: number;

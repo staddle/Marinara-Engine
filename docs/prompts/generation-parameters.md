@@ -1,6 +1,6 @@
 # Generation Parameters
 
-This guide explains the generation parameters in Marinara Engine. These are the settings that control how the AI writes each reply, such as **Temperature** and **Max Output Tokens**. You change them per chat in the **Advanced Parameters** panel.
+This guide explains the generation parameters in Marinara Engine. These are the settings that control how the AI writes each reply, such as **Temperature** and **Max Output Tokens**. Presets and connections provide defaults; the **Advanced Parameters** panel provides overrides for each chat.
 
 ## What generation parameters do
 
@@ -12,10 +12,10 @@ Change these settings only when you want to fix a specific problem. This guide l
 
 ## Where to find them
 
-Generation parameters live in each chat, not in a global menu.
+Edit base values under **Presets > Parameters**, connection values under **Connections > Default Parameters**, and chat overrides under **Chat Settings > Advanced Parameters**.
 
 1. Open the chat you want to change.
-2. Open **Chat Settings** (the gear icon for the active chat).
+2. Open **Chat Settings** (the **Chat Settings** button in the chat, at the top right unless you moved it).
 3. Find the **Advanced Parameters** section and click it to expand it.
 
 You should see a help note that reads: "Override generation parameters for this chat. Only change these if you know what you're doing." Every setting below sits inside **Advanced Parameters**.
@@ -60,12 +60,12 @@ In a chat's **Advanced Parameters**, only **Max Output Tokens** and **Reasoning 
 
 ## Default values
 
-New chats start from a built-in baseline. The table below shows those starting values and whether each one is sent by default.
+The table shows fallback values displayed by the parameter editor and the default Send switches. These are not necessarily the values sent to the model: without a preset, generation starts at `4096` output tokens before connection and chat overrides. An active scene can use `8192`. Game uses saved connection and chat parameters, with task defaults only for unconfigured values. The **Effective** line shows the resolved value.
 
 | Parameter | Starting value | Sent by default |
 |---|---|---|
 | Temperature | 1 | No |
-| Max Output Tokens | 4096 in Conversation, 8192 in Roleplay and Game | Yes |
+| Max Output Tokens | 4096 in Conversation, 8192 in Roleplay; no Game override | Yes |
 | Top P | 1 | No |
 | Top K | 0 (off) | No |
 | Frequency | 0 | No |
@@ -97,7 +97,7 @@ You write one wrapper per line, with a slot in the middle for the hidden text. C
 
 **Custom Parameters** lets you add raw settings that Marinara does not show as its own field. You type a JSON object, and Marinara merges it into the request sent to the provider.
 
-Custom Parameters saved as connection defaults are sent for every API-backed text generation that uses that connection, including Conversation, Roleplay, Game, Noodle, summaries, and agents. This also applies to custom endpoints running on your own machine. Per-chat Custom Parameters are added for that chat and override matching connection-level keys.
+Custom Parameters saved as connection defaults are sent for every API-backed text generation that uses that connection, including Conversation, Roleplay, Game, Noodle, summaries, agents, and installed agent packages. This also applies to custom endpoints running on your own machine. Per-chat Custom Parameters are added for that chat and override matching connection-level keys.
 
 This is an advanced field. A wrong key can make the provider reject the request. The object must use lowercase `true`, `false`, and `null`. Leave this empty unless a provider's guide tells you to add a specific key.
 
@@ -110,6 +110,8 @@ This is an advanced field. A wrong key can make the provider reject the request.
 **Limit Context Messages** controls how much chat history is sent to the model. Turn it on to send only the last N messages instead of the whole chat.
 
 When you enable it, the count starts at 50. You can set any number from 1 to 9999. A smaller number sends less history, which can lower cost and speed things up. It also means the AI remembers less of the older conversation. This setting is off by default.
+
+In a Roleplay chat with **Advanced Memory Recall** on, this limit is not used. Advanced Memory decides how much history to send with its **Maximum allowed context before compression (tokens)** setting, and older scenes come back as summaries and excerpts. To send less history there, lower that setting in **Chat Settings → Memory Recall**. A note under **Limit Context Messages** says so while both are on. See [Advanced Memory Recall](../agents/memory.md#advanced-memory-recall-roleplay).
 
 ## Exclude Past Reasoning
 
@@ -125,25 +127,43 @@ Leave it on unless you have a clear reason to feed old reasoning back into the m
 
 Use this for models that cannot see images. When you turn it on, pick a connection in the **Captioning Connection** dropdown. A text-only endpoint may fail if you point it at the wrong connection. This setting is off by default.
 
+The **Captioning Prompt** box below the dropdown holds the instructions sent with each image. Edit it to change the descriptions, for example to ask for more detail. The reset button next to the label brings back the default prompt, and so does clearing the box. The prompt is saved for this chat only, and **Save as Connection Default** does not copy it.
+
+If captioning fails, for example because the captioning connection is broken, deleted, or sends back nothing, the reply stops with an **Image captioning failed** error. Marinara does not send the image itself instead. Fix or change the captioning connection, or turn Image Captioning off.
+
 ## Save as Connection Default
 
 At the bottom of **Advanced Parameters**, the **Save as Connection Default** button writes your current parameter values onto the connection itself. After that, new chats using that same connection start from these values.
 
 The button only appears for a normal, saved connection. It is hidden for the random connection pool and for the built-in local model.
 
-The **Reset to Defaults** button below it clears every per-chat parameter change and returns this chat to the mode's baseline.
+The **Reset to Defaults** button below it clears every per-chat parameter change and returns this chat to its inherited settings.
 
 ## How defaults layer and override
 
-Your effective parameters come from three layers. Each layer wins over the one before it, one setting at a time.
+Parameters are resolved one field at a time, in this order:
 
-1. The mode baseline. This is the built-in starting point for the chat's mode.
-2. The connection's saved defaults. These are the values you stored with **Save as Connection Default**.
-3. This chat's **Advanced Parameters**. These are the values you set right here, and they win.
+1. The selected preset's **Parameters**, or built-in generation defaults when no preset is used (temperature `1`, maximum output `4096`). In Roleplay, a connection's preset override takes precedence over the chat's selected preset.
+2. The connection's **Default Parameters**.
+3. This chat's **Advanced Parameters**.
+4. Mode rules: an active scene chat sets output to `8192`, reasoning to **Maximum**, and verbosity to **High**. Game uses the saved connection and chat parameters without forcing sampling, reasoning, or a minimum output size. Its helper calls also honor saved parameters; task defaults apply only when a value is not configured.
+5. Output limits: Game applies the model's known output limit, and the connection's **Max Output Tokens override** caps requests in every mode. Available context can reduce the output budget further.
 
-So a value you set in **Advanced Parameters** always beats the connection default and the mode baseline.
+The **Effective** line beside a parameter shows the saved value and its winning layer, including mode rules and output caps. In the connection editor it uses the currently open chat with that connection, or a Roleplay baseline when no chat is open. Save edits to refresh it. A disabled Send switch is shown as **not sent**; providers can still impose required parameters or normalize unsupported values. Custom Parameters and context fitting may further change the final request.
 
-Game Mode is a special case. Game Mode sets some parameters on its own to keep its structured turns working. In Game Mode, a few of your **Advanced Parameters** changes may not fully apply. This is expected.
+For example, a preset at `8192` and this chat at `16384` show **Effective: 16384 · this chat**. A connection output cap of `4096` changes that to **Effective: 4096 · output token cap**. Resetting chat parameters exposes the next applicable layer; it does not remove preset or mode rules.
+
+## Parameters for agents
+
+Agent calls use the **Default Parameters** saved on the connection they run on: the agent's own connection, or the chat's connection when the agent has none. Marinara applies them with the same rules as a chat reply, including the Send switches and the model limits below. Presets and a chat's **Advanced Parameters** do not change agent calls, apart from the temperature rule below.
+
+- **Sent to agents**: Temperature, Top P, Top K, Frequency, Presence, Reasoning Effort, Verbosity, OpenRouter Service Tier, Custom Parameters, custom headers, and the extra parameters you add under **Settings**, then **Advanced**, then **Parameters** (such as Top A or a seed). A parameter whose Send switch is off is not sent.
+- **Not sent to agents**: Max Output Tokens, stop sequences, prefills, Thinking Tags, and other prompt-format settings. Each agent keeps its own **Max Output Tokens**.
+- **Temperature**: an agent uses the connection's temperature, or `0.7` when none is saved. Beholder always uses `0`, and the Illustrator's prompt writer uses its own value. During a chat reply, agents on the chat's connection take the temperature and Send switches the chat resolved, as before, but a parameter switched off on the connection is still not sent. Retries use the connection's saved values and Send switches, not the chat's.
+- **Reasoning Effort**: a level you pick, or **Off**, applies to every agent on that connection whose model takes Reasoning Effort. Turning on **Use custom defaults for this connection** starts Reasoning Effort at **Maximum** on most connections (**Default** on Codex), so agents on it think at the model's highest level, which is slower and costs more. Pick a lower level, or turn its Send switch off, if agents should think less. With no level saved (custom defaults off, or **Default** on a Codex connection), agents that answer in JSON ask for thinking off and other agents leave the model's default.
+- **Room to think**: when the connection saves a Reasoning Effort for the model, Marinara adds room for thinking on top of the agent's **Max Output Tokens**, so the answer is not cut short. The room stays within the connection's output cap, the model's limit, and the context the prompt leaves free. A custom endpoint gets it even when it does not send the level, because a local model may think on its own.
+
+Installed agent packages follow the same connection values. A value the connection saves and sends replaces what the package asks for, and anything the connection leaves unset keeps the package's own setting. A **Reasoning Effort** or **Max Output Tokens** switched off on the connection is not sent, even when the package asks for it. Temperature and Verbosity start switched off, so for those the package's own value stays. Packages keep their own output budget, plus room to think when the connection's Reasoning Effort applies.
 
 ## Some models ignore some parameters
 

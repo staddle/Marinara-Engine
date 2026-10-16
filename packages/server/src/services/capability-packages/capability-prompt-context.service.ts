@@ -1,3 +1,4 @@
+import { currentRoomGeneration } from "../multiplayer/generation-policy.js";
 // ──────────────────────────────────────────────
 // Capability prompt-context registry — gives the `prompt-context` permission its mechanism.
 //
@@ -6,7 +7,7 @@
 // collector. It may also declare which built-in game systems it replaces; undeclared stays built-in.
 // ──────────────────────────────────────────────
 
-import { logger } from "../../lib/logger.js";
+import { logRateLimited } from "../../lib/log-rate-limit.js";
 
 /** Read-only view of the turn handed to each contributor. */
 export interface CapabilityPromptContextRequest {
@@ -21,6 +22,8 @@ export interface CapabilityPromptContextRequest {
   personaId?: string | null;
   /** Agent-data sections already placed by the active preset. */
   placedAgentTypes?: string[];
+  /** The preset's section wrap format, so a contributor's block matches the prompt around it. */
+  wrapFormat?: "xml" | "markdown" | "none";
 }
 
 /** Built-in game systems an experience can declare it replaces. Open set — undeclared stays built-in. */
@@ -53,6 +56,10 @@ export interface CapabilityPromptContextResult {
 }
 
 const contributorsByPackage = new Map<string, CapabilityPromptContextContributor>();
+
+export function getCapabilityPromptContextPackageIds(): string[] {
+  return [...contributorsByPackage.keys()];
+}
 
 /** Register (or replace) the contributor for a package. Returns a releaser for deactivation. */
 export function registerCapabilityPromptContext(
@@ -100,7 +107,8 @@ export function withDeadline<T>(value: Promise<T> | T, label: string, timeoutMs 
 export async function collectCapabilityPromptContext(
   request: CapabilityPromptContextRequest,
 ): Promise<CapabilityPromptContextResult> {
-  if (contributorsByPackage.size === 0) return { blocks: [], packageBlocks: [], provides: {} };
+  if (currentRoomGeneration() || contributorsByPackage.size === 0)
+    return { blocks: [], packageBlocks: [], provides: {} };
   const blocks: string[] = [];
   const packageBlocks: Array<{ packageId: string; text: string }> = [];
   const provides: CapabilityProvidedGameSystems = {};
@@ -127,7 +135,14 @@ export async function collectCapabilityPromptContext(
       }
     } catch (error) {
       // Non-fatal by design: a broken contributor costs its own context, not the player's turn.
-      logger.warn(error, "[capability] prompt-context contributor failed for %s", packageId);
+      // Runs every turn, so a package that keeps failing logs once a minute, with a repeat count.
+      logRateLimited(
+        "warn",
+        `prompt-context:${packageId}`,
+        error,
+        "[capability] prompt-context contributor failed for %s",
+        packageId,
+      );
     }
   }
   return { blocks, packageBlocks, provides };

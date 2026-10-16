@@ -1,4 +1,5 @@
-import type { FastifyReply } from "fastify";
+import { currentRoomGeneration } from "../multiplayer/generation-policy.js";
+import type { GenerationOutput } from "../../routes/generate/sse.js";
 import {
   GM_VERB_TABLE_ASSET_PATH,
   gmVerbMetadataKeyIssue,
@@ -50,6 +51,8 @@ export type GmVerbParseResult = {
   content: string;
   /** Validated calls, at most one per verb name. */
   calls: GmVerbCall[];
+  /** Recognized commands rejected by their declared argument contract. */
+  refusals: string[];
   /** True when anything was stripped, so the caller knows the content changed. */
   matched: boolean;
 };
@@ -91,6 +94,7 @@ export type GmVerbTurnRef = {
  *  rather than trusted to have been checked upstream — a table that reached here through a future
  *  second reader, or a schema that loosens, both fail closed. */
 export async function resolveGmVerbTable(chatMeta: Record<string, unknown>): Promise<ResolvedGmVerbTable | null> {
+  if (currentRoomGeneration()) return null;
   const packageId = typeof chatMeta.gameExperienceId === "string" ? chatMeta.gameExperienceId : "";
   if (!packageId) return null;
 
@@ -209,7 +213,7 @@ function verbExamplePayload(verb: GmVerb): string {
 }
 
 /** Validate one tag's payload against its verb's declared arguments. Returns the refusal reason
- *  rather than throwing, because a refusal is a log line and a stripped tag — never a failed turn. */
+ *  rather than throwing, so the caller can explain a refusal without executing it. */
 export function validateGmVerbArgs(
   verb: GmVerb,
   rawPayload: string | null,
@@ -272,6 +276,7 @@ export function parseAndStripGmVerbCalls(content: string, table: ResolvedGmVerbT
   const verbsByName = new Map(table.verbs.map((verb) => [verb.name.toLowerCase(), verb]));
   const seen = new Set<string>();
   const calls: GmVerbCall[] = [];
+  const refusals: string[] = [];
   let matched = false;
 
   const stripped = content.replace(createCapabilityCommandTagRegex(), (match, name: string, payload?: string) => {
@@ -292,13 +297,14 @@ export function parseAndStripGmVerbCalls(content: string, table: ResolvedGmVerbT
     const validated = validateGmVerbArgs(verb, payload?.trim() || null);
     if (!validated.ok) {
       logger.warn("[capability/gm-verbs] Verb %s refused: %s", verb.name, validated.reason);
+      refusals.push(`Game command "${verb.name}" was refused: ${validated.reason}.`);
       return "";
     }
     calls.push({ verb, args: validated.args });
     return "";
   });
 
-  return { content: stripped, calls, matched };
+  return { content: stripped, calls, refusals, matched };
 }
 
 /** Write a state verb's arguments wholesale under its package's metadata key.
@@ -328,7 +334,7 @@ export async function applyGmVerbWrite(
  *  the resolved package id — it is how the verb table was found — so there is no reason to make the
  *  client infer it. */
 export function emitGmVerbEvent(
-  reply: FastifyReply,
+  reply: GenerationOutput,
   packageId: string,
   verb: GmVerb,
   args: GmVerbArgs,
@@ -403,9 +409,10 @@ export async function executeGmVerbCalls(options: {
   table: ResolvedGmVerbTable;
   turn: GmVerbTurnRef;
   store: GmVerbMetadataStore & GmVerbClaimStore;
-  reply: FastifyReply;
+  reply: GenerationOutput;
   onMetadataWritten?: () => void;
 }): Promise<void> {
+  if (currentRoomGeneration()) return;
   const { calls, table, turn, store, reply } = options;
   for (const call of calls) {
     try {

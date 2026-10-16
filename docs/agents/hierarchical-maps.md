@@ -117,7 +117,7 @@ does not enable it in every chat.
 ### Roleplay
 
 1. Open the Roleplay chat.
-2. Open **Chat Settings** with the gear button.
+2. Open **Chat Settings**.
 3. Turn on **Enable Agents**.
 4. Under **Tracker Agents**, enable **World Maps**.
 5. Open **Edit world map** or the **World map library**. On supported Engine
@@ -135,6 +135,16 @@ During Game setup, choose World Maps and then select one of its setup routes:
 - **Create with AI** prepares a generated hierarchy for review.
 - **Use template** opens the world library before the Game is created.
 - **Build manually** starts with an editable blank hierarchy.
+- **From the world** appears when the Game makes a world (see
+  [Making a world](../game/getting-started.md#making-a-world)). It lays that
+  world out as the map: its regions, settlements and places, and the ways
+  between them with their travel times. You review it before it is saved. It
+  needs no AI generation, and the map's places are the world's places.
+  In play the two stay in step. The Game Master and the markets use the place
+  where the map has the party. When the Game Master names a world place, the
+  map moves the party there. With World Maps 1.6.0 or later it takes the
+  shortest route. Earlier versions move only one step: a place inside, the
+  place around it, or a place a way links to.
 
 After choosing **Use template**, the picker shows **Shared worlds** first and
 **Independent templates** second:
@@ -286,7 +296,7 @@ towns, stairs between selected floors, a portal between worlds, or a secret
 passage between rooms in different buildings.
 
 A 25-floor tower should normally model the floors as siblings under one tower,
-not as a 25-deep parent chain. Maps allow up to 500 locations and 20 hierarchy
+not as a 25-deep parent chain. Maps allow up to 5,000 locations and 20 hierarchy
 levels.
 
 ## Draft or expand a map with AI
@@ -542,7 +552,9 @@ Select a location in the editor and open **Location reference image**.
 
 For a parent using Map presentation, open **Child map background** separately.
 Choose a Gallery image, then position it behind the child markers. This image is
-never sent to a provider merely because it is displayed on the map.
+never sent to a provider merely because it is displayed on the map. Use square artwork,
+for example 1024 × 1024 px, to match the 100 × 100 coordinate grid. The editor
+and runtime use the same square canvas.
 
 When one Gallery image fills both roles, **Remove reference only** keeps it as
 the child-map background. Use **Reject both and create replacement** when the

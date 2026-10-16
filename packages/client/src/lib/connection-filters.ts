@@ -1,4 +1,9 @@
-import { LOCAL_SIDECAR_CONNECTION_ID } from "@marinara-engine/shared";
+import {
+  LOCAL_SIDECAR_CONNECTION_ID,
+  hasPlanUsageWindows,
+  isChatProvider,
+  supportsSubscriptionUsageWidget,
+} from "@marinara-engine/shared";
 
 export type ConnectionProviderLike = {
   id?: string | null;
@@ -27,12 +32,40 @@ export function isConnectionFlagTrue(value: unknown): boolean {
   return value === true || value === "true";
 }
 
+/** For flags that default to on: only an explicit false, in either stored or client form, is off. */
+export function isConnectionFlagFalse(value: unknown): boolean {
+  return value === false || value === "false";
+}
+
+/** The active connection with its subscription usage meter, or null when it should not show. */
+export function resolveUsageConnection<
+  T extends {
+    id?: string | null;
+    provider?: string | null;
+    showUsageWidget?: unknown;
+    showUsageFiveHour?: unknown;
+    showUsageWeekly?: unknown;
+  },
+>(connections: readonly T[] | null | undefined, connectionId: string | null | undefined): T | null {
+  // A random pick has no single quota to read.
+  if (!connectionId || connectionId === "random") return null;
+  const connection = (connections ?? []).find((candidate) => candidate.id === connectionId);
+  if (!connection || !supportsSubscriptionUsageWidget(connection.provider)) return null;
+  // A plan meter with both of its windows switched off has nothing to draw.
+  if (
+    hasPlanUsageWindows(connection.provider) &&
+    isConnectionFlagFalse(connection.showUsageFiveHour) &&
+    isConnectionFlagFalse(connection.showUsageWeekly)
+  ) {
+    return null;
+  }
+  // The stored flag is a "true"/"false" string, so a strict boolean check
+  // would always be false and silently hide the meter.
+  return isConnectionFlagTrue(connection.showUsageWidget) ? connection : null;
+}
+
 export function isLanguageGenerationConnection(connection: ConnectionProviderLike): boolean {
-  return (
-    connection.provider !== "image_generation" &&
-    connection.provider !== "video_generation" &&
-    connection.provider !== "audio"
-  );
+  return isChatProvider(connection.provider);
 }
 
 export function filterLanguageGenerationConnections<T extends ConnectionProviderLike>(

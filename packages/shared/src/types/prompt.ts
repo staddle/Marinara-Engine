@@ -33,6 +33,9 @@ export type MarkerType =
   | "persona"
   | "chat_history"
   | "chat_summary"
+  | "current_scene_summary"
+  | "recalled_scenes"
+  | "recalled_messages"
   | "id_macro_cards"
   | "world_info_before"
   | "world_info_after"
@@ -138,6 +141,8 @@ export interface PromptSection {
   // ── Overrides ──
   /** If true, character cards cannot override this section */
   forbidOverrides: boolean;
+  /** If true, this prompt block is sent without the preset's XML/Markdown wrapper (its group may still wrap it). Ignored for markers. */
+  skipWrap: boolean;
 }
 
 /** A preset-level variable — the user picks one option per chat, referenced via {{variableName}} in prompts. */

@@ -1,3 +1,4 @@
+import { getRoleplayCommandActivity } from "@marinara-engine/shared";
 import { parseMessageExtraRecord } from "./chat-message-extra";
 
 interface ChatMessageVisibilityInput {
@@ -16,5 +17,17 @@ export function isMessageHiddenFromUser(message: ChatMessageVisibilityInput): bo
   if (extra.hiddenFromUser === true) return true;
   if (message.role !== "user") return false;
   if (extra.diceRollResult && typeof extra.diceRollResult === "object") return false;
+  if (Array.isArray(extra.diceRollResults) && extra.diceRollResults.length > 0) return false;
+  if (getRoleplayCommandActivity(extra).length > 0) return false;
   return !hasVisibleUserMessagePayload(message.content, extra.attachments);
+}
+
+/** Game narration and logs share one rule for readable turns, including hidden command anchors. */
+export function isVisibleGameMessage(message: ChatMessageVisibilityInput): boolean {
+  return (
+    !isMessageHiddenFromUser(message) &&
+    parseMessageExtraRecord(message.extra).commandOnly !== true &&
+    typeof message.content === "string" &&
+    message.content.trim().length > 0
+  );
 }

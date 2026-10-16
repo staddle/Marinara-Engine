@@ -4,7 +4,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readdir, unlink, writeFile } from "node:fs/promises";
 import { basename, extname, join, resolve } from "node:path";
-import { inferImageSource, type ImagePromptKind } from "@marinara-engine/shared";
+import { inferImageSource, isOpenAIGptImageModel, type ImagePromptKind } from "@marinara-engine/shared";
 import type { DB } from "../../db/connection.js";
 import { flushDB } from "../../db/connection.js";
 import { DATA_DIR } from "../../utils/data-dir.js";
@@ -243,10 +243,6 @@ function detectImageKind(target: ImageTarget | null, explicit?: string): ImagePr
   }
 }
 
-function isOpenAIGptImageModel(model?: string) {
-  return !!model && /^gpt-image-(?:1|1\.5|2)(?:$|-)/i.test(model.trim());
-}
-
 function isStabilityV1Base(baseUrl: string) {
   try {
     const url = new URL(baseUrl);
@@ -294,6 +290,10 @@ function capabilityForConnection(conn: ImageConnection): ImageCapability {
       canEdit = true;
       editMode = "image-to-image";
       notes.push("Uses text+image image output through chat-completions style payloads.");
+      break;
+    case "codex_chatgpt":
+      canEdit = true;
+      editMode = "image-to-image";
       break;
     case "openrouter":
       canEdit = /(?:gemini.*image|image.*gemini|nano.?banana|kontext)/i.test(model);

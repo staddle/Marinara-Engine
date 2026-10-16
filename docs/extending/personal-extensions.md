@@ -10,6 +10,16 @@ There is no New Draft action and there are no import controls in this section. A
 
 To write and import your own package, use the [Personal Extension authoring guide](writing-personal-extensions.md). Self-authored packages use the separately gated External Extensions flow.
 
+## Estimate text tokens
+
+Browser, Full page access, and Server Personal Extensions can use Marinara's built-in text token estimator:
+
+```js
+const tokens = marinara.estimateTextTokens(text);
+```
+
+The signature is `estimateTextTokens(text: string): number`, also described by the exported `PersonalExtensionTokenApi` type in `@marinara-engine/shared`. The call is synchronous, needs no extra capability, and returns Marinara's model-agnostic estimated token count rather than an exact tokenizer result. On older Engines, check `typeof marinara.estimateTextTokens === "function"` before calling it.
+
 ## Review and enable
 
 Every draft starts disabled. Marinara fingerprints the exact executable code with SHA-256. Open the draft, inspect the code, compare the displayed hash, then choose **Review and Run** only if you accept that exact version. Any executable edit or restored revision disables the extension and requires a fresh approval.
@@ -64,7 +74,18 @@ const panel = marinara.ui.registerContribution({
 marinara.onCleanup(() => panel.remove());
 ```
 
-Use `kind: "button"` for a compact action and `kind: "menu-item"` for an Extensions-menu action. Buttons default to `surface: "top-bar"`. They can instead target `chats`, `bots`, `characters`, `personas`, `lorebooks`, `presets`, `connections`, `agents`, or `settings`, with `position` set to `header`, `before-content`, or `after-content`. The `icon` accepts any kebab-case Lucide icon name supported by Marinara. Both action kinds invoke `onActivate`. A `panel` invokes `onActivate` when opened; its buttons invoke `onEvent` with the current values of every panel control. The returned handle supports kind-specific updates: `button` accepts `label`, `description`, `icon`, `surface`, and `position`; `menu-item` accepts `label`, `description`, and `icon`; `panel` accepts `label`, `description`, `icon`, and `elements`. All handles support `remove()`. IDs may contain letters, numbers, `.`, `_`, and `-`.
+Use `kind: "button"` for a compact action and `kind: "menu-item"` for an Extensions-menu action. Use `kind: "command"` for a Command Center entry that activates an existing contribution from the same extension revision. A command requires `targetContributionId` and cannot use `onActivate` or `onEvent`.
+
+```js
+marinara.ui.registerContribution({
+  id: "open-weather",
+  kind: "command",
+  label: "Open weather controls",
+  targetContributionId: "weather-settings",
+});
+```
+
+The host resolves a command only when the target has the same extension ID and content hash. Missing, cross-extension, and stale-revision targets fail closed. Buttons default to `surface: "top-bar"`. They can instead target `chats`, `bots`, `characters`, `personas`, `lorebooks`, `presets`, `connections`, `agents`, or `settings`, with `position` set to `header`, `before-content`, or `after-content`. The `icon` accepts any kebab-case Lucide icon name supported by Marinara. Both action kinds invoke `onActivate`. A `panel` invokes `onActivate` when opened; its buttons invoke `onEvent` with the current values of every panel control. The returned handle supports kind-specific updates: `button` accepts `label`, `description`, `icon`, `surface`, and `position`; `menu-item` accepts `label`, `description`, and `icon`; `panel` accepts `label`, `description`, `icon`, and `elements`. All handles support `remove()`. IDs may contain letters, numbers, `.`, `_`, and `-`.
 
 For example, this places a native action above the Presets panel content:
 

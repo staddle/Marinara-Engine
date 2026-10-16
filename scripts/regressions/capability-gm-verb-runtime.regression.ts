@@ -25,6 +25,9 @@
 //   5. A VERB-ONLY turn keeps its turn. Its narration strips to empty, and the hidden-anchor gate it
 //      then meets counted only Conversation commands — both zero in game mode — so the turn errored
 //      and its already-validated writes were discarded before the executor was ever reached.
+//   6. A MIXED turn does both. The verb executes and the skill check resolves over one narration, in
+//      that order — the verb pass deletes text, the check pass only rewrites a tag in place — and the
+//      surviving check keeps the turn off the anchor path entirely.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -149,7 +152,6 @@ function installFixture(overrides: ManifestOverrides = {}) {
 installFixture();
 
 const [
-  { capabilityPackageManager },
   gmVerbRuntime,
   { createChatsStorage },
   { getDB, closeDB },
@@ -158,8 +160,9 @@ const [
   { logger },
   { buildGmFormatReminder },
   { shouldSaveHiddenGenerationAnchor },
+  { resolveSkillCheckTagsInContent },
+  { parseSkillCheckTagBody },
 ] = await Promise.all([
-  import("../../packages/server/src/services/capability-packages/package-manager.service.js"),
   import("../../packages/server/src/services/capability-packages/capability-gm-verb-runtime.service.js"),
   import("../../packages/server/src/services/storage/chats.storage.js"),
   import("../../packages/server/src/db/connection.js"),
@@ -168,6 +171,8 @@ const [
   import("../../packages/server/src/lib/logger.js"),
   import("../../packages/server/src/services/game/gm-prompts.js"),
   import("../../packages/server/src/routes/generate/spatial-transition-request.js"),
+  import("../../packages/server/src/services/game/skill-check-resolution.service.js"),
+  import("../../packages/shared/src/utils/skill-check-tag.js"),
 ]);
 
 const {
@@ -500,37 +505,17 @@ try {
 
   // ── A verb-only turn keeps its turn ────────────────────────────────────────
   //
-  // A game turn that is nothing but verb tags strips to empty, and the two Conversation command
-  // counts the anchor gate was built on are both zero in game mode by construction. Without the verb
-  // count the gate says no, the turn takes the error branch, and writes that already validated are
-  // dropped (#5902 stays open for the generic surface; this closes the flagship path).
-  const anchorGateBase = {
-    impersonate: false,
-    parsedCommandCount: 0,
-    parsedRawCommandCount: 0,
-    spatialDirectiveDetected: false,
-  };
+  const anchorGateBase = { impersonate: false, hasActionableOutput: false, spatialDirectiveDetected: false };
   assert.equal(
-    shouldSaveHiddenGenerationAnchor({ ...anchorGateBase, gmVerbCallCount: 1 }),
+    shouldSaveHiddenGenerationAnchor({ ...anchorGateBase, hasActionableOutput: true }),
     true,
-    "a verb-only game turn must save the hidden anchor rather than error",
+    "any successfully parsed command-only turn gets a hidden anchor, including Game verbs and tools",
   );
+  assert.equal(shouldSaveHiddenGenerationAnchor(anchorGateBase), false, "empty and unrecognized output still errors");
   assert.equal(
-    shouldSaveHiddenGenerationAnchor({ ...anchorGateBase, gmVerbCallCount: 0 }),
+    shouldSaveHiddenGenerationAnchor({ ...anchorGateBase, impersonate: true, hasActionableOutput: true }),
     false,
-    "a genuinely empty game turn — no verbs, no commands — still errors, exactly as it does today",
-  );
-  assert.equal(
-    shouldSaveHiddenGenerationAnchor(anchorGateBase),
-    false,
-    "the count is optional, so every non-game caller keeps the behavior it has",
-  );
-  // An impersonated turn parses no verbs at all, so it can never reach this gate with a count — but
-  // the gate must refuse one anyway rather than let a future caller open a second impersonate hole.
-  assert.equal(
-    shouldSaveHiddenGenerationAnchor({ ...anchorGateBase, impersonate: true, gmVerbCallCount: 3 }),
-    false,
-    "an impersonated turn never anchors on a verb count",
+    "impersonation never executes assistant commands",
   );
 
   // ── Narration scan ─────────────────────────────────────────────────────────
@@ -538,7 +523,10 @@ try {
   const clean = parseAndStripGmVerbCalls('Rain sheets down. [weather:{"word":"storm","intensity":"heavy"}]', live);
   assert.equal(clean.matched, true);
   assert.equal(clean.content.trim(), "Rain sheets down.");
-  assert.deepEqual(clean.calls.map((call) => call.args), [{ word: "storm", intensity: "heavy" }]);
+  assert.deepEqual(
+    clean.calls.map((call) => call.args),
+    [{ word: "storm", intensity: "heavy" }],
+  );
 
   // A tag is stripped on the NAME match, never on validation success — a command the model got
   // slightly wrong is still a command, and leaving it in shows the player machinery.
@@ -552,6 +540,7 @@ try {
   ]) {
     const refused = parseAndStripGmVerbCalls(`Before. ${bad} After.`, live);
     assert.equal(refused.calls.length, 0, `must refuse ${bad}`);
+    assert.match(refused.refusals[0]!, /Game command .* was refused:/, "the caller can explain the rejected command");
     assert.equal(refused.matched, true);
     assert.equal(refused.content.replace(/\s+/g, " ").trim(), "Before. After.", `must still strip ${bad}`);
   }
@@ -585,6 +574,44 @@ try {
   assert.equal(repeated.calls.length, 1);
   assert.deepEqual(repeated.calls[0]!.args, { word: "rain" });
   assert.equal(repeated.content.trim(), "then");
+
+  // ── A MIXED turn: a verb tag and a skill check in one narration ────────────
+  //
+  // The sixth turn shape, and the one where the two Game-mode post-processing passes meet. Their
+  // order is load-bearing rather than incidental: the verb pass DELETES text — a matched tag leaves
+  // the narration entirely — while the check pass only REWRITES a `[skill_check:]` in place. Strip
+  // first and the roller sees exactly the text that survives into the saved turn; roll first and a
+  // check the strip was about to carry off has already thrown a real die and read the chat's
+  // modifier snapshot to write numbers nothing will ever display.
+  const mixedNarration =
+    'Rain sheets down. [weather:{"word":"storm","intensity":"heavy"}] You press flat against the crates. ' +
+    '[skill_check: skill="Stealth" dc="15"]';
+  const mixedStrip = parseAndStripGmVerbCalls(mixedNarration, live);
+  assert.equal(mixedStrip.calls.length, 1, "the verb still parses out of a turn that also asks for a check");
+  assert.deepEqual(mixedStrip.calls[0]!.args, { word: "storm", intensity: "heavy" });
+  assert.ok(
+    mixedStrip.content.includes('[skill_check: skill="Stealth" dc="15"]'),
+    "the verb strip must leave the check tag alone — it belongs to the roller, and it is content",
+  );
+
+  // …and what survives the strip is exactly what the roller is handed.
+  const mixedRolled = await resolveSkillCheckTagsInContent(mixedStrip.content, {
+    loadContext: async () => ({ skills: { Stealth: 2 }, attributes: null, sheetAttributes: { dex: 14 } }),
+    rollD20: () => 12,
+    chatId: "mixed-turn",
+  });
+  assert.equal(mixedRolled.resolved, 1, "the check in a mixed turn is rolled like any other");
+  const mixedTag = parseSkillCheckTagBody(mixedRolled.content.match(/\[skill_check:\s*([^\]]+)\]/u)![1]!);
+  assert.equal(mixedTag?.resolvedResult?.usedRoll, 12, "the engine's own die");
+  assert.equal(mixedTag?.resolvedResult?.total, 16, "12, plus Stealth's +2 and DEX 14's +2");
+  assert.ok(mixedRolled.content.includes("Rain sheets down."), "the prose either pass left alone survives both");
+  assert.ok(mixedRolled.content.includes("You press flat against the crates."));
+  assert.doesNotMatch(mixedRolled.content, /\[weather:/u, "the verb tag is gone; the player never sees the machinery");
+
+  // The turn-shape consequence: a resolved check is content, so a mixed turn is never empty and
+  // never reaches the hidden-anchor branch. It takes the ordinary saved-message path and executes
+  // its verbs there, which is why the anchor gate above can stay scoped to the verb-only shape.
+  assert.ok(mixedRolled.content.trim().length > 0, "a mixed turn always has a message of its own to claim against");
 
   // An optional argument may simply be absent; it is never defaulted into the payload.
   assert.deepEqual(validateGmVerbArgs(weatherVerb, '{"word":"snow"}'), { ok: true, args: { word: "snow" } });
@@ -626,7 +653,9 @@ try {
 
   // Provenance: a truthy OBJECT, or the storage guard treats the slot as unclaimed forever.
   const claimedSwipes = await chats.getSwipes(message.id);
-  const claim = JSON.parse((claimedSwipes.find((swipe: { index: number }) => swipe.index === 0)!.extra as string) ?? "{}");
+  const claim = JSON.parse(
+    (claimedSwipes.find((swipe: { index: number }) => swipe.index === 0)!.extra as string) ?? "{}",
+  );
   assert.equal(typeof claim["gmVerb:weather"], "object");
   assert.equal(claim["gmVerb:weather"].verb, "weather");
   assert.deepEqual(claim["gmVerb:weather"].args, { word: "storm" });
@@ -833,7 +862,10 @@ try {
   });
   assert.deepEqual((await readMetadata(chatId)).pixelforgeWeather, { word: "rain" });
   assert.equal(anonymousReply.frames.length, 1);
-  assert.equal(await claimGmVerb(chats, weatherVerb, { word: "rain" }, { chatId, messageId: "", swipeIndex: 0 }), false);
+  assert.equal(
+    await claimGmVerb(chats, weatherVerb, { word: "rain" }, { chatId, messageId: "", swipeIndex: 0 }),
+    false,
+  );
 
   // The write shape is `patchMetadata` and nothing else, so a state verb can only ever replace its
   // own key — never read-modify-write a whole metadata object and lose a concurrent turn's write.
@@ -858,6 +890,15 @@ try {
     /if \(chatMode === "game" && !input\.impersonate && fullResponse\) \{/,
     "the GM verb scan must run on its own game-mode-only path",
   );
+  // The seam's ORDER, which the mixed-turn lane above drives but cannot see the route commit to.
+  // The verb pass deletes text and the check pass only rewrites a tag in place, so the dependency
+  // runs one way: strip, then roll. Reversed, a check the strip was about to carry off has already
+  // thrown a real die and read the chat's modifiers to write numbers nothing will ever display.
+  const verbScanAt = generateRoute.indexOf('if (chatMode === "game" && !input.impersonate && fullResponse) {');
+  const checkRollAt = generateRoute.indexOf("resolveSkillCheckTagsInContent(fullResponse");
+  assert.ok(verbScanAt > 0 && checkRollAt > 0, "both Game-mode post-processing passes must exist");
+  assert.ok(verbScanAt < checkRollAt, "verbs are stripped before the turn's checks are rolled, never after");
+
   // The other side of that same predicate. Teach and parse must agree on WHO is speaking: a turn the
   // scan above skips must not be handed the vocabulary, or the model writes a tag nobody removes and
   // it lands raw in the player's own impersonated message.
@@ -872,7 +913,7 @@ try {
   // Scoped to the gate's own call rather than the bare field: the same count also rides the warn
   // payload a few lines above, and a pin that either one satisfies proves nothing about the gate.
   const anchorGateCall = generateRoute.match(
-    /shouldSaveHiddenGenerationAnchor\(\{[\s\S]*?gmVerbCallCount: collectedGmVerbCalls\.length,[\s\S]*?\}\)/,
+    /shouldSaveHiddenGenerationAnchor\(\{[\s\S]*?hasActionableOutput:[\s\S]*?collectedGmVerbCalls\.length > 0[\s\S]*?\}\)/,
   );
   assert.ok(anchorGateCall, "the hidden-anchor gate must see how many verbs this turn parsed");
   // Saving the anchor is only half of it: the execution site sits past the early return that path
@@ -890,7 +931,8 @@ try {
   // Ordering, because the two live in one `if`/fallthrough: the gate must be consulted BEFORE the
   // empty-response error is sent, or a verb-only turn is told it produced nothing.
   assert.ok(
-    generateRoute.indexOf(anchorGateCall[0]) < generateRoute.indexOf("The AI returned an empty response."),
+    generateRoute.indexOf(anchorGateCall[0]) <
+      generateRoute.indexOf('sendSseEvent(reply, { type: "error", data: emptyResponseMessage })'),
     "the verb count must reach the anchor gate ahead of the empty-response error frame",
   );
 
@@ -903,7 +945,7 @@ try {
   // client has already dropped the stream and the frame would evaporate unlogged.
   assert.match(
     generateRoute,
-    /collectedGmVerbCalls\.length > 0 && gmVerbTable && !abortController\.signal\.aborted/,
+    /collectedGmVerbCalls\.length > 0 && gmVerbTable && !generationSignal\.aborted/,
     "GM verb execution must be skipped on an aborted turn",
   );
   // The committed-write signal. Without this frame a state verb's write never reaches the package
@@ -941,7 +983,10 @@ try {
     (generateRoute.match(/type: "gm_verb"/g) ?? []).length +
       (
         readFileSync(
-          join(repositoryRoot, "packages/server/src/services/capability-packages/capability-gm-verb-runtime.service.ts"),
+          join(
+            repositoryRoot,
+            "packages/server/src/services/capability-packages/capability-gm-verb-runtime.service.ts",
+          ),
           "utf8",
         ).match(/type: "gm_verb"/g) ?? []
       ).length,
@@ -950,7 +995,8 @@ try {
   );
 
   // The seam is advertised only now that the runtime behind it exists.
-  assert.deepEqual({ ...supportedCapabilityApi }, { major: 1, minor: 16 });
+  assert.equal(supportedCapabilityApi.major, 1);
+  assert.ok(supportedCapabilityApi.minor >= 16, "the host advertises the GM verb runtime introduced in API 1.16");
   const manifestSchema = readFileSync(
     join(repositoryRoot, "packages/shared/src/schemas/capability-package.schema.ts"),
     "utf8",

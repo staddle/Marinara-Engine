@@ -35,7 +35,7 @@ assert.match(
 );
 assert.match(
   generateRouteSource,
-  /const continuedTargetIndex = input\.continueMessageId[\s\S]{0,500}index === continuedTargetIndex \? \{ \.\.\.message, content: completedResponse \} : message[\s\S]{0,220}: \[\.\.\.chatMessages, \{ role: "assistant", content: completedResponse \}\][\s\S]{0,600}matchCustomAgentActivation\(agent\.settings, postActivationMessages\)/u,
+  /const continuedTargetIndex = input\.continueMessageId[\s\S]{0,500}index === continuedTargetIndex \? \{ \.\.\.message, content: completedResponse \} : message[\s\S]{0,220}: \[[\s\S]{0,100}\.\.\.chatMessages,[\s\S]{0,100}role: "assistant",[\s\S]{0,100}content: completedResponse,[\s\S]{0,400}\][\s\S]{0,600}matchCustomAgentActivation\(agent\.settings, postActivationMessages\)/u,
   "Post-processing activation must include the completed assistant response",
 );
 assert.match(
@@ -43,30 +43,36 @@ assert.match(
   /const activatedTextRewriteRunAgents = textRewriteRunAgents\.filter\(\s*\(agent\) => !inactivePostProcessingAgentIds\.has\(agent\.id\),\s*\);/u,
   "Text-rewrite agents must honor the same completed-response activation check",
 );
+const postGenerationStart = generateRouteSource.indexOf("if (hasPostWork &&");
+assert.ok(postGenerationStart >= 0, "The post-generation entrypoint must exist");
 const postGenerationSource = generateRouteSource.slice(
-  generateRouteSource.indexOf("if (hasPostWork && completedResponse"),
+  postGenerationStart,
   generateRouteSource.indexOf("// ── Text rewrite/editing agents"),
 );
-assert.match(postGenerationSource, /content: completedResponse,/u, "Lorebook triggers must receive the completed response");
 assert.match(
   postGenerationSource,
-  /const postAgentContext:[\s\S]{0,220}mainResponse: completedResponse/u,
+  /content: agentCompletedResponse,/u,
+  "Lorebook triggers must receive the completed response",
+);
+assert.match(
+  postGenerationSource,
+  /const postAgentContext:[\s\S]{0,220}mainResponse: agentCompletedResponse/u,
   "Post-agent context must receive the completed response",
 );
 assert.match(
   postGenerationSource,
-  /pipeline\.postGenerate\(completedResponse/u,
+  /pipeline\.postGenerate\(agentCompletedResponse/u,
   "The post-generation pipeline must receive the completed response",
 );
 assert.match(
   postGenerationSource,
-  /phaseRetryContext[\s\S]{0,240}mainResponse: completedResponse/u,
+  /phaseRetryContext[\s\S]{0,240}mainResponse: agentCompletedResponse/u,
   "Post-processing retries must receive the completed response",
 );
 assert.match(
   generateRouteSource,
-  /const hasPostWork =\s*!recoveredAlreadyAppliedOwnerTurn\s*&&\s*\(hasPostProcessingAgents \|\| parallelResults\.length > 0 \|\| holdForTextRewrite\);/u,
-  "Held responses must keep the outer post-work path reachable when every custom rewrite agent is inactive",
+  /const hasPostWork =\s*!recoveredAlreadyAppliedOwnerTurn\s*&&\s*\(hasPostProcessingAgents\s*\|\|\s*parallelResults\.length > 0\s*\|\|\s*holdForTextRewrite\s*\|\|\s*roleplayMediaRequests\.length > 0\);/u,
+  "Held responses and explicit media commands must keep post-work reachable when every custom rewrite agent is inactive",
 );
 assert.match(
   generateRouteSource,

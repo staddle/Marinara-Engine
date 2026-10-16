@@ -64,12 +64,16 @@ export function createLLMProvider(
 
   let resolved: BaseLLMProvider;
   switch (provider) {
+    case "decision":
+      throw new Error("Decision connections cannot generate chat or agent output.");
     case "openai":
     case "openrouter":
     case "nanogpt":
     case "xai":
     case "mistral":
     case "arli":
+    case "zai":
+    case "deepseek":
       resolved = new OpenAIProvider(
         baseUrl,
         apiKey,

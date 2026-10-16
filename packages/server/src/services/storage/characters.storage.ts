@@ -5,6 +5,7 @@ import { and, asc, desc, eq, inArray, like, ne, or } from "../../db/file-query.j
 import type { DB } from "../../db/connection.js";
 import {
   characters,
+  chats,
   characterCardVersions,
   personas,
   personaCardVersions,
@@ -169,6 +170,8 @@ export type PersonaStorageWriteFields = Pick<
   | "scenario"
   | "backstory"
   | "appearance"
+  | "imageAppearanceEnabled"
+  | "imageAppearance"
   | "characterSheetImageId"
   | "useCharacterSheetAsReference"
   | "avatarCrop"
@@ -294,6 +297,8 @@ function buildPersonaSnapshot(persona: PersonaStorageRow): PersonaCardSnapshot {
     scenario: persona.scenario ?? "",
     backstory: persona.backstory ?? "",
     appearance: persona.appearance ?? "",
+    imageAppearanceEnabled: persona.imageAppearanceEnabled ?? "false",
+    imageAppearance: persona.imageAppearance ?? "",
     characterSheetImageId: persona.characterSheetImageId ?? "",
     useCharacterSheetAsReference: persona.useCharacterSheetAsReference ?? "false",
     avatarCrop: persona.avatarCrop ?? "",
@@ -335,6 +340,8 @@ function normalizePersonaSnapshot(data: PersonaCardSnapshot): PersonaCardSnapsho
     scenario: data.scenario ?? "",
     backstory: data.backstory ?? "",
     appearance: data.appearance ?? "",
+    imageAppearanceEnabled: data.imageAppearanceEnabled ?? "false",
+    imageAppearance: data.imageAppearance ?? "",
     characterSheetImageId: data.characterSheetImageId ?? "",
     useCharacterSheetAsReference: data.useCharacterSheetAsReference ?? "false",
     avatarCrop: data.avatarCrop ?? "",
@@ -779,6 +786,48 @@ export function createCharactersStorage(db: DB) {
             .where(eq(lorebooks.id, lorebookId));
         }
         await tx.delete(characters).where(eq(characters.id, id));
+        // Every chat, not only Game: otherwise a deleted card's id stays in a Roleplay or
+        // Conversation chat's member list and Chat Settings counts it (#6084). The Game
+        // party/setup branches below are no-ops for the other modes.
+        const memberChats = await tx.select().from(chats);
+        for (const chat of memberChats) {
+          let memberIds: unknown;
+          let metadata: Record<string, unknown>;
+          try {
+            memberIds = JSON.parse(chat.characterIds);
+            metadata = JSON.parse(chat.metadata);
+          } catch {
+            continue;
+          }
+          if (!Array.isArray(memberIds) || !metadata || typeof metadata !== "object" || Array.isArray(metadata))
+            continue;
+          const config = metadata.gameSetupConfig;
+          const setup =
+            config && typeof config === "object" && !Array.isArray(config)
+              ? (config as Record<string, unknown>)
+              : undefined;
+          const partyIds = Array.isArray(metadata.gamePartyCharacterIds) ? metadata.gamePartyCharacterIds : [];
+          const setupPartyIds = Array.isArray(setup?.partyCharacterIds) ? setup.partyCharacterIds : [];
+          if (
+            !memberIds.includes(id) &&
+            !partyIds.includes(id) &&
+            !setupPartyIds.includes(id) &&
+            setup?.gmCharacterId !== id
+          )
+            continue;
+          if (partyIds.includes(id)) metadata.gamePartyCharacterIds = partyIds.filter((memberId) => memberId !== id);
+          if (setup && setupPartyIds.includes(id))
+            setup.partyCharacterIds = setupPartyIds.filter((memberId) => memberId !== id);
+          if (setup?.gmCharacterId === id) setup.gmCharacterId = null;
+          await tx
+            .update(chats)
+            .set({
+              characterIds: JSON.stringify(memberIds.filter((memberId) => memberId !== id)),
+              metadata: JSON.stringify(metadata),
+              updatedAt: now(),
+            })
+            .where(eq(chats.id, chat.id));
+        }
         const groups = await tx.select().from(characterGroups);
         for (const group of groups) {
           let memberIds: string[];
@@ -960,6 +1009,8 @@ export function createCharactersStorage(db: DB) {
         scenario: extra?.scenario ?? "",
         backstory: extra?.backstory ?? "",
         appearance: extra?.appearance ?? "",
+        imageAppearanceEnabled: extra?.imageAppearanceEnabled ?? "false",
+        imageAppearance: extra?.imageAppearance ?? "",
         avatarPath: avatarPath ?? null,
         characterSheetImageId: extra?.characterSheetImageId ?? null,
         useCharacterSheetAsReference: extra?.useCharacterSheetAsReference ?? "false",
@@ -979,16 +1030,6 @@ export function createCharactersStorage(db: DB) {
         updatedAt: timestamp.updatedAt,
       });
       return this.getPersona(id);
-    },
-
-    async setActivePersona(id: string) {
-      return db.transaction(async (tx) => {
-        const existing = await tx.select({ id: personas.id }).from(personas).where(eq(personas.id, id));
-        if (!existing[0]) return false;
-        await tx.update(personas).set({ isActive: "false" });
-        await tx.update(personas).set({ isActive: "true", updatedAt: now() }).where(eq(personas.id, id));
-        return true;
-      });
     },
 
     async removePersona(id: string) {
@@ -1031,6 +1072,8 @@ export function createCharactersStorage(db: DB) {
           scenario: source.scenario ?? "",
           backstory: source.backstory ?? "",
           appearance: source.appearance ?? "",
+          imageAppearanceEnabled: source.imageAppearanceEnabled ?? "false",
+          imageAppearance: source.imageAppearance ?? "",
           avatarPath: source.avatarPath,
           characterSheetImageId: null,
           useCharacterSheetAsReference: "false",
@@ -1082,6 +1125,8 @@ export function createCharactersStorage(db: DB) {
       if (updates.scenario !== undefined) sets.scenario = updates.scenario;
       if (updates.backstory !== undefined) sets.backstory = updates.backstory;
       if (updates.appearance !== undefined) sets.appearance = updates.appearance;
+      if (updates.imageAppearanceEnabled !== undefined) sets.imageAppearanceEnabled = updates.imageAppearanceEnabled;
+      if (updates.imageAppearance !== undefined) sets.imageAppearance = updates.imageAppearance;
       if (updates.avatarPath !== undefined) sets.avatarPath = updates.avatarPath;
       if (updates.characterSheetImageId !== undefined) sets.characterSheetImageId = updates.characterSheetImageId;
       if (updates.useCharacterSheetAsReference !== undefined) {
@@ -1115,6 +1160,10 @@ export function createCharactersStorage(db: DB) {
           ...(updates.scenario !== undefined && { scenario: updates.scenario }),
           ...(updates.backstory !== undefined && { backstory: updates.backstory }),
           ...(updates.appearance !== undefined && { appearance: updates.appearance }),
+          ...(updates.imageAppearanceEnabled !== undefined && {
+            imageAppearanceEnabled: updates.imageAppearanceEnabled,
+          }),
+          ...(updates.imageAppearance !== undefined && { imageAppearance: updates.imageAppearance }),
           ...(updates.characterSheetImageId !== undefined && {
             characterSheetImageId: updates.characterSheetImageId ?? "",
           }),
@@ -1207,6 +1256,8 @@ export function createCharactersStorage(db: DB) {
             scenario: data.scenario,
             backstory: data.backstory,
             appearance: data.appearance,
+            imageAppearanceEnabled: data.imageAppearanceEnabled ?? "false",
+            imageAppearance: data.imageAppearance ?? "",
             avatarPath: version.avatarPath ?? null,
             characterSheetImageId: data.characterSheetImageId || null,
             useCharacterSheetAsReference: data.useCharacterSheetAsReference,

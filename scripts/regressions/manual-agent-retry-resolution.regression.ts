@@ -111,7 +111,7 @@ const retryToolWiringStart = retryRouteSource.indexOf("const phaseToolInputs = r
 const retryToolWiringEnd = retryRouteSource.indexOf("const retryIllustratorPromptAgent", retryToolWiringStart);
 const retryToolWiringSource = retryRouteSource.slice(retryToolWiringStart, retryToolWiringEnd);
 assert.ok(retryToolWiringStart >= 0 && retryToolWiringEnd > retryToolWiringStart);
-assert.match(retryToolWiringSource, /selectedTargetMessage:\s*lastAssistant/);
+assert.match(retryToolWiringSource, /selectedTargetMessage:\s*rangeTarget \?\? lastAssistant/);
 assert.match(retryToolWiringSource, /await resolveAgentGenerationTools\(\{/);
 assert.match(retryToolWiringSource, /if \(activeMusicPlayerSource === null\)/);
 assert.match(retryToolWiringSource, /!spotifyToolNames\.has\(toolName\)/);
@@ -923,5 +923,22 @@ const fallbackResult = await validateSpotifyRetryPlayback(
 assert.equal(fallbackResult.success, true);
 assert.equal((fallbackResult.data as Record<string, unknown>).deterministicFallbackApplied, true);
 assert.deepEqual(fallbackCalls, ["spotify_get_current_playback", "spotify_get_playlist_tracks", "spotify_play"]);
+
+// The metadata tool callback must not reattach a summary excluded from Roleplay agents.
+historicalContext.chatMode = "roleplay";
+await runtime.updateChatMetadataForTools({ ...metadata });
+assert.equal(historicalContext.chatSummary, null, "unset Roleplay preference excludes summaries after tool refresh");
+await runtime.updateChatMetadataForTools({ ...metadata, attachSummariesToAgents: false });
+assert.equal(historicalContext.chatSummary, null);
+await runtime.updateChatMetadataForTools({ ...metadata, summary: "Updated stored summary" });
+assert.equal(metadata.summary, "Updated stored summary", "tools can still save summaries");
+assert.equal(historicalContext.chatSummary, null, "a later metadata write cannot restore excluded context");
+await runtime.updateChatMetadataForTools({ ...metadata, attachSummariesToAgents: true });
+assert.equal(historicalContext.chatSummary, "Updated stored summary");
+for (const mode of ["conversation", "game"] as const) {
+  historicalContext.chatMode = mode;
+  await runtime.updateChatMetadataForTools({ ...metadata, attachSummariesToAgents: false });
+  assert.equal(historicalContext.chatSummary, "Updated stored summary", `${mode} behavior stays unchanged`);
+}
 
 console.info("Manual Agent retry settings/tool parity regression passed.");

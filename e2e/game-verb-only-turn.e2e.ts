@@ -121,7 +121,7 @@ async function wheelBackOneEntry(page: Page) {
   await page.mouse.wheel(0, -120);
 }
 
-test("a hidden verb-only anchor does not blank the GM narration panel", async ({ page, request }, testInfo) => {
+test("a hidden verb-only anchor does not blank the GM narration panel", { tag: "@smoke" }, async ({ page, request }, testInfo) => {
   test.skip(!testInfo.project.name.includes("desktop"), "One proof of the narration filter is sufficient.");
   const { chatId, anchorId, editedEmptyId } = await seedVerbOnlyTurn(request);
   try {
@@ -143,6 +143,14 @@ test("a hidden verb-only anchor does not blank the GM narration panel", async ({
     await wheelBackOneEntry(page);
     await expect(narrationPanel).toContainText(EARLIER_NARRATION, { timeout: 10_000 });
     await expect(narrationPanel).not.toContainText(HIDDEN_CONTEXT);
+
+    await page.getByRole("button", { name: "Logs", exact: true }).click();
+    const logs = page.getByRole("dialog").filter({ has: page.getByRole("heading", { name: "Session Logs" }) });
+    await expect(logs).toBeVisible();
+    await expect(logs).toContainText(GM_NARRATION);
+    await expect(logs).toContainText(EARLIER_NARRATION);
+    await expect(logs).not.toContainText(HIDDEN_CONTEXT);
+    await page.screenshot({ path: testInfo.outputPath("game-visible-logs.png") });
 
     // Both unreadable rows are still real rows on the server — the surface skipped them,
     // they were not dropped from the chat. Re-asserting the edited row's shape keeps the

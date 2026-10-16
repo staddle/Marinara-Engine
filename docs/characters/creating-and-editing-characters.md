@@ -1,6 +1,6 @@
 # Creating and Editing Characters
 
-This guide shows you how to make a character in Marinara Engine. It also shows how to use the Character Editor to write, save, and manage card versions. It covers the Metadata, Card, and Advanced tabs, avatars, and saved version history.
+This guide shows you how to make a character in Marinara Engine. It also shows how to use the Character Editor to write, save, and manage card versions. It covers the Metadata, Card, Voice, and Advanced tabs, avatars, and saved version history.
 
 ## What a character card is
 
@@ -35,10 +35,11 @@ At the top right you have these buttons:
 
 If you try to leave with unsaved work, a banner reads `You have unsaved changes. Close without saving?` It gives you **Keep editing**, **Discard & close**, and **Save & close**.
 
-The editor is split into tabs. On a wide screen the tabs run down the left side. On a narrow screen they become a scrollable strip across the top. The tabs, in order, are **Metadata**, **Card**, **Convo**, **Lorebook**, **Sprites**, **Gallery**, **Colors**, **Stats**, and **Advanced**.
+The editor is split into tabs. On a wide screen the tabs run down the left side. On a narrow screen they become a scrollable strip across the top. The tabs, in order, are **Metadata**, **Card**, **Onboarding**, **Convo**, **Lorebook**, **Sprites**, **Gallery**, **Colors**, **Voice**, **Stats**, and **Advanced**.
 
-This guide covers **Metadata**, **Card**, and **Advanced**, plus avatars and version history. The other tabs have their own guides:
+This guide covers **Metadata**, **Card**, **Voice**, and **Advanced**, plus avatars and version history. The other tabs have their own guides:
 
+- **Onboarding**: [Interactive Onboarding](interactive-onboarding.md).
 - **Convo**: [Conversation Mode Profiles](../conversation/profiles.md).
 - **Lorebook**: [Linking Lorebooks to Characters](../lorebooks/linking-to-characters.md).
 - **Sprites**: [Character Sprites](sprites.md).
@@ -51,7 +52,6 @@ The **Metadata** tab holds identity and organization details. These help you sor
 
 - **Character ID**. A read-only value shown only after the card is saved. Click **Copy** to copy it.
 - **Name**. The display name. It is used as `{{char}}` in prompts.
-- **Phonetic name**. An optional spelling used only to fix pronunciation for text-to-speech. Leave it empty to use the normal name.
 - **Creator**. The person who made the card, for credit when you share it.
 - **Version**. A version number you set, such as `1.0`.
 - **Talkativeness**. A slider from 0 to 100 percent. It sets how often this character speaks in group chats. The default is 50 percent.
@@ -68,15 +68,18 @@ The **Card** tab is the main writing workspace. It holds the fields the AI reads
 - **Personality**. A short summary of temperament, speech habits, and behavior patterns.
 - **Backstory**. History, origin, and important relationships.
 - **Appearance**. Physical description, clothing, and visual details. Marinara also uses this text to seed an AI avatar prompt.
+- **Image Appearance Override**. An optional switch under **Appearance**, off by default. Turn it on to reveal a second box for an image-prompt-ready description of the character. While it is on and the box is filled, image prompts use that text instead of **Appearance**, and an AI avatar prompt is seeded from it too. The narrator always sees the full **Appearance** text. Leave it off to keep the usual behavior.
 - **Scenario**. The default setting for new chats with this character.
 
 The **Dialogue & Greetings** section sets how a chat opens and how the character sounds:
 
-- **First Message**. The opening message shown when a new chat starts.
-- **Alternate Greetings**. Extra opening messages. When you start a chat you can pick which one to use. Use the up and down controls to reorder them, and the X to remove one.
+- **First Message**. The opening message shown when a new Roleplay chat starts. Conversation and Game chats do not start with a greeting.
+- **Alternate Greetings**. Extra opening messages. When you start a Roleplay chat you can pick which one to use. Use the up and down controls to reorder them, and the X to remove one.
 - **Example Dialogue**. Sample exchanges that teach the character's voice. Use `<START>` to separate exchanges. Use `{{user}}` and `{{char}}` as placeholders.
 
 Greetings and example messages can also display images from the character's Gallery; see [Character galleries → Reuse a gallery image in messages and greetings](galleries.md#reuse-a-gallery-image-in-messages-and-greetings).
+
+When the greetings show images from other websites, **Save images locally** keeps a copy of them in the character's Gallery; see [Character galleries → Save web images from greetings](galleries.md#save-web-images-from-greetings).
 
 A short Example Dialogue entry looks like this:
 
@@ -104,12 +107,22 @@ The AI avatar option appears only when you have at least one image-generation co
 1. Hover the avatar tile and click the small **Generate avatar** wand button.
 2. The **Generate Character Avatar** window opens.
 3. Pick an **Image Generation Connection**.
-4. Review or edit the **Avatar Prompt**. It is pre-filled from your Appearance text. If Appearance is empty, it uses Description, then Personality.
+4. Review or edit the **Avatar Prompt**. If **Image Appearance Override** is on and filled, its text is used as the starting prompt. Otherwise, Marinara uses **Appearance**, then **Description**, then **Personality**, taking the first field that contains text.
 5. If the card already has an avatar, you can check **Use current avatar as a reference**.
 6. Click **Generate**. To try again, click **Regenerate**.
 7. When you like the result, click **Use Avatar**.
 
 The picture size comes from the **Portraits** image-size setting in the image-generation settings, which defaults to 1024 by 1024. If you have turned on **Expose media prompts before sending**, a prompt-review step appears before each request.
+
+## Voice tab
+
+The **Voice** tab sets how the character sounds when Text to Speech reads it aloud.
+
+- **Voice**. The voice Text to Speech uses for this character. A change saves right away, without **Save**. It is the same setting as this character's row in **Connections → Text to Speech**, so the two always match. Leave it empty to use the default voice. If a card with a matching name has a voice, such as the original of an AU copy, the empty field names that voice, because this card uses it too.
+- **Preview**. Plays a short line in that voice. The line says the character's name, or the Phonetic name when one is set, so you can hear how it sounds.
+- **Phonetic name**. An optional spelling used only to fix pronunciation for text-to-speech. Leave it empty to use the normal name. Unlike the voice, it is part of the card, so click **Save** to keep it.
+
+If Text to Speech is off, or every character shares one voice, a short note replaces the **Voice** field. With one shared voice, the note offers **Use a voice per character**. **Open Text to Speech settings** opens Connections, where the **Text to Speech** card holds every setting. See [Text to Speech (TTS) Setup](../media/tts-setup.md).
 
 ## Advanced tab
 
@@ -163,6 +176,7 @@ If the underlying text changed since the proposal was made, the app warns you be
 ## Related guides
 
 - [User Personas: Creating and Editing](personas.md)
+- [Interactive Onboarding](interactive-onboarding.md)
 - [Character Sprites](sprites.md)
 - [Character and Persona Galleries](galleries.md)
 - [Importing and Exporting Character Cards](import-export.md)

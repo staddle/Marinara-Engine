@@ -10,9 +10,11 @@ import {
   type HudWidgetConfig,
   type HudWidgetType,
 } from "@marinara-engine/shared";
+import { downloadJsonFile } from "../../lib/download-json";
 import { cn } from "../../lib/utils";
 import { translate } from "../../localization/i18n";
 import { DraftNumberInput } from "../ui/DraftNumberInput";
+import { ColorPicker } from "../ui/ColorPicker";
 import { AgentSettingsActionButton } from "../chat/AgentSettingsControls";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
@@ -34,12 +36,12 @@ const WIDGET_TYPES: readonly HudWidgetType[] = [
 const DEFAULT_ACCENTS: Record<HudWidgetType, string> = {
   progress_bar: "#a78bfa",
   gauge: "#22c55e",
-  relationship_meter: "#f472b6",
+  relationship_meter: "var(--marinara-chat-chrome-accent)",
   counter: "#38bdf8",
   stat_block: "#f59e0b",
   list: "#14b8a6",
   inventory_grid: "#94a3b8",
-  timer: "#fb7185",
+  timer: "var(--marinara-chat-chrome-accent)",
 };
 
 const DEFAULT_ICONS: Record<HudWidgetType, string> = {
@@ -319,20 +321,14 @@ function exportGameHudWidgets(widgets: readonly HudWidget[], filename?: string) 
     exportedAt: new Date().toISOString(),
     widgets: normalizedWidgets,
   };
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = buildWidgetExportFilename(filename);
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-  toast.success(
-    translate("ui.game.gamewidgetsetupeditor.exportedWidgets", {
-      count: normalizedWidgets.length,
-    }),
-  );
+  void downloadJsonFile(payload, buildWidgetExportFilename(filename)).then((saveStatus) => {
+    if (saveStatus === "saved")
+      toast.success(
+        translate("ui.game.gamewidgetsetupeditor.exportedWidgets", {
+          count: normalizedWidgets.length,
+        }),
+      );
+  });
 }
 
 async function importGameHudWidgetsFromFile(file: File) {
@@ -423,9 +419,17 @@ interface GameWidgetSetupEditorProps {
   onChange: (widgets: HudWidget[]) => void;
   disabled?: boolean;
   className?: string;
+  /** Lay out by the surrounding container's width (the Chat Settings window) instead of the screen's. */
+  containerQueries?: boolean;
 }
 
-export function GameWidgetSetupEditor({ widgets, onChange, disabled, className }: GameWidgetSetupEditorProps) {
+export function GameWidgetSetupEditor({
+  widgets,
+  onChange,
+  disabled,
+  className,
+  containerQueries = false,
+}: GameWidgetSetupEditorProps) {
   const { t: localizeUi } = useUiTranslation();
   const [newWidgetType, setNewWidgetType] = useState<HudWidgetType>("progress_bar");
   const normalizedWidgets = useMemo(() => normalizeGameHudWidgets(widgets), [widgets]);
@@ -521,7 +525,14 @@ export function GameWidgetSetupEditor({ widgets, onChange, disabled, className }
         <div className="space-y-2">
           {normalizedWidgets.map((widget) => (
             <div key={widget.id} className="rounded-lg bg-[var(--background)]/75 p-3 ring-1 ring-[var(--border)]">
-              <div className="grid gap-2 sm:grid-cols-[3.25rem_minmax(0,1fr)_9rem_auto] sm:items-end">
+              <div
+                className={cn(
+                  "grid gap-2",
+                  containerQueries
+                    ? "@lg:grid-cols-[3.25rem_minmax(0,1fr)_9rem_auto] @lg:items-end"
+                    : "sm:grid-cols-[3.25rem_minmax(0,1fr)_9rem_auto] sm:items-end",
+                )}
+              >
                 <label className="space-y-1">
                   <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
                     {localizeUi("ui.game.gamewidgetsetupeditor.icon")}
@@ -588,7 +599,7 @@ export function GameWidgetSetupEditor({ widgets, onChange, disabled, className }
                 </div>
               </div>
 
-              <div className="mt-2 grid gap-2 sm:grid-cols-3">
+              <div className={cn("mt-2 grid gap-2", containerQueries ? "@lg:grid-cols-3" : "sm:grid-cols-3")}>
                 <label className="space-y-1">
                   <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
                     {localizeUi("ui.game.gamewidgetsetupeditor.id")}
@@ -624,23 +635,22 @@ export function GameWidgetSetupEditor({ widgets, onChange, disabled, className }
                     <option value="hud_right">{localizeUi("ui.game.gamewidgetsetupeditor.rightHud")}</option>
                   </select>
                 </label>
-                <label className="space-y-1">
-                  <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
-                    {localizeUi("ui.game.gamewidgetsetupeditor.accent")}
-                  </span>
-                  <input
-                    type="color"
-                    value={/^#[0-9a-f]{6}$/i.test(widget.accent ?? "") ? widget.accent : DEFAULT_ACCENTS[widget.type]}
-                    disabled={disabled}
-                    onChange={(event) => replaceWidget(widget.id, { accent: event.target.value })}
-                    className="h-9 w-full rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-2 py-1"
-                  />
-                </label>
+                <ColorPicker
+                  compact
+                  label={localizeUi("ui.game.gamewidgetsetupeditor.accent")}
+                  value={widget.accent === DEFAULT_ACCENTS[widget.type] ? "" : (widget.accent ?? "")}
+                  emptyText={localizeUi("ui.game.gamewidgetsetupeditor.defaultAccent")}
+                  emptyPreviewValue={DEFAULT_ACCENTS[widget.type]}
+                  clearLabel={localizeUi("ui.game.gamewidgetsetupeditor.resetAccent")}
+                  disabled={disabled}
+                  onChange={(accent) => replaceWidget(widget.id, { accent: accent || DEFAULT_ACCENTS[widget.type] })}
+                />
               </div>
 
               <WidgetConfigFields
                 widget={widget}
                 disabled={disabled}
+                containerQueries={containerQueries}
                 onConfigChange={(patch) => updateWidgetConfig(widget.id, patch)}
               />
             </div>
@@ -654,10 +664,12 @@ export function GameWidgetSetupEditor({ widgets, onChange, disabled, className }
 function WidgetConfigFields({
   widget,
   disabled,
+  containerQueries,
   onConfigChange,
 }: {
   widget: HudWidget;
   disabled?: boolean;
+  containerQueries: boolean;
   onConfigChange: (patch: Partial<HudWidgetConfig>) => void;
 }) {
   const { t: localizeUi } = useUiTranslation();
@@ -665,7 +677,7 @@ function WidgetConfigFields({
     const value = parseNumber(widget.config.value ?? widget.config.startingValue, 0, 0);
     const max = parseNumber(widget.config.max, 100, 1);
     return (
-      <div className="mt-2 grid gap-2 sm:grid-cols-2">
+      <div className={cn("mt-2 grid gap-2", containerQueries ? "@lg:grid-cols-2" : "sm:grid-cols-2")}>
         <label className="space-y-1">
           <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
             {localizeUi("ui.game.widgeteditormodal.value")}
@@ -720,7 +732,13 @@ function WidgetConfigFields({
     return (
       <div className="mt-2 space-y-2">
         {stats.map((stat, index) => (
-          <div key={index} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_7rem_auto]">
+          <div
+            key={index}
+            className={cn(
+              "grid gap-2",
+              containerQueries ? "@lg:grid-cols-[minmax(0,1fr)_7rem_auto]" : "sm:grid-cols-[minmax(0,1fr)_7rem_auto]",
+            )}
+          >
             <input
               value={stat.name}
               disabled={disabled}
@@ -779,7 +797,12 @@ function WidgetConfigFields({
   if (widget.type === "inventory_grid") {
     const contents = Array.isArray(widget.config.contents) ? widget.config.contents : [];
     return (
-      <div className="mt-2 grid gap-2 sm:grid-cols-[7rem_minmax(0,1fr)]">
+      <div
+        className={cn(
+          "mt-2 grid gap-2",
+          containerQueries ? "@lg:grid-cols-[7rem_minmax(0,1fr)]" : "sm:grid-cols-[7rem_minmax(0,1fr)]",
+        )}
+      >
         <label className="space-y-1">
           <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
             {localizeUi("ui.game.widgetconfigfields.slots")}
@@ -814,7 +837,7 @@ function WidgetConfigFields({
   }
 
   return (
-    <div className="mt-2 grid gap-2 sm:grid-cols-2">
+    <div className={cn("mt-2 grid gap-2", containerQueries ? "@lg:grid-cols-2" : "sm:grid-cols-2")}>
       <label className="space-y-1">
         <span className="text-[0.625rem] font-medium text-[var(--muted-foreground)]">
           {localizeUi("ui.game.widgetconfigfields.seconds")}

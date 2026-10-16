@@ -1,4 +1,5 @@
 import { CardLibraryPreview } from "./CardLibraryPreview";
+import { AvatarImage } from "./AvatarImage";
 import {
   Fragment,
   useCallback,
@@ -10,20 +11,8 @@ import {
   useState,
   type UIEvent,
 } from "react";
-import {
-  ArrowLeft,
-  ArrowUpDown,
-  Check,
-  Download,
-  Hash,
-  MessageCircle,
-  Pencil,
-  Plus,
-  Search,
-  Star,
-  User,
-} from "lucide-react";
-import { type CharacterData, type Persona } from "@marinara-engine/shared";
+import { ArrowLeft, ArrowUpDown, Download, Hash, MessageCircle, Pencil, Plus, Search, Star, User } from "lucide-react";
+import { estimateTextTokens, type CharacterData, type Persona } from "@marinara-engine/shared";
 import type { CharacterCatalogEntry } from "@marinara-engine/shared";
 import { useTranslation, useTranslation as useUiTranslation } from "react-i18next";
 import {
@@ -42,6 +31,7 @@ import {
 } from "../../lib/card-library-search";
 import { estimateCharacterCardTokens, formatEstimatedTokens } from "../../lib/character-token-count";
 import { applyInlineMarkdown, renderMarkdownBlocks } from "../../lib/markdown";
+import { resolveSelfCardAssets } from "../../lib/card-asset-links";
 import { normalizeAvatarCrop, type AvatarCrop } from "@marinara-engine/shared";
 import { cn, getAvatarCropStyle } from "../../lib/utils";
 import { useLocalizedUiText } from "../../localization/use-localized-ui-text";
@@ -58,7 +48,10 @@ const libraryToolbarFieldClass = "mari-chrome-field h-10 w-full text-[0.75rem] m
 
 type CharacterRow = CharacterCatalogEntry;
 
-type ParsedCharacterRow = Pick<CharacterRow, "id" | "comment" | "avatarPath" | "createdAt" | "updatedAt"> & {
+type ParsedCharacterRow = Pick<
+  CharacterRow,
+  "id" | "comment" | "avatarPath" | "createdAt" | "updatedAt" | "tokenEstimate"
+> & {
   parsed: Partial<CharacterData> & {
     extensions?: Record<string, unknown>;
   };
@@ -79,7 +72,6 @@ type LibraryCard = {
   tags: string[];
   tokenEstimate: number;
   favorite: boolean;
-  active: boolean;
   creatorNotes: string;
   hasExplicitSummary: boolean;
   sections: LibrarySection[];
@@ -122,7 +114,7 @@ function parseCharacterRow(char: CharacterRow): ParsedCharacterRow {
       character_version: char.version,
       extensions: { fav: char.favorite, avatarCrop: char.avatarCrop, nameColor: char.nameColor },
     };
-    return { ...char, parsed: (parsed as unknown as ParsedCharacterRow["parsed"]) ?? {} };
+    return { ...char, parsed: parsed as unknown as ParsedCharacterRow["parsed"] };
   } catch {
     return { ...char, parsed: { name: "Unknown", description: "" } };
   }
@@ -157,12 +149,15 @@ function truncateText(content: string, maxLength: number) {
 }
 
 function getCharacterSections(char: ParsedCharacterRow): LibrarySection[] {
+  // card://self gallery images, such as greeting images saved locally (#7221), show from this character's gallery.
   return [
     { title: "Description", content: getText(char.parsed.description) },
     { title: "Personality", content: getText(char.parsed.personality) },
     { title: "Scenario", content: getText(char.parsed.scenario) },
     { title: "Opening Message", content: getText(char.parsed.first_mes) },
-  ].filter((section) => section.content);
+  ]
+    .map((section) => ({ ...section, content: resolveSelfCardAssets(section.content, char.id) }))
+    .filter((section) => section.content);
 }
 
 function getPersonaSections(persona: Persona): LibrarySection[] {
@@ -176,10 +171,10 @@ function getPersonaSections(persona: Persona): LibrarySection[] {
 }
 
 function estimatePersonaTokens(persona: Persona) {
-  return Math.ceil(
+  return estimateTextTokens(
     [persona.description, persona.personality, persona.scenario, persona.backstory, persona.appearance]
       .map(getText)
-      .join("").length / 4,
+      .join(""),
   );
 }
 
@@ -196,9 +191,8 @@ function toCharacterLibraryCard(char: ParsedCharacterRow): LibraryCard {
     createdAt: char.createdAt,
     updatedAt: char.updatedAt,
     tags: getCharacterTags(char),
-    tokenEstimate: estimateCharacterCardTokens(char.parsed),
+    tokenEstimate: char.tokenEstimate ?? estimateCharacterCardTokens(char.parsed),
     favorite: !!char.parsed.extensions?.fav,
-    active: false,
     creatorNotes: getText(char.parsed.creator_notes),
     hasExplicitSummary: Boolean(getText(char.parsed.summary)),
     sections: getCharacterSections(char),
@@ -219,7 +213,6 @@ function toPersonaLibraryCard(persona: Persona): LibraryCard {
     tags: persona.tags.filter((tag) => tag.trim().length > 0),
     tokenEstimate: estimatePersonaTokens(persona),
     favorite: false,
-    active: persona.isActive,
     creatorNotes: getText(persona.creatorNotes),
     hasExplicitSummary: false,
     sections: getPersonaSections(persona),
@@ -247,9 +240,10 @@ function CardLibraryDetailCard({
       <div className="overflow-hidden rounded-[1.5rem] border border-[var(--marinara-chat-chrome-panel-border)] bg-[var(--background)]/70 shadow-[0_24px_70px_-40px_rgba(15,23,42,0.95)] sm:rounded-[2rem]">
         <div className={cn("mari-avatar-placeholder relative aspect-square overflow-hidden", placeholderClass)}>
           {card.avatarPath ? (
-            <img
+            <AvatarImage
               src={card.avatarPath}
               alt={card.name}
+              iconSize="2.5rem"
               className="h-full w-full object-cover"
               style={getAvatarCropStyle(card.avatarCrop)}
             />
@@ -287,7 +281,7 @@ function CardLibraryDetailCard({
                   )}
                 >
                   <Hash size="0.75rem" />
-                  {formatEstimatedTokens(card.tokenEstimate)}
+                  {formatEstimatedTokens(card.tokenEstimate, localizeUi)}
                 </span>
                 {card.favorite && (
                   <span
@@ -296,11 +290,6 @@ function CardLibraryDetailCard({
                   >
                     <Star size="0.75rem" className="fill-current" />{" "}
                     {localizeUi("ui.characters.cardlibrarydetailcard.favorite")}
-                  </span>
-                )}
-                {card.active && (
-                  <span className="mari-chrome-muted-badge mari-chrome-accent-surface gap-1 px-2.5 py-1 text-[0.6875rem]">
-                    <Check size="0.75rem" /> {localizeUi("ui.characters.lorebooktab.active")}
                   </span>
                 )}
               </div>
@@ -610,9 +599,15 @@ export function CharacterLibraryView() {
                 {copy.heading}
               </h1>
               <p className="text-xs text-[var(--marinara-chat-chrome-panel-muted)] md:text-sm">
-                {filteredCards.length} {localizeUi("ui.characters.characterlibraryview.outOf")} {cards.length}{" "}
-                {localizeUi("ui.characters.characterlibraryview.card")}
-                {cards.length === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s")}
+                {hasNextPage
+                  ? localizeUi("ui.characters.characterlibraryview.loadedCount", {
+                      visible: filteredCards.length,
+                      loaded: cards.length,
+                    })
+                  : localizeUi("ui.characters.characterlibraryview.cardCount", {
+                      visible: filteredCards.length,
+                      count: cards.length,
+                    })}
               </p>
             </div>
           </div>

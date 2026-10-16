@@ -1,3 +1,5 @@
+import { useLibraryFolderDrag } from "../../hooks/use-library-folder-drag";
+import { useLibraryOrder } from "../../hooks/use-library-order";
 // ──────────────────────────────────────────────
 // Panel: Presets (overhauled — search, assign, edit, duplicate)
 // ──────────────────────────────────────────────
@@ -41,6 +43,7 @@ import {
 import { useChatStore } from "../../stores/chat.store";
 import { useUIStore, type ResourcePanelSort } from "../../stores/ui.store";
 import { api, ApiError } from "../../lib/api-client";
+import { EXPORT_FAILED_TOAST_ID } from "../../lib/file-download";
 import { confirmNonEmptyFolderDelete, showConfirmDialog } from "../../lib/app-dialogs";
 import { ChoiceSelectionModal } from "../presets/ChoiceSelectionModal";
 import { SelectionActionBar } from "../ui/SelectionActionBar";
@@ -68,7 +71,7 @@ import {
   Camera,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
-import { sortBasicPanelItems } from "../../lib/panel-sort";
+import { sortBasicPanelItems, sortPanelFolders } from "../../lib/panel-sort";
 import { downloadJsonFile } from "../../lib/download-json";
 import { downloadZipFile } from "../../lib/download-zip";
 import { getFolderImportEntries, isPatternSafe, isStockMarinaraUniversalPreset } from "@marinara-engine/shared";
@@ -92,7 +95,6 @@ import {
 import { handleFolderRenameKeyDown, useFolderRenameGesture } from "../../hooks/use-folder-rename-gesture";
 import { useTouchFolderDrag } from "../../hooks/use-touch-folder-drag";
 import { SmoothFolderContent } from "../ui/SmoothFolderContent";
-import { TouchDragHandle } from "../ui/TouchDragHandle";
 import { getTouchReorderDropIndex } from "../../lib/touch-reorder";
 import { useLocalizedUiText } from "../../localization/use-localized-ui-text";
 import { useTranslation as useUiTranslation } from "react-i18next";
@@ -277,6 +279,9 @@ function normalizeRegexImportEntry(entry: unknown, fallbackOrder: number) {
 }
 
 export function PresetsPanel() {
+  const manualOrder = useLibraryOrder("preset");
+  const { active: manualOrderActive, orderItems: orderLibraryItems } = manualOrder;
+  const folderDrag = useLibraryFolderDrag("preset");
   const { t: localizeUi } = useUiTranslation();
   const localize = useLocalizedUiText();
   const { data: presets, isLoading } = usePresets();
@@ -311,7 +316,8 @@ export function PresetsPanel() {
   const updateMetadata = useUpdateChatMetadata();
   const [search, setSearch] = useState("");
   const [choiceModalPresetId, setChoiceModalPresetId] = useState<string | null>(null);
-  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectionTarget, setSelectionTarget] = useState<"presets" | "regex" | null>(null);
+  const selectionMode = selectionTarget === "presets";
   const [selectedPresetIds, setSelectedPresetIds] = useState<Set<string>>(new Set());
   const [exportingSelected, setExportingSelected] = useState(false);
   const [regexImportError, setRegexImportError] = useState<string | null>(null);
@@ -349,13 +355,15 @@ export function PresetsPanel() {
   }, [presets, search]);
   const sortedPresets = useMemo(
     () =>
-      sortBasicPanelItems(
-        filteredPresets,
-        sort,
-        (preset) => preset.name,
-        (preset) => preset.createdAt || preset.updatedAt,
+      orderLibraryItems(
+        sortBasicPanelItems(
+          filteredPresets,
+          sort,
+          (preset) => preset.name,
+          (preset) => preset.createdAt || preset.updatedAt,
+        ),
       ),
-    [filteredPresets, sort],
+    [filteredPresets, sort, orderLibraryItems],
   );
   const presetSearchActive = search.trim().length > 0;
 
@@ -444,7 +452,7 @@ export function PresetsPanel() {
   }, []);
 
   const exitSelectionMode = () => {
-    setSelectionMode(false);
+    setSelectionTarget((target) => (target === "presets" ? null : target));
     setSelectedPresetIds(new Set());
   };
 
@@ -509,15 +517,22 @@ export function PresetsPanel() {
     if (selectedPresetIds.size === 0) return;
     setExportingSelected(true);
     try {
-      await api.downloadPost("/prompts/export-bulk", { ids: [...selectedPresetIds] }, "marinara-presets.zip");
-      toast.success(
-        localizeUi("ui.panels.presetspanel.exportedValue1PresetValue2", {
-          value1: selectedPresetIds.size,
-          value2: selectedPresetIds.size === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s"),
-        }),
+      const saveStatus = await api.downloadPost(
+        "/prompts/export-bulk",
+        { ids: [...selectedPresetIds] },
+        "marinara-presets.zip",
       );
+      if (saveStatus === "saved")
+        toast.success(
+          localizeUi("ui.panels.presetspanel.exportedValue1PresetValue2", {
+            value1: selectedPresetIds.size,
+            value2: selectedPresetIds.size === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s"),
+          }),
+        );
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : localizeUi("ui.panels.presetspanel.failedToExportPresets"));
+      toast.error(error instanceof Error ? error.message : localizeUi("ui.panels.presetspanel.failedToExportPresets"), {
+        id: EXPORT_FAILED_TOAST_ID,
+      });
     } finally {
       setExportingSelected(false);
     }
@@ -531,28 +546,33 @@ export function PresetsPanel() {
     openToolDetail("__new__");
   }, [openToolDetail]);
 
-  const handleExportRegex = useCallback(() => {
-    if (sortedRegexScripts.length === 0) {
-      toast.error(localizeUi("ui.panels.presetspanel.noRegexesToExport"));
-      return;
-    }
+  const handleExportRegex = useCallback(
+    (scripts = sortedRegexScripts) => {
+      if (scripts.length === 0) {
+        toast.error(localizeUi("ui.panels.presetspanel.noRegexesToExport"));
+        return;
+      }
 
-    downloadJsonFile(
-      {
-        kind: "marinara.regex-scripts",
-        version: 1,
-        exportedAt: new Date().toISOString(),
-        regexScripts: sortedRegexScripts.map(serializeRegexScript),
-      },
-      "marinara-regexes.json",
-    );
-    toast.success(
-      localizeUi("ui.panels.presetspanel.exportedValue1RegexValue2", {
-        value1: sortedRegexScripts.length,
-        value2: sortedRegexScripts.length === 1 ? "" : localizeUi("ui.lorebooks.lorebookeditor.es"),
-      }),
-    );
-  }, [sortedRegexScripts, localizeUi]);
+      void downloadJsonFile(
+        {
+          kind: "marinara.regex-scripts",
+          version: 1,
+          exportedAt: new Date().toISOString(),
+          regexScripts: scripts.map(serializeRegexScript),
+        },
+        "marinara-regexes.json",
+      ).then((saveStatus) => {
+        if (saveStatus === "saved")
+          toast.success(
+            localizeUi("ui.panels.presetspanel.exportedValue1RegexValue2", {
+              value1: scripts.length,
+              value2: scripts.length === 1 ? "" : localizeUi("ui.lorebooks.lorebookeditor.es"),
+            }),
+          );
+      });
+    },
+    [sortedRegexScripts, localizeUi],
+  );
 
   const handleImportRegex = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
@@ -645,16 +665,18 @@ export function PresetsPanel() {
       return;
     }
 
-    downloadZipFile(
+    void downloadZipFile(
       createCustomToolFolderPackageFiles(customToolRows.map(serializeCustomToolForTransfer)),
       "marinara-functions.zip",
-    );
-    toast.success(
-      localizeUi("ui.panels.presetspanel.exportedValue1FunctionValue2", {
-        value1: customToolRows.length,
-        value2: customToolRows.length === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s"),
-      }),
-    );
+    ).then((saveStatus) => {
+      if (saveStatus === "saved")
+        toast.success(
+          localizeUi("ui.panels.presetspanel.exportedValue1FunctionValue2", {
+            value1: customToolRows.length,
+            value2: customToolRows.length === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s"),
+          }),
+        );
+    });
   }, [customToolRows, localizeUi]);
 
   const handleImportFunctions = useCallback(
@@ -857,14 +879,14 @@ export function PresetsPanel() {
   );
 
   const finishPresetTouchDrag = useCallback(
-    (presetId: string, x: number, y: number) => {
+    (presetId: string, x: number, y: number, dragIds?: string[]) => {
       const target = document.elementFromPoint(x, y);
       const folderElement = target?.closest("[data-preset-folder-id]") as HTMLElement | null;
       const rootElement = target?.closest("[data-preset-folder-root]") as HTMLElement | null;
       if (folderElement?.dataset.presetFolderId) {
-        movePresetsToFolder(getDraggedPresetIds(presetId), folderElement.dataset.presetFolderId);
-      } else if (rootElement) {
-        movePresetsToFolder(getDraggedPresetIds(presetId), null);
+        movePresetsToFolder(dragIds ?? getDraggedPresetIds(presetId), folderElement.dataset.presetFolderId);
+      } else if (rootElement || target?.closest('[data-drag-kind="preset"]')) {
+        movePresetsToFolder(dragIds ?? getDraggedPresetIds(presetId), null);
       }
       setDraggedPresetId(null);
       window.setTimeout(() => {
@@ -886,6 +908,8 @@ export function PresetsPanel() {
   }, []);
 
   const { startTouchDrag: startPresetTouchDrag } = useTouchFolderDrag({
+    getDragIds: getDraggedPresetIds,
+    onReorder: manualOrder.reorder,
     onActivate: (presetId) => {
       suppressPresetClickRef.current = true;
       setDraggedPresetId(presetId);
@@ -918,8 +942,24 @@ export function PresetsPanel() {
         <div
           key={preset.id}
           data-touch-drag-card="preset"
+          data-drag-id={preset.id}
+          aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
+          data-drag-kind="preset"
+          data-drag-payload={JSON.stringify({ version: 1, kind: "preset", ids: [preset.id], label: preset.name })}
+          onMouseDown={(event) => {
+            startPresetTouchDrag(event, preset.id, {
+              chatResourcePayload: { version: 1, kind: "preset", ids: [preset.id], label: preset.name },
+              sourceElement: event.currentTarget.closest<HTMLElement>('[data-touch-drag-card="preset"]'),
+            });
+          }}
+          onTouchStart={(event) => {
+            startPresetTouchDrag(event, preset.id, {
+              chatResourcePayload: { version: 1, kind: "preset", ids: [preset.id], label: preset.name },
+              sourceElement: event.currentTarget.closest<HTMLElement>('[data-touch-drag-card="preset"]'),
+            });
+          }}
           className={cn(
-            "group relative flex touch-pan-y cursor-pointer items-center gap-3 rounded-xl p-2.5 transition-all hover:bg-[var(--sidebar-accent)]",
+            "group relative flex touch-pan-y cursor-grab active:cursor-grabbing items-center gap-3 rounded-xl p-2.5 transition-all hover:bg-[var(--sidebar-accent)]",
             selectionMode &&
               isBulkSelected &&
               "bg-[var(--marinara-chat-chrome-highlight-bg)] ring-1 ring-[var(--marinara-chat-chrome-button-border-active)]",
@@ -946,16 +986,6 @@ export function PresetsPanel() {
             clearActiveChatResourceDrag();
           }}
         >
-          <TouchDragHandle
-            label={localizeUi("ui.panels.presetspanel.dragPreset")}
-            onTouchStart={(event) => {
-              startPresetTouchDrag(event, preset.id, {
-                allowInteractiveTarget: true,
-                chatResourcePayload: { version: 1, kind: "preset", ids: [preset.id], label: preset.name },
-                sourceElement: event.currentTarget.closest<HTMLElement>('[data-touch-drag-card="preset"]'),
-              });
-            }}
-          />
           <div
             className="flex min-w-0 flex-1 items-center gap-3"
             onClick={() => {
@@ -1194,7 +1224,7 @@ export function PresetsPanel() {
           type="button"
           onClick={() => {
             if (selectionMode) exitSelectionMode();
-            else setSelectionMode(true);
+            else setSelectionTarget("presets");
           }}
           className={cn(
             "mari-chrome-control mari-chrome-control--primary flex-1 text-xs",
@@ -1228,12 +1258,19 @@ export function PresetsPanel() {
         </div>
         <div className="relative">
           <select
-            value={sort}
-            onChange={(e) => setSort(e.target.value as ResourcePanelSort)}
+            value={manualOrderActive || folderDrag.active ? "custom" : sort}
+            onChange={(e) => {
+              manualOrder.setActive(e.target.value === "custom");
+              folderDrag.setActive(e.target.value === "custom");
+              if (e.target.value !== "custom") setSort(e.target.value as ResourcePanelSort);
+            }}
             className="mari-chrome-field mari-chrome-sort-field mari-accent-animated h-10 appearance-none py-0 pl-2.5 pr-7 text-[0.6875rem] md:h-9"
             title={localizeUi("ui.panels.agentspanel.sortOrder")}
             aria-label={localizeUi("ui.panels.presetspanel.sortPresets")}
           >
+            <option value="custom" title={localizeUi("dragDrop.manualOrderHelp")}>
+              {localizeUi("dragDrop.manualOrder")}
+            </option>
             <option value="name-asc">{localizeUi("ui.panels.backgroundpicker.aZ")}</option>
             <option value="name-desc">{localizeUi("ui.panels.backgroundpicker.zA")}</option>
             <option value="newest">{localizeUi("ui.panels.backgroundpicker.newest")}</option>
@@ -1265,19 +1302,22 @@ export function PresetsPanel() {
 
       <PanelSection title={localizeUi("ui.panels.presetspanel.prompts")} icon={<FileText size="0.8125rem" />}>
         <div className="flex flex-col gap-0.5">
-          {presetFolders.map((folder) => {
+          {folderDrag.orderItems(sortPanelFolders(presetFolders, sort)).map((folder) => {
             const isEditing = editingFolderId === folder.id;
-            const folderItems = sortBasicPanelItems(
-              folder.itemIds.map((id) => presetById.get(id)).filter((item): item is PresetRow => Boolean(item)),
-              sort,
-              (preset) => preset.name,
-              (preset) => preset.createdAt || preset.updatedAt,
+            const folderItems = orderLibraryItems(
+              sortBasicPanelItems(
+                folder.itemIds.map((id) => presetById.get(id)).filter((item): item is PresetRow => Boolean(item)),
+                sort,
+                (preset) => preset.name,
+                (preset) => preset.createdAt || preset.updatedAt,
+              ),
             );
             if (presetSearchActive && folderItems.length === 0) return null;
             const isExpanded = (presetSearchActive && folderItems.length > 0) || expandedFolderId === folder.id;
             return (
               <div
                 key={folder.id}
+                {...folderDrag.bind(folder.id)}
                 data-preset-folder-id={folder.id}
                 onDragOver={(event) => {
                   if (draggedPresetId) {
@@ -1294,6 +1334,7 @@ export function PresetsPanel() {
                 className="flex flex-col rounded-lg transition-colors"
               >
                 <div
+                  data-drag-surface
                   role="button"
                   tabIndex={0}
                   aria-expanded={isExpanded}
@@ -1341,6 +1382,7 @@ export function PresetsPanel() {
                         onKeyDown={(event) => {
                           if (event.key === "Enter") event.currentTarget.blur();
                           if (event.key === "Escape") {
+                            event.preventDefault();
                             setEditingFolderId(null);
                             setEditFolderName("");
                           }
@@ -1474,6 +1516,15 @@ export function PresetsPanel() {
       </PanelSection>
 
       <RegexSection
+        selectionMode={selectionTarget === "regex"}
+        setSelectionMode={(enabled) => {
+          if (enabled) {
+            setSelectedPresetIds(new Set());
+            setSelectionTarget("regex");
+          } else {
+            setSelectionTarget((target) => (target === "regex" ? null : target));
+          }
+        }}
         handleCreateRegex={handleCreateRegex}
         handleImportRegex={handleImportRegex}
         handleExportRegex={handleExportRegex}
@@ -1541,6 +1592,8 @@ export function PresetsPanel() {
 }
 
 function RegexSection({
+  selectionMode,
+  setSelectionMode,
   handleCreateRegex,
   handleImportRegex,
   handleExportRegex,
@@ -1558,9 +1611,11 @@ function RegexSection({
   updateRegex,
   deleteRegex,
 }: {
+  selectionMode: boolean;
+  setSelectionMode: (enabled: boolean) => void;
   handleCreateRegex: () => void;
   handleImportRegex: (event: ChangeEvent<HTMLInputElement>) => void;
-  handleExportRegex: () => void;
+  handleExportRegex: (scripts?: RegexScriptRow[]) => void;
   regexImportError: string | null;
   regexImportWarning: string | null;
   regexImportSuccess: string | null;
@@ -1576,6 +1631,44 @@ function RegexSection({
   deleteRegex: ReturnType<typeof useDeleteRegexScript>;
 }) {
   const { t: localizeUi } = useUiTranslation();
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState(false);
+  const selectedScripts = sortedRegexScripts.filter((script) => selectedIds.has(script.id));
+  const toggleSelection = (id: string) => {
+    setSelectedIds((previous) => {
+      const next = new Set(previous);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const deleteSelected = async () => {
+    if (deleting || selectedScripts.length === 0) return;
+    setDeleting(true);
+    try {
+      if (
+        !(await showConfirmDialog({
+          title: localizeUi("regex.bulk.deleteTitle"),
+          message: localizeUi("regex.bulk.deleteConfirm", { count: selectedScripts.length }),
+          confirmLabel: localizeUi("lorebook.editor.batch.delete"),
+          tone: "destructive",
+        }))
+      )
+        return;
+      const results = await Promise.allSettled(selectedScripts.map((script) => deleteRegex.mutateAsync(script.id)));
+      const failedIds = selectedScripts
+        .filter((_, index) => results[index]?.status === "rejected")
+        .map((script) => script.id);
+      setSelectedIds(new Set(failedIds));
+      if (failedIds.length > 0) {
+        toast.error(localizeUi("regex.bulk.deleteFailed", { count: failedIds.length }));
+      } else {
+        setSelectionMode(false);
+      }
+    } finally {
+      setDeleting(false);
+    }
+  };
   const { startTouchDrag: startRegexTouchDrag } = useTouchFolderDrag({
     onActivate: (scriptId) => {
       setDraggedRegexId(scriptId);
@@ -1608,6 +1701,23 @@ function RegexSection({
         <div className="flex items-center gap-1">
           <button
             type="button"
+            onClick={() => {
+              setSelectionMode(!selectionMode);
+              if (selectionMode) setSelectedIds(new Set());
+            }}
+            disabled={deleting || sortedRegexScripts.length === 0}
+            aria-label={localizeUi(selectionMode ? "regex.bulk.exitSelection" : "regex.bulk.select")}
+            title={localizeUi(selectionMode ? "regex.bulk.exitSelection" : "regex.bulk.select")}
+            aria-pressed={selectionMode}
+            className={cn(
+              "mari-chrome-control mari-chrome-control--small p-1.5",
+              selectionMode && "mari-chrome-control--selected",
+            )}
+          >
+            <Check size="0.8125rem" />
+          </button>
+          <button
+            type="button"
             onClick={handleCreateRegex}
             className="mari-chrome-control mari-chrome-control--small p-1.5"
             title={localizeUi("ui.characters.characterregexsection.createRegex")}
@@ -1625,7 +1735,7 @@ function RegexSection({
           </label>
           <button
             type="button"
-            onClick={handleExportRegex}
+            onClick={() => handleExportRegex()}
             disabled={sortedRegexScripts.length === 0}
             className="mari-chrome-control mari-chrome-control--small p-1.5"
             title={localizeUi("ui.characters.characterregexsection.exportRegexesToJson")}
@@ -1646,6 +1756,20 @@ function RegexSection({
       )}
       {regexImportWarning && <div className="mb-1 px-1 text-xs text-amber-500">{regexImportWarning}</div>}
       {regexImportSuccess && <div className="mb-1 px-1 text-xs text-green-500">{regexImportSuccess}</div>}
+      {selectionMode && (
+        <label className="mb-2 flex min-h-11 cursor-pointer items-center gap-2 px-2 text-xs">
+          <input
+            type="checkbox"
+            checked={selectedScripts.length === sortedRegexScripts.length && sortedRegexScripts.length > 0}
+            disabled={deleting}
+            onChange={(event) =>
+              setSelectedIds(new Set(event.target.checked ? sortedRegexScripts.map((script) => script.id) : []))
+            }
+            className="h-4 w-4 accent-[var(--primary)]"
+          />
+          {localizeUi("regex.bulk.selectAll")}
+        </label>
+      )}
       {sortedRegexScripts.length === 0 ? (
         <p className="mari-chrome-text-muted px-1 py-2 text-[0.625rem]">
           {localizeUi("ui.panels.regexsection.noRegexesYet")}
@@ -1668,10 +1792,9 @@ function RegexSection({
                 data-touch-reorder-index={index}
                 className={cn(
                   "group flex flex-wrap items-start gap-2 rounded-xl p-2 transition-colors hover:bg-[var(--sidebar-accent)]",
-                  !enabled && "opacity-50",
                   draggedRegexId === script.id && "opacity-40",
                 )}
-                draggable={regexDragReadyId === script.id}
+                draggable={!selectionMode && regexDragReadyId === script.id}
                 onDragStart={(event) => {
                   setDraggedRegexId(script.id);
                   event.dataTransfer.effectAllowed = "move";
@@ -1692,35 +1815,49 @@ function RegexSection({
                   setRegexDragReadyId(null);
                 }}
               >
-                <button
-                  type="button"
-                  className="mari-chrome-accent-text-muted mari-accent-animated mt-0.5 shrink-0 cursor-grab rounded p-0.5 opacity-100 transition-all hover:bg-[var(--marinara-chat-chrome-highlight-bg)] hover:text-[var(--marinara-chat-chrome-button-text-hover)] active:cursor-grabbing [@media(pointer:fine)]:opacity-0 [@media(pointer:fine)]:group-focus-within:opacity-100 [@media(pointer:fine)]:group-hover:opacity-100"
-                  title={localizeUi("ui.lorebooks.lorebookentryrow.dragToReorder")}
-                  onClick={(event) => event.stopPropagation()}
-                  onMouseDown={(event) => {
-                    event.stopPropagation();
-                    setRegexDragReadyId(script.id);
-                  }}
-                  onMouseUp={(event) => {
-                    event.stopPropagation();
-                    setRegexDragReadyId(null);
-                  }}
-                  onTouchStart={(event) => {
-                    event.stopPropagation();
-                    startRegexTouchDrag(event, script.id, {
-                      allowInteractiveTarget: true,
-                      sourceElement: event.currentTarget.closest<HTMLElement>(
-                        '[data-touch-reorder-item="preset-regex"]',
-                      ),
-                    });
-                  }}
-                >
-                  <GripVertical size="0.8125rem" />
-                </button>
+                {selectionMode ? (
+                  <label className="flex min-h-11 w-6 shrink-0 cursor-pointer items-center justify-center">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(script.id)}
+                      disabled={deleting}
+                      onChange={() => toggleSelection(script.id)}
+                      aria-label={localizeUi("regex.bulk.selectEntry", { name: script.name })}
+                      className="h-4 w-4 accent-[var(--primary)]"
+                    />
+                  </label>
+                ) : (
+                  <button
+                    type="button"
+                    className="mari-chrome-accent-text-muted mari-accent-animated mt-0.5 shrink-0 cursor-grab rounded p-0.5 opacity-100 transition-all hover:bg-[var(--marinara-chat-chrome-highlight-bg)] hover:text-[var(--marinara-chat-chrome-button-text-hover)] active:cursor-grabbing [@media(pointer:fine)]:opacity-0 [@media(pointer:fine)]:group-focus-within:opacity-100 [@media(pointer:fine)]:group-hover:opacity-100"
+                    title={localizeUi("ui.lorebooks.lorebookentryrow.dragToReorder")}
+                    onClick={(event) => event.stopPropagation()}
+                    onMouseDown={(event) => {
+                      event.stopPropagation();
+                      setRegexDragReadyId(script.id);
+                    }}
+                    onMouseUp={(event) => {
+                      event.stopPropagation();
+                      setRegexDragReadyId(null);
+                    }}
+                    onTouchStart={(event) => {
+                      event.stopPropagation();
+                      startRegexTouchDrag(event, script.id, {
+                        allowInteractiveTarget: true,
+                        sourceElement: event.currentTarget.closest<HTMLElement>(
+                          '[data-touch-reorder-item="preset-regex"]',
+                        ),
+                      });
+                    }}
+                  >
+                    <GripVertical size="0.8125rem" />
+                  </button>
+                )}
                 <Regex size="0.875rem" className="mt-0.5 shrink-0 text-[var(--marinara-chat-chrome-button-text)]" />
                 <button
-                  className="min-w-0 flex-1 basis-[min(100%,10rem)] text-left"
-                  onClick={() => openRegexDetail(script.id)}
+                  className={cn("min-w-0 flex-1 basis-[min(100%,10rem)] text-left", !enabled && "opacity-50")}
+                  disabled={deleting}
+                  onClick={() => (selectionMode ? toggleSelection(script.id) : openRegexDetail(script.id))}
                 >
                   <div className="text-xs font-medium">{script.name}</div>
                   <div className="mt-0.5 flex min-w-0 items-center gap-1">
@@ -1745,59 +1882,70 @@ function RegexSection({
                     ))}
                   </div>
                 </button>
-                <div className="ml-auto flex shrink-0 items-center gap-1">
-                  <div
-                    className="shrink-0"
-                    title={
-                      enabled
-                        ? localizeUi("ui.characters.characterregexsection.disableRegex")
-                        : localizeUi("ui.characters.characterregexsection.enableRegex")
-                    }
-                    onClick={(event) => {
-                      event.stopPropagation();
-                    }}
-                  >
-                    <SettingsSwitch
-                      ariaLabel={enabled ? "Disable regex" : "Enable regex"}
-                      checked={enabled}
-                      onChange={(checked) => updateRegex.mutate({ id: script.id, enabled: checked })}
-                      className="p-0 hover:bg-transparent"
-                    />
-                  </div>
-                  <button
-                    type="button"
-                    className="mari-chrome-control mari-chrome-control--small shrink-0 p-1"
-                    title={localizeUi("ui.characters.characterregexsection.editRegex")}
-                    aria-label={localizeUi("ui.characters.characterregexsection.editRegex")}
-                    onClick={() => openRegexDetail(script.id)}
-                  >
-                    <Pencil size="0.8125rem" />
-                  </button>
-                  <button
-                    type="button"
-                    className="mari-chrome-control mari-chrome-control--small shrink-0 p-1"
-                    title={localizeUi("ui.characters.characterregexsection.deleteRegex")}
-                    aria-label={localizeUi("ui.characters.characterregexsection.deleteRegex")}
-                    onClick={async () => {
-                      if (
-                        await showConfirmDialog({
-                          title: localizeUi("ui.panels.regexsection.deleteRegex"),
-                          message: localizeUi("ui.panels.agentspanel.deleteValue1", { value1: script.name }),
-                          confirmLabel: localizeUi("lorebook.editor.batch.delete"),
-                          tone: "destructive",
-                        })
-                      ) {
-                        deleteRegex.mutate(script.id);
+                {!selectionMode && (
+                  <div className="ml-auto flex shrink-0 items-center gap-1">
+                    <div
+                      className="shrink-0"
+                      title={
+                        enabled
+                          ? localizeUi("ui.characters.characterregexsection.disableRegex")
+                          : localizeUi("ui.characters.characterregexsection.enableRegex")
                       }
-                    }}
-                  >
-                    <Trash2 size="0.8125rem" />
-                  </button>
-                </div>
+                      onClick={(event) => {
+                        event.stopPropagation();
+                      }}
+                    >
+                      <SettingsSwitch
+                        ariaLabel={enabled ? "Disable regex" : "Enable regex"}
+                        checked={enabled}
+                        onChange={(checked) => updateRegex.mutate({ id: script.id, enabled: checked })}
+                        className="p-0 hover:bg-transparent"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      className="mari-chrome-control mari-chrome-control--small shrink-0 p-1"
+                      title={localizeUi("ui.characters.characterregexsection.editRegex")}
+                      aria-label={localizeUi("ui.characters.characterregexsection.editRegex")}
+                      onClick={() => openRegexDetail(script.id)}
+                    >
+                      <Pencil size="0.8125rem" />
+                    </button>
+                    <button
+                      type="button"
+                      className="mari-chrome-control mari-chrome-control--small shrink-0 p-1"
+                      title={localizeUi("ui.characters.characterregexsection.deleteRegex")}
+                      aria-label={localizeUi("ui.characters.characterregexsection.deleteRegex")}
+                      onClick={async () => {
+                        if (
+                          await showConfirmDialog({
+                            title: localizeUi("ui.panels.regexsection.deleteRegex"),
+                            message: localizeUi("ui.panels.agentspanel.deleteValue1", { value1: script.name }),
+                            confirmLabel: localizeUi("lorebook.editor.batch.delete"),
+                            tone: "destructive",
+                          })
+                        ) {
+                          deleteRegex.mutate(script.id);
+                        }
+                      }}
+                    >
+                      <Trash2 size="0.8125rem" />
+                    </button>
+                  </div>
+                )}
               </div>
             );
           })}
         </div>
+      )}
+      {selectionMode && (
+        <SelectionActionBar
+          selectedCount={selectedScripts.length}
+          onExport={() => handleExportRegex(selectedScripts)}
+          onDelete={() => void deleteSelected()}
+          exportDisabled={deleting}
+          deleteDisabled={deleting}
+        />
       )}
     </PanelSection>
   );
@@ -2006,7 +2154,6 @@ function FunctionsSection({
                 data-touch-reorder-index={index}
                 className={cn(
                   "group flex flex-wrap items-start gap-2 rounded-xl p-2 transition-colors hover:bg-[var(--sidebar-accent)]",
-                  !enabled && "opacity-50",
                   draggedFunctionId === tool.id && "opacity-40",
                 )}
                 draggable={functionDragReadyId === tool.id}
@@ -2057,7 +2204,7 @@ function FunctionsSection({
                 </button>
                 <Wrench size="0.875rem" className="mt-0.5 shrink-0 text-[var(--marinara-chat-chrome-button-text)]" />
                 <button
-                  className="min-w-0 flex-1 basis-[min(100%,10rem)] text-left"
+                  className={cn("min-w-0 flex-1 basis-[min(100%,10rem)] text-left", !enabled && "opacity-50")}
                   onClick={() => openToolDetail(tool.id)}
                 >
                   <div className="flex min-w-0 items-center gap-1">

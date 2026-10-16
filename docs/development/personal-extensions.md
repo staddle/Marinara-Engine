@@ -93,6 +93,18 @@ Capabilities are declared in the extension payload, persisted with every revisio
 - `button`: a compact top-bar action by default, or a host-rendered action on the `chats`, `bots`, `characters`, `personas`, `lorebooks`, `presets`, `connections`, `agents`, or `settings` surface;
 - `menu-item`: an action in the Extensions menu;
 - `panel`: an entry that opens Marinara's trusted Extensions side panel.
+- `command`: an entry in the Command Center that activates an existing `button`, `menu-item`, or `panel` from the same extension revision.
+
+Commands contain `targetContributionId` and have no `onActivate` or `onEvent` callback. The host resolves the target by extension ID, content hash, and contribution ID. A missing target or a target from another revision fails closed. For example:
+
+```js
+marinara.ui.registerContribution({
+  id: "open-weather",
+  kind: "command",
+  label: "Open weather controls",
+  targetContributionId: "weather-panel",
+});
+```
 
 Side-panel buttons accept `position: "header"`, `"before-content"`, or `"after-content"`. Top-bar buttons omit `position`. Icons are bounded kebab-case names from Marinara's Lucide icon catalog; unsupported names fall back to the puzzle icon.
 
@@ -100,7 +112,7 @@ Panel elements use the same declarative vocabulary as constrained windows: `head
 
 The client independently validates every descriptor before adding it to the runtime store. Contribution kinds, surfaces, positions, controls, IDs, option lists, icon-name syntax, text lengths, total panel text, element count, and per-extension contribution count are validated and capped. React renders extension text as text. No extension-controlled HTML, CSS, URL, React component, or host callback is accepted. The host removes all contributions when the worker is stopped, its hash changes, or it disappears from the approved runtime response. Events are dispatched only to the worker registered for the same extension ID and content hash.
 
-There is no DOM helper, Marinara API fetch, parent event access, or arbitrary network capability. The iframe validates and rate-limits messages. A heartbeat watchdog terminates an unresponsive or busy-looping worker.
+There is no DOM helper, Marinara API fetch, parent event access, or arbitrary network capability. The iframe validates and rate-limits messages. A heartbeat watchdog terminates an unresponsive or busy-looping worker. It waits while the page is hidden or the browser is holding back its timers (background tab, sleep, suspended mobile app), so those pauses never stop a healthy worker. When the sandbox does stop a worker, the host removes its contributions and offers the user a restart.
 
 ## Full page compatibility runtime
 

@@ -1,22 +1,28 @@
 // ──────────────────────────────────────────────
 // Storage: Game State Snapshots
 // ──────────────────────────────────────────────
-import { eq, and, ne, desc, inArray, lte } from "../../db/file-query.js";
+import { createHash } from "node:crypto";
+import { eq, and, ne, asc, desc, inArray, lte } from "../../db/file-query.js";
 import type { DB } from "../../db/connection.js";
 import { gameStateSnapshots } from "../../db/schema/index.js";
 import { newId, now } from "../../utils/id-generator.js";
 import { ensureTimestampAfter } from "../import/import-timestamps.js";
 import {
   coerceGameStateTextValue,
+  applyTrackerFieldLocksToGameStatePatch,
   normalizeWorldCustomFields,
   normalizeTrackerFieldLocks,
   normalizeTrackerFieldLocksForState,
   normalizeTrackerHiddenFields,
   parseTrackerFieldLocks,
   parseTrackerHiddenFields,
+  rulesetLiveStatesSchema,
+  rulesetClocksSchema,
+  type RulesetClocks,
   trackerFieldLocksAreEmpty,
   trackerHiddenFieldsAreEmpty,
   type GameState,
+  type RulesetLiveStates,
   type TrackerFieldLocks,
   type TrackerHiddenFields,
 } from "@marinara-engine/shared";
@@ -24,6 +30,13 @@ import {
 export type GameStateVisibleAnchor = { messageId: string; swipeIndex: number };
 
 const MANUAL_OVERRIDE_FIELDS = ["date", "time", "location", "weather", "temperature"] as const;
+/** Tracker values whose Tracker Panel edits are recorded as a fingerprint, so the record stays small. */
+const MANUAL_EDIT_JSON_FIELDS = ["worldCustomFields", "presentCharacters", "personaStats"] as const;
+/** playerStats holds several trackers, so its edits are recorded per key (`playerStats.activeQuests`). */
+const PLAYER_STATS_EDIT_PREFIX = "playerStats.";
+
+type GameStateRow = typeof gameStateSnapshots.$inferSelect;
+type ManualEditSource = Partial<Record<string, unknown>>;
 
 type GameStateUpdateFields = Partial<
   Pick<
@@ -39,6 +52,8 @@ type GameStateUpdateFields = Partial<
     | "personaStats"
     | "fieldLocks"
     | "hiddenTrackerFields"
+    | "rulesetLive"
+    | "rulesetClocks"
   >
 >;
 
@@ -85,8 +100,93 @@ function parseStoredManualOverrides(value: unknown): Record<string, string> | nu
   return typeof value === "object" && !Array.isArray(value) ? (value as Record<string, string>) : null;
 }
 
+/** The edits of the five scene fields. The others are stored as fingerprints, which mean nothing in a prompt. */
+export function parseSceneManualOverrides(value: unknown): Record<string, string> | null {
+  const scene = Object.fromEntries(
+    Object.entries(parseStoredManualOverrides(value) ?? {}).filter(([key]) =>
+      (MANUAL_OVERRIDE_FIELDS as readonly string[]).includes(key),
+    ),
+  );
+  return Object.keys(scene).length > 0 ? scene : null;
+}
+
 function serializeManualOverrides(manualOverrides: Record<string, string> | null | undefined) {
   return manualOverrides && Object.keys(manualOverrides).length > 0 ? JSON.stringify(manualOverrides) : null;
+}
+
+function fingerprintTrackerValue(value: unknown) {
+  return createHash("sha256")
+    .update(JSON.stringify(value ?? null))
+    .digest("hex")
+    .slice(0, 16);
+}
+
+function storedPlayerStats(row: ManualEditSource | null | undefined): Record<string, unknown> {
+  const stats = parseSnapshotJson<unknown>(row?.playerStats, null);
+  return stats && typeof stats === "object" && !Array.isArray(stats) ? (stats as Record<string, unknown>) : {};
+}
+
+/** What an edit record holds for one tracker value: the text of a scene field, a fingerprint otherwise. */
+function manualEditValue(row: ManualEditSource | null | undefined, key: string): string | null {
+  if ((MANUAL_OVERRIDE_FIELDS as readonly string[]).includes(key)) return coerceGameStateTextValue(row?.[key]) ?? "";
+  if ((MANUAL_EDIT_JSON_FIELDS as readonly string[]).includes(key)) {
+    return fingerprintTrackerValue(parseSnapshotJson<unknown>(row?.[key], null));
+  }
+  if (key.startsWith(PLAYER_STATS_EDIT_PREFIX)) {
+    return fingerprintTrackerValue(storedPlayerStats(row)[key.slice(PLAYER_STATS_EDIT_PREFIX.length)]);
+  }
+  return null;
+}
+
+/** Record in `overrides` every tracker value a Tracker Panel edit changed from `before` to `after`. */
+function recordManualEdits(
+  overrides: Record<string, string>,
+  before: ManualEditSource | null | undefined,
+  after: ManualEditSource,
+) {
+  const statKeys = new Set([...Object.keys(storedPlayerStats(before)), ...Object.keys(storedPlayerStats(after))]);
+  const keys = [
+    ...MANUAL_OVERRIDE_FIELDS,
+    ...MANUAL_EDIT_JSON_FIELDS,
+    ...[...statKeys].map((key) => `${PLAYER_STATS_EDIT_PREFIX}${key}`),
+  ];
+  for (const key of keys) {
+    const edited = manualEditValue(after, key);
+    if (edited !== null && edited !== manualEditValue(before, key)) overrides[key] = edited;
+  }
+}
+
+/** The edits in `overrides` that `row` still holds. A changed value retires its edit for good. */
+function retainManualEdits(overrides: Record<string, string> | null | undefined, row: ManualEditSource) {
+  return Object.fromEntries(
+    Object.entries(overrides ?? {}).filter(([key, value]) => manualEditValue(row, key) === value),
+  );
+}
+
+function emptyGameStateRow(chatId: string): GameStateRow {
+  return {
+    id: "",
+    chatId,
+    messageId: "",
+    swipeIndex: 0,
+    date: null,
+    time: null,
+    location: null,
+    weather: null,
+    temperature: null,
+    worldCustomFields: "[]",
+    presentCharacters: "[]",
+    recentEvents: "[]",
+    playerStats: null,
+    personaStats: null,
+    manualOverrides: null,
+    fieldLocks: null,
+    hiddenTrackerFields: null,
+    rulesetLive: null,
+    rulesetClocks: null,
+    committed: 0,
+    createdAt: "",
+  };
 }
 
 function serializeFieldLocks(fieldLocks: TrackerFieldLocks | null | undefined) {
@@ -97,6 +197,28 @@ function serializeFieldLocks(fieldLocks: TrackerFieldLocks | null | undefined) {
 function serializeHiddenTrackerFields(hiddenFields: TrackerHiddenFields | null | undefined) {
   const normalized = normalizeTrackerHiddenFields(hiddenFields);
   return trackerHiddenFieldsAreEmpty(normalized) ? null : JSON.stringify(normalized);
+}
+
+/** Live ruleset sheet state is bounded at every read and write: an unreadable or oversized value
+ *  reads as none, which the sheet math treats as every pool at its default. */
+export function parseStoredRulesetLive(value: unknown): RulesetLiveStates | null {
+  const parsed = rulesetLiveStatesSchema.safeParse(parseSnapshotJson<unknown>(value, null));
+  return parsed.success && Object.keys(parsed.data).length > 0 ? parsed.data : null;
+}
+
+export function parseStoredRulesetClocks(value: unknown): RulesetClocks {
+  const parsed = rulesetClocksSchema.safeParse(parseSnapshotJson<unknown>(value, []));
+  return parsed.success ? parsed.data : [];
+}
+
+function serializeRulesetClocks(value: unknown): string | null {
+  const clocks = parseStoredRulesetClocks(value);
+  return clocks.length ? JSON.stringify(clocks) : null;
+}
+
+function serializeRulesetLive(value: unknown): string | null {
+  const live = parseStoredRulesetLive(value);
+  return live ? JSON.stringify(live) : null;
 }
 
 function parseSnapshotJson<T>(value: unknown, fallback: T): T {
@@ -206,18 +328,85 @@ export function createGameStateStorage(db: DB) {
             ? this.getLatestExcludingMessage(chatId, excludeMessageId)
             : this.getLatest(chatId);
 
-      if (options?.preferLatestVisible) {
-        if (options.visibleAnchor?.messageId) {
-          const visible = await this.getByChatAndMessage(
-            chatId,
-            options.visibleAnchor.messageId,
-            options.visibleAnchor.swipeIndex,
-          );
-          if (visible) return visible;
-        }
-        return (await latestCommitted()) ?? (await latestAny());
+      const visible =
+        options?.preferLatestVisible && options.visibleAnchor?.messageId
+          ? await this.getByChatAndMessage(chatId, options.visibleAnchor.messageId, options.visibleAnchor.swipeIndex)
+          : null;
+      const selected = visible ?? (await latestCommitted()) ?? (await latestAny());
+      // A regeneration starts from the reply before the one it replaces, so the Tracker Panel
+      // edits made on the replaced reply are laid over that state. Re-run trackers anchors the
+      // reply's own swipe, which already holds them.
+      if (excludeMessageId && selected?.messageId !== excludeMessageId) {
+        return (await this.applyManualEdits(chatId, excludeMessageId, selected)) ?? selected;
       }
-      return (await latestCommitted()) ?? (await latestAny());
+      return selected;
+    },
+
+    /**
+     * `base` with the Tracker Panel edits made on any swipe of `messageId` laid over it, or
+     * null when there are none. An edit counts while its row still holds the edited value,
+     * so a later tracker run that changes the field retires it.
+     */
+    async applyManualEdits(chatId: string, messageId: string, base: GameStateRow | null) {
+      if (!messageId) return null;
+      const rows = await db
+        .select()
+        .from(gameStateSnapshots)
+        .where(and(eq(gameStateSnapshots.chatId, chatId), eq(gameStateSnapshots.messageId, messageId)))
+        .orderBy(asc(gameStateSnapshots.swipeIndex));
+      let edited: GameStateRow | null = null;
+      const laid: Record<string, string> = {};
+      // A newer edit of a value retires the reply's older edits of it (retireOtherSwipeEdits),
+      // so at most one swipe holds each edit.
+      // ponytail: a list (characters, custom world fields, persona stats, one playerStats key)
+      // is taken whole from the edited swipe. A per-row diff would carry only the edited rows.
+      for (const row of rows) {
+        for (const [key, value] of Object.entries(parseStoredManualOverrides(row.manualOverrides) ?? {})) {
+          if (manualEditValue(row, key) !== value) continue;
+          edited ??= { ...(base ?? emptyGameStateRow(chatId)) };
+          laid[key] = value;
+          if (key.startsWith(PLAYER_STATS_EDIT_PREFIX)) {
+            const statKey = key.slice(PLAYER_STATS_EDIT_PREFIX.length);
+            edited.playerStats = JSON.stringify({
+              ...storedPlayerStats(edited),
+              [statKey]: storedPlayerStats(row)[statKey],
+            });
+          } else {
+            Object.assign(edited, { [key]: row[key as keyof GameStateRow] });
+          }
+        }
+      }
+      // The agents are shown the edit record, so it must not keep the base's edits these replaced.
+      if (edited) {
+        edited.manualOverrides = serializeManualOverrides(
+          retainManualEdits({ ...parseStoredManualOverrides(base?.manualOverrides), ...laid }, edited),
+        );
+      }
+      return edited;
+    },
+
+    /** A Tracker Panel edit replaces the edits of the same values on the reply's other swipes, so the newest one wins. */
+    async retireOtherSwipeEdits(target: { chatId: string; messageId: string; swipeIndex: number }, keys: string[]) {
+      if (!target.messageId || keys.length === 0) return;
+      const rows = await db
+        .select()
+        .from(gameStateSnapshots)
+        .where(
+          and(
+            eq(gameStateSnapshots.chatId, target.chatId),
+            eq(gameStateSnapshots.messageId, target.messageId),
+            ne(gameStateSnapshots.swipeIndex, target.swipeIndex),
+          ),
+        );
+      for (const row of rows) {
+        const overrides = { ...(parseStoredManualOverrides(row.manualOverrides) ?? {}) };
+        if (!keys.some((key) => key in overrides)) continue;
+        for (const key of keys) delete overrides[key];
+        await db
+          .update(gameStateSnapshots)
+          .set({ manualOverrides: serializeManualOverrides(overrides) })
+          .where(and(eq(gameStateSnapshots.chatId, row.chatId), eq(gameStateSnapshots.id, row.id)));
+      }
     },
 
     /** Get latest game state excluding snapshots tied to a specific message (for regen/swipes). */
@@ -335,8 +524,32 @@ export function createGameStateStorage(db: DB) {
       await db.update(gameStateSnapshots).set({ committed: 1 }).where(condition);
     },
 
-    async create(state: Omit<GameState, "id" | "createdAt">, manualOverrides?: Record<string, string> | null) {
+    async create(
+      state: Omit<GameState, "id" | "createdAt">,
+      manualOverrides?: Record<string, string> | null,
+      options?: {
+        /** Keep the detailed inventory of the row being replaced, for a caller that carries the
+         *  previous turn's stats forward (the world-state tracker). The turn's own inventory tags
+         *  wrote that inventory and no tracker works one out, so carrying the stats would undo them. */
+        keepReplacedInventory?: boolean;
+      },
+    ) {
       const latestBeforeInsert = await this.getLatest(state.chatId);
+      // Most callers rebuild a snapshot from the fields they know and have never heard of ruleset
+      // live state. When such a caller replaces the row of a message + swipe, the live state that
+      // row already carried (written right after the message was saved) stays with it.
+      const replaced = state.messageId
+        ? await this.getByChatAndMessage(state.chatId, state.messageId, state.swipeIndex)
+        : null;
+      const replacedInventory = (() => {
+        if (!options?.keepReplacedInventory || !replaced?.playerStats || !state.playerStats) return undefined;
+        const stats = parseSnapshotJson<{ inventory?: unknown } | null>(replaced.playerStats, null);
+        return Array.isArray(stats?.inventory) ? stats.inventory : undefined;
+      })();
+      const playerStats =
+        state.playerStats && replacedInventory
+          ? { ...state.playerStats, inventory: replacedInventory as NonNullable<typeof state.playerStats>["inventory"] }
+          : state.playerStats;
       // Remove any prior snapshot for the same message + swipe so duplicates don't accumulate
       if (state.messageId) {
         await db
@@ -350,24 +563,72 @@ export function createGameStateStorage(db: DB) {
           );
       }
       const id = newId();
+      const trackerValues = {
+        ...coerceSnapshotTextFields(state),
+        worldCustomFields: JSON.stringify(normalizeWorldCustomFields(state.worldCustomFields)),
+        presentCharacters: JSON.stringify(state.presentCharacters),
+        recentEvents: JSON.stringify(state.recentEvents),
+        playerStats: playerStats ? JSON.stringify(playerStats) : null,
+        personaStats: state.personaStats ? JSON.stringify(state.personaStats) : null,
+      };
       await db.insert(gameStateSnapshots).values({
         id,
         chatId: state.chatId,
         messageId: state.messageId,
         swipeIndex: state.swipeIndex,
-        ...coerceSnapshotTextFields(state),
-        worldCustomFields: JSON.stringify(normalizeWorldCustomFields(state.worldCustomFields)),
-        presentCharacters: JSON.stringify(state.presentCharacters),
-        recentEvents: JSON.stringify(state.recentEvents),
-        playerStats: state.playerStats ? JSON.stringify(state.playerStats) : null,
-        personaStats: state.personaStats ? JSON.stringify(state.personaStats) : null,
-        manualOverrides: serializeManualOverrides(manualOverrides),
+        ...trackerValues,
+        // A tracker run that rewrites a row it does not move keeps that row's edits it did not change.
+        manualOverrides: serializeManualOverrides(
+          retainManualEdits(manualOverrides ?? parseStoredManualOverrides(replaced?.manualOverrides), trackerValues),
+        ),
         fieldLocks: serializeFieldLocks(state.fieldLocks),
         hiddenTrackerFields: serializeHiddenTrackerFields(state.hiddenTrackerFields),
+        rulesetLive: serializeRulesetLive(state.rulesetLive !== undefined ? state.rulesetLive : replaced?.rulesetLive),
+        rulesetClocks: serializeRulesetClocks(
+          state.rulesetClocks !== undefined ? state.rulesetClocks : replaced?.rulesetClocks,
+        ),
         committed: state.committed ? 1 : 0,
         createdAt: ensureTimestampAfter(now(), latestBeforeInsert?.createdAt),
       });
       return id;
+    },
+
+    /** Apply one model-requested field with its lock check and write in the same transaction. */
+    async updateFromTool(
+      chatId: string,
+      field: "location" | "time",
+      value: string,
+      locationIsAuthoritative: boolean,
+      target: {
+        messageId: string;
+        swipeIndex: number;
+        baseSnapshot: typeof gameStateSnapshots.$inferSelect | null;
+        compatibilityLocation?: string | null;
+      },
+    ) {
+      if (field === "location" && locationIsAuthoritative) {
+        throw new Error("Location is controlled by Spatial Context. Use the game's movement controls.");
+      }
+      return db.transaction(async (tx) => {
+        const store = createGameStateStorage(tx);
+        const storedBase = target.baseSnapshot ? await store.getById(target.baseSnapshot.id, chatId) : null;
+        // Re-reading the base drops the Tracker Panel edits a regeneration starts from, so lay them over again.
+        const base = storedBase
+          ? ((await store.applyManualEdits(chatId, target.messageId, storedBase)) ?? storedBase)
+          : null;
+        const snapshot = (await store.getByChatAndMessage(chatId, target.messageId, target.swipeIndex)) ?? base;
+        if (!snapshot) throw new Error("No game-state snapshot is available to update.");
+        const patch = applyTrackerFieldLocksToGameStatePatch({ [field]: value }, buildLockMigrationState(snapshot));
+        if (patch[field] !== value) throw new Error(`The ${field} field is locked; no change was applied.`);
+        const stored = await store.updateByMessage(target.messageId, target.swipeIndex, chatId, patch, undefined, {
+          baseSnapshot: base,
+          ...(target.compatibilityLocation !== undefined
+            ? { compatibilityLocation: target.compatibilityLocation }
+            : {}),
+        });
+        if (stored?.[field] !== value) throw new Error("The game-state update could not be stored.");
+        return { [field]: stored[field] };
+      });
     },
 
     async updateLatest(
@@ -454,11 +715,15 @@ export function createGameStateStorage(db: DB) {
           : null,
         fieldLocks: parseTrackerFieldLocks(latest?.fieldLocks),
         hiddenTrackerFields: parseTrackerHiddenFields(latest?.hiddenTrackerFields),
+        rulesetLive: parseStoredRulesetLive(latest?.rulesetLive),
+        rulesetClocks: parseStoredRulesetClocks(latest?.rulesetClocks),
       };
       baseState.fieldLocks = normalizeTrackerFieldLocksForState(
         baseState.fieldLocks,
         buildLockMigrationState(baseState),
       );
+
+      const clonedState = { ...baseState };
 
       // Apply the incoming fields on top of the cloned base
       if (fields.date !== undefined) baseState.date = coerceGameStateTextValue(fields.date);
@@ -480,17 +745,14 @@ export function createGameStateStorage(db: DB) {
       if (fields.hiddenTrackerFields !== undefined) {
         baseState.hiddenTrackerFields = normalizeTrackerHiddenFields(fields.hiddenTrackerFields);
       }
+      if (fields.rulesetLive !== undefined) baseState.rulesetLive = parseStoredRulesetLive(fields.rulesetLive);
+      if (fields.rulesetClocks !== undefined) baseState.rulesetClocks = parseStoredRulesetClocks(fields.rulesetClocks);
 
-      const manualOverrides = manual
-        ? MANUAL_OVERRIDE_FIELDS.reduce<Record<string, string>>((acc, key) => {
-            const value = fields[key];
-            const text = coerceGameStateTextValue(value);
-            if (text) acc[key] = text;
-            return acc;
-          }, {})
-        : {};
-      // Manual overrides are one-shot — carry only overrides from this edit.
+      // The record covers only this edit, never the base's own edits.
+      const manualOverrides: Record<string, string> = {};
+      if (manual) recordManualEdits(manualOverrides, clonedState, baseState);
       await this.create(baseState as any, Object.keys(manualOverrides).length > 0 ? manualOverrides : null);
+      await this.retireOtherSwipeEdits({ chatId, messageId, swipeIndex }, Object.keys(manualOverrides));
       return this.getByChatAndMessage(chatId, messageId, swipeIndex);
     },
 
@@ -512,23 +774,17 @@ export function createGameStateStorage(db: DB) {
         updates.personaStats = fields.personaStats ? JSON.stringify(fields.personaStats) : null;
       if (fields.hiddenTrackerFields !== undefined)
         updates.hiddenTrackerFields = serializeHiddenTrackerFields(fields.hiddenTrackerFields);
+      if (fields.rulesetLive !== undefined) updates.rulesetLive = serializeRulesetLive(fields.rulesetLive);
+      if (fields.rulesetClocks !== undefined) updates.rulesetClocks = serializeRulesetClocks(fields.rulesetClocks);
 
-      if (manual) {
-        const storedOverrides = parseStoredManualOverrides(row.manualOverrides) ?? {};
-
-        for (const key of MANUAL_OVERRIDE_FIELDS) {
-          if (fields[key] !== undefined) {
-            const text = coerceGameStateTextValue(fields[key]);
-            // Setting a field to null/empty removes the override so the agent can update it again
-            if (!text) {
-              delete storedOverrides[key];
-            } else {
-              storedOverrides[key] = text;
-            }
-          }
-        }
-
-        updates.manualOverrides = serializeManualOverrides(storedOverrides);
+      const edits: Record<string, string> = {};
+      if (manual || (row.manualOverrides && Object.keys(updates).length > 0)) {
+        const updated = { ...row, ...updates };
+        // A cleared field is an edit too: the next generation starts from it empty.
+        if (manual) recordManualEdits(edits, row, updated);
+        updates.manualOverrides = serializeManualOverrides(
+          retainManualEdits({ ...parseStoredManualOverrides(row.manualOverrides), ...edits }, updated),
+        );
       }
 
       if (fields.fieldLocks !== undefined) {
@@ -556,6 +812,7 @@ export function createGameStateStorage(db: DB) {
         .update(gameStateSnapshots)
         .set(updates)
         .where(and(eq(gameStateSnapshots.chatId, row.chatId), eq(gameStateSnapshots.id, row.id)));
+      await this.retireOtherSwipeEdits(row, Object.keys(edits));
       return { ...row, ...updates };
     },
 

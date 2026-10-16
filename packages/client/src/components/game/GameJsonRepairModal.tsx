@@ -3,6 +3,7 @@ import { AlertTriangle, Braces, CheckCircle2, Loader2, Wand2 } from "lucide-reac
 import { toast } from "sonner";
 import { api, type JsonRepairRequest } from "../../lib/api-client";
 import { cn } from "../../lib/utils";
+import { GAME_DIALOG_CLASS } from "../../lib/chat-widget-colors";
 import { Modal } from "../ui/Modal";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
@@ -86,6 +87,7 @@ export function GameJsonRepairModal({ request, onClose, onApplied }: GameJsonRep
       onClose={isApplying ? () => {} : onClose}
       title={request?.title ?? "Repair JSON"}
       width="max-w-5xl"
+      panelClassName={GAME_DIALOG_CLASS}
     >
       <div className="flex min-h-0 flex-col gap-4">
         <div className="flex items-start gap-3 rounded-lg border border-[var(--border)] bg-[var(--secondary)]/60 px-3 py-2.5">

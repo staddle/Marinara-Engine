@@ -25,6 +25,10 @@ export interface Persona {
   scenario: string;
   backstory: string;
   appearance: string;
+  /** Marinara Engine: use `imageAppearance` instead of `appearance` in image prompts. */
+  imageAppearanceEnabled?: boolean;
+  /** Marinara Engine: appearance text used for image prompts when the override is enabled. */
+  imageAppearance?: string;
   /** Avatar image path */
   avatarPath: string | null;
   /** Persona gallery image selected as the optional character sheet. */
@@ -35,7 +39,7 @@ export interface Persona {
    *  source-rectangle shape and the legacy zoom+offset shape (kept readable so
    *  previously saved crops display unchanged until the user re-edits). */
   avatarCrop?: AvatarCrop | null;
-  /** Whether this is the currently active persona */
+  /** @deprecated Inert legacy flag. Personas are selected explicitly per chat. */
   isActive: boolean;
   /** Name display color/gradient (CSS value) */
   nameColor: string;
@@ -121,4 +125,6 @@ export interface PersonaStatsConfig {
   bars: PersonaStatBar[];
   /** Optional Game mode RPG stats stored alongside the persona status bars. */
   rpgStats?: RPGStatsConfig;
+  /** Starting builds for Game Mode rulesets, keyed by ruleset id. A game copies the one it needs. */
+  rulesetSheets?: Record<string, unknown>;
 }

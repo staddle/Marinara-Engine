@@ -39,6 +39,14 @@ When **Refreshes/day** is above 0, Marinara splits the day into equal windows an
 
 Automatic refreshes run inside the Marinara server. The Noodle page does not need to stay open, but Marinara itself must be running. If a refresh fails, the schedule shows the error and retries later, waiting longer after repeated failures. If several planned times are missed, one successful catch-up refresh covers them instead of flooding the timeline.
 
+## Translation
+
+The **Translation** section has one switch. It needs Noodle 1.5.0 or later.
+
+- **Translate posts automatically**: a toggle, default **off**. Turn it on to show a translation under every post and comment your personas didn't write, without clicking **Translate** on each one. Noodle uses the translator defaults saved from a chat's **Translation** settings (**Save translator defaults**). Without saved defaults it uses Google Translate into English. Text already in the target language gets no extra copy, a translation you hide stays hidden, and turning the switch off stops the translations still waiting.
+
+Translations are kept in this browser, whether automatic or made with **Translate**. Refreshing the timeline, leaving Noodle, or reloading the page shows them again without translating again. Another device, or a browser with its data cleared, translates again. **Reset Noodle Timeline** also forgets them.
+
 ## Active Accounts
 
 The **Active Accounts** section sets how many eligible accounts take part in one refresh. Eligible accounts are your invited characters, folder-included characters, and random users if you turned them on.
@@ -74,7 +82,8 @@ The **Image Generation** section lets Noodle attach AI-made images to some posts
   - **Image generation connection**: a dropdown, default **Default image generation connection**. Leaving it on Default uses whichever connection is marked default for image generation in the Connections panel.
   - **Prompt instructions**: a text box with built-in default text, up to 4000 characters. These extra notes are merged into the image prompt.
   - **Use avatar references**: a toggle, default **on**. Sends the character's avatar or reference images to the image model.
-  - **Include descriptions**: a toggle, default **on**. Adds the character's written appearance notes to the image prompt.
+  - **Interpret image prompts**: a toggle, default **on**. A text model rewrites each image prompt, following your image connection's **Image Prompting Instructions** and your style profile's Style text. When it is off, the Image Prompting Instructions aren't used and the Style text is added as written.
+  - **Include descriptions**: a toggle, default **on**. Adds the character's written appearance notes to the image prompt. With **Interpret image prompts** on, the text model works them in instead of pasting them.
   - **Images/refresh**: a number, 0 to 50, default **3**. This caps generated post images separately for every manual or automatic refresh.
 - **Attach gallery images**: a separate toggle, default **off**. It stays visible even when **Image generation** is off. Instead of making a new image, it lets a post reuse an image from that character's gallery or from a chat they appear in.
 
@@ -155,6 +164,7 @@ This table lists every Noodle setting with its default and range.
 | **Generation connection** | none | any text connection (required for refresh) |
 | **Professor Mari participates** | on | on or off |
 | **Refreshes/day** | 2 | 0 to 24 (0 turns automatic refreshes off) |
+| **Translate posts automatically** | off | on or off |
 | **Active selection** | Random range | Random range, Exact count, All invited |
 | **Min active** | 2 | 1 to 100 (Random range only) |
 | **Max active** | 5 | 1 to 100 (Random range only) |
@@ -167,6 +177,7 @@ This table lists every Noodle setting with its default and range.
 | **Image generation connection** | Default | any image-generation connection |
 | **Prompt instructions** | built-in text | up to 4000 characters |
 | **Use avatar references** | on | on or off |
+| **Interpret image prompts** | on | on or off |
 | **Include descriptions** | on | on or off |
 | **Images/refresh** | 3 | 0 to 50 |
 | **Attach gallery images** | off | on or off |

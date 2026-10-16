@@ -1,3 +1,4 @@
+import { clickTopbarPanel } from "./topbar-navigation.js";
 import { expect, test, type Page, type Locator } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { seedUIState } from "./ui-state-fixture.js";
@@ -19,7 +20,6 @@ test.beforeEach(async ({ page }) => {
       rightPanelOpen: false,
       chatHelpSeenModes: ["conversation", "roleplay", "game"],
       appAccentColor: "#16a6b6",
-      professorMariNavigationEnabled: false,
     },
     "if-missing",
   );
@@ -87,7 +87,7 @@ test("UX sweep: narrow desktop windows use the overlay shell before sidebar topb
   await page.locator('[data-topbar-hover-key="chats"]').click();
   await expect(page.locator('[data-component="ChatSidebarPanel"]')).toBeVisible();
   await expect(page.locator('[data-component="RightPanelMobile"]')).toHaveCount(0);
-  await page.locator('[data-tour="panel-settings"]').click();
+  await clickTopbarPanel(page, "settings");
   await expect(page.locator('[data-component="RightPanelMobile"]')).toBeVisible();
   await page.setViewportSize({ width: 1600, height: 900 });
   await expect(center).not.toHaveAttribute("data-shell-overlay-mode", "true");
@@ -123,10 +123,10 @@ test("UX sweep: achievement highlights stay inside the widget with padding", asy
 });
 
 for (const spec of [
-  { kind: "Character", path: "/api/characters", sections: 9, last: "Advanced", lastId: "advanced" },
+  { kind: "Character", path: "/api/characters", sections: 10, last: "Advanced", lastId: "advanced" },
   { kind: "Persona", path: "/api/characters/personas", sections: 8, last: "Stats", lastId: "stats" },
   { kind: "Lorebook", path: "/api/lorebooks", sections: 2, last: "Entries", lastId: "entries" },
-  { kind: "Preset", path: "/api/prompts", sections: 4, last: "Regex", lastId: "regex" },
+  { kind: "Preset", path: "/api/prompts", sections: 5, last: "Regex", lastId: "regex" },
 ]) {
   test(`UX sweep: ${spec.kind} sections scroll and leaving saves without discarding a failed draft`, async ({
     page,
@@ -193,9 +193,135 @@ for (const spec of [
   });
 }
 
+test("UX sweep: Character Voice names a same-name card's voice and keeps typing through a slow save", async ({
+  page,
+  request,
+}, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "The Text to Speech card beside the editor shows each refetch.");
+  const original = await (await request.get("/api/tts/config")).json();
+  const name = `UX Voice ${Date.now()}`;
+  const ids: string[] = [];
+  for (let index = 0; index < 2; index += 1) {
+    const created = await request.post("/api/characters", { data: { data: { name } } });
+    expect(created.ok()).toBeTruthy();
+    ids.push(((await created.json()) as { id: string }).id);
+  }
+  const [originalId, auId] = ids as [string, string];
+  const heldSaves: Array<() => void> = [];
+  try {
+    const voiceAssignments = [{ characterId: originalId, characterName: name, voice: "echo" }];
+    const configured = await request.put("/api/tts/config", {
+      data: { ...original, enabled: true, source: "openai", speed: 1, voiceMode: "per-character", voiceAssignments },
+    });
+    expect(configured.ok()).toBeTruthy();
+    await page.route("**/api/tts/voices", (route) =>
+      route.fulfill({ json: { voices: ["echo"], voiceOptions: [{ id: "echo", name: "echo" }], fromProvider: false } }),
+    );
+    await page.goto("/");
+    await clickTopbarPanel(page, "connections");
+    const ttsCard = page
+      .locator('[data-component="RightPanel"]')
+      .getByText("Text to Speech", { exact: true })
+      .locator("xpath=../../..");
+    await ttsCard.getByTitle("Expand").click();
+    await openEditor(page, "Character", auId);
+    const editor = page.locator(".mari-editor-shell");
+    await openSection(editor, "Voice");
+    const input = editor.locator('[data-editor-section="voice"]').getByTestId("character-voice-input");
+    const cardInput = ttsCard.getByTestId(`tts-custom-voice-input-character-${auId}`);
+    // Without a voice of its own, the copy speaks with the original card's voice, so it must not say "Default voice".
+    await expect(input).toHaveAttribute("placeholder", "echo (from a card with a matching name)");
+
+    // Another tab saves a new speed after this page read the config. Saving a voice here must keep it.
+    const latest = await (await request.get("/api/tts/config")).json();
+    expect((await request.put("/api/tts/config", { data: { ...latest, speed: 1.5 } })).ok()).toBeTruthy();
+    await expect(ttsCard.getByText("Speed — 1.00×")).toBeVisible();
+    await input.fill("nova");
+    await expect(cardInput).toHaveValue("nova");
+    const saved = await (await request.get("/api/tts/config")).json();
+    expect(saved.speed).toBe(1.5);
+    expect(saved.voiceAssignments).toContainEqual({ characterId: auId, characterName: name, voice: "nova" });
+
+    // Hold each save so the first save's refetch lands while the second one is still unanswered.
+    await page.route("**/api/tts/config/voice-assignment", async (route) => {
+      await new Promise<void>((release) => heldSaves.push(release));
+      await route.continue();
+    });
+    await input.fill("abc");
+    await expect.poll(() => heldSaves.length).toBe(1);
+    await input.pressSequentially("d");
+    // The next save waits for the held one, so the server gets the saves in the order they were made.
+    await page.waitForTimeout(1_000);
+    expect(heldSaves).toHaveLength(1);
+    // The settings card shows each refetch as it lands; the typed "abcd" must outlive the older "abc" one.
+    heldSaves[0]!();
+    await expect.poll(() => heldSaves.length).toBe(2);
+    await expect(cardInput).toHaveValue("abc");
+    await expect(input).toHaveValue("abcd");
+    heldSaves[1]!();
+    await expect(cardInput).toHaveValue("abcd");
+    await expect(input).toHaveValue("abcd");
+
+    // A failed save shows an error and the saved voice again, and does not stop the next pick from saving.
+    await page.unroute("**/api/tts/config/voice-assignment");
+    await page.route(
+      "**/api/tts/config/voice-assignment",
+      (route) => route.fulfill({ status: 500, json: { error: "Internal Server Error" } }),
+      { times: 1 },
+    );
+    await input.fill("fable");
+    await expect(
+      page.locator('[data-sonner-toast][data-type="error"]').filter({ hasText: "Could not save the voice." }),
+    ).toBeVisible();
+    await expect(input).toHaveValue("abcd");
+    await input.fill("sage");
+    await expect(cardInput).toHaveValue("sage");
+  } finally {
+    for (const release of heldSaves) release();
+    await request.put("/api/tts/config", { data: original });
+    for (const id of ids) await request.delete(`/api/characters/${id}`);
+  }
+});
+
+test("UX sweep: Use a voice per character keeps Text to Speech settings saved elsewhere", async ({
+  page,
+  request,
+}, testInfo) => {
+  test.skip(testInfo.project.name.includes("mobile"), "One desktop run covers the save; the layout is the same.");
+  const original = await (await request.get("/api/tts/config")).json();
+  const created = await request.post("/api/characters", { data: { data: { name: `UX Voice Mode ${Date.now()}` } } });
+  expect(created.ok()).toBeTruthy();
+  const { id } = (await created.json()) as { id: string };
+  try {
+    const shared = { ...original, enabled: true, source: "openai", speed: 1, voiceMode: "single" };
+    expect((await request.put("/api/tts/config", { data: shared })).ok()).toBeTruthy();
+    await page.route("**/api/tts/voices", (route) =>
+      route.fulfill({ json: { voices: ["echo"], voiceOptions: [{ id: "echo", name: "echo" }], fromProvider: false } }),
+    );
+    await page.goto("/");
+    await openEditor(page, "Character", id);
+    const editor = page.locator(".mari-editor-shell");
+    await openSection(editor, "Voice");
+    const usePerCharacter = editor
+      .locator('[data-editor-section="voice"]')
+      .getByRole("button", { name: "Use a voice per character" });
+    await expect(usePerCharacter).toBeVisible();
+    // Another tab saves a new speed after this page read the settings; the switch must keep it.
+    expect((await request.put("/api/tts/config", { data: { ...shared, speed: 1.5 } })).ok()).toBeTruthy();
+    await usePerCharacter.click();
+    await expect
+      .poll(async () => ((await (await request.get("/api/tts/config")).json()) as { voiceMode: string }).voiceMode)
+      .toBe("per-character");
+    expect(((await (await request.get("/api/tts/config")).json()) as { speed: number }).speed).toBe(1.5);
+  } finally {
+    await request.put("/api/tts/config", { data: original });
+    await request.delete(`/api/characters/${id}`);
+  }
+});
+
 test("UX sweep: Appearance groups, quick access, width and hidden-panel state", async ({ page }, testInfo) => {
   await page.goto("/");
-  await page.locator('[data-tour="panel-settings"]').click();
+  await clickTopbarPanel(page, "settings");
   await page.getByRole("tab", { name: "Appearance", exact: true }).click();
   const modes = page.getByRole("group", { name: "Appearance by chat mode" });
   await expect(modes.locator("button")).toHaveCount(4);
@@ -242,8 +368,8 @@ test("UX sweep: Appearance groups, quick access, width and hidden-panel state", 
   await page.screenshot({ path: testInfo.outputPath("appearance-groups.png") });
   await page.getByRole("tab", { name: "General", exact: true }).click();
   await page.getByPlaceholder("Search settings").fill("width draft preserved");
-  await page.locator('[data-tour="panel-personas"]').click();
-  await page.locator('[data-tour="panel-settings"]').click();
+  await clickTopbarPanel(page, "personas");
+  await clickTopbarPanel(page, "settings");
   await expect(page.getByPlaceholder("Search settings")).toHaveValue("width draft preserved");
   await page.reload();
   await page.evaluate(async () => {
@@ -256,7 +382,7 @@ test("UX sweep: Appearance groups, quick access, width and hidden-panel state", 
 
 test("UX sweep: Background library mobile toolbar, accent marker and settled modal", async ({ page }, testInfo) => {
   await page.goto("/");
-  await page.locator('[data-tour="panel-settings"]').click();
+  await clickTopbarPanel(page, "settings");
   await page.getByRole("tab", { name: "Appearance", exact: true }).click();
   await page.getByPlaceholder("Search settings").fill("Backgrounds");
   await page.getByRole("button", { name: /Backgrounds Section/ }).click();
@@ -278,12 +404,6 @@ test("UX sweep: Background library mobile toolbar, accent marker and settled mod
   await expect(card.locator("[data-background-default-toggle]")).toHaveAttribute("aria-pressed", "true");
   const useButton = card.getByRole("button", { name: /Use .* for this chat/ });
   await useButton.click();
-  const marker = card.locator("[data-background-selection-indicator]");
-  await expect(marker).toBeVisible();
-  const markerBox = (await marker.boundingBox())!;
-  const cardBox = (await card.boundingBox())!;
-  expect(markerBox.x + markerBox.width).toBeGreaterThan(cardBox.x + cardBox.width);
-  expect(markerBox.y).toBeLessThan(cardBox.y);
   await expect(library).toBeHidden();
   await expect(page.getByRole("button", { name: "Clear selection", exact: true })).toHaveAttribute(
     "class",
@@ -291,13 +411,28 @@ test("UX sweep: Background library mobile toolbar, accent marker and settled mod
   );
   await page.getByRole("button", { name: "Browse library", exact: true }).click();
   await expect(library).toHaveCSS("opacity", "1");
+  await expect(library.locator(".mari-modal-panel")).toHaveCSS("transform", "none");
+  const marker = card.locator("[data-background-selection-indicator]");
+  await expect(marker).toBeVisible();
+  const markerBox = (await marker.boundingBox())!;
+  const cardBox = (await card.boundingBox())!;
+  expect(markerBox.x + markerBox.width).toBeGreaterThan(cardBox.x + cardBox.width);
+  expect(markerBox.y).toBeLessThan(cardBox.y);
   await page.screenshot({ path: testInfo.outputPath("background-library.png") });
   if (testInfo.project.name === "mobile-webkit") {
     await expect(library.locator(".mari-modal-backdrop")).toHaveCSS("backdrop-filter", "none");
-    await expect(library.locator(".mari-modal-panel")).toHaveCSS(
-      "background-color",
-      await page.locator("body").evaluate((element) => getComputedStyle(element).backgroundColor),
-    );
+    // The panel keeps an opaque app-background backing. The page itself now carries the flattened
+    // topbar surface for browser chrome (4234d024f), so compare with --background, not with <body>.
+    const appBackground = await page.evaluate(() => {
+      const probe = document.createElement("div");
+      probe.style.backgroundColor = "var(--background)";
+      document.body.appendChild(probe);
+      const color = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return color;
+    });
+    expect(appBackground).toMatch(/^rgb\(\d+, \d+, \d+\)$/u);
+    await expect(library.locator(".mari-modal-panel")).toHaveCSS("background-color", appBackground);
   }
 });
 
@@ -509,12 +644,13 @@ for (const mode of ["roleplay", "game", "conversation"] as const) {
             probe.remove();
             return color;
           });
-          for (const [trigger, name] of [
-            ["Quick Connection Switcher", "Connections"],
-            ["Quick Persona Switcher", "Personas"],
+          // The connection picker is a non-modal dialog: it holds a model search box and pin toggles.
+          for (const [trigger, name, role] of [
+            ["Quick Connection Switcher", "Connections", "dialog"],
+            ["Quick Persona Switcher", "Personas", "menu"],
           ] as const) {
             await page.getByTitle(trigger, { exact: true }).click();
-            const picker = page.getByRole("menu", { name, exact: true });
+            const picker = page.getByRole(role, { name, exact: true });
             await expect(picker).toHaveCSS("background-color", cardColor);
             await picker.screenshot({ path: testInfo.outputPath(`desktop-${name.toLowerCase()}-picker.png`) });
             await picker.press("Escape");
@@ -552,10 +688,12 @@ for (const mode of ["roleplay", "game", "conversation"] as const) {
       expect(Number(await section.evaluate((el) => getComputedStyle(el).order))).toBeGreaterThan(
         Number(await agents.evaluate((el) => getComputedStyle(el).order)),
       );
-      const header = section.locator('[role="button"][aria-expanded]').first();
-      await expect(header.locator("svg.lucide-image")).toBeVisible();
+      // The shared drawer (f502a1ffd) keeps the help tip beside its toggle; 76d1e52c3 gave Background the wallpaper icon.
+      const headerRow = section.locator(":scope > .mari-drawer__header");
+      const header = headerRow.locator("[data-drawer-toggle]");
+      await expect(header.locator("svg.lucide-wallpaper")).toBeVisible();
       const wasExpanded = await header.getAttribute("aria-expanded");
-      await header.getByRole("button", { name: "Show help", exact: true }).click();
+      await headerRow.getByRole("button", { name: "Show help", exact: true }).click();
       await expect(
         page.getByText(
           "Choose a background for this chat from your library. The preview shows the currently active background.",
@@ -563,7 +701,7 @@ for (const mode of ["roleplay", "game", "conversation"] as const) {
         ),
       ).toBeVisible();
       await expect(header).toHaveAttribute("aria-expanded", wasExpanded!);
-      await header.getByRole("button", { name: "Show help", exact: true }).click();
+      await headerRow.getByRole("button", { name: "Show help", exact: true }).click();
       if ((await header.getAttribute("aria-expanded")) !== "true") await header.click();
       await section.getByRole("button", { name: "Browse library", exact: true }).click();
       const library = page.getByRole("dialog", { name: "Background Library" });

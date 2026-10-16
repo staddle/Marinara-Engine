@@ -1,5 +1,7 @@
-import type { WrapFormat } from "@marinara-engine/shared";
+import { getRoleplayDocuments, getRoleplayWhispers, type WrapFormat } from "@marinara-engine/shared";
 
+import { isSentSelfieAttachment, type PromptAttachment } from "../../services/generation/prompt-attachments.js";
+import { parseRoleplayUserCommands } from "../../services/generation/roleplay-commands.js";
 import type { GenerationPromptMessage } from "../../services/generation/prompt-message-scope.js";
 import { wrapContent } from "../../services/prompt/format-engine.js";
 import { parseExtra } from "./generate-route-utils.js";
@@ -90,6 +92,22 @@ export function conversationPromptHistoryContent(
   message: { role?: unknown; content?: unknown; extra?: unknown },
   chatMode: string,
 ): string {
+  if (chatMode === "roleplay" && message.role === "user") {
+    const content = parseRoleplayUserCommands(typeof message.content === "string" ? message.content : "").content;
+    return content.trim() || !getRoleplayWhispers(parseExtra(message.extra)).length ? content : "[Private whisper]";
+  }
+  if (chatMode === "roleplay" && message.role === "assistant") {
+    const extra = parseExtra(message.extra);
+    const documents = getRoleplayDocuments(extra);
+    const content = typeof message.content === "string" ? message.content : "";
+    if (Array.isArray(documents))
+      return [
+        content.trim() || !getRoleplayWhispers(extra).length ? content : "[Private whisper]",
+        ...documents
+          .filter((document) => document && typeof document.title === "string" && typeof document.content === "string")
+          .map((document) => `Document: ${document.title}\n${document.content}`),
+      ].join("\n\n");
+  }
   if (chatMode === "conversation" && message.role === "assistant") {
     const commandContent = parseExtra(message.extra).conversationCommandContent;
     if (typeof commandContent === "string" && commandContent.trim()) {
@@ -97,4 +115,44 @@ export function conversationPromptHistoryContent(
     }
   }
   return typeof message.content === "string" ? message.content : "";
+}
+
+const SENT_SELFIE_DESCRIPTION_MAX_CHARS = 600;
+
+/**
+ * History notes for video messages a character sent, so the next reply knows a clip went out and
+ * what it shows. Only Conversation video messages name a sender; Roleplay scene clips stay hidden
+ * like Illustrator images.
+ */
+export function formatSentVideoNotes(attachments: PromptAttachment[] | undefined): string {
+  return (attachments ?? [])
+    .filter((attachment) => attachment.type === "video" && !!attachment.characterName?.trim())
+    .map((attachment) => {
+      const description = (attachment.prompt ?? "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, SENT_SELFIE_DESCRIPTION_MAX_CHARS);
+      return `\n[${attachment.characterName!.trim()} sent a video message${description ? `: ${description}` : ""}]`;
+    })
+    .join("");
+}
+
+/**
+ * History notes for selfies a character sent, so the next reply knows a photo went out and what it
+ * shows. A saved caption describes the real image and wins, even after captioning is turned off;
+ * otherwise the image prompt's first paragraph (later ones are appearance and reference notes).
+ */
+export function formatSentSelfieNotes(attachments: PromptAttachment[] | undefined): string {
+  return (attachments ?? [])
+    .filter(isSentSelfieAttachment)
+    .map((attachment) => {
+      const description = (attachment.imageCaption?.trim() || (attachment.prompt ?? "").split(/\n\s*\n/)[0]!)
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, SENT_SELFIE_DESCRIPTION_MAX_CHARS);
+      // Selfies saved before the sender was recorded have no name; their note stays unattributed.
+      const sender = attachment.characterName?.trim();
+      return `\n[${sender ? `${sender} sent` : "Sent"} a selfie${description ? `: ${description}` : ""}]`;
+    })
+    .join("");
 }

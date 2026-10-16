@@ -5,7 +5,12 @@
 import { useState, useEffect, useMemo, useRef, type CSSProperties, type RefObject } from "react";
 import { motion, AnimatePresence, type TargetAndTransition } from "framer-motion";
 import { Check } from "lucide-react";
-import type { SpriteCharacterVisualSettings, SpritePlacement, SpriteSide } from "@marinara-engine/shared";
+import {
+  detectExpressionKeyword,
+  type SpriteCharacterVisualSettings,
+  type SpritePlacement,
+  type SpriteSide,
+} from "@marinara-engine/shared";
 import { useCharacterSprites, type SpriteInfo } from "../../hooks/use-characters";
 import { normalizeSpriteExpressionKey, resolveSpriteExpression } from "../../lib/sprite-expression-match";
 import {
@@ -24,6 +29,7 @@ import {
   type SpriteDisplayMode,
 } from "./sprite-display-modes";
 import { clampSpritePlacement, getDefaultSpritePlacement, type SpritePlacementMap } from "./sprite-placement";
+import { useSpritePlacementDrag } from "./use-sprite-placement-drag";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface SpriteOverlayProps {
@@ -61,6 +67,12 @@ interface SpriteOverlayProps {
   expressionSpriteOpacity?: number;
   /** Opacity multiplier for roleplay full-body sprites. Falls back to spriteOpacity. */
   fullBodySpriteOpacity?: number;
+  /** Scene-wide size adjustment, applied after individual sprite settings. */
+  spriteScaleMultiplier?: number;
+  /** When supplied, sprites outside this turn's expression results are dimmed. */
+  activeCharacterIds?: readonly string[];
+  /** When supplied, only these owners are visible; an empty completed result hides all sprites. */
+  visibleCharacterIds?: readonly string[];
 }
 
 interface CharacterExpressionState {
@@ -102,31 +114,9 @@ function offsetPairedSpritePlacement(
   });
 }
 
-/** Simple keyword-based expression detection from message text. */
+/** Simple keyword-based expression detection from message text (the shared expression keyword list). */
 export function detectExpression(text: string): string {
-  const lower = text.toLowerCase();
-  const patterns: [string, RegExp][] = [
-    ["angry", /\b(anger|angry|furious|rage|yells?|shouts?|snarls?|growls?|seeth)/i],
-    ["sad", /\b(sad|sorrow|cry|cries|crying|tears|weep|sob|mourn|grief|melanchol)/i],
-    ["happy", /\b(happy|joy|laugh|smile|smiles|grin|grins|cheer|delight|beam|beaming|giggl)/i],
-    ["surprised", /\b(surpris|shock|astonish|gasp|gasps|wide.?eye|startle|stun)/i],
-    ["scared", /\b(scare|fear|afraid|terrif|frighten|tremble|trembling|shiver|panic)/i],
-    ["embarrassed", /\b(embarrass|blush|blushes|flustered|sheepish|shy|avert)/i],
-    ["love", /\b(love|adore|affection|heart|kiss|embrace|cherish)/i],
-    ["thinking", /\b(think|ponder|consider|contemplat|muse|hmm|wonder)/i],
-    ["laughing", /\b(laugh|laughing|laughter|haha|LOL|chuckle|cackle|snicker|giggle)/i],
-    ["worried", /\b(worr|anxious|nervous|uneasy|fret|concern|dread)/i],
-    ["disgusted", /\b(disgust|repuls|revolt|gross|nausea|sicken)/i],
-    ["smirk", /\b(smirk|sly|mischiev|devious|wink|tease|teasing)/i],
-    ["crying", /\b(crying|cried|weeping|tears stream|sobbing)/i],
-    ["determined", /\b(determin|resolv|steadfast|unwaver|resolute|clench)/i],
-    ["hurt", /\b(hurt|pain|wound|wince|grimace|ache|suffer)/i],
-  ];
-
-  for (const [expression, regex] of patterns) {
-    if (regex.test(lower)) return expression;
-  }
-  return "neutral";
+  return detectExpressionKeyword(text);
 }
 
 export function SpriteOverlay({
@@ -147,6 +137,9 @@ export function SpriteOverlay({
   spriteOpacity = 1,
   expressionSpriteOpacity,
   fullBodySpriteOpacity,
+  spriteScaleMultiplier = 1,
+  activeCharacterIds,
+  visibleCharacterIds,
 }: SpriteOverlayProps) {
   const { t: localizeUi } = useUiTranslation();
   const stageRef = useRef<HTMLDivElement>(null);
@@ -274,6 +267,7 @@ export function SpriteOverlay({
     const hasPairedSprites = renderModes.length > 1;
 
     for (const [index, charId] of characterIds.entries()) {
+      if (visibleCharacterIds && !visibleCharacterIds.includes(charId)) continue;
       const characterSettings = characterVisualSettings?.[charId];
       const characterSide = characterSettings?.spritePosition ?? side;
       const basePlacement = clampSpritePlacement(
@@ -313,6 +307,7 @@ export function SpriteOverlay({
     resolvedFullBodySpriteScale,
     side,
     spritePlacements,
+    visibleCharacterIds,
   ]);
 
   if (visibleSpriteEntries.length === 0) return null;
@@ -337,8 +332,11 @@ export function SpriteOverlay({
           onFinishPlacement={onFinishPlacement}
           fullBodyOnly={fullBodyOnly}
           spriteDisplayModes={[entry.renderMode]}
-          spriteScale={entry.spriteScale}
-          spriteOpacity={entry.spriteOpacity}
+          spriteScale={entry.spriteScale * spriteScaleMultiplier}
+          spriteOpacity={
+            entry.spriteOpacity *
+            (!editing && activeCharacterIds && !activeCharacterIds.includes(entry.characterId) ? 0.45 : 1)
+          }
         />
       ))}
 
@@ -437,16 +435,12 @@ function CharacterSprite({
   const { t: localizeUi } = useUiTranslation();
   const { data: sprites } = useCharacterSprites(characterId);
   const prevExpressionRef = useRef(expression);
-  const dragRef = useRef<{
-    pointerId: number;
-    startX: number;
-    startY: number;
-    origin: SpritePlacement;
-  } | null>(null);
   const [activeTransition, setActiveTransition] = useState<Transition>(transition);
-  const [currentPlacement, setCurrentPlacement] = useState<SpritePlacement>(() => clampSpritePlacement(placement));
-  const currentPlacementRef = useRef(currentPlacement);
-  const [isDragging, setIsDragging] = useState(false);
+  const {
+    placement: currentPlacement,
+    dragging: isDragging,
+    onPointerDown,
+  } = useSpritePlacementDrag({ placement, placementKey, editing, stageRef, onPlacementChange });
 
   const spriteUrl = useMemo(() => {
     if (!sprites || !(sprites as SpriteInfo[]).length) return null;
@@ -525,64 +519,11 @@ function CharacterSprite({
   );
 
   useEffect(() => {
-    currentPlacementRef.current = currentPlacement;
-  }, [currentPlacement]);
-
-  useEffect(() => {
-    if (!isDragging) {
-      const nextPlacement = clampSpritePlacement(placement);
-      currentPlacementRef.current = nextPlacement;
-      setCurrentPlacement(nextPlacement);
-    }
-  }, [isDragging, placement]);
-
-  useEffect(() => {
     if (prevExpressionRef.current !== expression) {
       setActiveTransition(transition);
       prevExpressionRef.current = expression;
     }
   }, [expression, transition]);
-
-  useEffect(() => {
-    if (!editing && dragRef.current) {
-      dragRef.current = null;
-      setIsDragging(false);
-    }
-  }, [editing]);
-
-  useEffect(() => {
-    if (!isDragging) return;
-
-    const handlePointerMove = (event: PointerEvent) => {
-      const dragState = dragRef.current;
-      const stage = stageRef.current;
-      if (!dragState || !stage || event.pointerId !== dragState.pointerId) return;
-
-      const dx = ((event.clientX - dragState.startX) / Math.max(stage.clientWidth, 1)) * 100;
-      const dy = ((event.clientY - dragState.startY) / Math.max(stage.clientHeight, 1)) * 100;
-      const nextPlacement = clampSpritePlacement({ x: dragState.origin.x + dx, y: dragState.origin.y + dy });
-      currentPlacementRef.current = nextPlacement;
-      setCurrentPlacement(nextPlacement);
-    };
-
-    const finishDrag = (event: PointerEvent) => {
-      const dragState = dragRef.current;
-      if (!dragState || event.pointerId !== dragState.pointerId) return;
-      dragRef.current = null;
-      setIsDragging(false);
-      onPlacementChange?.(placementKey, currentPlacementRef.current);
-    };
-
-    window.addEventListener("pointermove", handlePointerMove);
-    window.addEventListener("pointerup", finishDrag);
-    window.addEventListener("pointercancel", finishDrag);
-
-    return () => {
-      window.removeEventListener("pointermove", handlePointerMove);
-      window.removeEventListener("pointerup", finishDrag);
-      window.removeEventListener("pointercancel", finishDrag);
-    };
-  }, [isDragging, onPlacementChange, placementKey, stageRef]);
 
   if (!spriteUrl) return null;
 
@@ -598,19 +539,7 @@ function CharacterSprite({
         zIndex: isDragging ? 40 : zIndex,
         touchAction: editing ? "none" : "auto",
       }}
-      onPointerDown={(event) => {
-        if (!editing) return;
-        if (event.button !== 0 && event.pointerType !== "touch") return;
-        event.preventDefault();
-        event.stopPropagation();
-        dragRef.current = {
-          pointerId: event.pointerId,
-          startX: event.clientX,
-          startY: event.clientY,
-          origin: currentPlacementRef.current,
-        };
-        setIsDragging(true);
-      }}
+      onPointerDown={onPointerDown}
     >
       {editing && (
         <div className="absolute left-1/2 top-0 z-[2] flex -translate-x-1/2 -translate-y-[calc(100%+0.35rem)] items-center gap-1">
@@ -624,7 +553,7 @@ function CharacterSprite({
             onClick={(event) => {
               event.preventDefault();
               event.stopPropagation();
-              onPlacementChange?.(placementKey, currentPlacementRef.current);
+              onPlacementChange?.(placementKey, currentPlacement);
               onFinishPlacement?.();
             }}
             className="pointer-events-auto flex h-6 w-6 items-center justify-center rounded-lg border border-[var(--marinara-chat-chrome-button-border)] bg-[var(--marinara-chat-chrome-button-bg)] text-[var(--marinara-chat-chrome-button-text-hover)] shadow-lg backdrop-blur-md transition-colors hover:border-[var(--marinara-chat-chrome-button-border-hover)] hover:bg-[var(--marinara-chat-chrome-button-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--marinara-chat-chrome-focus-ring)]"

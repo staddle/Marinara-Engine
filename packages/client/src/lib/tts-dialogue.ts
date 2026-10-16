@@ -1,4 +1,9 @@
-import { decodeEncodedSpeakerTags, type TTSConfig } from "@marinara-engine/shared";
+import {
+  decodeEncodedSpeakerTags,
+  setCharacterVoiceAssignment,
+  type TTSConfig,
+  type TTSVoiceAssignment,
+} from "@marinara-engine/shared";
 import { DIALOGUE_QUOTE_CAPTURE_GROUP_PATTERN_SOURCE, stripSurroundingDialogueQuotes } from "./dialogue-quotes";
 
 export interface TTSUtterance {
@@ -9,7 +14,10 @@ export interface TTSUtterance {
 
 export interface TTSVoiceRequest {
   text: string;
+  paragraphIndex?: number;
   speaker?: string;
+  /** The chat character the speaker resolved to (the one whose voice reads the line), if any. */
+  characterId?: string;
   tone?: string;
   voice?: string;
   pauseAfterMs?: number;
@@ -115,6 +123,9 @@ function buildTTSConfigCacheSignature(config: TTSConfig): string {
     config.elevenLabsStability,
     config.elevenLabsLanguageCode,
     config.voice,
+    config.skipTagContent ? "skip-tags" : "read-tags",
+    config.skipCodeBlocks !== false ? "skip-code" : "read-code",
+    config.skipBracketedText ? "skip-brackets" : "read-brackets",
     config.narratorVoiceEnabled ? "narrator-voice" : "narrator-global",
     config.narratorVoice,
     config.voiceMode,
@@ -200,6 +211,30 @@ function resolveNpcDefaultVoice(
   return pool[stableTTSIndex(seed, pool.length)] ?? "";
 }
 
+/** The voice a character's own per-character row names, or "" when it has none. */
+export function getCharacterVoiceAssignment(
+  assignments: readonly TTSVoiceAssignment[] | undefined,
+  characterId: string,
+): string {
+  return assignments?.find((entry) => entry.characterId === characterId && entry.voice)?.voice ?? "";
+}
+
+/**
+ * The voice a character still gets from its name without a row of its own, such as
+ * an AU copy using the original card's voice, or "" when it uses the default voice.
+ */
+export function getCharacterNameVoice(
+  assignments: readonly TTSVoiceAssignment[] | undefined,
+  character: Pick<TTSVoiceAssignment, "characterId" | "characterName">,
+): string {
+  const otherRows = setCharacterVoiceAssignment(assignments, character, "");
+  return resolveTTSVoiceForSpeaker(
+    { voice: "", voiceMode: "per-character", voiceAssignments: otherRows },
+    character.characterName,
+    character.characterId,
+  );
+}
+
 export function resolveTTSVoiceForSpeaker(
   config: Pick<TTSConfig, "voice"> &
     Partial<
@@ -224,13 +259,14 @@ export function resolveTTSVoiceForSpeaker(
 
   if (config.voiceMode === "per-character") {
     const assignments = Array.isArray(config.voiceAssignments) ? config.voiceAssignments : [];
+    // A character's own row wins over another card that only shares its name.
+    const ownVoice = characterId ? getCharacterVoiceAssignment(assignments, characterId) : "";
+    if (ownVoice) return ownVoice;
     const normalizedSpeaker = normalizeTTSCharacterName(speaker);
-    const exactAssignment = assignments.find((entry) => {
-      if (!entry.voice) return false;
-      if (characterId && entry.characterId === characterId) return true;
-      return normalizedSpeaker.length > 0 && normalizeTTSCharacterName(entry.characterName) === normalizedSpeaker;
-    });
-    if (exactAssignment?.voice) return exactAssignment.voice;
+    const namedAssignment = normalizedSpeaker
+      ? assignments.find((entry) => entry.voice && normalizeTTSCharacterName(entry.characterName) === normalizedSpeaker)
+      : undefined;
+    if (namedAssignment?.voice) return namedAssignment.voice;
 
     const normalizedSpeakerBase = normalizeTTSCharacterBaseName(speaker);
     if (normalizedSpeakerBase) {
@@ -273,11 +309,46 @@ function stripTTSMarkup(value: string, preserveSpeakerTags = false): string {
   return withoutNonSpeechBlocks.replace(/<(?!\/?speaker(?:=|\s|>))[^>]+>/gi, " ");
 }
 
-export function cleanTTSInputText(value: string, options: { preserveEmotionIndicators?: boolean } = {}): string {
-  let cleaned = stripTTSMarkup(value)
+type TTSReadOptions = Partial<Pick<TTSConfig, "skipTagContent" | "skipCodeBlocks" | "skipBracketedText">> & {
+  preserveEmotionIndicators?: boolean;
+};
+
+/** Filter complete blocks before speaker extraction or line chunking can split them. */
+export function filterTTSText(value: string, options: TTSReadOptions = {}): string {
+  let filtered = value
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/(`{3,}|~{3,}|'{3,})[ \t]*(?:[\w+-]+[ \t]*\r?\n)?([\s\S]*?)\1/g, (_match, _fence, content: string) =>
+      options.skipCodeBlocks !== false ? " " : content,
+    );
+  if (options.skipTagContent) {
+    const parts: string[] = [];
+    const tags: string[] = [];
+    let cursor = 0;
+    for (const match of filtered.matchAll(/<\/?([a-z][\w:-]*)\b[^>]*>/gi)) {
+      if (tags.length === 0) parts.push(filtered.slice(cursor, match.index));
+      const name = match[1]!.toLowerCase();
+      if (name === "speaker") {
+        if (tags.length === 0) parts.push(match[0]);
+      } else if (match[0].startsWith("</")) {
+        const start = tags.lastIndexOf(name);
+        if (start >= 0) tags.length = start;
+      } else if (
+        !/\/\s*>$/.test(match[0]) &&
+        !/^(?:area|base|br|col|embed|hr|img|input|link|meta|param|source|track|wbr)$/.test(name)
+      ) {
+        tags.push(name);
+      }
+      cursor = match.index + match[0].length;
+    }
+    if (tags.length === 0) parts.push(filtered.slice(cursor));
+    filtered = parts.join(" ");
+  }
+  return options.skipBracketedText ? filtered.replace(/!?\[[^\]]*\](?:\([^)]*\))?/g, " ") : filtered;
+}
+
+export function cleanTTSInputText(value: string, options: TTSReadOptions = {}): string {
+  let cleaned = stripTTSMarkup(filterTTSText(value, options))
     .replace(VN_TTS_LINE_PREFIX_RE, "")
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/~~~[\s\S]*?~~~/g, " ")
     .replace(/`[^`\n]*`/g, " ")
     .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
     .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
@@ -372,8 +443,8 @@ function splitCleanTTSInputIntoChunks(value: string, maxChars = DEFAULT_TTS_CHUN
   return packTTSChunkPieces(sentencePieces, maxChars);
 }
 
-export function splitTTSChunks(value: string, options: { preserveEmotionIndicators?: boolean } = {}): string[] {
-  return value
+export function splitTTSChunks(value: string, options: TTSReadOptions = {}): string[] {
+  return filterTTSText(value, options)
     .split(/\r?\n+/)
     .map((chunk) => cleanTTSInputText(chunk, options))
     .filter(Boolean)
@@ -428,7 +499,7 @@ export function buildTTSVoiceRequests(
   fallbackCharacterId?: string | null,
   resolveCharacterIdForSpeaker?: (speaker?: string | null) => string | null | undefined,
 ): TTSVoiceRequest[] {
-  const normalized = decodeEncodedSpeakerTags(text);
+  const normalized = filterTTSText(decodeEncodedSpeakerTags(text), config);
   const hasSpeakerTags = /<speaker="[^"]*">/i.test(normalized);
   const shouldExtractUtterances = config.dialogueOnly || hasSpeakerTags;
   const utterances =
@@ -436,7 +507,12 @@ export function buildTTSVoiceRequests(
       ? extractSpeakerTaggedUtterances(normalized, fallbackSpeaker, true)
       : shouldExtractUtterances
         ? extractDialogueUtterances(normalized, fallbackSpeaker)
-        : [{ text: cleanTTSInputText(normalized), speaker: fallbackSpeaker || undefined } satisfies TTSUtterance];
+        : [
+            {
+              text: cleanTTSInputText(normalized, config),
+              speaker: fallbackSpeaker || undefined,
+            } satisfies TTSUtterance,
+          ];
 
   const fallbackSpeakerKey = normalizeTTSCharacterName(fallbackSpeaker);
   return utterances.flatMap((utterance, utteranceIndex) => {
@@ -449,10 +525,11 @@ export function buildTTSVoiceRequests(
     const voice = resolveTTSVoiceForSpeaker(config, speaker, resolvedCharacterId);
     if (config.source === "elevenlabs" && !voice) return [];
 
-    const chunks = splitTTSChunks(utterance.text);
+    const chunks = splitTTSChunks(utterance.text, config);
     return chunks.map((chunk, chunkIndex) => ({
       text: chunk,
       speaker,
+      ...(resolvedCharacterId ? { characterId: resolvedCharacterId } : {}),
       tone: utterance.tone,
       voice,
       ...(config.source === "sglang_omni" ? { streamProviderSynthesis: true } : {}),

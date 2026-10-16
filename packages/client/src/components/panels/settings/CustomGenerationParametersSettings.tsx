@@ -13,6 +13,12 @@ import {
 import { parseGenerationParameterDraft } from "../../../lib/generation-parameter-draft";
 import { showConfirmDialog } from "../../../lib/app-dialogs";
 import { cn } from "../../../lib/utils";
+import {
+  SETTINGS_BUTTON_CLASS,
+  SETTINGS_COMPACT_PRIMARY_BUTTON_CLASS,
+  SETTINGS_ICON_BUTTON_CLASS,
+  SETTINGS_PRIMARY_FULL_BUTTON_CLASS,
+} from "./SettingControls";
 
 type DefinitionDraft = {
   id: string | null;
@@ -168,11 +174,12 @@ export function CustomGenerationParametersSettings() {
                   </p>
                 )}
               </div>
+              {/* 16px (1rem) icons here are a maintainer choice from #4125; core-flows pins them. */}
               <div className="flex shrink-0 gap-1">
                 <button
                   type="button"
                   onClick={() => openForEdit(definition)}
-                  className="mari-chrome-control mari-chrome-control--compact h-7 w-7 p-0"
+                  className={SETTINGS_ICON_BUTTON_CLASS}
                   aria-label={t("settings.customGenerationParameters.editAction", { name: definition.name })}
                   title={t("settings.customGenerationParameters.editAction", { name: definition.name })}
                 >
@@ -182,11 +189,11 @@ export function CustomGenerationParametersSettings() {
                   type="button"
                   onClick={() => void deleteDefinition(definition)}
                   disabled={saveDefinitions.isPending}
-                  className="mari-chrome-control mari-chrome-control--compact h-7 w-7 p-0"
+                  className={cn(SETTINGS_ICON_BUTTON_CLASS, "mari-chrome-control--danger")}
                   aria-label={t("settings.customGenerationParameters.deleteActionNamed", { name: definition.name })}
                   title={t("settings.customGenerationParameters.deleteActionNamed", { name: definition.name })}
                 >
-                  <Trash2 size="1rem" className="shrink-0 text-[var(--destructive)]" />
+                  <Trash2 size="1rem" className="shrink-0" />
                 </button>
               </div>
             </div>
@@ -259,11 +266,7 @@ export function CustomGenerationParametersSettings() {
           </label>
           {validationKey && <p className="text-[0.625rem] text-amber-500">{t(validationKey)}</p>}
           <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
-            <button
-              type="button"
-              onClick={resetForm}
-              className="mari-chrome-control mari-chrome-control--compact justify-center px-3"
-            >
+            <button type="button" onClick={resetForm} className={SETTINGS_BUTTON_CLASS}>
               <X size="0.75rem" />
               {t("chat.delete.dialog.cancel")}
             </button>
@@ -271,10 +274,7 @@ export function CustomGenerationParametersSettings() {
               type="button"
               onClick={() => void saveDraft()}
               disabled={saveDefinitions.isPending}
-              className={cn(
-                "mari-chrome-control mari-chrome-control--compact mari-chrome-control--selected justify-center px-3",
-                saveDefinitions.isPending && "opacity-60",
-              )}
+              className={SETTINGS_COMPACT_PRIMARY_BUTTON_CLASS}
             >
               <Check size="0.75rem" />
               {t("settings.customGenerationParameters.save")}
@@ -288,9 +288,9 @@ export function CustomGenerationParametersSettings() {
             setDraft(EMPTY_DRAFT);
             setFormOpen(true);
           }}
-          className="mari-chrome-control mari-chrome-control--compact mari-chrome-control--selected w-full justify-center px-3"
+          className={SETTINGS_PRIMARY_FULL_BUTTON_CLASS}
         >
-          <Plus size="0.75rem" />
+          <Plus size="0.8125rem" />
           {t("settings.customGenerationParameters.add")}
         </button>
       )}

@@ -1,0 +1,32 @@
+# v2.5.0 announcement media
+
+Screenshots and recordings for the in-app What's New. All of them were captured from this release build (`pnpm build`, `2.5.0+b6211caf573e`), run with `pnpm start` on an isolated local instance. That instance used throwaway `DATA_DIR`/`FILE_STORAGE_DIR` folders, `MARINARA_GIT_BRANCH=staging` so the Agents staging preview catalog was visible, and no real model. The browser was headless Chromium, driven by Playwright with onboarding, What's New, the Professor Mari navigator and the chat window intro dismissed beforehand.
+
+- **Stills:** captured at 1440×900 CSS px with device scale factor 2, then downscaled to 1600 px wide as JPEG (quality 85).
+- **Recordings:** captured with a Chrome DevTools screencast at 1440×900 and encoded to H.264 MP4 at 1280 px, 30 fps, with no audio. The visible cursor is a page overlay added for the recording.
+
+## Demo data
+
+- **Images:** the character art, sprites and backgrounds come from SpicyMarinara's own Marinara instance. They were fetched with read-only GET requests to `/api/characters`, `/api/characters/personas/list`, `/api/sprites/...`, `/api/avatars/file/...` and `/api/backgrounds/file/...`.
+  - Avatars and expression or full-body sprites for Dottore, Tighnari, Pantalone, Maukie and the Mari persona.
+  - Avatars for Capitano and Arlecchino.
+  - The `Laboratory.jpg` and `generated-gandharva-ville-ranger-hut.png` backgrounds.
+- **Text:** all names were kept, but every description, message, item, relationship, scene summary and Gacha Forge unit kit was written for these captures. No chat content was copied.
+- **Chat:** the demo Roleplay chat ("The Blooming Hour", with the Mari persona, Dottore and Tighnari) was inserted through the local chat API.
+
+## Files
+
+| File | What it shows | How it was produced |
+| --- | --- | --- |
+| `chat-ui-dottore.jpg` | Roleplay chat with the movable Chat Settings window pinned open, Author's Notes popped out into its own pinned window, and Gallery minimized to its window button. Chat widget style **Dottore**, dark mode. | The window arrangement was seeded as the chat's saved window layout, the same data the app stores when you move, pin and pop out windows. The widget style is Settings → Appearance → App → Chat widget style. |
+| `chat-ui-mari.jpg` | The same chat with the **Mari** widget style in light mode. The Characters section is popped out and Author's Notes is minimized to its button. | Same as above. The ranger-hut background is set on the chat. |
+| `chat-ui.mp4` (24 s) | Open Chat Settings, drag it across the chat and pin it. Pop out Author's Notes, move it, and close it to its button. Then Settings → Appearance → App: switch the Chat widget style from Default to Dottore to Mari. | Recorded from scripted UI actions in the real UI. |
+| `chat-ui-phone.jpg` | Two phone screens (390×844, light mode, **Mari** widget style with font, shape and colors applied): the **Chat tools** menu open with buttons for popped-out sections, and Chat Settings as a full-width panel. | Captured later from the release branch build (`2.5.0+3997a0582ecb`, which includes the reworked mobile Chat tools from #7145) on a fresh isolated instance. The same demo scene and art were re-seeded without sprites: Mari persona, Dottore and Tighnari avatars and the Laboratory background, fetched again with read-only GETs. Four sections were saved as popped out in the chat's window layout so the menu has buttons to show. |
+| `gacha-forge.jpg` | Home → **Gacha Forge** tab → Summon: the standard banner "Bloom of the Clockwork Conservatory" with Dottore and 76/80 pity. | Gacha Forge 1.8.12 was installed through the Engine's catalog install API, the same call as Download Agents. The world was created with the package's own `/run` API. The founding cast, Mari's kit and the weapons came from a local OpenAI-compatible mock that returned canned answers in the package's format. Unit portraits are the cropped avatars, added through the package's portrait upload. The pity counter was advanced in the stored session so the 10-pull reaches its guaranteed 5★. |
+| `gacha-forge.mp4` (14.5 s) | Home → Gacha Forge → Summon → **Summon ×10**: the pull animation and the results, with Dottore as the 5★ best pull. | Same world as above. Real pull through the UI; no model call is involved in pulling. |
+| `quartermaster.jpg` | Roleplay chat with the **Quartermaster** dock open: outfits, the equipped ring around the Mari persona portrait, and the bag. | Quartermaster 0.1.23 (staging preview) was installed through the catalog install API and enabled as an agent on the chat. Items and outfits were seeded with Quartermaster's own `/import` API. Opened from the Trackers window (the backpack button). The dock is set to UI size S, moved and resized. No item images were added, so bag items show the add-image placeholder. |
+| `relationship-tracker.jpg` | The **Relationship Tracker** web, popped out of the Trackers window: Dottore, Tighnari, Pantalone and Capitano around Mari. The Capitano–Tighnari line is hovered ("Night-watch friends"). | Relationship Tracker 0.6.2 (staging preview) was installed the same way. The relationships and persona perceptions were seeded with the package's manual-edit API. The persona node shows the initial "M", because the package draws the persona without an avatar. |
+| `decision-models.jpg` | A **Decision** connection, "Open-Jev 2B (local)", in the connection editor, with source Custom System One endpoint. Connections → Defaults shows it selected as the **Decision model**, and its **Test** reads "Probability of yes: 0.830". | The connection was created through the connections API and selected with `/api/decision/select`. Test was answered by the same local mock serving a canned System One response. No Open-Jev model ran. |
+| `advanced-memory.jpg` | Chat Settings → **Memory Recall**, popped out → **Access memories for this chat**: Advanced Memory scene summaries with story timeframes (Day 1, early afternoon; Day 1, evening; Day 3, morning). | A demo Roleplay chat with four short scenes was created through the chat API. Advanced Memory was enabled, and the scene summaries and timeframes were seeded through its export/import API, as `e2e/advanced-memory.e2e.ts` does. No summaries were generated by a model. |
+
+The capture scripts, including the mock model server and the seeding scripts, are kept outside the repository in the agent's scratch folder. They are not needed to use these files.

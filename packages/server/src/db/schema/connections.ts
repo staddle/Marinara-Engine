@@ -21,18 +21,39 @@ export const apiConnections = fileTable("api_connections", {
       "nanogpt",
       "xai",
       "arli",
+      "zai",
+      "deepseek",
       "custom",
       "image_generation",
       "video_generation",
       "audio",
+      "decision",
     ],
   }).notNull(),
   baseUrl: text("base_url").notNull().default(""),
   /** Encrypted API key */
   apiKeyEncrypted: text("api_key_encrypted").notNull().default(""),
+  /**
+   * NanoGPT: encrypted management token (usage:read scope) used only for the
+   * subscription usage widget. Cannot authenticate inference endpoints.
+   */
+  managementTokenEncrypted: text("management_token_encrypted").notNull().default(""),
+  /** NanoGPT, Claude (Subscription) and OpenAI (ChatGPT): whether the subscription usage widget is shown. */
+  showUsageWidget: text("show_usage_widget").notNull().default("false"),
+  /** Claude (Subscription) and OpenAI (ChatGPT): which plan windows the usage widget shows. */
+  showUsageFiveHour: text("show_usage_five_hour").notNull().default("true"),
+  showUsageWeekly: text("show_usage_weekly").notNull().default("true"),
   /** Imported endpoints stay unavailable until the user reviews and saves them locally. */
   profileImportReviewRequired: text("profile_import_review_required").notNull().default("false"),
   model: text("model").notNull().default(""),
+  /** Model IDs pinned to the top of the model picker (JSON array). Travels with exports like other settings. */
+  pinnedModels: text("pinned_models").notNull().default("[]"),
+  /**
+   * The model list last fetched from the provider, as JSON `{ fetchedAt, models }`. A re-fetchable cache:
+   * never holds credentials, is left out of API responses and profile exports, and is cleared when the
+   * provider, base URL or API key changes.
+   */
+  savedModels: text("saved_models"),
   imagePath: text("image_path"),
   maxContext: integer("max_context").notNull().default(128000),
   isDefault: text("is_default").notNull().default("false"),
@@ -74,8 +95,15 @@ export const apiConnections = fileTable("api_connections", {
   videoGenerationSource: text("video_generation_source"),
   /** Video generation: explicitly selected service ID. */
   videoService: text("video_service"),
+  /** Instructions for the language model that writes video prompts for this connection. */
+  videoPromptInstructions: text("video_prompt_instructions"),
   /** Audio backend for audio connections (openai | elevenlabs | pockettts | xai). */
   audioSource: text("audio_source"),
+  decisionSource: text("decision_source"),
+  credentialsFromConnectionId: text("credentials_from_connection_id"),
+  maxStateTokens: integer("max_state_tokens"),
+  /** A Decision connection's time limit in milliseconds; null uses the default. */
+  decisionTimeoutMs: integer("decision_timeout_ms"),
   /** Default voice id/name for speech synthesis on this audio connection. */
   audioVoice: text("audio_voice"),
   /** Whether this audio connection may generate game sound effects ("true"/"false"). */

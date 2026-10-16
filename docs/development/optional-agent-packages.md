@@ -247,9 +247,10 @@ const vectors = await embeddings.embed(texts, signal);
 // Store/compare embeddings.spaceId with persisted vectors; do not mix embedding spaces.
 ```
 
-The returned host has `spaceId`, `label`, and `embed(texts, signal?)`. Resolution uses the
-configured embedding source and falls back to the built-in local MiniLM embedder when
-none is available or configuration resolution fails. `embed` can return `null`; empty
+The returned host has `spaceId`, `label`, and `embed(texts, signal?, inputType?)` (see
+capability API 1.68 for the input type). Resolution uses the configured embedding source
+and falls back to the built-in local MiniLM embedder when none is available or
+configuration resolution fails. `embed` can return `null`; empty
 batches, more than 128 texts, or more than 200,000 combined characters are refused. A
 new host does not re-embed existing vectors, so a package must handle a changed `spaceId`
 before comparing new vectors with stored ones.
@@ -460,14 +461,174 @@ keys under its own id; `noodle` and `background` sit in the same position, the l
 verbs, which own no key at all. Keys are flat and top-level because that is the shape a package's
 reconciler already reads.
 
-Verbs run only for a package that holds the `chat-write` permission and is installed and ready.
-This is the Engine's first enforcement of that permission, and it widens what the permission means:
-until now `chat-write` described a package's own client code writing chat data, and it now also
-means the Engine will execute writes on the package's behalf from model output. Permissions are
-displayed before install and nothing re-consents on update, so an existing install carries the old
-meaning into the new one. Readiness is checked rather than servability, so after an update that
-leaves a package `restart-required` its verbs stop resolving until the Engine restarts, with a log
-line as the only signal.
+Verbs run only for a package that declares `chat-write` and is installed and ready. This permission
+also gates writes through the package persistence API, including messages, chat metadata, roleplay
+events and spatial snapshots. `chat-read` gates chat, message, game-state and spatial-snapshot reads.
+The same checks apply inside persistence transactions and chat locks; a write permission does not
+implicitly grant read permission. Engine-owned persistence calls remain trusted.
+
+The Download Agents detail view shows the installed version's declared permissions after installation.
+When the catalog version requests different permissions, it shows those separately. Installing or
+updating code still requires the existing approval bound to that exact version and checksum; model
+commands do not request separate approval on every turn.
+
+These are API checks, not a JavaScript sandbox. Network, storage and UI permissions are access
+declarations. Package browser/server code remains trusted code and can access its host environment;
+only install packages you trust. Readiness is checked rather than servability, so an update that leaves
+a package `restart-required` stops its verbs resolving until Engine restarts.
+
+### Capability API 1.17: prepare an Experience before its opening turn
+
+A `game-surface` package may declare `contributions.gameSurface.prepareBeforeStart: true`
+with schema version 2 and Capability API 1.17. The Engine mounts that surface
+while the game is ready, before enabling Start Game. Classic games and packages without
+the flag retain their existing startup flow.
+
+The opted-in main surface receives two additional props:
+
+- `startup: boolean` stays true until the player finishes the Engine introduction with Continue.
+  Pause world simulation and player actions while it is true.
+- `setStartupReady(context: string | null): void` reports preparation state. Send `null` while
+  loading, saving, or recovering from failure. Send a string only after the actual world is
+  persisted and usable; an empty string permits startup without additional context.
+
+The host blocks Start Game, its widget preparation confirmation, and initial-turn retries
+until a ready string arrives. While blocked, the package's own loading and failure/retry
+interface remains visible. Once ready, the package is hidden behind the normal Engine
+introduction. Continue opens the ordinary surface, which may remount: keep world preparation
+idempotent and restore persisted state instead of generating it again. A returning game that
+has already completed its introduction does not repeat startup preparation.
+
+Opening context is limited to **8,000 characters**. Invalid or oversized context keeps startup
+blocked and displays an error; the host does not truncate world facts. Supply a compact account
+of the prepared starting location and its actual cast. The Engine appends this text to its
+existing first-turn `generationGuide` with source `game_start`, so the opening uses the world
+that exists. This does not register context for later turns; keep using the package's normal
+prompt contribution or turn-generation context for those.
+
+Readiness callbacks belong to the mounted chat, game, and package. Late callbacks from another
+scope are ignored. A module/runtime failure blocks startup rather than treating missing world
+context as success. On reload, the package must report readiness from its saved world. The
+server prompt-context contributor remains read-only and subject to its short deadline; do not
+use it for world generation or as a long-running startup barrier.
+
+### Capability API 1.19: package-contributed tools
+
+Capability API 1.16 gave a package a way to have the model _say_ something it could act on. This one
+gives it a way to have the model _call_ something. A package holding the new `tools` permission
+registers a named tool from its server entrypoint, and the Engine offers it to the model beside the
+built-ins on every turn of every chat, validates the call against the package's own JSON Schema, and
+hands the arguments to the package's handler.
+
+```ts
+export async function activate({ api }) {
+  api.registerTool({
+    name: "set_time",
+    description: "Move the world clock forward or back.",
+    parameters: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["advance", "rewind"] },
+        minutes: { type: "integer", minimum: 0 },
+      },
+      required: ["action", "minutes"],
+      additionalProperties: false,
+    },
+    handler: async (args, { chatId }) => {
+      const clock = await moveClock(chatId, args.action, args.minutes);
+      return { time: clock.label };
+    },
+  });
+}
+```
+
+Tool calling rather than a response format, on purpose. A response format claims the whole reply, so
+the narration would have to be a field inside a JSON object and could not stream. A tool call arrives
+alongside the prose and costs it nothing: the model writes its turn as normal and calls the tool
+while it does. It also means the package gets arguments the provider itself constrained, instead of
+parsing them back out of finished narration — which is the difference between a schema and a
+convention the model is asked to honour.
+
+Enums are the reason this matters. A package that knows the twelve places in its world can put those
+twelve strings in the schema, and a call naming a thirteenth is refused before the handler sees it.
+Refusals reuse the Engine's own tool-argument validator, which names the values that would have
+worked, so the model gets something it can act on rather than "must be equal to one of the allowed
+values". Whatever the handler returns is shown to the model as the tool result.
+
+Rules worth knowing before you write one:
+
+- Names are namespaced to `<packageId>_<name>`, with `-` flattened to `_`, so `world-clock`'s
+  `set_time` reaches the model as `world_clock_set_time`. A qualified name already taken by another
+  package is refused. Built-ins and enabled custom tools keep ownership of colliding names; the
+  package definition is omitted and the built-in or custom handler runs. Qualified names must fit
+  the provider limit of **64 characters**.
+  Resolution is built-in first, then custom, then package, in both the definitions the model is
+  shown and the executor, so the owner of a name is always the one that runs the call.
+- A package's tools are always attached for as long as it is active. There is no second per-chat
+  switch the way there is for built-in tools: declaring the permission and registering the tool is
+  the decision. The selected provider must support native tool calls.
+- The parameters schema is snapshotted and compiled at registration, so a schema the Engine cannot compile fails the
+  package at activation, where a developer sees it, rather than mid-turn.
+- A handler that throws is reported to the model as a failed tool call and logged; its message is not
+  forwarded. A handler that has not settled within **10 seconds** is abandoned the same way — it keeps
+  running, but the turn stops waiting on it.
+- Tool results must serialize to at most **64 KiB**. Larger or non-serializable results fail the call
+  instead of crowding out the conversation. Descriptions and results are trusted package content;
+  package authors must check `chatId` before reading or changing chat-specific state.
+- Every definition is serialised into each turn's provider request and counted by context fitting, so
+  registration is bounded: at most **16 tools per package** and **64 across all packages**, a
+  description of at most **512 characters**, and a parameters schema of at most **8 KiB**. Exceeding
+  any of these throws, which fails activation. Registering a name the package already owns replaces
+  that tool rather than consuming another slot.
+- The activation context stops working once the activation is torn down: a package that retains `api`
+  and calls `registerTool` from a later callback is refused, so a dead runtime cannot register a tool
+  or replace a live one belonging to a re-activated package.
+- Deactivating, updating or removing a package releases its tools, so a tool is never offered to a
+  model whose package is no longer there to answer it.
+  Tools are removed before awaiting package cleanup, whose individual callbacks have an 8-second deadline.
+
+These deadlines bound asynchronous waits only. Packages run as trusted code in the server process;
+synchronous work that blocks the event loop cannot be interrupted by a timer. Hard cancellation would
+require a separate worker or process boundary, which this API does not provide.
+
+This is not a soft seam. `api.registerTool` only exists on an Engine this new, so a package that
+needs it must declare `capabilityApi` 1.19 and will refuse to install on anything older.
+
+## Decision statements and the Decision model
+
+The user's **Decision model** answers yes/no and choice statements about the recent chat. See [Decision Models](../connections/decision-models.md) for what it is and how users set one up.
+
+An agent prompt template shipped by a package can use decision statements exactly as a user's custom agent does: `{{#if decision:"..."}}` and `{{#if decision_choice:"..." == "..."}}`. The Engine finds them in the template, asks them before the agent runs (after the reply, for a post-processing agent), and resolves the template with the answers. No capability API version is involved. See [Conditional Prompts](../prompts/conditional-prompts.md#asking-the-decision-model) for the syntax and the wording advice, and [Creating Custom Agents](../agents/custom-agents.md#decision-statements-in-the-agents-prompt) for how agent phases read them.
+
+Package server code can also ask the user's configured Decision model bounded yes/no and Choice questions about context the package supplies, through `api.runtime.decisions.evaluate(...)`. It uses the same Decision model as agent activation questions and prompt conditionals (a managed local model or a Decision connection) and never exposes keys or Engine internals. `decisions` is optional and needs no newer capability API or permission: check `typeof api.runtime.decisions?.evaluate === "function"` and fall back on older Engines.
+
+```ts
+const result = await api.runtime.decisions?.evaluate({
+  messages: [{ role: "user", content: "The tavern falls silent as the stranger draws a blade." }],
+  questions: [
+    { id: "danger", question: "Someone is about to be attacked." },
+    { id: "mood", question: "The mood of the scene is", options: ["calm", "tense", "festive"] },
+  ],
+  // Optional: pass `signal` to cancel and `debugMode: true` to log the Decision prompt.
+});
+// null: no Decision model is configured, or it gave no answer (unreachable, timed out or cancelled).
+if (result && (result.answers.danger ?? 0) >= result.threshold) {
+  // ...
+}
+```
+
+- `messages` is the package's own context, oldest first (at most 200 messages and 200,000 characters; a message `name` is at most 100 characters). The oldest messages are dropped to fit the model.
+- Each `question` is at most 500 characters; ids must be unique. A Choice question has at least two `options`, and its answer is one of them or `"none of these"`.
+- One request may ask for at most the user's **Decision statements per turn** limit of answers; each Choice option counts once, plus one. An invalid request throws a `TypeError`.
+- `answers` holds the probability of yes per yes/no question, and a question missing from it was not answered. Compare it with `threshold`, the model's own operating point: probabilities are not comparable across Decision models.
+
+Design every use for a user with no Decision model. A statement with no answer reads as no, so the `{{else}}` branch, or nothing, must be a sensible default. Write for "a Decision model", rather than requiring Jev: local chat models and other supported backends use the same syntax, but can give different answers. See [Thresholds](../connections/decision-models.md#thresholds) and [Limits and cost](../prompts/conditional-prompts.md#limits-and-cost) before relying on a particular score, request count or cached answer.
+
+### A note for Game Mode Experience developers
+
+Engine combat decides what ordinary enemies do on its own. Every non-boss enemy on the GM's side of a fight gets a role from its skills and class (bruiser, bulwark, skirmisher, marksman, spellcaster, supporter or controller), a proficiency from its level unless the enemy sets one (novice, trained, veteran or master), and a temperament such as reckless, cautious, opportunistic or protective. Beasts and monstrosities are always mindless. Engine code picks these from a seed with no model call, and the game's difficulty changes how consistently enemies play to type. Only authored bosses are directed by the GM through a model call. See [Game Mode combat AI](game-combat-ai-design.md).
+
+More combat improvements are on the way. Before involving a decision model anywhere in the combat pipeline, check that vanilla Engine combat does not already do what you need. If an enemy needs a particular personality, give it the matching proficiency and temperament first. A decision per enemy turn would add model work and a time limit; a hosted backend would also add network requests and charges. The fight would then depend on answers from a model the user may not have set up, so it would need a sensible no-answer fallback.
 
 ## Initial packages
 
@@ -539,3 +700,849 @@ Desktop uses a browse list with an adjacent detail region. Mobile uses one pane 
 ## Extraction gate
 
 An extraction is complete only when the base production client and server bundles no longer contain the package implementation, a fresh install cannot activate it without downloading the package, an upgraded install retains it, and package install/update/uninstall passes on desktop, mobile, and Termux-compatible filesystems.
+
+### Capability API 1.30: wound tracks, spending on a check, and a fight fought on a track
+
+A ruleset's `live.tracks` entry may declare `levels` and `kinds`, which turns it from a bounded
+integer into a WOUND TRACK: a column of boxes, each with its own label and penalty, that a mark sits
+on. `levels` is 1 to 16 rungs, best first and worst last, each a `label` and an integer `penalty`.
+`kinds` is 1 to 6 sorts of harm the track may take, each an `id`, a short `label` and a distinct
+`severity`. The two go together: `kinds` without `levels` is refused, because there would be nothing
+to mark. Beside them, `resolution.penaltyFrom` names the track whose penalty rides on every roll:
+under `dice-pool` it takes that many dice off the pool and never below `pool.min`, and under
+`dice-sum` it is a flat modifier on the roll.
+
+The rest of 1.30 is everything else this slice added, and a package that ships any ONE of them
+declares 1.30:
+
+- `combat.health` may name a wound track instead of a pool, and then `combat.damageKinds` says what
+  each damage type marks: `default`, an optional `byType` map, and `marks`, which is `per-blow`
+  where a landing blow ticks one box or `per-point` where a damage roll counts health levels.
+  `damageKinds` is required with a wound track and refused with a pool.
+- `resolution.spend` (a `dice-pool` ruleset only): the pool a player may spend on a check, what one
+  payment costs, whether it buys `successes` or `dice`, and `perCheck`, the ceiling on one roll.
+- `mechanics.check` on a catalog entry: what a thing the character PICKED does to a check, as
+  `reroll` (`upTo` and `once` or `until`), `dice`, `successes` or `threshold`. Also pool-only.
+
+```json
+{
+  "capabilityApi": { "major": 1, "minor": 30 },
+  "kind": ["ruleset"],
+  "contributions": { "assets": { "paths": ["ruleset.json"] } }
+}
+```
+
+A wound track's length is its levels, so its `min` is 0 and its `max` is `levels.length`, and a file
+that says otherwise is refused rather than quietly corrected. A track named by `resolution.penaltyFrom`
+must be a wound track: a plain track carries no penalty to apply.
+
+Not a soft seam, for the same reason as 1.20 through 1.28: an Engine that cannot read `levels`,
+`kinds`, `penaltyFrom`, `damageKinds`, `resolution.spend` or `mechanics.check` refuses the whole
+ruleset file, so install reads the verified bytes of `ruleset.json` and refuses the package under an
+older declaration. No change for a ruleset whose tracks are plain numbers, whose health is a pool
+and which says nothing about spending on a check.
+
+### Capability API 1.29: what one turn of a ruleset fight can do
+
+Five additions, all optional, to the `combat` block and to the catalog entries a fight reads:
+
+- A blow may carry up to three MORE amounts beside its first. `mechanics.plus` on a catalog entry
+  and `damage.plus` on a creature action are each `{ dice?, flat?, type?, save?: { save,
+difficulty?, onSuccess: "none" | "half" } }`: rolled and typed on its own, doubled on its own by a
+  critical, saved against on its own by the target, and still one check against concentration and
+  one check for going down for the whole blow.
+- `combat.attacks[].strikes` is a value reference saying how many strikes one spend of that list's
+  budget buys. The rest wait in hand until the turn ends, and while any are in hand every row of
+  that list costs no budget.
+- `mechanics.free` costs no budget, `mechanics.gives` hands budgets back for this turn only (capped
+  where they land), and `mechanics.standard` lets its holder buy named standard actions with
+  another budget. A `utility` entry that declares `gives` or `standard` is offered rather than
+  dropped.
+- A new entry kind, `rider`, and a creature's own `riders`, add a damage clause to the first
+  qualifying hit of a turn or a round, passively and without ever being on the menu.
+- The closed condition effect list gains `own-saves-advantage`, `own-saves-disadvantage`,
+  `resist-all`, `cannot-target-source` and `cannot-approach-source`, and a condition may narrow the
+  saves it is about (`saves`), count only while its source is in sight (`whileSourceInSight`) or
+  end when its source goes down (`endsWhenSourceDown`).
+
+```json
+{
+  "capabilityApi": { "major": 1, "minor": 29 },
+  "kind": ["ruleset"],
+  "contributions": { "assets": { "paths": ["ruleset.json"] } }
+}
+```
+
+Not a soft seam, for the same reason as 1.20 through 1.28: an Engine that cannot read these keys
+refuses the whole ruleset file, or the catalog file that holds them, so install reads the verified
+bytes of `ruleset.json` and of every declared `catalogs/<id>.json` and refuses either one under an
+older declaration. No permission, and no change for a ruleset that declares none of them.
+
+### Capability API 1.28: a ruleset fight on a board
+
+A ruleset's `combat` block may say what one cell of a battlefield is worth in its own distance
+(`distance: { label, perCell }`), and that is what makes a fight positionable at all. Beside it:
+`ranged` says what a shot past its ordinary distance, or taken with a foe in the next cell, costs;
+`cover` says what standing behind something adds to the defense an attack is rolled against;
+`opportunity` names the budget a strike at somebody walking away is paid out of; an attack list may
+give its rows a `reach` and a `range`, each read from a column of that list or written once for
+every row; and a creature action's `range` may be `{ "normal": 30, "long": 120 }` instead of a plain
+number.
+
+```json
+{
+  "capabilityApi": { "major": 1, "minor": 28 },
+  "kind": ["ruleset"],
+  "contributions": { "assets": { "paths": ["ruleset.json"] } }
+}
+```
+
+A ruleset that declares `ranged`, `cover`, `opportunity` or any weapon reach or range WITHOUT
+`distance` is refused at import: none of them means anything without a cell to measure it in. The
+board itself is the tactical combat style's own generator, terrain and deployment, so this level
+adds no second battlefield model and no permission.
+
+Not a soft seam, for the same reason as 1.20 through 1.27: an Engine that cannot read these keys
+refuses the whole ruleset file, or the catalog file that holds the creature whose range is a pair,
+so install reads the verified bytes of `ruleset.json` and of every declared `catalogs/<id>.json` and
+refuses either one under an older declaration. No change for a ruleset that says nothing about
+distance.
+
+### Capability API 1.27: ruleset bestiaries
+
+A ruleset catalog may declare `"holds": "creatures"` and carry creature stat blocks instead of sheet
+rows. A creature is written in the numbers the `combat` block already declares: health that may be a
+number or dice thrown when the fight starts, a defense, an initiative modifier, ability scores and
+save modifiers under the sheet's own ids, damage types it resists, is hurt more by or ignores, the
+conditions it is never in, the threat tier it sits on, traits the Game Master is shown, and actions
+that may hit, force a save, apply a condition, be limited to so many uses, come back on a recharge
+roll, resolve a sequence of the block's other actions for one budget, or be bought with the
+creature's own signature points.
+
+```json
+{
+  "capabilityApi": { "major": 1, "minor": 27 },
+  "kind": ["ruleset"],
+  "contributions": { "assets": { "paths": ["ruleset.json", "catalogs/beasts.json"] } }
+}
+```
+
+A catalog of creatures declares no `feeds` and is never offered by the sheet editor's picker: it is
+read by a fight, not by a character sheet. The fight that reads it is the combat director's
+`ruleset` style, which needs no Capability API level of its own: it plays whatever `combat` block
+and bestiary an installed ruleset already carries.
+
+Not a soft seam, for the same reason as 1.20 through 1.26: an Engine that cannot read `holds` or an
+entry's `creature` refuses the whole ruleset file, or the catalog file that holds it, so install
+reads the verified bytes of `ruleset.json` and of every declared `catalogs/<id>.json` and refuses
+either one under an older declaration. No permission, and no change for a ruleset without a bestiary.
+
+### Capability API 1.26: ruleset combat
+
+A ruleset may carry an optional top-level `combat` block saying how a fight is RESOLVED by its own
+numbers: what is rolled and against what, the action economy, which sheet lists are attacks and
+which are abilities, what its conditions do, concentration, what happens to a character at zero, the
+damage types it has and the scale an opponent is picked from. The same release lets a catalog
+entry's `mechanics` say how many targets it takes, that it always lands, what conditions it applies,
+what temporary points it grants, how it grows with the sheet and which budget it spends.
+
+```json
+{
+  "capabilityApi": { "major": 1, "minor": 26 },
+  "kind": ["ruleset"],
+  "contributions": { "assets": { "paths": ["ruleset.json"] } }
+}
+```
+
+A game on a ruleset that declares `combat`, with the combat director on, fights its battles by
+this block on the battle screen. A ruleset without it fights the way it did before, through its
+`battle` block or the player's Classic or Tactical preference.
+
+Not a soft seam, for the same reason as 1.20 through 1.25: an Engine that cannot read `combat` or
+the new `mechanics` keys refuses the whole ruleset file, or the catalog file that holds them, so
+install reads the verified bytes of `ruleset.json` and of every declared `catalogs/<id>.json` and
+refuses either one under an older declaration. No permission, and no change for a ruleset with
+neither.
+
+### Capability API 1.25: ruleset layers and world guidance
+
+A ruleset may declare an optional top-level `layers` array: named variants of itself (Low magic, Hard
+winter) that a player turns on when a game is created, frozen into that game's pin for its lifetime.
+The same release gives the base `gm` block an optional `worldGuidance` string, which world generation
+reads once at setup so the setting suits the rules the party will play by.
+
+```json
+{
+  "capabilityApi": { "major": 1, "minor": 25 },
+  "kind": ["ruleset"],
+  "contributions": { "assets": { "paths": ["ruleset.json"] } }
+}
+```
+
+A layer's effects are a closed set and every one of them narrows or appends: guidance added after the
+ruleset's own, values removed from an enum field, the difficulty ladder replaced by one of the same
+resolution kind, and catalog entries hidden from the sheet editor's picker. Nothing is added, so a
+character sheet stays readable whichever layers a game chose, and a layer brings no package code and no
+extra model call. Layers shipped by someone other than the ruleset's author are a later addition.
+
+Not a soft seam, for the same reason as 1.20 through 1.24: an Engine that does not know `layers` or
+`gm.worldGuidance` refuses the whole ruleset file, so install reads the verified bytes of `ruleset.json`
+and refuses either one under an older declaration. No permission, and no change for a ruleset with
+neither.
+
+### Capability API 1.24: the dice-pool resolution kind
+
+A ruleset's `resolution` may declare `"kind": "dice-pool"` instead of `"dice-sum"`. The check then throws
+the character sheet's own number of dice and counts the ones that reach a target, with optional doubled
+faces, exploding faces, cancelling faces, botches, exceptional successes and a range of situational dice
+the Game Master may add or take for one check.
+
+```json
+{
+  "capabilityApi": { "major": 1, "minor": 24 },
+  "kind": ["ruleset"],
+  "contributions": { "assets": { "paths": ["ruleset.json"] } }
+}
+```
+
+The sheet is the same sheet: what `dice-sum` adds to the roll is, here, the number of dice. So the kind
+brings no new sheet vocabulary, no editor slot and no package code.
+
+Not a soft seam, for the same reason as 1.20 through 1.23: an Engine that knows only `dice-sum` refuses
+the whole ruleset file, so install reads the verified bytes of `ruleset.json` and refuses a `dice-pool`
+resolution under an older declaration. No permission, and no change for a ruleset that sums its dice.
+
+### Capability API 1.23: scaled catalog values
+
+A catalog entry's row may carry an optional `scaled` map: up to four of that row's own number columns
+whose value the ruleset keeps, rather than the player. Each one is an ordinary value reference with an
+optional step table, so a class resource can follow a level and a feature's uses can follow an ability
+score without the format learning any new arithmetic.
+
+```json
+{
+  "capabilityApi": { "major": 1, "minor": 23 },
+  "kind": ["ruleset"],
+  "contributions": { "assets": { "paths": ["ruleset.json", "catalogs/spells.json"] } }
+}
+```
+
+The value is worked out when the sheet is edited and never when it is read, so live state, the Game
+Master's prompt block and the battle bridge all keep reading the stored number.
+
+A scaled row can sit inline in `ruleset.json` or in a `catalogs/<id>.json` asset. The manifest
+declares both files as assets but cannot show the keys inside them, so install reads the verified
+bytes of both and refuses a `scaled` key under a
+declaration older than 1.23, exactly as it does for `catalogs` under 1.21 and `battle` under 1.22. An
+older Engine's strict schema would refuse the file that holds it anyway. No permission, and no change
+for a ruleset whose catalogs ship none.
+
+The same release adds the `[sheet: op="use" name="..."]` command, which pays a catalog entry's
+`mechanics.cost` plus one use of every row pool that entry wrote. It needs no declaration: it reads
+catalogs the Engine already serves.
+
+### Capability API 1.22: the battle block
+
+A ruleset may carry an optional `battle` block, which lends a battle the numbers on the character
+sheet: the live pool that is hit points, an optional pool that becomes MP, the pools that become
+spell slots, and the sheet lists whose catalog-marked rows become the Engine's own `CombatSkill`s.
+When the fight ends, the hit points, energy and slots it spent are written back through the same
+sheet operations a player's own buttons use.
+
+```json
+{
+  "capabilityApi": { "major": 1, "minor": 22 },
+  "kind": ["ruleset"],
+  "contributions": { "assets": { "paths": ["ruleset.json"] } }
+}
+```
+
+This is not a combat adapter. The damage arithmetic stays the Engine's, and `attackRoll`, `save`,
+`concentration` and `perCostStep` on a catalog entry are read by nobody: rules-accurate resolution
+belongs to the combat handoff's per-ruleset adapters. `coverage.combat` keeps its own meaning and
+the bridge never reads it.
+
+The block lives inside `ruleset.json`, which the manifest cannot show, so install reads the verified
+bytes and refuses a `battle` key under a declaration older than 1.22, exactly as it does for
+`catalogs` under 1.21. An older Engine's strict schema would refuse the whole ruleset file anyway.
+No permission, and no change for a ruleset that ships no `battle` block.
+
+### Capability API 1.21: ruleset catalogs
+
+A ruleset may ship **catalogs**: named collections of ready-made entries (spells, class features,
+gear) that the sheet editor offers in a picker, so a player does not type a list row by row. The
+header lives in `ruleset.json` under `catalogs`; the entries sit either inline in that header or in
+a reserved asset of their own, one file per catalog:
+
+```json
+{
+  "capabilityApi": { "major": 1, "minor": 21 },
+  "kind": ["ruleset"],
+  "contributions": { "assets": { "paths": ["ruleset.json", "catalogs/spells.json"] } },
+  "files": [
+    { "path": "ruleset.json", "sha256": "<sha256>", "bytes": 25767 },
+    { "path": "catalogs/spells.json", "sha256": "<sha256>", "bytes": 418204 }
+  ]
+}
+```
+
+`catalogs/<id>.json` is a reserved asset family: the file name is the catalog's own id, so the
+Engine finds the file from the ruleset alone and no catalog can name another one's file. A catalog
+asset is hash-pinned in `files[]` like every other declared asset, only ever ships beside the
+`ruleset.json` that declares it, and is refused on its declared size above 2 MB before it is read (1 MB before Capability API
+1.340; a package with a catalog file over 1 MB declares 1.340).
+Its contents go through the same checks the inline entries go through, against the same sheet, so a
+catalog can never write a row the sheet could not hold. Up to 12 catalogs per ruleset and 2000
+entries per catalog.
+
+The client fetches a catalog only when a picker opens, through
+`GET /api/capability-packages/rulesets/catalog?rulesetId=&catalogId=&version=`. The installed-ruleset
+list never carries inline entries, only a count, because it is read whenever a sheet editor opens.
+Catalog text never reaches a prompt: the Game Master still sees only what `gm.sheetSummary` names,
+so catalogs cost no tokens.
+
+Like 1.20 this is not a soft seam, and the gate has two halves because catalogs live inside the
+ruleset file rather than in the manifest. Declaring a `catalogs/<id>.json` asset requires 1.21, and
+a `ruleset.json` that carries a `catalogs` key is refused at install when the manifest declares
+less, because an older Engine's strict schema would refuse the whole ruleset file anyway. No
+permission, as before.
+
+### Capability API 1.20: Game Mode rulesets
+
+A ruleset is a game's rules as validated data: a resolution kind the Engine already implements, a
+character sheet declared from a closed set of primitives, rests, and guidance for the Game Master
+prompt. A package ships it as the reserved-filename asset `ruleset.json`, discovered by convention
+exactly like `gm-verbs.json`: listed in `contributions.assets.paths` and hash-pinned in `files[]`.
+
+```json
+{
+  "schemaVersion": 2,
+  "capabilityApi": { "major": 1, "minor": 20 },
+  "id": "ruleset-5e-2014",
+  "kind": ["ruleset"],
+  "permissions": [],
+  "entrypoints": {},
+  "contributions": { "assets": { "paths": ["ruleset.json"] } },
+  "files": [{ "path": "ruleset.json", "sha256": "<sha256 of the file>", "bytes": 25767 }]
+}
+```
+
+The snippet shows only the keys that matter to a ruleset; the usual manifest fields (`name`,
+`version`, `description`, `engine`, `builtAgainst`) are still required.
+
+A ruleset package needs no permission, no server or client entrypoint and no agent. The kind and the
+asset go together: a package of kind `ruleset` must list `ruleset.json`, and a package that lists
+`ruleset.json` must declare the kind, so a ruleset cannot ride in under another kind. Nothing in the
+file is executed: there are no expression strings, and a mechanic that no resolution kind expresses
+is an Engine change that adds a kind, not something a ruleset can do. The format, the first-party 5e
+file and the reasons behind its shape are in
+[`game-rulesets-and-sheets-implementation.md`](game-rulesets-and-sheets-implementation.md).
+
+This is not a soft seam. A ruleset package does nothing on an Engine that cannot read it, so a
+manifest that lists `ruleset.json` must declare Capability API 1.20, and an older Engine refuses the
+install cleanly.
+
+The Engine refuses the asset on its declared size above 512 KB before reading it (256 KB before Capability
+API 1.340; a package whose ruleset is over 256 KB declares 1.340), re-verifies it
+against the install-time hash, and validates it with the strict shared schema
+(`packages/shared/src/schemas/ruleset.schema.ts`). A file it cannot use is dropped with one log line
+that names the package and the first few `path: message` problems. Two packages that declare the same
+ruleset id resolve to the first in package-id order, and the other is dropped with a log line.
+`engine-legacy` and `traditional` are Engine-owned ids a file may not claim.
+
+A game pins its ruleset once, at creation, as `chat.metadata.gameRuleset`. No pin means the Engine's
+own rules, exactly as before. A pin the install cannot honour (the package is gone, or the installed
+definition is older than the pinned version) is reported as unavailable and never reinterpreted as
+another ruleset. The pin is matched on the ruleset id and on the package that supplied it, so
+another package claiming the same id does not take over an existing game.
+
+### Capability API 1.73: the avatar agents
+
+The Engine hosts the two avatar agents, `2d-avatars` (PNGTuber sprites and mesh avatars) and
+`3d-avatars` (VRM models). Their packages stay thin: an agent definition each, default prompts,
+locales and the catalog entry. The Engine owns everything else: per-owner storage under
+`DATA_DIR/avatar-models/`, import, the lazy-loaded renderers, the setup on each agent's Agent editor
+page, the stream director, the expression classifier and the generation routes. The shared contract
+is `packages/shared/src/types/avatars.ts` (its schemas are in `schemas/avatars.schema.ts`), and the
+client half is `packages/client/src/features/avatars/contract.ts`. The user guide is
+[`docs/agents/avatars.md`](../agents/avatars.md).
+
+There is no new manifest field. An avatar package declares schema version 2 and Capability API 1.73,
+so an Engine without these surfaces refuses the install instead of listing an agent that shows
+nothing. The change that introduced 1.73 shipped these surfaces as inert stubs, so the packages are
+published, even to the preview catalog, only once the Engine's setup, stage and a renderer are on
+`staging`. The 2D agent's generation prompts ship as the `avatarGenerationTemplates` prompt template
+collection in its `defaultSettings`, with the ids in `AVATAR_PROMPT_TEMPLATE_IDS`; the Agent editor
+merges and resets them like any other built-in template collection.
+
+### Capability API 1.72: an Experience's map pack
+
+A `game-surface` package that sets up through the Game wizard (`gameSurface.setup`, 1.18) can ship a
+map pack with schema version 2 and Capability API 1.72: its own setting kit, ready-made worlds built
+with that kit, and its own tile pack. Each is the share file Game Mode and Pixelforge already read and
+write (a `.worldkit.json`, `.world.json` files and a `.tilepack.json`), and each is also a declared,
+hash-pinned asset.
+
+```json
+{
+  "gameSurface": {
+    "setup": {},
+    "mapPack": {
+      "kit": "map/riverlands.worldkit.json",
+      "worlds": ["map/upriver.world.json", "map/downriver.world.json"],
+      "tiles": "map/riverlands.tilepack.json"
+    }
+  },
+  "assets": {
+    "paths": [
+      "map/riverlands.worldkit.json",
+      "map/upriver.world.json",
+      "map/downriver.world.json",
+      "map/riverlands.tilepack.json"
+    ]
+  }
+}
+```
+
+`worlds` (at most 32) and `tiles` are optional. A world file may carry its world's story script
+(worldgen W10), which ships with the map as part of it. A world file of version 2 also carries the
+world's `snapshot`, the world as it was made (W11): an Engine whose world generator has changed since
+reads the world from it, exactly as it was made, so a pack keeps working across Engine updates. Write
+the files from a game's or library world's **Download** (or `GET /api/game/:chatId/world/file`), which
+include it. A pack file is still at most 2 MB, so a world whose file is larger (a big world's snapshot)
+cannot ship in a pack. With the Experience on, a new game is locked
+to the pack's kit; if the pack ships worlds, the player picks one of them (story included) and makes
+no other. Turning the
+Experience off gives the player's own choices back. `POST /api/game/create` holds a game to the same
+lock. The game keeps its kit and world like any game, so it plays on if the package is removed, and
+draws its overworld and towns with the pack's tiles while the package is installed.
+
+The Engine reads the files through the verified asset path (declared size at most 2 MB each, hash
+re-checked) and checks them as it checks share files. A pack is refused whole, with the reason, when a
+file does not read, when a world was made with another kit or does not fit it, or when its bytes are
+not the ones installed; the Experience then cannot start a game. A ruleset is never part of a map
+pack: an Experience that needs its own rules ships a separate ruleset package.
+
+### Capability API 1.18: keep Experience setup in the Game wizard
+
+A `game-surface` package can declare `contributions.gameSurface.setup` with schema
+version 2 and Capability API 1.18. The Engine keeps its usual seven setup steps,
+including Party, goals, models, and lorebooks. Only new games offer Experiences;
+reopening setup for an existing game preserves its Experience and package config.
+Packages without this declaration retain their legacy setup dialog.
+
+```json
+{
+  "setup": {
+    "seed": { "key": "seed", "label": "World seed" },
+    "config": { "generate": true, "packWanted": true },
+    "requires": { "enableCustomWidgets": false }
+  }
+}
+```
+
+All three fields are optional. The declared seed appears beneath the selected
+Experience with a Randomize button. The seed is an unsigned whole number from 0
+to 4294967295; blank, fractional, negative, exponent, or hex input blocks Start.
+The host writes the numeric seed and declared constants to `experienceConfig`;
+`config` cannot contain the seed key. Constants must serialize to at most 8,000
+characters. A seed label is package-authored display text; omit it to use the
+Engine's localized label.
+
+A declared widget requirement is enforced while the Experience is active. The
+host sets the control to the declared value, locks it, and explains which
+Experience set it. A setup-file import cannot override the declared value. The
+player's own earlier choice is kept untouched and is restored as soon as the
+Experience is turned off. The spatial-map setup controls are hidden for these
+Experiences, so no separate map draft, template, or builder is launched.
+
+The Lorebooks step can select up to 100 individual enabled entries, including
+entries from unattached books. Disabled books, entries, and chat exclusions are
+respected. These ids travel in `GameSetupConfig.activeLorebookEntryIds`. On
+`/game/setup` they are additive forced entries: they skip probability rolls but
+retain ordinary token limits. Global, character-bound, and attached lore still
+participate in the ordinary scan. Packages can read the same selected ids from
+the setup config for their own world-generation request. Imported entry ids that
+do not exist on this machine are reported and skipped.
+
+A setup-file import restores an installed compatible Experience and its valid
+numeric seed, but discards arbitrary package config. The current manifest supplies
+constants again. A file that carries no usable Experience seed leaves the
+prefilled random seed alone. Existing games skip Experience imports with an
+explanation. Creation snapshots retain the Experience name and seed for the setup
+summary.
+
+Use the existing startup-readiness declaration independently when the world must
+be prepared before the opening turn. Declare API 1.18 as the package minimum;
+older hosts cannot interpret this setup declaration.
+
+### Capability API 1.71: read messages as agents read them
+
+In Roleplay, a message can carry whispers that are not part of its `content`. Every agent the Engine
+runs reads them, and a package that reads the chat itself can now read the same text. Each record
+from `persistence.listMessages(chatId)` gets `agentContent`: the message as Engine agents read it.
+Each whisper sits at its place, marked `[Private whisper to <name>: …]`, and a message that is only
+a whisper reads as its whispers. A document a character hands over, such as a letter, follows the
+message. The player's private notes are left out.
+
+`agentContent` is there only in Roleplay chats. It is missing in other modes and in a hosted
+multiplayer room, where everyone sees what agents write. `content` never changes: it is still the
+public text. `extra` doesn't change either: it is the message's saved data, with every whisper in it,
+in every mode. Never show text built from it to players or characters a whisper was not for.
+
+```ts
+const messages = await api.runtime.persistence.listMessages(chatId);
+const history = messages.map((message) => message.agentContent ?? message.content);
+```
+
+It is a soft seam: older Engines leave the field out, so a package that reads
+`agentContent ?? content` does not need to declare 1.71. It needs the `chat-read` permission, like
+`listMessages`. Whispers are private: anything a package writes from them, such as a note or a memory,
+can reach characters the whisper was not for.
+
+### Capability API 1.68: embed search queries as queries
+
+`embeddings.embed(texts, signal?, inputType?)` takes a third argument: pass `"query"` for search
+text, such as a recall query. Texts default to `"document"`. Some embedding models expect a prefix
+on queries, and some also on documents: e5 and nomic-embed-text use one of each, and Snowflake
+Arctic Embed v2 prefixes only queries. The Engine adds the right one. Recall is weaker when a query
+is embedded as a document. Other models, including the built-in MiniLM embedder, get no prefix
+either way. The input type does not change `spaceId`, so stored vectors stay comparable and nothing
+needs re-embedding.
+
+```ts
+const embeddings = await api.runtime.resolveEmbeddings();
+const [queryVector] = (await embeddings.embed([query], signal, "query")) ?? [];
+const memoryVectors = await embeddings.embed(memoryTexts, signal); // documents
+```
+
+It is a soft seam: an older Engine ignores the third argument, so a package can always pass it and
+does not need to declare 1.68. Pass the input type as the third argument, never in an options
+object: an older Engine hands the second argument straight to the provider as an abort signal.
+
+### Capability API 1.67: open a character in the editor
+
+The browser view gets `openCharacter(characterId, { tab })`. It opens the character editor, on the
+given tab when there is one, so a package can send the user to a card field it reads. Older Engines
+do not have it: check that `openCharacter` exists before you show the link.
+
+```ts
+if (typeof props.openCharacter === "function") props.openCharacter(characterId, { tab: "convo" });
+```
+
+### Capability API 1.66: scenes from package threads
+
+A roleplay scene usually branches from a Conversation (`/scene`). A package holding the new `scenes`
+permission can let its own threads, such as a direct-message thread, be the origin instead. The scene
+is an ordinary scene chat: the same planner, prompt-preference dialog, scene instructions, End Scene,
+Discard and Convert controls, and the same character memory when it concludes. The package owns the
+thread side: what the planner reads, the lock while the scene runs, and what happens with the recap.
+
+```ts
+export async function activate({ api }) {
+  api.registerSceneOrigin({
+    // Planning context, or null when the thread no longer exists.
+    getContext: async (threadId) => ({
+      characterIds: [creatorCharacterId],
+      personaId,
+      connectionId: null, // the Engine's default connection
+      transcript: [{ speaker: "Mina", content: "Come to my shoot tonight?" }],
+      notes: "Stage persona, limits and anything else the scene writer must respect.",
+    }),
+    // Lock the thread. Return false when it already has an active scene.
+    claim: async (threadId, { sceneChatId, characterIds }) => lockThread(threadId, sceneChatId),
+    // Unlock and receive the outcome.
+    release: async (threadId, end) => {
+      if (!(await holdsLock(threadId, end.sceneChatId))) return;
+      if (end.kind === "concluded") await saveRecap(threadId, end.summary);
+      await unlockThread(threadId);
+    },
+  });
+}
+```
+
+The browser view (`home-browser-tab`) receives these props:
+
+- `startScene({ originId, prompt?, planHint?, plan?, data?, initiatorCharacterId?, initiatorName? })` opens the
+  scene prompt-preference dialog, plans and creates the scene, and opens its chat. Pass `plan` (a
+  `SceneFullPlan`: name, description, hidden scenario, first message, scene system prompt, rating,
+  relationship history, participation guide, background, cast) to write the scene yourself; the
+  dialog and the Engine planner are skipped and the scene is created exactly as planned. It resolves to
+  `{ chatId }`, or `null` when the user cancels or creating fails (the user sees why). The helper always
+  uses the package's own id. It is a convenience, not a boundary: the scene routes accept any package
+  id, so `getContext` must return only what the player may see in that thread anyway.
+- `openChat(chatId)` goes to a chat, for a "Go to scene" button on a locked thread.
+- `focusSceneOriginId` is the thread to show when the user comes back from a scene (Back, End Scene,
+  Discard). Call `onFocusSceneOriginHandled()` once you have shown it.
+
+Rules worth knowing:
+
+- `data` is this scene's own settings, a plain JSON object of at most 4,000 characters. The Engine
+  keeps it with the scene and passes it to `claim(originId, { sceneChatId, characterIds, data })` and
+  to `release` as `end.data`, so each scene can decide for itself: `claim` may admit a scene without
+  locking (return `true` and store nothing), and `release` may unlock without taking the recap, or
+  take it at the reach the scene asked for.
+- Only `getContext` is required. A package that just wants to start scenes leaves out `claim` and
+  `release`: nothing is locked, any number of scenes can run from the same origin, and nothing is
+  delivered when they end (**Back** still returns to the package). Leave out only `release` to lock
+  without hearing the outcome, or only `claim` to hear outcomes without a lock.
+- One provider per package; registering again replaces it, and deactivating removes it.
+- `characterIds` must be Engine characters; unknown IDs are dropped, and a context without one known
+  character is refused. An unknown `personaId` is treated as none. `notes` is cut at 8,000 characters
+  and is given to the planner and, with the transcript, to the scene writer as hidden context.
+- `claim` runs after the scene chat exists. `false` discards it with a 409; a throw discards it with
+  a 503. `getContext`, `claim` and `release` each have 8 seconds: a late `getContext` or `claim`
+  counts as a failure (503, the scene chat is removed), a late `release` is logged and dropped.
+- `release` gets `concluded` (with `summary`, `description`, `scenario`, `rating` and the cast),
+  `abandoned`, `deleted` or `converted`. It must be idempotent and must ignore a scene that does not
+  hold the lock. A release that throws, or that arrives while the package is inactive, is logged and
+  dropped: the scene chat stays ended either way, so reconcile a stale lock by reading the scene chat
+  with `chat-read`. Its metadata has `sceneStatus`, and a concluded scene also has `sceneSummary`.
+- The Engine writes nothing into a Conversation for a package origin. Character memory is stored on
+  conclude exactly as for a Conversation scene.
+
+`scenes` is refused on a manifest that declares a `capabilityApi` older than 1.66.
+
+### Capability API 1.50: Professor Mari actions
+
+A package holding the new `mari-actions` permission can offer named actions to Professor Mari. It
+registers one service under its own id; Mari's `package_service` tool lists every offered action and
+runs one when the user asks for it.
+
+```ts
+export async function activate({ api }) {
+  api.registerService("mari-actions:my-package", {
+    list: () => [
+      {
+        name: "add-idea",
+        summary: "Give a Creator an idea for a post.",
+        inputs: { accountId: "The Creator.", text: "The idea." },
+      },
+    ],
+    run: async (name, input, { signal }) => {
+      const parsed = schemas[name]?.safeParse(input);
+      if (!parsed?.success) return { ok: false, status: 400, error: "Invalid input." };
+      return { ok: true, value: await doIt(name, parsed.data, signal) };
+    },
+  });
+}
+```
+
+Rules worth knowing:
+
+- The key must be `mari-actions:<package-id>` for the registering package. Registration throws without
+  the permission or under another package's id, so an action Mari runs always belongs to the package it
+  names.
+- `list()` returns `{ name, summary?, inputs? }` entries. Names are 1 to 80 letters, digits, `.`, `_` or
+  `-`; other entries are not shown. `summary` and `inputs` are what Mari reads, so write them in plain
+  words. Only the first 50 actions can be seen or run, Mari sees at most 40 inputs per action, input
+  names are cut at 80 characters and each text at 300 characters.
+  `list()` must answer within 5 seconds, or the package's actions are left out.
+- `run(name, input, { signal })` is called only with a listed name and a plain JSON object of at most 64,000
+  characters. The input comes from a model: validate it against your own schema before doing anything.
+  Answer `{ ok: true, value }` or `{ ok: false, status?, error }`; Mari sees the first 2,000 characters
+  of the error text. `signal` aborts when the user stops Mari or after 5 minutes; the Engine stops
+  waiting at that point, so stop your work too.
+- The Engine elides data URLs in `value` before Mari reads it, and truncates long answers. Return ids
+  and short text, not files.
+- Listing is read-only. Every run counts as a change for Mari's Permissions Mode: Plan refuses it,
+  Manual holds it for the user's Accept. The Engine cannot preview or undo a package action, so no
+  Keep/Restore card is shown; offer an undo action of your own when a change is hard to take back.
+  Because of this, Plan mode also refuses actions that only read.
+- Deactivating or removing the package removes its actions.
+
+`mari-actions` is refused on a manifest that declares a `capabilityApi` older than 1.50.
+
+### Capability API 1.36: package achievements
+
+A package holding the new `achievements` permission can add badges to the Home **Achievements** panel,
+read whether they are unlocked, and unlock them. The panel shows them under a section headed with the
+package name, after the Engine's own badges.
+
+```ts
+export async function activate({ api }) {
+  api.registerAchievements([
+    { id: "first_run", title: "First Run", description: "Ran the package once.", iconPath: "art/first-run.png" },
+    {
+      id: "ten_runs",
+      title: "Regular",
+      description: "Ran the package ten times.",
+      target: 10,
+      readProgress: () => runs,
+    },
+  ]);
+  // Later, when the package decides a badge is earned:
+  if (await api.runtime.achievements.unlock("first_run")) celebrate();
+}
+```
+
+Rules worth knowing:
+
+- Ids are namespaced to `<packageId>.<id>`. A built-in id has no dot, so the two cannot collide. The
+  host accepts the local or the namespaced id, and refuses any id the package did not register itself.
+- `unlock(id)` resolves `true` only for the call that unlocked the badge. `isUnlocked(id)` and `list()`
+  read state; `list()` returns the package's own badges with progress.
+- Counting stays with the package. A ranked badge sets `target` and a `readProgress` callback, both
+  or neither; the
+  Engine unlocks it on the same pass as its own ranked badges once the count reaches the target. Keep
+  the counter in the persistence host. A callback that throws, or does not settle within **2 seconds**,
+  reports zero and is logged. As with tools, this bounds asynchronous waits only: synchronous work
+  that blocks the event loop cannot be interrupted.
+- `iconPath` is a path inside the package's asset root, served from the package assets route. A locked
+  card still shows the padlock. When the art fails to load, the card falls back to `icon` (default
+  `trophy`).
+- `title` and `description` are the display text. A locale pack can override them through
+  `capabilityAchievements.<packageId>.<id>.title` and `.description`.
+- At most **32 badges per package**. A batch with one invalid entry registers nothing.
+- Deactivating or removing the package hides its badges. Unlocks are kept, as with the Engine's own
+  badges, and show again when the package returns.
+
+`api.registerAchievements` and `api.runtime.achievements` only exist on an Engine this new, so a
+package that uses them declares `capabilityApi` 1.36.
+
+### Capability API 1.35: agent Home widgets
+
+An agent package can offer up to three cards for the Home widget grid. The Engine never places them on
+its own: the user adds, hides, restores, and reorders them in the **Widget Manager**, where they are
+grouped under the agent. The Engine owns the grid, the frame, and the layout; the package owns what is
+inside the card.
+
+Declare the `home-widget` slot and the widget definitions together:
+
+```json
+{
+  "schemaVersion": 2,
+  "capabilityApi": { "major": 1, "minor": 35 },
+  "kind": ["agent"],
+  "permissions": ["ui"],
+  "entrypoints": { "client": "client.js" },
+  "contributions": {
+    "slots": ["home-widget"],
+    "homeWidgets": [
+      {
+        "id": "latest",
+        "label": "Latest Posts",
+        "description": "The newest posts from the feed.",
+        "size": "large",
+        "iconPath": "art/widget.png",
+        "accent": "violet",
+        "surface": "solid",
+        "header": "banner"
+      }
+    ]
+  }
+}
+```
+
+- `id` is lower-case kebab case, at most 64 characters, and unique within the package.
+- `label` (1–80 characters) and `description` (up to 200) are the Widget Manager text. A locale pack can
+  override them through `localizations.<locale>.homeWidgets.<id>.label` and `.description`.
+- `size` is `compact` or `large`. A large widget takes more room in the grid.
+- `icon` is one of the Engine's icon names (`activity`, `bell`, `calendar`, `chart`, `circle`, `clock`,
+  `file`, `flame`, `heart`, `image`, `list`, `message`, `sparkles`, `star`, `zap`). `iconPath` is package
+  art (`gif`, `jpg`, `jpeg`, `png`, `webp`) and must be listed in `files[]`.
+- `accent`, `surface`, and `header` pick from the Engine's presentation presets.
+
+The install is refused when the package is not an `agent` with the `ui` permission and a client
+entrypoint, when the slot and `homeWidgets` are not declared together, when two widgets share an id, or
+when `capabilityApi` is older than 1.35.
+
+The Engine mounts the package's client element with `view="widget"`. On top of the usual
+`packageId`, `packageVersion`, and `localization`, `capabilityProps` carries:
+
+- `widgetId`, `widgetLabel`, `widgetDescription`, `widgetIcon`, `widgetIconPath`, `widgetAccent`,
+  `widgetSurface`, and `widgetHeader`: the definition of the card being drawn, so one bundle can draw
+  every widget it declares.
+- `active`: `true` only while Home is showing and the card is visible. Pause polling and animation when
+  it is `false`.
+- `onOpenNoodle()`: opens the package's own Home browser tab. Despite the name, it works for any package
+  that also declares the `home-browser-tab` slot. Without that tab, it and `onOpenPost` do nothing.
+- `onOpenPost(id)`: opens the package's own Home browser tab at one item. `id` is a string of up to 128
+  characters; anything else is ignored. The tab's `view="browser"` element then receives
+  `focusPostId: id`. It should call `onFocusPostHandled()` once it has shown the item, so the focus does
+  not replay. Switching to any other tab drops a pending focus.
+
+A widget is a small view of the agent, not a second copy of it. Keep it light, and send the user to the
+browser tab for anything larger.
+
+### Capability API 1.34: a creature written in the ruleset's own terms
+
+A bestiary creature may carry a `sheet`: a character sheet in the ruleset's own terms, as partial as
+it likes. A fight builds it exactly as it builds a party member, so its health, defense, saves,
+initiative, speed and the abilities on its lists come from the ruleset's own declarations, and it
+pays for them out of its own pools. It then gives none of `health`, `defense`, `initiativeModifier`,
+`speed`, `abilities` or `saves` beside the sheet, and may have no block actions of its own:
+
+```json
+{
+  "capabilityApi": { "major": 1, "minor": 34 },
+  "kind": ["ruleset"],
+  "contributions": { "assets": { "paths": ["ruleset.json", "catalogs/creatures.json"] } }
+}
+```
+
+The gate reads the ruleset's own bytes and every catalog file the install holds, exactly as 1.27
+does. A row on a creature's sheet may carry `_catalog: "<catalog>/<entry>"` for an entry of a
+catalog that feeds that list, and the Engine loads those catalogs for the fight along with the
+bestiary. Not a soft seam, for the same reason as 1.20 through 1.33: an Engine that cannot read the
+key refuses the whole strict catalog file, so a package that ships one declares 1.34. No permission.
+
+### Capability API 1.33: the moment a reaction waits for
+
+A catalog entry's `mechanics.reaction` may be an object rather than `true`. `on` names the moment
+the Engine notices, `at` says whom what is taken is pointed at, and `cancels` stops what the window
+was holding from happening at all:
+
+```json
+{
+  "capabilityApi": { "major": 1, "minor": 33 },
+  "kind": ["ruleset"],
+  "contributions": { "assets": { "paths": ["ruleset.json", "catalogs/spells.json"] } }
+}
+```
+
+`on` is `aimed` (before something lands on the entry's holder) or `harmed` (after something has hurt
+them), and naming one is what puts the entry on that window's menu. `at` is `source`, which fills in
+whoever caused the moment, or `chosen`, which keeps the entry's own targets. Only an `aimed` entry
+may `cancel`, because a moment that has already happened cannot be called off, and what a cancelled
+action cost is still spent: it was paid for before anybody was asked.
+
+An entry that still says `"reaction": true` says only that it is not taken on a turn, which is not
+enough to offer it anywhere, so it stays on no menu and needs nothing newer. Not a soft seam, for
+the same reason as 1.20 through 1.32: an Engine that cannot read the object refuses the whole strict
+catalog file, so a package that ships one declares 1.33. No permission.
+
+### Capability API 1.32: a weapon that caps its own strikes
+
+An attack source may declare `strikesCappedBy`, a boolean column of its own list. Where that column
+is set on a row, that row buys a single strike however many `strikes` the list buys, so a weapon
+that fires once a turn stays one shot while the rest of the list swings as often as the sheet says.
+SRD 5.1's Loading property is the sentence it exists for: "you can fire only one piece of ammunition
+when you use an action, bonus action, or reaction to fire it, regardless of the number of attacks
+you can normally make."
+
+```json
+{
+  "capabilityApi": { "major": 1, "minor": 32 },
+  "kind": ["ruleset"],
+  "contributions": { "assets": { "paths": ["ruleset.json"] } }
+}
+```
+
+It needs `strikes` beside it and is refused without one, because a list that buys one strike a spend
+already holds every row to one. Not a soft seam, for the same reason as 1.20 through 1.31: an Engine
+that cannot read the key refuses the whole ruleset file, so a package that ships it declares 1.32.
+No permission.
+
+### Capability API 1.31: host generation integrations
+
+Server packages can call `api.runtime.integrations` to use the current Engine's LLM, image and video services. Declare capability API 1.31 in the package manifest and check that the integration host is available during activation. Older Engines reject the newer API requirement before activating the package. Provider operations require the `network` permission; saving, staging and removing media require `storage`.
+
+- `llm.createProvider(...)` accepts the same connection settings as Engine's provider factory, including custom request parameters and headers. The returned provider supports `chat`, `chatComplete`, `embed`, `maxContextValue` and `maxTokensOverrideValue`. It exposes no credential properties.
+- `llm.localSidecar()` returns the host's local sidecar provider through the same facade.
+- `llm.withFallback(...)` wraps a provider created by the same package host. It preserves Engine's admission, fallback notifications and provider selection behavior.
+- `images.generate(...)` and `videos.generate(...)` use the live Engine implementations, including cancellation, request logging, network checks and media queues. Forward the caller's `signal` and UI `debugMode` when present.
+- `images.save`, `images.remove`, `images.stage` and `images.sweepStaged` reuse the gallery's safe writes and staged-file lifecycle. `videos.save` and `videos.remove` reuse the video storage path. `images.resolveNovelAiRequestSize` reuses the host's NovelAI size normalization. Video duration and public reference-upload normalization are also available through `videos.resolveDuration` and `videos.resolveReferenceUpload`.
+- `speech.transcribe(audio, { filename, mimeType, signal })` sends recorded audio to the speech-to-text server the user set in **Connections → Speech to Text** and resolves the transcript, or `null` while that server is off, so the package keeps its own transcription. It applies the host's URL policy (`STT_LOCAL_URLS_ENABLED`), size and time limits, and never exposes the saved key. `speech` is optional and needs no newer capability API: check `typeof api.runtime.integrations?.speech?.transcribe === "function"` and fall back on older Engines.
+
+Shared request/result types are exported by `@marinara-engine/shared`. Keep package-specific prompt building and orchestration in the package; call these host entrypoints for provider I/O instead of copying Engine service implementations. Pure helpers and types may still be bundled.

@@ -29,7 +29,9 @@
 //
 // Notes:
 //   • The `/api/health` endpoint is exempt so external uptime checks /
-//     load balancers can probe the server without needing credentials.
+//     load balancers can probe the server without needing credentials. It
+//     only adds the local model and GPU details for callers that pass
+//     isBasicAuthSatisfied.
 //   • Loopback (127.0.0.1, ::1) is exempt — if you're already on the box,
 //     you don't need a password.
 //   • Any IP that matches IP_ALLOWLIST is also exempt — if you've already
@@ -317,8 +319,6 @@ export function hasBasicAuthConfigured(): boolean {
 }
 
 export function isBasicAuthSatisfied(request: FastifyRequest): boolean {
-  if (request.url === "/api/health" || request.url.startsWith("/api/health?")) return true;
-
   const ip = request.ip;
   if (isLoopbackIp(ip) || isInIpAllowlist(ip) || isTrustedInterfaceRequest(request)) return true;
 

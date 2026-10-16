@@ -7,6 +7,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Minimize2 } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { handleTextareaTab } from "../../lib/textarea-editing";
+import { isBrowserExtensionUi } from "../../lib/chat-floating-ui-events";
 import {
   NEUTRAL_PANEL_HEADER,
   NEUTRAL_PANEL_SCROLL_AREA,
@@ -49,7 +50,8 @@ export function ExpandedTextarea({
   useEffect(() => {
     if (!open) return;
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      // Escape in a browser extension's card (Grammarly's) closes that card, not this editor.
+      if (e.key === "Escape" && !isBrowserExtensionUi(e.target)) onClose();
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
@@ -75,10 +77,8 @@ export function ExpandedTextarea({
           data-component="ExpandedTextarea"
           style={overlayStyle}
           className={cn(
-            "fixed inset-0 z-[100] flex flex-col max-md:pt-[env(safe-area-inset-top)]",
-            isChatSurface
-              ? `bg-[var(--marinara-chat-chrome-panel-bg)] text-[var(--marinara-chat-chrome-panel-text)] ${NEUTRAL_SURFACE_VARIABLES}`
-              : "bg-[var(--background)]",
+            "fixed inset-0 z-[100] flex flex-col bg-[var(--sidebar)] max-md:pt-[env(safe-area-inset-top)]",
+            isChatSurface && `text-[var(--marinara-chat-chrome-panel-text)] ${NEUTRAL_SURFACE_VARIABLES}`,
           )}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
@@ -94,7 +94,7 @@ export function ExpandedTextarea({
           >
             <h2 className={isChatSurface ? NEUTRAL_PANEL_TITLE : "text-sm font-semibold"}>{title}</h2>
             <div className="flex items-center gap-2">
-              <span className="text-[0.625rem] text-[var(--muted-foreground)]">
+              <span className="text-[0.625rem] text-[var(--marinara-chat-chrome-panel-muted)]">
                 {value.length} {localizeUi("ui.noodle.noodlehome.characters")}
               </span>
               <button
@@ -105,7 +105,7 @@ export function ExpandedTextarea({
                   "flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs transition-colors",
                   isChatSurface
                     ? "border border-[var(--marinara-chat-chrome-button-border)] bg-[var(--marinara-chat-chrome-button-bg)] text-[var(--marinara-chat-chrome-button-text)] hover:border-[var(--marinara-chat-chrome-button-border-hover)] hover:bg-[var(--marinara-chat-chrome-button-bg-hover)] hover:text-[var(--marinara-chat-chrome-button-text-hover)]"
-                    : "text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]",
+                    : "text-[var(--marinara-chat-chrome-button-text)] hover:bg-[var(--marinara-chat-chrome-button-bg-hover)] hover:text-[var(--marinara-chat-chrome-button-text-hover)]",
                 )}
               >
                 <Minimize2 size="0.875rem" />
@@ -118,16 +118,17 @@ export function ExpandedTextarea({
           <div className={cn("flex-1 overflow-hidden p-4 md:p-6", isChatSurface && NEUTRAL_PANEL_SCROLL_AREA)}>
             <textarea
               ref={textareaRef}
+              aria-label={title}
               value={value}
               onChange={(e) => onChange(e.target.value)}
               readOnly={readOnly}
               onKeyDown={readOnly ? undefined : handleTextareaTab}
               placeholder={placeholder}
               className={cn(
-                "h-full w-full resize-none rounded-xl p-5 text-sm leading-relaxed outline-none transition-colors",
+                "h-full w-full resize-none rounded-xl bg-[var(--sidebar)] p-5 text-sm leading-relaxed outline-none transition-colors",
                 isChatSurface
-                  ? "border border-[var(--marinara-chat-chrome-input-border)] bg-[var(--marinara-chat-chrome-input-bg)] text-[var(--marinara-chat-chrome-panel-text)] placeholder:text-[var(--marinara-chat-chrome-panel-muted)] focus:border-[var(--marinara-chat-chrome-input-border-focus)] focus:ring-1 focus:ring-[var(--marinara-chat-chrome-focus-ring)]"
-                  : "border border-[var(--border)] bg-[var(--secondary)] placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20",
+                  ? "border border-[var(--marinara-chat-chrome-input-border)] text-[var(--marinara-chat-chrome-panel-text)] placeholder:text-[var(--marinara-chat-chrome-panel-muted)] focus:border-[var(--marinara-chat-chrome-input-border-focus)] focus:ring-1 focus:ring-[var(--marinara-chat-chrome-focus-ring)]"
+                  : "border border-[var(--border)] placeholder:text-[var(--muted-foreground)]/40 focus:border-[var(--primary)]/40 focus:ring-1 focus:ring-[var(--primary)]/20",
                 readOnly && "cursor-text text-[var(--muted-foreground)]",
               )}
             />
@@ -135,10 +136,10 @@ export function ExpandedTextarea({
           {footer ? (
             <div
               className={cn(
-                "shrink-0",
+                "shrink-0 bg-[var(--sidebar)]",
                 isChatSurface
-                  ? "border-t border-[var(--marinara-chat-chrome-panel-divider)] bg-[var(--marinara-chat-chrome-panel-bg)] px-4 py-3 md:px-6"
-                  : "border-t border-[var(--border)] bg-[var(--background)] px-4 py-3 md:px-6",
+                  ? "border-t border-[var(--marinara-chat-chrome-panel-divider)] px-4 py-3 md:px-6"
+                  : "border-t border-[var(--border)] px-4 py-3 md:px-6",
               )}
             >
               {footer}

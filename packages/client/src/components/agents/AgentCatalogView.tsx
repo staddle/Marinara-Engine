@@ -17,6 +17,7 @@ import {
 import { compareCapabilityPackageVersions, type CapabilityCatalogPackage } from "@marinara-engine/shared";
 import { toast } from "sonner";
 import {
+  isAppCapabilityPackage,
   useCapabilityCatalog,
   useInstallAllCapabilityPackages,
   useInstallCapabilityPackage,
@@ -30,6 +31,7 @@ import { isAgentCatalogKindBadgeVisible } from "../../lib/agent-catalog-kind-bad
 import { AgentVersionHistory } from "./AgentVersionHistory";
 import { showConfirmDialog } from "../../lib/app-dialogs";
 import { cn } from "../../lib/utils";
+import { notifyDecisionImport } from "../../lib/decision-import-notice";
 import { useUIStore } from "../../stores/ui.store";
 import { AgentArtwork } from "./AgentArtwork";
 import { AgentModeFilter, type AgentModeFilterValue } from "./AgentModeFilter";
@@ -37,10 +39,16 @@ import { CustomAgentRepositoriesModal } from "./CustomAgentRepositoriesModal";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
 const CATEGORY_SECTIONS = [
-  { id: "writer", label: "Writer Agents" },
-  { id: "tracker", label: "Tracker Agents" },
-  { id: "misc", label: "Misc Agents" },
+  { id: "app", labelKey: "ui.agents.agentcatalogview.apps" },
+  { id: "writer", labelKey: "ui.agents.agentcatalogview.writerAgents" },
+  { id: "tracker", labelKey: "ui.agents.agentcatalogview.trackerAgents" },
+  { id: "misc", labelKey: "ui.agents.agentcatalogview.miscAgents" },
 ] as const;
+
+/** Standalone apps get their own section, whatever category their catalog entry names. */
+function catalogCategory({ manifest, category }: Pick<CapabilityCatalogPackage, "manifest" | "category">) {
+  return isAppCapabilityPackage(manifest) ? "app" : category;
+}
 
 type CatalogMode = "conversation" | "roleplay" | "game";
 
@@ -56,6 +64,8 @@ const OFFICIAL_PACKAGE_MODES: Readonly<Record<string, readonly CatalogMode[]>> =
   "character-tracker": ["roleplay"],
   "custom-tracker": ["roleplay"],
   "inventory-tracker": ["roleplay"],
+  quartermaster: ["roleplay"],
+  "relationship-tracker": ["roleplay"],
   "memory-nag": ["roleplay"],
   "long-term-memory": ["conversation", "roleplay", "game"],
   expression: ["roleplay"],
@@ -64,6 +74,8 @@ const OFFICIAL_PACKAGE_MODES: Readonly<Record<string, readonly CatalogMode[]>> =
   "persona-stats": ["roleplay"],
   quest: ["roleplay"],
   "world-state": ["roleplay"],
+  "2d-avatars": ["roleplay", "game"],
+  "3d-avatars": ["roleplay", "game"],
   eightball: ["conversation"],
   chess: ["conversation"],
   combat: ["roleplay"],
@@ -80,6 +92,7 @@ const OFFICIAL_PACKAGE_MODES: Readonly<Record<string, readonly CatalogMode[]>> =
   spotify: ["conversation", "roleplay", "game"],
   poker: ["conversation"],
   "rock-paper-scissors": ["conversation"],
+  "ruleset-5e-2014": ["game"],
   "tic-tac-toe": ["conversation"],
   uno: ["conversation"],
 });
@@ -98,7 +111,7 @@ const MODE_BADGES: Record<CatalogMode, { labelKey: string; className: string }> 
   game: {
     labelKey: "ui.agents.agentcatalogview.gameMode",
     className:
-      "border-[color-mix(in_srgb,var(--mari-logo-pink)_55%,var(--border))] bg-[color-mix(in_srgb,var(--mari-logo-pink)_18%,transparent)]",
+      "border-[color-mix(in_srgb,var(--marinara-chat-chrome-accent)_55%,var(--border))] bg-[color-mix(in_srgb,var(--marinara-chat-chrome-accent)_18%,transparent)]",
   },
 };
 
@@ -128,6 +141,7 @@ function kindLabel(kind: CapabilityCatalogPackage["manifest"]["kind"][number]) {
   if (kind === "conversation-calls") return "Calls";
   if (kind === "turn-game") return "Conversation Game";
   if (kind === "maps") return "Maps";
+  if (kind === "ruleset") return "Rules";
   return "Agent";
 }
 
@@ -165,7 +179,11 @@ export function AgentCatalogView() {
             manifest.name,
             manifest.description,
             manifest.id,
-            category,
+            catalogCategory({ manifest, category }),
+            localizeUi(
+              CATEGORY_SECTIONS.find((section) => section.id === catalogCategory({ manifest, category }))?.labelKey ??
+                "",
+            ),
             ...manifest.kind.map(kindLabel),
             ...packageModes(manifest.id).map((mode) => localizeUi(MODE_BADGES[mode].labelKey)),
           ]
@@ -202,6 +220,25 @@ export function AgentCatalogView() {
   const selected =
     (catalog.data?.packages ?? []).find((item) => item.manifest.id === selectedId) ?? packages[0] ?? null;
   const selectedInstalled = selected ? installedById.get(selected.manifest.id) : undefined;
+  const installedPermissions = selectedInstalled?.manifest.permissions;
+  const permissionGroups = selected
+    ? [
+        ...(selectedInstalled
+          ? [
+              {
+                kind: "installed",
+                version: selectedInstalled.version,
+                permissions: selectedInstalled.manifest.permissions,
+              },
+            ]
+          : []),
+        ...(!installedPermissions ||
+        installedPermissions.length !== selected.manifest.permissions.length ||
+        selected.manifest.permissions.some((permission) => !installedPermissions.includes(permission))
+          ? [{ kind: "available", version: selected.manifest.version, permissions: selected.manifest.permissions }]
+          : []),
+      ]
+    : [];
   const selectedVersionComparison = selectedInstalled
     ? compareCapabilityPackageVersions(selected.manifest.version, selectedInstalled.version)
     : 0;
@@ -223,6 +260,7 @@ export function AgentCatalogView() {
         expectedVersion: entry.manifest.version,
         expectedArtifactSha256: entry.artifact.sha256,
       });
+      void notifyDecisionImport(result.usesDecisions ?? false, localizeUi);
       toast.success(
         result.status === "restart-required"
           ? localizeUi(
@@ -276,6 +314,7 @@ export function AgentCatalogView() {
         packages: (catalog.data?.packages ?? []).filter((entry) => installablePackageIds.includes(entry.manifest.id)),
         onProgress: (completed) => setBulkProgress({ action: "install", completed, total }),
       });
+      void notifyDecisionImport(result.usesDecisions, localizeUi);
       if (result.failures.length === 0) {
         toast.success(
           result.restartRequired
@@ -554,12 +593,12 @@ export function AgentCatalogView() {
                     ) : (
                       <div className="space-y-3">
                         {CATEGORY_SECTIONS.map((category) => {
-                          const entries = group.entries.filter((entry) => entry.category === category.id);
+                          const entries = group.entries.filter((entry) => catalogCategory(entry) === category.id);
                           if (entries.length === 0) return null;
                           return (
                             <div key={category.id}>
                               <h3 className="mb-1 px-2 text-[0.6875rem] font-semibold text-[var(--foreground)]/75">
-                                {category.label}
+                                {localizeUi(category.labelKey)}
                               </h3>
                               <div className="space-y-1">
                                 {entries.map((entry) => {
@@ -653,7 +692,10 @@ export function AgentCatalogView() {
                 </div>
                 <div className="min-w-0 pt-1">
                   <p className="text-xs font-semibold text-[var(--muted-foreground)]">
-                    {CATEGORY_SECTIONS.find((category) => category.id === selected.category)?.label ?? "Misc Agents"}
+                    {localizeUi(
+                      CATEGORY_SECTIONS.find((category) => category.id === catalogCategory(selected))?.labelKey ??
+                        "ui.agents.agentcatalogview.miscAgents",
+                    )}
                   </p>
                   <h2 className="mt-1 text-xl font-bold md:text-2xl">{selected.manifest.name}</h2>
                   <p className="mt-2 max-w-[70ch] text-sm leading-6 text-[var(--muted-foreground)]">
@@ -734,14 +776,38 @@ export function AgentCatalogView() {
                     {localizeUi("ui.agents.agentcatalogview.trustedCodeAccessNotice")}
                   </p>
                 )}
-                <ul className="mt-3 grid gap-2 sm:grid-cols-2">
-                  {selected.manifest.permissions.map((permission) => (
-                    <li key={permission} className="flex items-center gap-2 text-sm text-[var(--muted-foreground)]">
-                      <Check size="0.85rem" className="text-[var(--marinara-chat-chrome-highlight-text)]" />
-                      {permission.replaceAll("-", " ")}
-                    </li>
-                  ))}
-                </ul>
+                <p className="mt-2 text-xs leading-relaxed text-[var(--muted-foreground)]">
+                  {localizeUi("ui.agents.agentcatalogview.permissionScopeNotice")}
+                </p>
+                {permissionGroups.map((group) => (
+                  <div key={group.kind} className="mt-3">
+                    <h4 className="text-xs font-medium">
+                      {localizeUi(
+                        group.kind === "installed"
+                          ? "ui.agents.agentcatalogview.installedPermissions"
+                          : "ui.agents.agentcatalogview.availablePermissions",
+                        { version: group.version },
+                      )}
+                    </h4>
+                    {group.permissions.length > 0 ? (
+                      <ul className="mt-2 grid gap-2 sm:grid-cols-2">
+                        {group.permissions.map((permission) => (
+                          <li
+                            key={permission}
+                            className="flex items-center gap-2 text-sm text-[var(--muted-foreground)]"
+                          >
+                            <Check size="0.85rem" className="text-[var(--marinara-chat-chrome-highlight-text)]" />
+                            {permission.replaceAll("-", " ")}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="mt-2 text-xs text-[var(--muted-foreground)]">
+                        {localizeUi("ui.agents.agentcatalogview.noPermissions")}
+                      </p>
+                    )}
+                  </div>
+                ))}
               </section>
 
               <AgentVersionHistory packageId={selected.manifest.id} />

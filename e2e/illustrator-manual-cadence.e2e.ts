@@ -1,8 +1,130 @@
 import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { seedUIState } from "./ui-state-fixture.js";
+import { chatSettingsDrawer, closeChatSettings, openChatSettingsTool } from "./chat-settings-tools.js";
 
 const version = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+
+test("Roleplay Gallery illustrate, background and slash illustrate work without enabling automatic agents", async ({
+  page,
+  request,
+}, info) => {
+  const previousUi = await (await request.get("/api/app-settings/ui")).json();
+  await request.put("/api/app-settings/ui", { data: { value: "" } });
+  const characterResponse = await request.post("/api/characters", { data: { data: { name: "Illustration fixture" } } });
+  expect(characterResponse.ok(), await characterResponse.text()).toBeTruthy();
+  const character = await characterResponse.json();
+  const chatResponse = await request.post("/api/chats", {
+    data: { name: "One-shot illustration", mode: "roleplay", characterIds: [character.id] },
+  });
+  expect(chatResponse.ok()).toBeTruthy();
+  const chat = await chatResponse.json();
+  const activation = { enableAgents: false, activeAgentIds: [] };
+  expect((await request.patch(`/api/chats/${chat.id}/metadata`, { data: activation })).ok()).toBeTruthy();
+  const installed = {
+    id: "illustrator",
+    version: "1.0.0",
+    status: "active",
+    readiness: "ready",
+    manifest: {
+      schemaVersion: 1,
+      id: "illustrator",
+      name: "Illustrator",
+      version: "1.0.0",
+      engine: { min: "2.0.0", maxExclusive: "3.0.0" },
+      kind: ["agent"],
+      entrypoints: { agents: "agents.json" },
+      permissions: ["agent-runtime"],
+      files: [],
+    },
+  };
+  let packageInstalled = true;
+  const calls: Array<Record<string, unknown>> = [];
+  await page.route("**/api/capability-packages/installed", (route) =>
+    route.fulfill({ json: packageInstalled ? [installed] : [] }),
+  );
+  await page.route("**/api/generate/retry-agents", (route) => {
+    calls.push(route.request().postDataJSON());
+    return route.fulfill({ contentType: "text/event-stream", body: 'data: {"type":"done","data":""}\n\n' });
+  });
+  await seedUIState(page, {
+    hasCompletedOnboarding: true,
+    rightPanelOpen: false,
+    sidebarOpen: false,
+    chatHelpSeenModes: ["roleplay"],
+    trackerPanelEnabled: false,
+    trackerPanelOpen: false,
+    reviewImagePromptsBeforeSend: false,
+    theme: info.project.name === "desktop-chromium" ? "light" : "dark",
+  });
+  await page.addInitScript(
+    ({ id, appVersion }) => {
+      localStorage.setItem("marinara-active-chat-id", id);
+      localStorage.setItem("marinara:whats-new:seen-version", appVersion);
+    },
+    { id: chat.id, appVersion: version },
+  );
+  const openGallery = () => openChatSettingsTool(page, "gallery");
+  try {
+    await page.goto("/");
+    await openGallery();
+    await page.screenshot({ path: info.outputPath("manual-illustration-agents-disabled.png"), animations: "disabled" });
+    const illustrate = chatSettingsDrawer(page, "gallery").getByRole("button", { name: "Illustrate", exact: true });
+    const background = chatSettingsDrawer(page, "gallery").getByRole("button", { name: "Background", exact: true });
+    await expect(illustrate).toBeVisible();
+    await expect(illustrate).toBeInViewport();
+    await expect(background).toBeVisible();
+    await page.screenshot({ path: info.outputPath("manual-illustration-available.png"), animations: "disabled" });
+    await illustrate.click();
+    await expect.poll(() => calls.length).toBe(1);
+    await expect(illustrate).toBeEnabled();
+    await closeChatSettings(page);
+    const input = page.locator("textarea[data-chat-composer]");
+    await input.fill("/illustrate ");
+    await page.locator(".mari-chat-send-btn").click();
+    await expect.poll(() => calls.length).toBe(2);
+    for (const call of calls)
+      expect(call).toMatchObject({
+        chatId: chat.id,
+        agentTypes: ["illustrator"],
+        illustratorRetryTargets: ["illustration"],
+      });
+    const stored = await (await request.get(`/api/chats/${chat.id}`)).json();
+    const metadata = typeof stored.metadata === "string" ? JSON.parse(stored.metadata) : stored.metadata;
+    expect(metadata).toMatchObject(activation);
+    packageInstalled = false;
+    await page.reload();
+    await openGallery();
+    await expect(illustrate).toHaveCount(0);
+    await expect(background).toHaveCount(0);
+    await closeChatSettings(page);
+    await input.fill("/illustrate");
+    await expect(page.locator(".chat-input-container").getByRole("button", { name: /^\/illustrate\b/ })).toHaveCount(0);
+    expect(calls).toHaveLength(2);
+
+    // Background is a one-off run like Illustrate: it needs Illustrator installed, not added to the chat.
+    packageInstalled = true;
+    await page.reload();
+    await openGallery();
+    await background.click();
+    await expect.poll(() => calls.length).toBe(3);
+    await expect(background).toBeEnabled();
+    expect(calls[2]).toMatchObject({
+      chatId: chat.id,
+      agentTypes: ["illustrator"],
+      agentPromptTemplateIds: { illustrator: "background" },
+      illustratorRetryTargets: ["background"],
+    });
+    const afterBackground = await (await request.get(`/api/chats/${chat.id}`)).json();
+    expect(
+      typeof afterBackground.metadata === "string" ? JSON.parse(afterBackground.metadata) : afterBackground.metadata,
+    ).toMatchObject(activation);
+  } finally {
+    await request.delete(`/api/chats/${chat.id}`);
+    await request.delete(`/api/characters/${character.id}`);
+    await request.put("/api/app-settings/ui", { data: previousUi });
+  }
+});
 
 test("Illustrator manual-only interval saves and survives reopening and chat setup", async ({
   page,
@@ -114,9 +236,6 @@ test("Illustrator manual-only interval saves and survives reopening and chat set
       useUIStore.getState().closeAgentDetail();
     });
 
-    if (testInfo.project.name.includes("mobile")) {
-      await page.getByRole("button", { name: "More options", exact: true }).click();
-    }
     await page.getByRole("button", { name: "Chat Settings", exact: true }).click();
     const drawer = page.locator(".mari-chat-settings-drawer");
     const agents = drawer.locator('[role="button"][aria-expanded]').filter({ hasText: /^Agents/ });
@@ -140,6 +259,62 @@ test("Illustrator manual-only interval saves and survives reopening and chat set
     await add.getByRole("button", { name: "Add", exact: true }).click();
     await expect(add).toBeHidden();
     await expect.poll(async () => (await readSettings()).runInterval).toBe(0);
+
+    // Run Interval belongs to the chat: the Illustrator card and the add window save it there, never to the agent.
+    const readChatMetadata = async () => {
+      const stored = (await (await request.get(`/api/chats/${chat.id}`)).json()) as { metadata: unknown };
+      return (typeof stored.metadata === "string" ? JSON.parse(stored.metadata) : stored.metadata) as Record<
+        string,
+        unknown
+      >;
+    };
+    expect(await readChatMetadata()).not.toHaveProperty("illustratorRunInterval");
+    const card = drawer.locator(`#chat-settings-agent-menu-${chat.id}-illustrator`);
+    const intervalControl = card.locator("label").filter({ hasText: "Run Interval" }).locator("..");
+    const chatInterval = intervalControl.getByRole("textbox");
+    await expect(chatInterval).toHaveValue("0");
+    await expect(intervalControl.getByText("Using agent default", { exact: true })).toBeVisible();
+    await chatInterval.fill("7");
+    await chatInterval.blur();
+    await expect.poll(async () => (await readChatMetadata()).illustratorRunInterval).toBe(7);
+    await expect(intervalControl.getByText("Chat override", { exact: true })).toBeVisible();
+    expect((await readSettings()).runInterval).toBe(0);
+    await testInfo.attach("illustrator-chat-run-interval", {
+      body: await intervalControl.screenshot({ path: testInfo.outputPath("illustrator-chat-run-interval.png") }),
+      contentType: "image/png",
+    });
+
+    await card.getByRole("button", { name: "Remove Illustrator from chat" }).click();
+    await page
+      .getByRole("dialog", { name: "Remove Illustrator?" })
+      .getByRole("button", { name: "Remove Agent", exact: true })
+      .click();
+    await expect(card).toHaveCount(0);
+    await drawer.getByRole("button").filter({ hasText: "Illustrator" }).last().click();
+    await expect(add).toBeVisible();
+    await expect(addInterval).toHaveValue("7");
+    await addInterval.fill("2");
+    await add.getByRole("button", { name: "Add", exact: true }).click();
+    await expect(add).toBeHidden();
+    await expect.poll(async () => (await readChatMetadata()).illustratorRunInterval).toBe(2);
+    expect((await readSettings()).runInterval).toBe(0);
+    await expect(chatInterval).toHaveValue("2");
+
+    await intervalControl.getByRole("button", { name: "Use agent default", exact: true }).click();
+    await expect.poll(async () => (await readChatMetadata()).illustratorRunInterval ?? null).toBeNull();
+    await expect(chatInterval).toHaveValue("0");
+    await expect(intervalControl.getByText("Using agent default", { exact: true })).toBeVisible();
+    expect((await readSettings()).runInterval).toBe(0);
+
+    // An agent value saved as text (older or imported settings) is read the way the server reads it.
+    const textSettings = { ...(await readSettings()), runInterval: "3" };
+    expect((await request.patch(`/api/agents/${agent.id}`, { data: { settings: textSettings } })).ok()).toBeTruthy();
+    await page.reload();
+    const chatSettingsButton = page.getByRole("button", { name: "Chat Settings", exact: true });
+    await expect(chatSettingsButton).toBeVisible();
+    if (!(await drawer.isVisible())) await chatSettingsButton.click();
+    if ((await agents.getAttribute("aria-expanded")) !== "true") await agents.click();
+    await expect(chatInterval).toHaveValue("3");
   } finally {
     await request.delete(`/api/chats/${chat.id}`);
     await request.delete(`/api/agents/${agent.id}`);

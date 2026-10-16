@@ -96,35 +96,6 @@ for pkg_name in git; do
     fi
 done
 
-# ── Fix platform detection for native binaries ──
-# Node.js 24+ on Termux reports process.platform = "android", but Termux uses
-# the Linux kernel and Linux ARM64 native binaries work perfectly. Tell pnpm to
-# install both android AND linux optional dependencies so build tools like
-# rollup, lightningcss, and tailwindcss oxide resolve correctly.
-# Run early so the auto-update's pnpm install also benefits.
-NODE_PLAT=$(node -e "process.stdout.write(process.platform)" 2>/dev/null || echo "")
-if [ "$NODE_PLAT" = "android" ]; then
-    NPMRC_MARKER="# termux-supported-architectures"
-    if ! grep -q "$NPMRC_MARKER" .npmrc 2>/dev/null; then
-        NODE_ARCH=$(node -e "process.stdout.write(process.arch)" 2>/dev/null || echo "")
-        echo "  [OK] Detected Android/Termux (${NODE_ARCH:-unknown}) — enabling Linux binaries"
-        {
-            echo "$NPMRC_MARKER"
-            echo "supportedArchitectures.os[]=current"
-            echo "supportedArchitectures.os[]=linux"
-            echo "supportedArchitectures.cpu[]=current"
-            [ -n "$NODE_ARCH" ] && echo "supportedArchitectures.cpu[]=$NODE_ARCH"
-        } >> .npmrc
-        # Force pnpm to re-resolve optional deps on next install
-        TERMUX_FORCE_INSTALL=1
-    fi
-    # Ensure wasm32 is supported (required for sharp fallback on some Android devices)
-    if ! grep -q "supportedArchitectures.cpu\[\]=wasm32" .npmrc 2>/dev/null; then
-        echo "supportedArchitectures.cpu[]=wasm32" >> .npmrc
-        TERMUX_FORCE_INSTALL=1
-    fi
-fi
-
 # ── Check Node.js ──
 if ! command -v node &> /dev/null || ! node -v &> /dev/null; then
     echo "  [..] Node.js not found or broken — installing via pkg..."
@@ -231,6 +202,13 @@ resolve_default_node_heap_mb() {
     printf '%s' "$heap_mb"
 }
 
+build_termux_client() (
+    # Vite needs more heap than the running server. The client's build script
+    # sets it for the build only (packages/client/scripts/build-heap.mjs), so the
+    # in-app updater gets it too; an explicit NODE_OPTIONS heap still wins.
+    MARINARA_LOW_MEMORY_BUILD=1 run_pnpm --filter @marinara-engine/client build
+)
+
 load_launcher_setting() {
     local setting_name="$1"
     local setting_value
@@ -260,6 +238,9 @@ if ! has_explicit_node_heap_limit; then
     NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--max-old-space-size=${MARINARA_TERMUX_HEAP_MB}"
     export NODE_OPTIONS
     echo "  [OK] Node.js heap limit set to ${MARINARA_TERMUX_HEAP_MB} MiB for this profile and device"
+else
+    # Tells the client build (and the in-app updater's) to keep the user's heap.
+    export MARINARA_EXPLICIT_NODE_HEAP=1
 fi
 
 # Resident chat cap (#5592): evict clean LRU chats from memory past this. 0 = off.
@@ -300,6 +281,8 @@ prune_pnpm_store() {
 install_workspace_dependencies() {
     # Avoid --force here. On constrained Android devices it recreates the entire
     # virtual store and may download optional binaries for platforms we cannot run.
+    # pnpm's default target (android/<arch>) is the right one: the native build
+    # tools ship Android builds, and nothing loads Linux binaries on Android.
     # Termux provides a global libvips but no Android NDK; Sharp must use its
     # supported WebAssembly fallback rather than attempting a native source build.
     SHARP_IGNORE_GLOBAL_LIBVIPS=1 run_pnpm install --frozen-lockfile --prefer-offline
@@ -571,9 +554,9 @@ if [ -f "packages/shared/dist/constants/defaults.js" ]; then
 fi
 
 # ── Install dependencies ──
-if [ ! -d "node_modules" ] || [ "$TERMUX_FORCE_INSTALL" = "1" ] || ! node scripts/check-workspace-install.mjs >/dev/null 2>&1; then
+if [ ! -d "node_modules" ] || ! node scripts/check-workspace-install.mjs >/dev/null 2>&1; then
     echo ""
-    echo "  [..] Installing dependencies${TERMUX_FORCE_INSTALL:+ (refreshing for platform fix)}..."
+    echo "  [..] Installing dependencies..."
     echo "       This may take several minutes on mobile."
     echo ""
     prune_pnpm_store
@@ -589,17 +572,17 @@ if [ ! -f "packages/server/dist/index.js" ]; then
     echo "  [..] Building server..."
     run_pnpm --filter @marinara-engine/server build
 fi
-if [ ! -f "packages/client/dist/index.html" ]; then
-    echo "  [..] Building client..."
+if ! node scripts/check-client-build.mjs; then
+    echo "  [..] Rebuilding incomplete client assets..."
     # Skip tsc type-check on Termux — it OOMs on low-memory devices.
     # Skip PWA service worker — terser minifier OOMs on low-memory devices.
     # Vite doesn't need tsc output (tsconfig has noEmit: true).
-    if ! SKIP_PWA=1 run_pnpm --filter @marinara-engine/client exec vite build 2>&1; then
-        echo "  [WARN] Vite build failed — native binaries may not match Node.js $(node -v)."
-        echo "  [..] Ensuring WASM fallback for rollup is installed and retrying..."
+    if ! build_termux_client 2>&1; then
+        echo "  [WARN] Vite build failed. Checking build dependencies before one retry..."
         run_pnpm install --frozen-lockfile --prefer-offline --filter @marinara-engine/client 2>/dev/null || true
-        SKIP_PWA=1 run_pnpm --filter @marinara-engine/client exec vite build
+        build_termux_client
     fi
+    node scripts/check-client-build.mjs
 fi
 
 export NODE_ENV=production
@@ -708,7 +691,7 @@ cd packages/server
 # Preserve Node's real exit status. The launcher's session-wide tee has already
 # made update, build, and server output durable for the next support report.
 set +e
-node dist/index.js
+node ../../scripts/run-server.mjs dist/index.js
 MARINARA_SERVER_STATUS=$?
 set -e
 if [ "$MARINARA_SERVER_STATUS" -ne 0 ]; then

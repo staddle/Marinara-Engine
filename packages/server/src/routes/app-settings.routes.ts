@@ -4,7 +4,10 @@
 import type { FastifyInstance } from "fastify";
 import {
   CHAT_SUMMARY_PROMPT_SETTINGS_KEY,
+  isProfessorMariSeenRunSettingsKey,
+  TRANSLATOR_DEFAULTS_SETTINGS_KEY,
   CUSTOM_GENERATION_PARAMETERS_SETTINGS_KEY,
+  DEFAULT_EMBEDDING_CONNECTION_SETTINGS_KEY,
   EMPTY_IMPERSONATE_PROMPT_TEMPLATE_CATALOG,
   IMPERSONATE_PROMPT_TEMPLATES_SETTINGS_KEY,
   HOME_CUSTOM_WIDGETS_SETTINGS_KEY,
@@ -12,26 +15,61 @@ import {
   STORAGE_MIGRATION_NOTICE_SETTINGS_KEY,
   VIDEO_GENERATION_SETTINGS_KEY,
   appSettingsUpdateSchema,
+  FEATURE_SETTINGS_KEY,
+  featureSettingsSchema,
+  type FeatureSettingsResponse,
   impersonatePromptTemplateCatalogSchema,
+  getChatWindowDefaultSettingsKey,
+  LOCAL_SIDECAR_CONNECTION_ID,
+  parseChatWindowDefault,
 } from "@marinara-engine/shared";
+import { z } from "zod";
 import { logger } from "../lib/logger.js";
 import {
   HomeWidgetCatalogConflictError,
   readHomeWidgetCatalog,
   replaceHomeWidgetCatalog,
 } from "../services/home-widget-catalog.service.js";
+import { withLongTermMemoryEmbeddingChange } from "../services/generation/long-term-memory-runtime.js";
+import {
+  readDefaultEmbeddingConnectionId,
+  resetMemoryRecallVectorizerCache,
+} from "../services/memory-recall-embedding.js";
 import { createAppSettingsStorage } from "../services/storage/app-settings.storage.js";
+import { createConnectionsStorage } from "../services/storage/connections.storage.js";
+import { initializeChatWindowDefaults } from "../services/storage/chat-window-defaults.js";
+import { featureSettingsResponse, loadFeatureSettings } from "../services/features/feature-settings.js";
+import { loadMediaQueueUiSettings } from "../services/image/image-generation-queue.js";
 
 const ALLOWED_KEYS = new Set([
   "ui",
+  TRANSLATOR_DEFAULTS_SETTINGS_KEY,
   CHAT_SUMMARY_PROMPT_SETTINGS_KEY,
   CUSTOM_GENERATION_PARAMETERS_SETTINGS_KEY,
   STORAGE_MIGRATION_NOTICE_SETTINGS_KEY,
   VIDEO_GENERATION_SETTINGS_KEY,
+  getChatWindowDefaultSettingsKey("conversation"),
+  getChatWindowDefaultSettingsKey("roleplay"),
+  getChatWindowDefaultSettingsKey("game"),
 ]);
 
+const isAllowedSettingsKey = (key: string) => ALLOWED_KEYS.has(key) || isProfessorMariSeenRunSettingsKey(key);
+
 export async function appSettingsRoutes(app: FastifyInstance) {
+  await initializeChatWindowDefaults(app.db);
   const storage = createAppSettingsStorage(app.db);
+  // Prime the in-memory feature switches; storage writes keep them current from here on.
+  await loadFeatureSettings(storage);
+  await loadMediaQueueUiSettings(storage);
+
+  app.get(`/${FEATURE_SETTINGS_KEY}`, (): FeatureSettingsResponse => featureSettingsResponse());
+
+  // Replaces the whole object: omit a key to return it to its default (off).
+  app.put(`/${FEATURE_SETTINGS_KEY}`, async (req): Promise<FeatureSettingsResponse> => {
+    const settings = featureSettingsSchema.parse(req.body ?? {});
+    await storage.set(FEATURE_SETTINGS_KEY, JSON.stringify(settings));
+    return featureSettingsResponse();
+  });
 
   app.get(`/${HOME_CUSTOM_WIDGETS_SETTINGS_KEY}`, () => readHomeWidgetCatalog(app.db));
 
@@ -65,8 +103,31 @@ export async function appSettingsRoutes(app: FastifyInstance) {
     return catalog;
   });
 
+  app.get(`/${DEFAULT_EMBEDDING_CONNECTION_SETTINGS_KEY}`, async () => ({
+    connectionId: await readDefaultEmbeddingConnectionId(app.db),
+  }));
+
+  // null clears the default. Its own route so the id is checked and Long-term memory re-indexes.
+  app.put(`/${DEFAULT_EMBEDDING_CONNECTION_SETTINGS_KEY}`, async (req, reply) => {
+    const { connectionId } = z.object({ connectionId: z.string().trim().min(1).nullable() }).parse(req.body);
+    if (connectionId && connectionId !== LOCAL_SIDECAR_CONNECTION_ID) {
+      const connection = await createConnectionsStorage(app.db).getWithKey(connectionId);
+      if (!connection) return reply.status(400).send({ error: "Connection not found" });
+      // A connection with no embedding source of its own would leave the default silently unused.
+      if (!connection.embeddingModel?.trim() && !connection.embeddingConnectionId?.trim()) {
+        return reply.status(400).send({ error: "That connection has no embedding model" });
+      }
+    }
+    return withLongTermMemoryEmbeddingChange(app.db, reply, async () => {
+      if (connectionId) await storage.set(DEFAULT_EMBEDDING_CONNECTION_SETTINGS_KEY, connectionId);
+      else await storage.remove(DEFAULT_EMBEDDING_CONNECTION_SETTINGS_KEY);
+      resetMemoryRecallVectorizerCache();
+      return { connectionId };
+    });
+  });
+
   app.get<{ Params: { key: string } }>("/:key", async (req, reply) => {
-    if (!ALLOWED_KEYS.has(req.params.key)) {
+    if (!isAllowedSettingsKey(req.params.key)) {
       return reply.status(404).send({ error: "Unknown settings key" });
     }
     const value = await storage.get(req.params.key);
@@ -74,10 +135,18 @@ export async function appSettingsRoutes(app: FastifyInstance) {
   });
 
   app.put<{ Params: { key: string } }>("/:key", async (req, reply) => {
-    if (!ALLOWED_KEYS.has(req.params.key)) {
+    if (!isAllowedSettingsKey(req.params.key)) {
       return reply.status(404).send({ error: "Unknown settings key" });
     }
     const input = appSettingsUpdateSchema.parse(req.body);
+    if (req.params.key.startsWith("chat-window-default-")) {
+      const favorite = parseChatWindowDefault(input.value);
+      if (favorite === null && input.value.trim() !== "null") {
+        return reply.status(400).send({ error: "Invalid chat window default" });
+      }
+      // Store only layout and hint preferences, never chat-specific content sent alongside them.
+      input.value = JSON.stringify(favorite);
+    }
     await storage.set(req.params.key, input.value);
     return { value: input.value };
   });

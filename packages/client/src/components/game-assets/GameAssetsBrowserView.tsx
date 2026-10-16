@@ -39,6 +39,7 @@ import { isImage, isAudio, isEditableText, countItems } from "./utils";
 import { resolveGameAssetFileUrl } from "../../lib/game-asset-urls";
 import { useUIStore } from "../../stores/ui.store";
 import { useChatStore } from "../../stores/chat.store";
+import { gameArtFamily } from "@marinara-engine/shared";
 import { useChat, useUpdateChatMetadata } from "../../hooks/use-chats";
 import { parseChatMetadata } from "../../lib/chat-display";
 import {
@@ -155,6 +156,8 @@ export function GameAssetsBrowserView({
     [activeChatMeta.gameAssetSelection],
   );
   const gameAssetExcludedFolders = optimisticAssetExcludedFolders ?? persistedGameAssetExcludedFolders;
+  // The open game's setting family (worldgen W6f): other families' folders are left out of it.
+  const gameArtFamilyName = useMemo(() => gameArtFamily(activeChatMeta), [activeChatMeta]);
   const folderSelectionMenuRef = useRef<HTMLDivElement>(null);
 
   const persistGameAssetSelection = useCallback(
@@ -754,6 +757,11 @@ export function GameAssetsBrowserView({
                   value2: gameAssetExcludedFolders.length !== 1 ? localizeUi("ui.noodle.stageprofileview.s") : "",
                 })}
           </span>
+          {gameArtFamilyName && (
+            <span className="text-xs text-[var(--muted-foreground)]">
+              {localizeUi("ui.gameAssets.gameassetsbrowserview.settingFamily", { family: gameArtFamilyName })}
+            </span>
+          )}
           {gameAssetExcludedFolders.length > 0 && (
             <button
               type="button"

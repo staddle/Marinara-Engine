@@ -2,7 +2,18 @@
 // Game: Input Bar (send message, roll dice, attach files, emoji)
 // ──────────────────────────────────────────────
 import { useState, useRef, useEffect, useCallback, useMemo, type KeyboardEvent } from "react";
-import { Send, Dices, Paperclip, Smile, Users, MessageCircle, MessageSquare, Languages, Loader2 } from "lucide-react";
+import {
+  Send,
+  Dices,
+  Paperclip,
+  Smile,
+  Users,
+  MessageCircle,
+  MessageSquare,
+  Languages,
+  Loader2,
+  Play,
+} from "lucide-react";
 import { cn } from "../../lib/utils";
 import { EmojiPicker } from "../ui/EmojiPicker";
 import { SpeechToTextButton } from "../ui/SpeechToTextButton";
@@ -56,6 +67,14 @@ interface GameInputProps {
    * `force` keeps the normal styling — the GM won't be told this is an interrupt.
    */
   interruptMode?: "risky" | "force" | null;
+  /**
+   * The chat's session has been concluded, so drafting is locked until a new session
+   * starts. Swaps the placeholder for an explanation and, with `onStartNewSession`,
+   * renders the New Session action right in the composer (#6045).
+   */
+  sessionConcluded?: boolean;
+  onStartNewSession?: () => void;
+  startNewSessionPending?: boolean;
 }
 
 const QUICK_DICE = ["d20", "d6", "2d6", "d10", "d100", "d4", "d8", "d12"];
@@ -124,6 +143,9 @@ export function GameInput({
   onIllustrate,
   spatialCapabilityEnabled = false,
   interruptMode,
+  sessionConcluded = false,
+  onStartNewSession,
+  startNewSessionPending = false,
 }: GameInputProps) {
   const { t: localizeUi } = useUiTranslation();
   const { t } = useTranslation();
@@ -384,7 +406,8 @@ export function GameInput({
   const forceInterruptStyle = forceInterrupt
     ? {
         boxShadow: "0 0 18px -6px rgba(32, 194, 14, 0.6)",
-        backgroundColor: "rgba(32, 194, 14, 0.04)",
+        backgroundColor: "var(--mari-chat-surface-paint, rgba(32, 194, 14, 0.04))",
+        ["--mari-chat-existing-bg" as never]: "rgba(32, 194, 14, 0.04)",
         ["--tw-ring-color" as never]: "rgba(32, 194, 14, 0.45)",
       }
     : undefined;
@@ -392,6 +415,7 @@ export function GameInput({
   return (
     <div
       data-chat-resource-drop-exclude
+      data-chat-input-container
       className={cn(inline ? "" : "px-3 pt-2 pb-3")}
       style={inline ? undefined : { minHeight: 61 }}
     >
@@ -419,8 +443,9 @@ export function GameInput({
       {/* Dice picker */}
       {showDice && (
         <div
+          data-chat-input-popup="dice"
           className={cn(
-            "flex flex-wrap items-center gap-1.5 border-b border-foreground/10 py-2",
+            "mari-chat-style-surface flex flex-wrap items-center gap-1.5 border-b border-foreground/10 py-2 [--mari-chat-existing-bg:transparent]",
             inline ? "px-0" : "px-4",
           )}
         >
@@ -429,25 +454,31 @@ export function GameInput({
               type="button"
               key={d}
               onClick={() => handleDiceRoll(d)}
-              className="rounded bg-foreground/10 px-2 py-1 text-xs font-mono text-foreground/70 transition-colors hover:bg-foreground/15"
+              className="mari-chat-style-control mari-chat-dice-control rounded bg-foreground/10 px-2 py-1 text-xs font-mono text-foreground/70 transition-colors hover:bg-foreground/15"
             >
               🎲 {d}
             </button>
           ))}
           <div className="flex items-center gap-1">
-            <input
-              type="text"
-              value={customDice}
-              onChange={(e) => setCustomDice(e.target.value)}
-              placeholder={localizeUi("ui.game.gameinput.text3d82")}
-              className="h-[26px] w-16 rounded bg-foreground/10 px-1.5 text-xs font-mono text-foreground/70 outline-none ring-1 ring-foreground/10 placeholder:text-foreground/35 focus:ring-foreground/20"
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && customDice.trim()) {
-                  handleDiceRoll(customDice.trim());
-                  setCustomDice("");
-                }
-              }}
-            />
+            {/* Native inputs cannot paint the cut-corner control pseudo-element. */}
+            <span
+              data-chat-dice-input
+              className="mari-chat-style-control mari-chat-dice-control inline-flex h-[26px] w-16 rounded bg-foreground/10 text-xs font-mono text-foreground/70 ring-1 ring-foreground/10 focus-within:ring-foreground/20 [--mari-chat-input-bg:transparent]"
+            >
+              <input
+                type="text"
+                value={customDice}
+                onChange={(e) => setCustomDice(e.target.value)}
+                placeholder={localizeUi("ui.game.gameinput.text3d82")}
+                className="h-full w-full min-w-0 rounded-[inherit] bg-transparent px-1.5 outline-none placeholder:text-foreground/35"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && customDice.trim()) {
+                    handleDiceRoll(customDice.trim());
+                    setCustomDice("");
+                  }
+                }}
+              />
+            </span>
             <button
               type="button"
               onClick={() => {
@@ -456,7 +487,7 @@ export function GameInput({
                   setCustomDice("");
                 }
               }}
-              className="flex h-[26px] items-center rounded bg-foreground/10 px-1.5 text-foreground/70 hover:bg-foreground/15"
+              className="mari-chat-style-control mari-chat-dice-control flex h-[26px] items-center rounded bg-foreground/10 px-1.5 text-foreground/70 hover:bg-foreground/15"
             >
               <Send size={14} />
             </button>
@@ -512,7 +543,8 @@ export function GameInput({
         ref={inputBarRef}
         className={getChatInputShellClass({
           className: cn(
-            riskyInterrupt && "ring-1 ring-red-500/40 bg-red-500/5 shadow-[0_0_18px_-6px_rgba(248,113,113,0.55)]",
+            riskyInterrupt &&
+              "[--mari-chat-owner-bg:color-mix(in_oklab,var(--color-red-500)_5%,transparent)] ring-1 ring-red-500/40 bg-red-500/5 shadow-[0_0_18px_-6px_rgba(248,113,113,0.55)]",
             forceInterrupt && "ring-1",
           ),
           hasContent:
@@ -553,7 +585,8 @@ export function GameInput({
           {addressMenuOpen && (
             <div
               ref={addressMenuRef}
-              className="absolute bottom-full left-0 z-20 mb-2 flex min-w-[11rem] flex-col gap-1 rounded-xl border border-foreground/10 bg-[var(--card)]/95 p-1.5 shadow-lg backdrop-blur"
+              data-chat-input-popup="address"
+              className="mari-chat-style-surface mari-chat-input-popup absolute bottom-full left-0 z-20 mb-2 flex min-w-[11rem] flex-col gap-1 rounded-xl border border-foreground/10 bg-[var(--card)]/95 p-1.5 shadow-lg backdrop-blur"
             >
               {hasPartyMembers && (
                 <button
@@ -617,6 +650,7 @@ export function GameInput({
         </div>
 
         <textarea
+          data-chat-composer
           ref={inputRef}
           value={text}
           onChange={(e) => {
@@ -632,21 +666,37 @@ export function GameInput({
           }}
           onKeyDown={handleKeyDown}
           placeholder={
-            isStreaming
-              ? t("game.input.prepareNextMove")
-              : addressMode === "party"
-                ? t("game.input.sayToParty")
-                : addressMode === "gm"
-                  ? t("game.input.sayToGm")
-                  : pendingMoveLabel
-                    ? t("game.input.onArrival")
-                    : t("game.input.default")
+            sessionConcluded
+              ? t("game.input.sessionConcluded")
+              : isStreaming
+                ? t("game.input.prepareNextMove")
+                : addressMode === "party"
+                  ? t("game.input.sayToParty")
+                  : addressMode === "gm"
+                    ? t("game.input.sayToGm")
+                    : pendingMoveLabel
+                      ? t("game.input.onArrival")
+                      : t("game.input.default")
           }
           disabled={draftDisabled}
           rows={1}
           className="min-w-0 flex-1 resize-none bg-transparent px-2 py-1.5 text-sm leading-normal text-foreground outline-none placeholder:text-foreground/30 disabled:opacity-50"
           style={{ minHeight: 36, maxHeight: 120 }}
         />
+
+        {sessionConcluded && onStartNewSession && (
+          <button
+            type="button"
+            onClick={onStartNewSession}
+            disabled={startNewSessionPending}
+            className="flex h-8 shrink-0 items-center gap-1.5 rounded-xl bg-foreground/10 px-2 text-xs font-medium text-foreground/75 ring-1 ring-foreground/20 transition-colors hover:bg-foreground/15 disabled:cursor-not-allowed disabled:opacity-50 sm:px-3"
+            title={t("game.input.startNewSession")}
+            aria-label={t("game.input.startNewSession")}
+          >
+            {startNewSessionPending ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
+            <span className="hidden sm:inline">{t("game.input.startNewSession")}</span>
+          </button>
+        )}
 
         {queuedDice && (
           <div className="flex items-center self-stretch rounded-lg border border-foreground/10 bg-foreground/10 px-2 text-xs text-foreground/70">
@@ -713,6 +763,7 @@ export function GameInput({
             <Smile size={18} />
           </button>
           <EmojiPicker
+            popupClassName="mari-chat-style-surface mari-chat-input-popup"
             open={emojiOpen}
             onClose={() => setEmojiOpen(false)}
             onSelect={handleEmojiSelect}

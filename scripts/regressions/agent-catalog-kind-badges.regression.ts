@@ -24,6 +24,13 @@ assert.match(
 assert.match(catalogViewSource, /(?:"beholder"|beholder):\s*\[\s*"roleplay"\s*\]/u);
 assert.match(catalogViewSource, /(?:"gacha-forge"|gacha-forge):\s*\[\s*"conversation",\s*"roleplay",\s*"game"\s*\]/u);
 assert.match(catalogViewSource, /(?:"slurp"|slurp):\s*\[\s*"conversation",\s*"roleplay",\s*"game"\s*\]/u);
+for (const avatarPackageId of ["2d-avatars", "3d-avatars"]) {
+  assert.match(
+    catalogViewSource,
+    new RegExp(`"${avatarPackageId}":\\s*\\[\\s*"roleplay",\\s*"game"\\s*\\]`, "u"),
+    `${avatarPackageId} must stay listed under the Roleplay and Game catalog filters`,
+  );
+}
 assert.match(
   catalogViewSource,
   /const modes = packageModes\(entry\.manifest\.id\);[\s\S]*?data-agent-catalog-mode-badges[\s\S]*?modes\.map/u,

@@ -152,8 +152,8 @@ export function processReputationActions(
   const milestones: RelationshipMilestone[] = [];
 
   for (const { npcId, action, modifier } of actions) {
-    // Support both ID-based and name-based lookup
-    let npc = npcMap.get(npcId);
+    // Support ID-based, world-id-based (a person the game's world drew) and name-based lookup
+    let npc = npcMap.get(npcId) ?? [...npcMap.values()].find((n) => n.worldId === npcId);
     if (!npc) {
       // Try matching by name (case-insensitive)
       for (const [, n] of npcMap) {

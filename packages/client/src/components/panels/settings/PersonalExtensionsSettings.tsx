@@ -62,7 +62,14 @@ import {
   createPersonalExtensionPackageFilename,
   createPersonalExtensionPackageFiles,
 } from "../../../lib/personal-extension-transfer";
-import { SettingsIntro, SettingsSection } from "./SettingControls";
+import {
+  SETTINGS_BUTTON_CLASS,
+  SETTINGS_COMPACT_PRIMARY_BUTTON_CLASS,
+  SETTINGS_ICON_BUTTON_CLASS,
+  SETTINGS_PRIMARY_FULL_BUTTON_CLASS,
+  SettingsIntro,
+  SettingsSection,
+} from "./SettingControls";
 
 type EditorDraft = PersonalExtensionImportDraft;
 
@@ -528,12 +535,8 @@ function ExtensionSettings({ showIntro, mode }: { showIntro: boolean; mode: Exte
     return (
       <div className="flex flex-col gap-3">
         <div className="flex flex-col gap-2">
-          <button
-            type="button"
-            onClick={closeEditor}
-            className="flex min-h-9 self-start items-center gap-1.5 rounded-md px-2 text-xs text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)] hover:text-[var(--foreground)]"
-          >
-            <ChevronLeft size="0.875rem" />
+          <button type="button" onClick={closeEditor} className={cn(SETTINGS_BUTTON_CLASS, "self-start")}>
+            <ChevronLeft size="0.75rem" />
             {isExternal
               ? t("settings.externalExtensions.title")
               : localizeUi("settings.sections.personalExtensions.title")}
@@ -560,12 +563,7 @@ function ExtensionSettings({ showIntro, mode }: { showIntro: boolean; mode: Exte
                       ? localizeUi("ui.panels.extensionsettings.disable")
                       : localizeUi("ui.panels.extensionsettings.enableAction")
                   }
-                  className={cn(
-                    "flex min-h-9 min-w-0 items-center justify-center gap-1.5 rounded-md px-2 text-xs font-semibold leading-none transition-colors disabled:cursor-not-allowed disabled:opacity-50",
-                    current.enabled
-                      ? "bg-[var(--secondary)] text-[var(--foreground)] hover:bg-[var(--accent)]"
-                      : "bg-[var(--primary)] text-[var(--primary-foreground)] hover:opacity-90",
-                  )}
+                  className={current.enabled ? SETTINGS_BUTTON_CLASS : SETTINGS_COMPACT_PRIMARY_BUTTON_CLASS}
                 >
                   {current.enabled ? (
                     <Power size="0.75rem" className="shrink-0" />
@@ -588,7 +586,7 @@ function ExtensionSettings({ showIntro, mode }: { showIntro: boolean; mode: Exte
                   }
                   aria-label={localizeUi("ui.panels.extensionsettings.exportLocalPackage")}
                   title={localizeUi("ui.panels.extensionsettings.exportLocalPackage")}
-                  className="flex min-h-9 min-w-0 items-center justify-center gap-1.5 rounded-md bg-[var(--secondary)] px-2 text-xs font-semibold leading-none text-[var(--foreground)] transition-colors hover:bg-[var(--accent)]"
+                  className={SETTINGS_BUTTON_CLASS}
                 >
                   <Upload size="0.75rem" className="shrink-0" />
                   <span className="truncate">{localizeUi("ui.panels.extensionsettings.exportAction")}</span>
@@ -602,7 +600,7 @@ function ExtensionSettings({ showIntro, mode }: { showIntro: boolean; mode: Exte
                 disabled={busy}
                 aria-label={localizeUi("ui.panels.extensionsettings.saveDraft")}
                 title={localizeUi("ui.panels.extensionsettings.saveDraft")}
-                className="flex min-h-9 min-w-0 items-center justify-center gap-1.5 rounded-md bg-[var(--primary)] px-2 text-xs font-semibold text-[var(--primary-foreground)] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                className={SETTINGS_COMPACT_PRIMARY_BUTTON_CLASS}
               >
                 {busy ? <Loader2 size="0.75rem" className="animate-spin" /> : <Save size="0.75rem" />}
                 <span className="truncate">{localizeUi("ui.panels.extensionsettings.saveAction")}</span>
@@ -858,9 +856,9 @@ function ExtensionSettings({ showIntro, mode }: { showIntro: boolean; mode: Exte
                     type="button"
                     onClick={() => void restoreRevision(current, revision.contentHash)}
                     disabled={busy}
-                    className="ml-auto flex min-h-8 items-center gap-1 rounded-md px-2 text-[var(--primary)] transition-colors hover:bg-[var(--primary)]/10 disabled:opacity-50"
+                    className={cn(SETTINGS_BUTTON_CLASS, "ml-auto")}
                   >
-                    <RotateCcw size="0.6875rem" />
+                    <RotateCcw size="0.75rem" />
                     {localizeUi("ui.panels.extensionsettings.restoreDraft")}
                   </button>
                 </div>
@@ -905,9 +903,9 @@ function ExtensionSettings({ showIntro, mode }: { showIntro: boolean; mode: Exte
                   })
                 }
                 disabled={busy}
-                className="flex min-h-11 items-center justify-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--secondary)]/55 px-3 text-xs text-[var(--foreground)] transition-colors hover:bg-[var(--accent)] disabled:opacity-50"
+                className={SETTINGS_PRIMARY_FULL_BUTTON_CLASS}
               >
-                {importing ? <Loader2 size="0.875rem" className="animate-spin" /> : <FileArchive size="0.875rem" />}
+                {importing ? <Loader2 size="0.8125rem" className="animate-spin" /> : <FileArchive size="0.8125rem" />}
                 {t("settings.externalExtensions.import.file")}
               </button>
               <button
@@ -920,9 +918,9 @@ function ExtensionSettings({ showIntro, mode }: { showIntro: boolean; mode: Exte
                   })
                 }
                 disabled={busy}
-                className="flex min-h-11 items-center justify-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--secondary)]/55 px-3 text-xs text-[var(--foreground)] transition-colors hover:bg-[var(--accent)] disabled:opacity-50"
+                className={SETTINGS_PRIMARY_FULL_BUTTON_CLASS}
               >
-                <FolderOpen size="0.875rem" />
+                <FolderOpen size="0.8125rem" />
                 {t("settings.externalExtensions.import.folder")}
               </button>
             </div>
@@ -993,7 +991,7 @@ function ExtensionSettings({ showIntro, mode }: { showIntro: boolean; mode: Exte
                       "flex items-stretch gap-2 rounded-lg border px-1.5 py-1.5 transition-colors",
                       extension.enabled
                         ? "border-[var(--primary)]/30 bg-[var(--primary)]/[0.07]"
-                        : "border-[var(--border)] bg-[var(--secondary)]/45 hover:bg-[var(--secondary)]/70",
+                        : "border-[var(--border)] bg-[var(--secondary)]/45 hover:bg-[var(--accent)]/70",
                     )}
                   >
                     <div
@@ -1011,24 +1009,24 @@ function ExtensionSettings({ showIntro, mode }: { showIntro: boolean; mode: Exte
                             ? localizeUi("ui.panels.extensionsettings.disable")
                             : localizeUi("ui.panels.extensionsettings.reviewAndRun_c0b4a0e")
                         }
-                        className="flex h-8 w-8 items-center justify-center rounded-md text-[var(--primary)] transition-colors hover:bg-[var(--primary)]/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] active:scale-90 disabled:cursor-not-allowed disabled:opacity-50"
+                        className={SETTINGS_ICON_BUTTON_CLASS}
                         title={
                           extension.enabled
                             ? localizeUi("ui.panels.extensionsettings.disable")
                             : localizeUi("ui.panels.extensionsettings.reviewAndRun_c0b4a0e")
                         }
                       >
-                        {extension.enabled ? <Power size="0.6875rem" /> : <PowerOff size="0.6875rem" />}
+                        {extension.enabled ? <Power size="0.75rem" /> : <PowerOff size="0.75rem" />}
                       </button>
                       <button
                         type="button"
                         onClick={() => void removeExtension(extension)}
                         disabled={busy}
                         aria-label={localizeUi("lorebook.editor.batch.delete")}
-                        className="flex h-8 w-8 items-center justify-center rounded-md text-[var(--destructive)] transition-colors hover:bg-[var(--destructive)]/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] active:scale-90 disabled:cursor-not-allowed disabled:opacity-50"
+                        className={cn(SETTINGS_ICON_BUTTON_CLASS, "mari-chrome-control--danger")}
                         title={localizeUi("lorebook.editor.batch.delete")}
                       >
-                        <Trash2 size="0.6875rem" />
+                        <Trash2 size="0.75rem" />
                       </button>
                     </div>
                     <button

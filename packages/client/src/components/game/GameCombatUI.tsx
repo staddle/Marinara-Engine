@@ -1,3 +1,6 @@
+import { artPortraitFor } from "@marinara-engine/shared";
+import { ArtIcon } from "./ArtIcon";
+import { CombatAiControls } from "./CombatAiControls";
 // ──────────────────────────────────────────────
 // Game: Turn-Based Combat UI
 //
@@ -21,6 +24,7 @@ import {
   type ReactNode,
 } from "react";
 import { cn } from "../../lib/utils";
+import { GAME_SECTION_CLASS } from "../../lib/chat-widget-colors";
 import { useRenderTimer } from "../../lib/perf-diagnostics";
 import { audioManager } from "../../lib/game-audio";
 import { getOrCreateCachedTTSAudioBlob } from "../../lib/tts-audio-cache";
@@ -30,6 +34,7 @@ import { useGameAssetManifest } from "../../hooks/use-game-assets";
 import { useCombatRound } from "../../hooks/use-game";
 import { useTTSConfig } from "../../hooks/use-tts";
 import { AnimatedText } from "./AnimatedText";
+import { combatInterruptFields, worldElementId, type WorldElementSet } from "@marinara-engine/shared";
 import type {
   Combatant,
   CombatAttackResult,
@@ -41,9 +46,11 @@ import type {
   CombatMechanic,
   CombatSkill,
   CombatStatus,
+  DirectedRulesetView,
   PartyDialogueLine,
   TTSConfig,
 } from "@marinara-engine/shared";
+import { RulesetCombatMenu } from "./RulesetCombatMenu";
 import {
   Heart,
   Droplets,
@@ -164,6 +171,10 @@ function sanitizeCombatSkills(skills: unknown): Combatant["skills"] {
       mpCost: Math.max(0, numberFromUnknown(skill.mpCost, 0)),
       power: Math.max(0.1, numberFromUnknown(skill.power, 1)),
     };
+    for (const [field, schema] of Object.entries(combatInterruptFields)) {
+      const parsed = schema.safeParse(skill[field]);
+      if (parsed.success && parsed.data !== undefined) Object.assign(next, { [field]: parsed.data });
+    }
     const description = stringFromUnknown(skill.description);
     if (description) next.description = description;
     if (typeof skill.cooldown === "number" && Number.isFinite(skill.cooldown)) next.cooldown = skill.cooldown;
@@ -315,6 +326,10 @@ function sanitizeCombatMechanics(mechanics: unknown): CombatMechanic[] | undefin
 
 function sanitizeCombatantForRound(combatant: Combatant): Omit<Combatant, "sprite"> {
   return {
+    tactics: combatant.tactics,
+    controller: combatant.controller,
+    skillCooldowns: combatant.skillCooldowns,
+    spellSlots: combatant.spellSlots,
     id: stringFromUnknown(combatant.id) ?? combatant.id,
     name: stringFromUnknown(combatant.name) ?? combatant.name,
     hp: numberFromUnknown(combatant.hp, 0),
@@ -387,9 +402,7 @@ interface CombatLogEntry {
 type CombatImpactTone = "hit" | "critical" | "miss" | "heal" | "reaction";
 
 type CombatVoiceEntry =
-  | { status: "loading"; urls?: undefined }
-  | { status: "ready"; urls: string[] }
-  | { status: "error"; urls?: undefined };
+  { status: "loading"; urls?: undefined } | { status: "ready"; urls: string[] } | { status: "error"; urls?: undefined };
 
 type CombatVoiceLine = PartyDialogueLine & {
   chunks: string[];
@@ -421,10 +434,43 @@ function CombatantSpriteVisual({
     );
   }
 
-  return <span className={textClassName}>{combatant.name.charAt(0).toUpperCase()}</span>;
+  // No picture of their own: their pixel bust from the portraits pack (1.338), else their initial.
+  return (
+    <ArtIcon
+      kind="portraits"
+      ids={[artPortraitFor(combatant.name)]}
+      label={combatant.name}
+      className={imageClassName}
+      fallback={<span className={textClassName}>{combatant.name.charAt(0).toUpperCase()}</span>}
+    />
+  );
 }
 
 interface GameCombatUIProps {
+  /** The game's elements (worldgen W6c), whose own colours mark an aura. */
+  elements?: WorldElementSet;
+  directed?: {
+    actorId?: string;
+    canAct: boolean;
+    round: number;
+    outcome?: "victory" | "defeat" | "flee";
+    onAction: (action: CombatPlayerAction) => void;
+    onControl: (id: string, controller: "manual" | "ai") => void;
+    /** Present only for a fight the game's own ruleset resolves. The stage above is unchanged (the
+     *  server keeps `party` and `enemies` in step with the fight), and this replaces the hardcoded
+     *  attack/skill/defend menu with the ruleset's own legal menu. Absent, every path below is the
+     *  Classic one it has always been. */
+    ruleset?: {
+      view: DirectedRulesetView;
+      /** The ruleset's own name for a budget id. */
+      budgetLabel: (id: string) => string;
+      /** What the ruleset calls its defense. */
+      defenseLabel?: string;
+      busy: boolean;
+      onChoose: (optionId: string, targetIds: string[], payWith?: string) => void;
+      onFlee: () => void;
+    };
+  };
   chatId: string;
   /** Player party combatants. */
   party: Combatant[];
@@ -564,6 +610,9 @@ function buildCombatVoiceConfigSignature(config?: TTSConfig | null): string {
     config.baseUrl,
     config.model,
     config.voice,
+    config.skipTagContent ? "skip-tags" : "read-tags",
+    config.skipCodeBlocks !== false ? "skip-code" : "read-code",
+    config.skipBracketedText ? "skip-brackets" : "read-brackets",
     config.narratorVoiceEnabled ? "narrator-voice" : "narrator-global",
     config.narratorVoice,
     config.voiceMode,
@@ -577,9 +626,14 @@ function buildCombatVoiceConfigSignature(config?: TTSConfig | null): string {
   ].join("|");
 }
 
-function buildCombatVoiceLineKey(configSignature: string, line: PartyDialogueLine, voice?: string): string {
+function buildCombatVoiceLineKey(
+  configSignature: string,
+  line: PartyDialogueLine,
+  chunks: string[],
+  voice?: string,
+): string {
   return `combat-voice-v1:${hashCombatVoiceKey(
-    [configSignature, line.character, line.type, line.expression ?? "", voice ?? "", line.content].join("\n"),
+    [configSignature, line.character, line.type, line.expression ?? "", voice ?? "", JSON.stringify(chunks)].join("\n"),
   )}`;
 }
 
@@ -654,6 +708,8 @@ function combatItemTargetsEnemies(effect?: CombatItemEffect): boolean {
 // ── Component ──
 
 export function GameCombatUI({
+  elements,
+  directed,
   chatId,
   party: initialParty,
   enemies: initialEnemies,
@@ -677,11 +733,21 @@ export function GameCombatUI({
   const { t: localizeUi } = useUiTranslation();
   useRenderTimer("game-combat"); // [#3104 diagnostic]
   // Combat state
-  const [phase, setPhase] = useState<CombatPhase>("intro");
-  const [round, setRound] = useState(1);
+  const [phase, setPhase] = useState<CombatPhase>(() =>
+    !initialEnemies.some((c) => c.hp > 0) ? "victory" : !initialParty.some((c) => c.hp > 0) ? "defeat" : "intro",
+  );
+  const [round, setRound] = useState(Math.max(1, ...initialParty.map((c) => c.combatRound ?? 1)));
+  const [queuedOrders, setQueuedOrders] = useState<Record<string, CombatPlayerAction>>({});
   const [party, setParty] = useState<Combatant[]>(initialParty);
   const [enemies, setEnemies] = useState<Combatant[]>(initialEnemies);
-  const [activePlayerIndex, setActivePlayerIndex] = useState(0);
+  const lastPartyProp = useRef(initialParty);
+  const lastEnemiesProp = useRef(initialEnemies);
+  const [activePlayerIndex, setActivePlayerIndex] = useState(
+    Math.max(
+      0,
+      initialParty.findIndex((c) => c.hp > 0),
+    ),
+  );
   const [selectedAction, setSelectedAction] = useState<string | null>(null);
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
   const [selectedItemName, setSelectedItemName] = useState<string | null>(null);
@@ -873,14 +939,14 @@ export function GameCombatUI({
       const voice = resolveTTSVoiceForSpeaker(ttsConfig, line.character);
       if (ttsConfig.source === "elevenlabs" && !voice) continue;
 
-      const chunks = splitTTSChunks(line.content);
+      const chunks = splitTTSChunks(line.content, ttsConfig);
       if (chunks.length === 0) continue;
 
       lines.push({
         ...line,
         chunks,
         voice: voice || undefined,
-        voiceKey: buildCombatVoiceLineKey(combatVoiceConfigSignature, line, voice),
+        voiceKey: buildCombatVoiceLineKey(combatVoiceConfigSignature, line, chunks, voice),
       });
     }
 
@@ -1184,20 +1250,49 @@ export function GameCombatUI({
     ) : null;
 
   useEffect(() => {
-    setParty(initialParty);
-  }, [initialParty]);
+    if (phase !== "resolving" && phase !== "animating" && initialParty !== lastPartyProp.current) {
+      lastPartyProp.current = initialParty;
+      setParty(initialParty);
+    }
+  }, [initialParty, phase]);
 
   useEffect(() => {
+    if (phase !== "resolving" && phase !== "animating" && initialEnemies !== lastEnemiesProp.current) {
+      lastEnemiesProp.current = initialEnemies;
+      setEnemies(initialEnemies);
+    }
+  }, [initialEnemies, phase]);
+
+  const directedRound = directed?.round,
+    directedActorId = directed?.actorId,
+    directedOutcome = directed?.outcome,
+    directedCanAct = directed?.canAct;
+  useEffect(() => {
+    if (directedRound === undefined) return;
+    setParty(initialParty);
     setEnemies(initialEnemies);
-  }, [initialEnemies]);
+    setRound(directedRound);
+    const index = initialParty.findIndex((c) => c.id === directedActorId);
+    if (index >= 0) setActivePlayerIndex(index);
+    setPhase(
+      directedOutcome === "victory"
+        ? "victory"
+        : directedOutcome === "defeat"
+          ? "defeat"
+          : directedCanAct
+            ? "player-turn"
+            : "resolving",
+    );
+  }, [directedRound, directedActorId, directedOutcome, directedCanAct, initialParty, initialEnemies]);
 
   // ── Intro phase ──
   useEffect(() => {
+    if (phase !== "intro" || directed) return;
     introTimer.current = setTimeout(() => {
       setPhase("player-turn");
     }, INTRO_DURATION_MS);
     return () => clearTimeout(introTimer.current);
-  }, []);
+  }, [phase, directed]);
 
   // ── All combatants merged for server requests ──
   const allCombatants = useMemo(
@@ -1219,6 +1314,11 @@ export function GameCombatUI({
           hp: c.hp,
           maxHp: c.maxHp,
           ko: c.hp <= 0,
+          // Carried like the director's and the tactical summary do: what a battle spent is what a
+          // ruleset sheet has to be told about afterwards.
+          mp: c.mp,
+          maxMp: c.maxMp,
+          spellSlots: c.spellSlots,
           statusEffects: (c.statusEffects ?? []).map((e) => e.name),
         })),
         enemies: enemies.map((c) => ({
@@ -1324,9 +1424,9 @@ export function GameCombatUI({
   );
 
   useEffect(() => {
-    if (phase !== "intro") return;
+    if (phase !== "intro" || directed) return;
     playSfx(COMBAT_SFX.start);
-  }, [phase, playSfx]);
+  }, [phase, playSfx, directed]);
 
   // ── Spawn damage popup ──
   const spawnDamage = useCallback(
@@ -1365,9 +1465,14 @@ export function GameCombatUI({
               hp: u.hp,
               mp: u.mp ?? p.mp,
               maxMp: u.maxMp ?? p.maxMp,
+              spellSlots: u.spellSlots ?? p.spellSlots,
               statusEffects: u.statusEffects,
               elementAura: u.elementAura,
               element: u.element,
+              tactics: u.tactics,
+              controller: u.controller,
+              skillCooldowns: u.skillCooldowns,
+              combatRound: u.combatRound,
             }
           : p;
       });
@@ -1379,9 +1484,14 @@ export function GameCombatUI({
               hp: u.hp,
               mp: u.mp ?? e.mp,
               maxMp: u.maxMp ?? e.maxMp,
+              spellSlots: u.spellSlots ?? e.spellSlots,
               statusEffects: u.statusEffects,
               elementAura: u.elementAura,
               element: u.element,
+              tactics: u.tactics,
+              controller: u.controller,
+              skillCooldowns: u.skillCooldowns,
+              combatRound: u.combatRound,
             }
           : e;
       });
@@ -1411,7 +1521,13 @@ export function GameCombatUI({
       setSelectedAction(null);
       setSelectedSkillId(null);
       setSelectedItemName(null);
-      setActivePlayerIndex(0);
+      setActivePlayerIndex(
+        Math.max(
+          0,
+          updatedParty.findIndex((c) => c.hp > 0),
+        ),
+      );
+      setQueuedOrders({});
     },
     [party, enemies, onCombatantsChange, playSfx],
   );
@@ -1481,7 +1597,28 @@ export function GameCombatUI({
 
   // ── Resolve a combat round on the server ──
   const resolveRound = useCallback(
-    (playerAction: CombatPlayerAction, usedItemName?: string) => {
+    (playerAction: CombatPlayerAction) => {
+      if (directed) {
+        if (directed.canAct) directed.onAction(playerAction);
+        return;
+      }
+      if (!activePlayer) return;
+      const orders = { ...queuedOrders, [activePlayer.id]: playerAction };
+      const nextManual = party.findIndex(
+        (member, index) =>
+          member.hp > 0 &&
+          !(member.id in orders) &&
+          (index === party.findIndex((c) => c.hp > 0) || member.controller === "manual"),
+      );
+      if (nextManual >= 0) {
+        setQueuedOrders(orders);
+        setActivePlayerIndex(nextManual);
+        setSelectedAction(null);
+        setSelectedSkillId(null);
+        setSelectedItemName(null);
+        setPhase("player-turn");
+        return;
+      }
       setPhase("resolving");
 
       combatRound.mutate(
@@ -1489,6 +1626,8 @@ export function GameCombatUI({
           chatId,
           combatants: allCombatants.filter((c) => c.hp > 0).map((c) => sanitizeCombatantForRound(c)),
           round,
+          partyActions: orders,
+          controlledId: activePlayer.id,
           playerAction:
             playerAction.type === "item"
               ? { ...playerAction, itemEffect: sanitizeCombatItemEffect(playerAction.itemEffect) }
@@ -1498,9 +1637,25 @@ export function GameCombatUI({
         {
           onSuccess: (data) => {
             const result = data.result as CombatRoundResult;
-            const updatedCombatants = data.combatants as Combatant[];
-            if (usedItemName) {
-              void onInventoryItemUsed?.(usedItemName);
+            const updatedCombatants = (data.combatants as Combatant[]).map((c) => ({
+              ...c,
+              combatRound: result.round + 1,
+            }));
+            onCombatantsChange?.(
+              party.map((c) => ({ ...c, ...updatedCombatants.find((u) => u.id === c.id) })),
+              enemies.map((c) => ({ ...c, ...updatedCombatants.find((u) => u.id === c.id) })),
+            );
+            // Consume from accepted orders, never a discarded choice from an earlier failed request.
+            // Only the leader has an item menu; a KO/skipped turn must not spend the queued item.
+            // ponytail: legacy rounds retain separate inventory persistence; migrate them to the
+            // director ledger for atomic round/item commits and idempotent persistence retries.
+            for (const [actorId, order] of Object.entries(orders)) {
+              if (
+                order.type === "item" &&
+                (order.itemEffect?.consumes !== false || order.itemEffect?.charges) &&
+                result.actions.some((action) => action.attackerId === actorId && action.skillName === order.itemId)
+              )
+                void onInventoryItemUsed?.(order.itemId);
             }
             setRoundResult(result);
             setTurnOrder(result.initiative.map((e) => ({ id: e.id, name: e.name })));
@@ -1510,12 +1665,51 @@ export function GameCombatUI({
         },
       );
     },
-    [chatId, allCombatants, round, combatRound, combatMechanics, onInventoryItemUsed, animateRoundResults],
+    [
+      directed,
+      chatId,
+      allCombatants,
+      round,
+      combatRound,
+      combatMechanics,
+      onInventoryItemUsed,
+      animateRoundResults,
+      activePlayer,
+      queuedOrders,
+      party,
+      enemies,
+      onCombatantsChange,
+    ],
   );
+
+  // A fight the game's own ruleset resolves brings its whole menu with it, so none of the Classic
+  // menu, its sub-phases or its keyboard handling is reachable while this is set.
+  const rulesetFight = directed?.ruleset;
+  const rulesetMenu = rulesetFight ? (
+    <RulesetCombatMenu
+      view={rulesetFight.view}
+      budgetLabel={rulesetFight.budgetLabel}
+      defenseLabel={rulesetFight.defenseLabel}
+      busy={rulesetFight.busy}
+      onChoose={rulesetFight.onChoose}
+      onFlee={rulesetFight.onFlee}
+    />
+  ) : null;
+
+  const actionMenu = (
+    activePlayerIndex === party.findIndex((c) => c.hp > 0)
+      ? ACTION_MENU
+      : ACTION_MENU.filter((a) => a.id === "attack" || a.id === "skill" || a.id === "defend")
+  ).filter((a) => !directed || a.id !== "custom");
 
   // ── Handle action selection ──
   const handleActionSelect = useCallback(
     (actionId: string) => {
+      if (directed && actionId === "custom") return;
+      if (directed && actionId === "flee") {
+        directed.onAction({ type: "flee" });
+        return;
+      }
       playSfx(COMBAT_SFX.menuSelect);
 
       if (actionId === "flee") {
@@ -1558,7 +1752,7 @@ export function GameCombatUI({
         return;
       }
     },
-    [activePlayer?.name, appendCombatLog, playSfx, onCombatEnd, resolveRound, buildSummary],
+    [directed, activePlayer?.name, appendCombatLog, playSfx, onCombatEnd, resolveRound, buildSummary],
   );
 
   const submitCustomInstruction = useCallback(() => {
@@ -1601,10 +1795,7 @@ export function GameCombatUI({
         return;
       }
       const targetId = itemEffect?.target === "ally" ? party.find((member) => member.hp > 0)?.id : activePlayer.id;
-      resolveRound(
-        { type: "item", itemId: normalizedItemName, targetId, itemEffect },
-        itemEffect?.consumes === false ? undefined : normalizedItemName,
-      );
+      resolveRound({ type: "item", itemId: normalizedItemName, targetId, itemEffect });
     },
     [activePlayer, combatItemEffects, party, playSfx, resolveRound],
   );
@@ -1626,37 +1817,56 @@ export function GameCombatUI({
                 itemEffect: selectedItemEffect,
               }
             : { type: "attack", targetId };
-      const usedItemName =
-        selectedAction === "item" && selectedItemName && selectedItemEffect?.consumes !== false
-          ? selectedItemName
-          : undefined;
-      resolveRound(action, usedItemName);
+      resolveRound(action);
     },
     [selectedAction, selectedItemEffect, selectedItemName, selectedSkillId, playSfx, resolveRound],
   );
 
+  const aiControls = (
+    <CombatAiControls
+      party={party}
+      enemies={enemies}
+      defaultController="ai"
+      // A ruleset fight has no queued orders and lets anybody be handed over at any point, so the
+      // only thing that locks the toggle is a step already on its way to the server.
+      locked={rulesetFight ? rulesetFight.busy : phase !== "player-turn" || Object.keys(queuedOrders).length > 0}
+      onChange={(id, controller) => {
+        if (directed) {
+          directed.onControl(id, controller);
+          return;
+        }
+        const updated = party.map((c) => (c.id === id ? { ...c, controller } : c));
+        setParty(updated);
+        onCombatantsChange?.(updated, enemies);
+      }}
+    />
+  );
+
   // ── Keyboard navigation for action menu ──
   useEffect(() => {
-    if (phase !== "player-turn") return;
+    // The ruleset's own menu is a list of ordinary buttons, reached with Tab, so the Classic
+    // menu's arrow keys must not also be sending Classic actions the fight would refuse.
+    if (phase !== "player-turn" || rulesetFight) return;
 
     const handleKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLElement && e.target.closest("input, select, textarea, summary")) return;
       if (e.key === "ArrowUp" || e.key === "w") {
         e.preventDefault();
-        setActionMenuIndex((i) => (i - 1 + ACTION_MENU.length) % ACTION_MENU.length);
+        setActionMenuIndex((i) => (i - 1 + actionMenu.length) % actionMenu.length);
         playSfx(COMBAT_SFX.menuHover);
       } else if (e.key === "ArrowDown" || e.key === "s") {
         e.preventDefault();
-        setActionMenuIndex((i) => (i + 1) % ACTION_MENU.length);
+        setActionMenuIndex((i) => (i + 1) % actionMenu.length);
         playSfx(COMBAT_SFX.menuHover);
       } else if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
-        handleActionSelect(ACTION_MENU[actionMenuIndex]!.id);
+        handleActionSelect(actionMenu[actionMenuIndex % actionMenu.length]!.id);
       }
     };
 
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [phase, actionMenuIndex, handleActionSelect, playSfx]);
+  }, [phase, actionMenuIndex, handleActionSelect, playSfx, actionMenu, rulesetFight]);
 
   // ── Mobile layout state ──
   // Keyboard parity for tablets / external keyboards: Escape dismisses the drawer
@@ -1703,12 +1913,24 @@ export function GameCombatUI({
         {/* Middle: touch battle stage */}
         <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
           {phase === "animating" && roundResult && animatingActionIndex >= 0 && (
-            <div className="pointer-events-none absolute inset-x-2 top-2 z-10 rounded-lg border border-white/10 bg-black/75 px-3 py-2 backdrop-blur-md">
+            <div
+              data-game-section="combat-banner"
+              className={cn(
+                GAME_SECTION_CLASS,
+                "pointer-events-none absolute inset-x-2 top-2 z-10 rounded-lg border border-white/10 bg-black/75 px-3 py-2 backdrop-blur-md",
+              )}
+            >
               <ActionNarration action={roundResult.actions[animatingActionIndex]!} allCombatants={allCombatants} />
             </div>
           )}
           {phase === "resolving" && (
-            <div className="absolute inset-x-2 top-2 z-10 flex items-center gap-2 rounded-lg border border-white/10 bg-black/75 px-3 py-2 text-xs text-white/70 backdrop-blur-md">
+            <div
+              data-game-section="combat-banner"
+              className={cn(
+                GAME_SECTION_CLASS,
+                "absolute inset-x-2 top-2 z-10 flex items-center gap-2 rounded-lg border border-white/10 bg-black/75 px-3 py-2 text-xs text-white/70 backdrop-blur-md",
+              )}
+            >
               <div className="h-3 w-3 animate-spin rounded-full border-2 border-white/30 border-t-white" />
               {selectedAction === "custom"
                 ? localizeUi("ui.game.gamecombatui.theGameMasterIsAdjudicatingYourManeuver")
@@ -1721,6 +1943,7 @@ export function GameCombatUI({
               <div className="flex w-max min-w-full flex-nowrap items-start justify-center gap-[clamp(0.25rem,1.5vw,0.5rem)]">
                 {enemies.map((enemy) => (
                   <CombatantCard
+                    elements={elements}
                     key={`stage-${enemy.id}`}
                     combatant={enemy}
                     side="enemy"
@@ -1739,6 +1962,7 @@ export function GameCombatUI({
               <div className="flex w-max min-w-full flex-nowrap items-end justify-center gap-[clamp(0.25rem,1.5vw,0.5rem)]">
                 {party.map((member, i) => (
                   <CombatantCard
+                    elements={elements}
                     key={`stage-${member.id}`}
                     combatant={member}
                     side="player"
@@ -1828,7 +2052,13 @@ export function GameCombatUI({
         )}
 
         {/* Bottom action sheet — sticky, always shows current player + active phase content */}
-        <div className="relative z-30 shrink-0 border-t border-white/10 bg-gradient-to-t from-black/95 to-black/85 backdrop-blur-md">
+        <div
+          data-game-section="combat-sheet"
+          className={cn(
+            GAME_SECTION_CLASS,
+            "relative z-30 shrink-0 border-t border-white/10 bg-gradient-to-t from-black/95 to-black/85 backdrop-blur-md",
+          )}
+        >
           {/* Drawer toggle bar */}
           <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-white/5 px-1.5 py-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             {combatControlsSlot && <div className="flex shrink-0 items-center gap-1">{combatControlsSlot}</div>}
@@ -1930,11 +2160,13 @@ export function GameCombatUI({
               </div>
             )}
 
+          {aiControls}
           {/* Phase-specific content — bounded so the action sheet never grows past ~half the screen */}
           <div className="max-h-[42svh] overflow-y-auto">
-            {phase === "player-turn" && activePlayer && (
+            {phase === "player-turn" && rulesetMenu}
+            {phase === "player-turn" && activePlayer && !rulesetFight && (
               <div className="grid grid-cols-3 gap-1.5 p-2">
-                {ACTION_MENU.map((action, i) => (
+                {actionMenu.map((action, i) => (
                   <button
                     key={action.id}
                     onClick={() => {
@@ -1963,36 +2195,44 @@ export function GameCombatUI({
                     {localizeUi("ui.game.gamecombatui.pickASkillThenATargetGreyedOutNot")}
                   </div>
                 </div>
-                {activePlayer.skills && activePlayer.skills.length > 0 ? (
+                {activePlayer.skills && activePlayer.skills.some((skill) => !skill.reaction) ? (
                   <div className="grid grid-cols-1 gap-1.5">
-                    {activePlayer.skills.map((skill) => {
-                      const insufficientMp = (activePlayer.mp ?? 0) < skill.mpCost;
-                      return (
-                        <button
-                          key={skill.id}
-                          type="button"
-                          disabled={insufficientMp}
-                          onClick={() => {
-                            setSelectedAction("skill");
-                            setSelectedSkillId(skill.id);
-                            setSelectedItemName(null);
-                            setPhase("target-select");
-                          }}
-                          className={cn(
-                            "flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-left text-xs transition-all",
-                            insufficientMp
-                              ? "cursor-not-allowed border-white/10 bg-white/5 text-white/30"
-                              : "border-blue-400/20 bg-blue-500/10 text-white/85 hover:border-blue-400/40 hover:bg-blue-500/15",
-                          )}
-                        >
-                          <span className="min-w-0 truncate font-semibold text-white/90">{skill.name}</span>
-                          <span className="shrink-0 text-[0.6rem] tabular-nums text-white/45">
-                            {localizeUi(combatSkillTypeLabelKey(skill.type))} · {skill.mpCost}{" "}
-                            {localizeUi("ui.game.gamecombatui.mp")}
-                          </span>
-                        </button>
-                      );
-                    })}
+                    {activePlayer.skills
+                      .filter((s) => !s.reaction)
+                      .map((skill) => {
+                        const insufficientMp =
+                          (activePlayer.skillCooldowns?.[skill.id] ?? 0) > 0 ||
+                          (skill.slotLevel
+                            ? (activePlayer.spellSlots?.[String(skill.slotLevel)] ?? 0) <= 0
+                            : (activePlayer.mp ?? 0) < skill.mpCost);
+                        return (
+                          <button
+                            key={skill.id}
+                            type="button"
+                            disabled={insufficientMp}
+                            onClick={() => {
+                              setSelectedAction("skill");
+                              setSelectedSkillId(skill.id);
+                              setSelectedItemName(null);
+                              setPhase("target-select");
+                            }}
+                            className={cn(
+                              "flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-left text-xs transition-all",
+                              insufficientMp
+                                ? "cursor-not-allowed border-white/10 bg-white/5 text-white/30"
+                                : "border-blue-400/20 bg-blue-500/10 text-white/85 hover:border-blue-400/40 hover:bg-blue-500/15",
+                            )}
+                          >
+                            <span className="min-w-0 truncate font-semibold text-white/90">{skill.name}</span>
+                            <span className="shrink-0 text-[0.6rem] tabular-nums text-white/45">
+                              {localizeUi(combatSkillTypeLabelKey(skill.type))} ·{" "}
+                              {skill.slotLevel
+                                ? localizeUi("game.combat.director.slotCost", { level: skill.slotLevel })
+                                : localizeUi("game.combat.director.mpCost", { amount: skill.mpCost })}
+                            </span>
+                          </button>
+                        );
+                      })}
                   </div>
                 ) : (
                   <div className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-xs text-white/45">
@@ -2225,7 +2465,11 @@ export function GameCombatUI({
           >
             <div className="mt-auto" />
             <div
-              className="relative max-h-[60svh] min-h-[20svh] overflow-y-auto rounded-t-xl border-t border-white/10 bg-gradient-to-t from-black/95 to-black/90 px-3 py-3 animate-in slide-in-from-bottom-4 duration-200"
+              data-game-section="combat-drawer"
+              className={cn(
+                GAME_SECTION_CLASS,
+                "relative max-h-[60svh] min-h-[20svh] overflow-y-auto rounded-t-xl border-t border-white/10 bg-gradient-to-t from-black/95 to-black/90 px-3 py-3 animate-in slide-in-from-bottom-4 duration-200",
+              )}
               onClick={(event) => event.stopPropagation()}
             >
               <div className="mb-2 flex items-center justify-between">
@@ -2248,6 +2492,7 @@ export function GameCombatUI({
                 <div className="grid grid-cols-2 gap-2">
                   {party.map((member, i) => (
                     <CombatantCard
+                      elements={elements}
                       key={member.id}
                       combatant={member}
                       side="player"
@@ -2347,6 +2592,7 @@ export function GameCombatUI({
         <div className="relative flex min-h-0 flex-nowrap items-start justify-center gap-[clamp(0.25rem,1vw,1rem)] overflow-visible px-3 pt-[clamp(3.25rem,13svh,5.5rem)] sm:px-6">
           {enemies.map((enemy) => (
             <CombatantCard
+              elements={elements}
               key={enemy.id}
               combatant={enemy}
               side="enemy"
@@ -2365,6 +2611,7 @@ export function GameCombatUI({
         <div className="relative flex min-h-0 shrink-0 flex-nowrap items-end justify-center gap-[clamp(0.25rem,1vw,1rem)] overflow-visible px-3 pb-[clamp(0.25rem,2svh,1rem)] sm:px-6">
           {party.map((member, i) => (
             <CombatantCard
+              elements={elements}
               key={member.id}
               combatant={member}
               side="player"
@@ -2410,7 +2657,13 @@ export function GameCombatUI({
         <div className="relative z-30 flex shrink-0 items-center justify-between gap-2 px-3 pb-1.5 sm:px-4 sm:pb-2">
           <div className="flex min-w-0 flex-wrap items-center gap-2">{combatControlsSlot}</div>
           {phase !== "intro" && (
-            <div className="shrink-0 rounded-lg border border-white/10 bg-black/65 px-2.5 py-1 text-center shadow-lg backdrop-blur-md">
+            <div
+              data-game-section="combat-round"
+              className={cn(
+                GAME_SECTION_CLASS,
+                "shrink-0 rounded-lg border border-white/10 bg-black/65 px-2.5 py-1 text-center shadow-lg backdrop-blur-md",
+              )}
+            >
               <div className="text-[0.55rem] font-semibold uppercase tracking-widest text-white/40">
                 {localizeUi("ui.game.gamecombatui.round")}
               </div>
@@ -2421,7 +2674,13 @@ export function GameCombatUI({
       )}
 
       {turnOrder.length > 0 && phase !== "intro" && (
-        <div className="relative z-30 shrink-0 border-y border-white/10 bg-black/60 px-3 py-1.5 backdrop-blur-md sm:px-4">
+        <div
+          data-game-section="combat-turn-order"
+          className={cn(
+            GAME_SECTION_CLASS,
+            "relative z-30 shrink-0 border-y border-white/10 bg-black/60 px-3 py-1.5 backdrop-blur-md sm:px-4",
+          )}
+        >
           <div className="flex items-center gap-1 overflow-x-auto pb-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
             <span className="mr-1 shrink-0 text-[0.6rem] font-semibold uppercase tracking-widest text-white/50">
               {localizeUi("ui.game.gamesurfacecomponent.turn")}
@@ -2450,7 +2709,13 @@ export function GameCombatUI({
       )}
 
       {/* ── Bottom panel: Action menu / Narration ── */}
-      <div className="relative z-20 max-h-[52svh] shrink-0 overflow-y-auto border-t border-white/10 bg-gradient-to-t from-black/90 to-black/70 backdrop-blur-md sm:max-h-none">
+      <div
+        data-game-section="combat-actions"
+        className={cn(
+          GAME_SECTION_CLASS,
+          "relative z-20 max-h-[52svh] shrink-0 overflow-y-auto border-t border-white/10 bg-gradient-to-t from-black/90 to-black/70 backdrop-blur-md sm:max-h-none",
+        )}
+      >
         {/* Resolving / animating state */}
         {(phase === "resolving" || phase === "animating") && (
           <div className="flex flex-col gap-2 px-4 py-3">
@@ -2468,8 +2733,10 @@ export function GameCombatUI({
           </div>
         )}
 
+        {aiControls}
         {/* Player turn: action menu */}
-        {phase === "player-turn" && activePlayer && (
+        {phase === "player-turn" && rulesetMenu}
+        {phase === "player-turn" && activePlayer && !rulesetFight && (
           <div className="flex flex-col gap-2 p-3 sm:flex-row sm:items-end sm:gap-4">
             {/* Active character indicator */}
             <div className="mb-1 flex items-center gap-2 sm:mb-0 sm:min-w-[140px]">
@@ -2489,7 +2756,7 @@ export function GameCombatUI({
 
             {/* Action buttons */}
             <div className="flex flex-wrap gap-1.5">
-              {ACTION_MENU.map((action, i) => (
+              {actionMenu.map((action, i) => (
                 <button
                   key={action.id}
                   onClick={() => {
@@ -2530,37 +2797,45 @@ export function GameCombatUI({
               </div>
             </div>
 
-            {activePlayer.skills && activePlayer.skills.length > 0 ? (
+            {activePlayer.skills && activePlayer.skills.some((skill) => !skill.reaction) ? (
               <div className="flex flex-wrap gap-2">
-                {activePlayer.skills.map((skill) => {
-                  const insufficientMp = (activePlayer.mp ?? 0) < skill.mpCost;
-                  return (
-                    <button
-                      key={skill.id}
-                      type="button"
-                      disabled={insufficientMp}
-                      onClick={() => {
-                        setSelectedAction("skill");
-                        setSelectedSkillId(skill.id);
-                        setSelectedItemName(null);
-                        setPhase("target-select");
-                      }}
-                      className={cn(
-                        "rounded-lg border px-3 py-2 text-left text-xs transition-all",
-                        insufficientMp
-                          ? "cursor-not-allowed border-white/10 bg-white/5 text-white/30"
-                          : "border-blue-400/20 bg-blue-500/10 text-white/80 hover:border-blue-400/40 hover:bg-blue-500/15",
-                      )}
-                    >
-                      <div className="font-semibold text-white/90">{skill.name}</div>
-                      <div className="mt-0.5 text-[0.65rem] text-white/45">
-                        {localizeUi(combatSkillTypeLabelKey(skill.type))} ·{" "}
-                        {skill.description || localizeUi(combatSkillDescriptionKey(skill.type))} • {skill.mpCost}{" "}
-                        {localizeUi("ui.game.gamecombatui.mp")}
-                      </div>
-                    </button>
-                  );
-                })}
+                {activePlayer.skills
+                  .filter((s) => !s.reaction)
+                  .map((skill) => {
+                    const insufficientMp =
+                      (activePlayer.skillCooldowns?.[skill.id] ?? 0) > 0 ||
+                      (skill.slotLevel
+                        ? (activePlayer.spellSlots?.[String(skill.slotLevel)] ?? 0) <= 0
+                        : (activePlayer.mp ?? 0) < skill.mpCost);
+                    return (
+                      <button
+                        key={skill.id}
+                        type="button"
+                        disabled={insufficientMp}
+                        onClick={() => {
+                          setSelectedAction("skill");
+                          setSelectedSkillId(skill.id);
+                          setSelectedItemName(null);
+                          setPhase("target-select");
+                        }}
+                        className={cn(
+                          "rounded-lg border px-3 py-2 text-left text-xs transition-all",
+                          insufficientMp
+                            ? "cursor-not-allowed border-white/10 bg-white/5 text-white/30"
+                            : "border-blue-400/20 bg-blue-500/10 text-white/80 hover:border-blue-400/40 hover:bg-blue-500/15",
+                        )}
+                      >
+                        <div className="font-semibold text-white/90">{skill.name}</div>
+                        <div className="mt-0.5 text-[0.65rem] text-white/45">
+                          {localizeUi(combatSkillTypeLabelKey(skill.type))} ·{" "}
+                          {skill.description || localizeUi(combatSkillDescriptionKey(skill.type))} •{" "}
+                          {skill.slotLevel
+                            ? localizeUi("game.combat.director.slotCost", { level: skill.slotLevel })
+                            : localizeUi("game.combat.director.mpCost", { amount: skill.mpCost })}
+                        </div>
+                      </button>
+                    );
+                  })}
               </div>
             ) : (
               <div className="text-xs text-white/45">
@@ -2973,6 +3248,7 @@ function CombatantCard({
   sideCount = 1,
   onDismissDialogue,
   compact = false,
+  elements,
 }: {
   combatant: Combatant;
   side: "player" | "enemy";
@@ -2984,8 +3260,17 @@ function CombatantCard({
   sideCount?: number;
   onDismissDialogue?: (line: PartyDialogueLine) => void;
   compact?: boolean;
+  elements?: WorldElementSet;
 }) {
   const { t: localizeUi } = useUiTranslation();
+  // An aura's colour is its element's own in a setting kit's set, else the older colours by its word, as a
+  // game without a kit (Classic Game Mode) always drew them.
+  const auraColor = combatant.elementAura
+    ? ((elements
+        ? elements.elements.find((element) => element.id === worldElementId(elements, combatant.elementAura!.element))
+            ?.color
+        : undefined) ?? ELEMENT_AURA_COLORS[combatant.elementAura.element])
+    : undefined;
   const hpPercent = combatant.maxHp > 0 ? (combatant.hp / combatant.maxHp) * 100 : 0;
   const mpPercent = combatant.maxMp && combatant.maxMp > 0 ? ((combatant.mp ?? 0) / combatant.maxMp) * 100 : null;
   const isKo = combatant.hp <= 0;
@@ -3230,8 +3515,8 @@ function CombatantCard({
           <div
             className="rounded-full px-1.5 py-0 text-[0.5rem] font-bold uppercase tracking-wider"
             style={{
-              backgroundColor: `${ELEMENT_AURA_COLORS[combatant.elementAura.element] ?? "#888"}20`,
-              color: ELEMENT_AURA_COLORS[combatant.elementAura.element] ?? "#aaa",
+              backgroundColor: `${auraColor ?? "#888"}20`,
+              color: auraColor ?? "#aaa",
             }}
             title={localizeUi("ui.game.combatantcard.value1AuraGaugeValue2", {
               value1: combatant.elementAura.element,
@@ -3289,7 +3574,9 @@ function formatCombatActionNarration(action: CombatAttackResult, allCombatants: 
   const defenderName = defender?.name ?? "???";
 
   let text: string;
-  if (action.isMiss) {
+  if (action.note) {
+    text = action.note;
+  } else if (action.isMiss) {
     text = action.skillName
       ? `${attackerName} uses ${action.skillName} on ${defenderName} — but it misses!`
       : `${attackerName} attacks ${defenderName} — but misses!`;

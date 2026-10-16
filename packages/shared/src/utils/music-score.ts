@@ -16,6 +16,7 @@
 // ──────────────────────────────────────────────
 
 import type { GameActiveState } from "../types/game.js";
+import { worldAssetUsable } from "../features/world/art-family.js";
 
 export const MUSIC_GENRES = [
   "fantasy",
@@ -56,6 +57,10 @@ export interface MusicScoreInput {
   currentMusic?: string | null;
   recentMusic?: string[] | null;
   availableMusic: string[];
+  /** The game's art family (worldgen W6f): another family's tracks are left out, and a track in its own
+   *  family's folder counts even when the family is not a genre, ahead of shared tracks. A game without
+   *  a kit leaves it out and hears everything, as before. */
+  family?: string | null;
 }
 
 export interface AmbientScoreInput {
@@ -75,6 +80,8 @@ type ParsedMusicTag = {
   genre: MusicGenre;
   intensity: MusicIntensity;
   keywords: string[];
+  /** In the game's own family's folder. */
+  own: boolean;
 };
 
 const GAME_STATES = new Set<GameActiveState>(["exploration", "dialogue", "combat", "travel_rest"]);
@@ -359,14 +366,15 @@ function pickContextTrack(tags: string[], currentMusic?: string | null, recentMu
   return pickRandom(fresh.length ? fresh : tags);
 }
 
-function parseMusicTag(tag: string): ParsedMusicTag | null {
+function parseMusicTag(tag: string, family?: string | null): ParsedMusicTag | null {
   const parts = tag.split(":");
   if (parts.length < 5 || parts[0] !== "music") return null;
 
   const state = parts[1] as GameActiveState | undefined;
   if (!state || !GAME_STATES.has(state)) return null;
 
-  const genre = normalizeMusicGenre(parts[2]);
+  const own = !!family && parts[2] === family;
+  const genre = normalizeMusicGenre(parts[2]) ?? (own ? "custom" : null);
   const intensity = normalizeMusicIntensity(parts[3]);
   if (!genre || !intensity) return null;
 
@@ -377,7 +385,7 @@ function parseMusicTag(tag: string): ParsedMusicTag | null {
     .split(/[:\-_]+/)
     .filter((part) => part.length > 1);
 
-  return { tag, state, genre, intensity, keywords };
+  return { tag, state, genre, intensity, keywords, own };
 }
 
 function inferMusicIntensity(
@@ -424,6 +432,8 @@ function scoreStructuredMusic(
   timeOfDay?: string | null,
 ): number {
   let score = 10;
+  // The setting's own music before music any setting shares.
+  if (candidate.own) score += 8;
 
   if (desiredGenre) {
     if (candidate.genre === desiredGenre) {
@@ -451,7 +461,8 @@ function scoreStructuredMusic(
  * area, the encounter tier, or the state/genre/intensity — actually moved.
  */
 export function scoreMusic(input: MusicScoreInput): string | null {
-  const { state, weather, timeOfDay, currentMusic, recentMusic, availableMusic } = input;
+  const { state, weather, timeOfDay, currentMusic, recentMusic, family } = input;
+  const availableMusic = input.availableMusic.filter((tag) => worldAssetUsable(tag, family));
   if (!availableMusic.length) return null;
 
   // Context tracks win outright (#5161): tier tracks during combat, area
@@ -483,7 +494,7 @@ export function scoreMusic(input: MusicScoreInput): string | null {
     normalizeMusicIntensity(input.musicIntensity) ?? inferMusicIntensity(state, weather, timeOfDay);
 
   const candidates = availableMusic
-    .map((tag) => parseMusicTag(tag))
+    .map((tag) => parseMusicTag(tag, family))
     .filter((candidate): candidate is ParsedMusicTag => !!candidate && candidate.state === state);
   if (!candidates.length) return null;
 

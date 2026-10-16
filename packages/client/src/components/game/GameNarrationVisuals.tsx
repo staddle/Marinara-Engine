@@ -1,5 +1,6 @@
 import type { CSSProperties, ReactNode } from "react";
 import type { AvatarCrop, PartyDialogueLine } from "@marinara-engine/shared";
+import { CHARACTER_COLOR_CLASS } from "../../lib/chat-widget-colors";
 import { cn, getAvatarCropStyle } from "../../lib/utils";
 import { formatNarration } from "./game-narration-format";
 
@@ -58,6 +59,7 @@ export function PartyOverlayBox({
   line,
   avatar,
   color,
+  colorClassName,
   nameColor,
   voiceControl,
   translation,
@@ -65,6 +67,9 @@ export function PartyOverlayBox({
   line: PartyDialogueLine;
   avatar: SpeakerAvatarInfo | null;
   color?: string;
+  /** Marks a speaker's own dialogue color so Apply preset colors keeps it. */
+  colorClassName?: string;
+  /** The speaker's own name color. Without it the label uses `color`, which follows Apply preset colors. */
   nameColor?: string;
   voiceControl?: ReactNode;
   translation?: ReactNode;
@@ -86,7 +91,8 @@ export function PartyOverlayBox({
     <div
       className={cn(
         "experience-side-line isolate flex w-fit min-w-0 max-w-full transform-gpu items-start gap-2 rounded-xl border bg-clip-padding px-3 py-2 sm:max-w-[75%]",
-        (line.type === "side" || line.type === "extra") && "shadow-[0_16px_38px_rgba(0,0,0,0.45)]",
+        (line.type === "side" || line.type === "extra") &&
+          "mari-chat-style-surface mari-game-side-line shadow-[0_16px_38px_rgba(0,0,0,0.45)]",
         style.border,
         style.bg,
       )}
@@ -110,7 +116,11 @@ export function PartyOverlayBox({
         <div className="flex min-w-0 items-center gap-1.5">
           <span className="text-[0.5625rem]">{style.icon}</span>
           <span
-            className={cn("min-w-0 truncate text-[0.6875rem] font-semibold", style.labelColor)}
+            className={cn(
+              "min-w-0 truncate text-[0.6875rem] font-semibold",
+              style.labelColor,
+              nameColor && CHARACTER_COLOR_CLASS,
+            )}
             style={nameColorStyle(nameColor ?? color)}
           >
             {line.character}
@@ -126,6 +136,7 @@ export function PartyOverlayBox({
               "text-xs leading-relaxed text-white/75 whitespace-normal break-words [overflow-wrap:anywhere]",
               line.type === "thought" && "italic opacity-80",
               line.type === "whisper" && "italic",
+              (line.type === "side" || line.type === "extra") && colorClassName,
             )}
             style={(line.type === "side" || line.type === "extra") && color ? { color } : undefined}
             dangerouslySetInnerHTML={{ __html: formatNarration(line.content, false) }}
@@ -138,15 +149,7 @@ export function PartyOverlayBox({
 }
 
 type ExpressionReactionEffect =
-  | "pop"
-  | "anger"
-  | "sparkle"
-  | "heart"
-  | "tear"
-  | "stress"
-  | "thought"
-  | "focus"
-  | "sleep";
+  "pop" | "anger" | "sparkle" | "heart" | "tear" | "stress" | "thought" | "focus" | "sleep";
 
 const EXPRESSION_REACTIONS: Record<string, { symbol: string; color: string; effect: ExpressionReactionEffect }> = {
   angry: { symbol: "❗", color: "text-red-400", effect: "anger" },

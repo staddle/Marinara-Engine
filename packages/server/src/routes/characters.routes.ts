@@ -1,3 +1,4 @@
+import { embedCharacterBookImages, LOREBOOK_EXPORT_IMAGE_MAX_BYTES } from "../services/lorebook/lorebook-images.js";
 // ──────────────────────────────────────────────
 // Routes: Characters, Personas & Groups
 // ──────────────────────────────────────────────
@@ -19,7 +20,14 @@ import {
   PROFESSOR_MARI_ID,
   CONVERSATION_CALL_CHARACTER_VIDEO_CLIP_KINDS,
   findImageStyleProfile,
+  type ImageStyleProfile,
   MAX_FILE_SIZES,
+  findDuplicateCharacters,
+  applyCharacterTagEdit,
+  normalizeCharacterTagEdit,
+  isEmptyCharacterTagEdit,
+  GREETING_IMAGE_BAKE_MAX_PER_REQUEST,
+  restoreBakedGreetingImages,
 } from "@marinara-engine/shared";
 import type { CharacterData, ConversationCallCharacterVideoClipKind, ExportEnvelope } from "@marinara-engine/shared";
 import { createCharactersStorage, type PersonaStorageRow } from "../services/storage/characters.storage.js";
@@ -43,6 +51,9 @@ import { loadImageGenerationUserSettings } from "../services/image/image-generat
 import { compileImagePrompt } from "../services/image/image-prompt-compiler.js";
 import { resolveImagePromptReviewSize } from "../services/image/image-prompt-review.js";
 import { resolveImageConnectionFallback } from "../services/generation/media-connection-fallback.js";
+import { buildAvatarPortraitLeadPrompt } from "../services/image/avatar-generation-prompt.js";
+import { downloadGreetingImage } from "../services/image/greeting-image-bake.js";
+import { GREETING_IMAGE_BAKE_RATE_LIMIT } from "../middleware/rate-limit.js";
 import {
   ConversationCallVideoClipAvatarMismatchError,
   ConversationCallVideoClipNotFoundError,
@@ -60,6 +71,14 @@ import { removeSavedVideoFromDisk } from "../services/video/video-generation.js"
 import { writeFile, mkdir, readFile, readdir, stat, unlink } from "fs/promises";
 import { join } from "path";
 import { DATA_DIR } from "../utils/data-dir.js";
+import {
+  createJsonSlot,
+  singleChunk,
+  streamExportZip,
+  streamJsonWithSlot,
+  toByteStream,
+  type JsonSlotPart,
+} from "../utils/export-stream.js";
 import { createWriteStream, existsSync, rmSync, unlinkSync } from "fs";
 import { normalizeTimestampOverrides } from "../services/import/import-timestamps.js";
 import { assertInsideDir, extensionFromImageMime, isAllowedImageBuffer } from "../utils/security.js";
@@ -82,12 +101,13 @@ import {
   clearEmbeddedLorebookFromCharacter,
   embedLorebookIntoCharacter,
   getEmbeddedLorebookId,
+  syncCharacterBookFromLorebook,
 } from "../services/lorebook/character-book-sync.js";
-import AdmZip from "adm-zip";
 import { extname } from "path";
 import { pipeline } from "stream/promises";
 import { newId } from "../utils/id-generator.js";
 import { createReplyFallbackNotifier } from "./generate/fallback-notification.js";
+import { removeAvatarOwner } from "../services/avatars/storage.js";
 import {
   findGalleryRowByFilename,
   galleryFileHasReferences,
@@ -126,6 +146,9 @@ const CALL_VIDEO_CLIP_LABELS = {
 const CALL_VIDEO_CLIP_UPLOAD_MAX_BYTES = 250 * 1024 * 1024;
 const ALLOWED_CALL_VIDEO_CLIP_UPLOAD_EXTS = new Set([".mp4"]);
 const renameCardVersionSchema = z.object({ version: z.string().trim().min(1).max(100) });
+const bakeGreetingImagesSchema = z.object({
+  urls: z.array(z.string()).min(1).max(GREETING_IMAGE_BAKE_MAX_PER_REQUEST),
+});
 type UploadedMultipartFile = NonNullable<Awaited<ReturnType<FastifyRequest["file"]>>>;
 
 function applyTrackerCardPaint(currentValue: unknown, paint: Record<string, unknown>, preserveStatIcons = true) {
@@ -503,15 +526,18 @@ const CHARACTER_SHEET_HARD_NEGATIVE_PROMPT =
 async function buildAvatarGenerationPrompt(
   promptOverridesStorage: ReturnType<typeof createPromptOverridesStorage>,
   body: AvatarGenerationBody,
-  profileSubjectTags: string,
+  profile: Pick<ImageStyleProfile, "promptMode" | "subjectTags">,
 ): Promise<string> {
   const name = body.name?.trim() || "Character";
   const appearance = body.appearance?.trim() || name;
   if (body.purpose === "character-sheet") {
     return loadPrompt(promptOverridesStorage, CHARACTERS_REFERENCE_SHEET, { name, appearance });
   }
-  if (profileSubjectTags.trim()) return `Create a polished character avatar portrait for ${name}.`;
-  return `Create a polished character avatar portrait for ${name}. Composition: centered face-and-shoulders portrait, readable expression, clear silhouette, suitable as a chat avatar.`;
+  return buildAvatarPortraitLeadPrompt({
+    name,
+    profileSubjectTags: profile.subjectTags.avatar ?? "",
+    promptMode: profile.promptMode,
+  });
 }
 
 async function resolveAvatarGenerationConnection(app: FastifyInstance, body: AvatarGenerationBody) {
@@ -591,10 +617,9 @@ async function copyGalleryImageToAvatar(
   return `/api/avatars/file/${filename}`;
 }
 
-// Read every sprite file in data/sprites/<id>/ and return it as
-// { filename, data } so import can restore the same expression set under a
-// new id.
-async function readSpritesForId(id: string): Promise<Array<{ filename: string; data: string }>>;
+// Read every sprite file in data/sprites/<id>/ for a PNG card as
+// { filename, data }, or null past the portable card limits. Native exports
+// stream sprites instead (spriteExportEntries).
 async function readSpritesForId(
   id: string,
   enforcePortableLimits: true,
@@ -640,15 +665,12 @@ async function readSpritesForId(
   return sprites;
 }
 
-// Read every gallery image for a character (metadata row + binary on disk),
-// returning a serializable list that import can rebuild the gallery from.
-async function readGalleryForOwner(
-  ownerId: string,
-  listImages: (id: string) => Promise<any[]>,
-  characterSheetImageId?: string | null,
-): Promise<Array<Record<string, unknown>>> {
-  const images = await listImages(ownerId);
-  const result: Array<Record<string, unknown>> = [];
+// Read each gallery image for an owner (metadata row + binary on disk) as it is
+// written, so a large gallery is never held in memory at once (#7115).
+async function* galleryExportEntries(
+  images: any[],
+  characterSheetImageId: string | null,
+): AsyncGenerator<Record<string, unknown>> {
   for (const img of images) {
     // img.filePath is stored relative to data/gallery/ — usually
     // "characters/<id>/<filename>", but GENERATED images keep their canonical
@@ -660,7 +682,7 @@ async function readGalleryForOwner(
     if (!storedFile) continue;
     const dataUrl = await readImageAsDataUrl(storedFile.directory, storedFile.filename);
     if (!dataUrl) continue;
-    result.push({
+    yield {
       filename: storedFile.filename,
       data: dataUrl,
       prompt: img.prompt ?? "",
@@ -669,50 +691,113 @@ async function readGalleryForOwner(
       width: img.width ?? null,
       height: img.height ?? null,
       ...(img.id === characterSheetImageId ? { isCharacterSheet: true } : {}),
-    });
+    };
   }
-  return result;
 }
 
-async function buildNativeCharacterEnvelope(
+// Read each sprite in data/sprites/<id>/ as it is written; import restores the
+// same expression set under a new id.
+async function* spriteExportEntries(id: string): AsyncGenerator<{ filename: string; data: string }> {
+  const dir = join(DATA_DIR, "sprites", id);
+  if (!id || !existsSync(dir)) return;
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const data = await readImageAsDataUrl(dir, entry);
+    if (data) yield { filename: entry, data };
+  }
+}
+
+/** A native export whose avatar, sprites and gallery are streamed in at the slot. */
+type NativeExport = { envelope: ExportEnvelope; slot: string; parts: JsonSlotPart[] };
+
+function nativeExportImageParts(
+  avatarPath: string | null | undefined,
+  ownerId: string,
+  gallery: any[],
+  characterSheetImageId: string | null,
+): JsonSlotPart[] {
+  return [
+    { key: "avatar", value: () => readAvatarDataUrl(avatarPath) },
+    { key: "sprites", items: spriteExportEntries(ownerId) },
+    { key: "gallery", items: galleryExportEntries(gallery, characterSheetImageId) },
+  ];
+}
+
+/** Stream a native export as JSON text: compact for single downloads, indented inside bulk ZIPs as before. */
+function streamNativeExport({ envelope, slot, parts }: NativeExport, space = 0) {
+  return streamJsonWithSlot(envelope, slot, parts, space);
+}
+
+async function buildNativeCharacterExport(
   char: { id: string; createdAt: string; updatedAt: string; comment?: string | null; avatarPath?: string | null },
   data: any,
   galleryStorage: { listByCharacterId: (id: string) => Promise<any[]> },
-) {
+): Promise<NativeExport> {
   const extensions = parseCharacterDataRecord(data?.extensions);
   const characterSheetImageId =
     typeof extensions.characterSheetImageId === "string" ? extensions.characterSheetImageId : null;
   const portableExtensions = { ...extensions };
   delete portableExtensions.characterSheetImageId;
   const portableData = { ...data, extensions: portableExtensions };
-  const [avatar, sprites, gallery] = await Promise.all([
-    readAvatarDataUrl(char.avatarPath),
-    readSpritesForId(char.id),
-    readGalleryForOwner(char.id, (id) => galleryStorage.listByCharacterId(id), characterSheetImageId),
-  ]);
+  const gallery = await galleryStorage.listByCharacterId(char.id);
+  const slot = createJsonSlot();
   return {
-    type: "marinara_character",
-    version: 1,
-    exportedAt: new Date().toISOString(),
-    data: {
-      spec: "chara_card_v2",
-      spec_version: "2.0",
-      data: portableData,
-      ...(avatar ? { avatar } : {}),
-      ...(sprites.length > 0 ? { sprites } : {}),
-      ...(gallery.length > 0 ? { gallery } : {}),
-      metadata: {
-        createdAt: char.createdAt,
-        updatedAt: char.updatedAt,
-        comment: char.comment ?? "",
+    envelope: {
+      type: "marinara_character",
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      data: {
+        spec: "chara_card_v2",
+        spec_version: "2.0",
+        data: portableData,
+        // avatar, sprites and gallery are streamed here, in that order.
+        [slot]: 0,
+        metadata: {
+          createdAt: char.createdAt,
+          updatedAt: char.updatedAt,
+          comment: char.comment ?? "",
+        },
       },
     },
-  } satisfies ExportEnvelope;
+    slot,
+    parts: nativeExportImageParts(char.avatarPath, char.id, gallery, characterSheetImageId),
+  };
 }
 
-export function buildCompatibleCharacterExport(data: any, sprites: Array<{ filename: string; data: string }> = []) {
+/**
+ * `keepOnboarding` is for the Compatible PNG route only. The PNG is the file
+ * authors hand around, so a Marinara user importing it should still get the
+ * card's onboarding; other front-ends ignore the unknown extension key. The
+ * Compatible JSON export deliberately omits it, so that stays a clean V2 card.
+ */
+export function buildCompatibleCharacterExport(
+  data: any,
+  sprites: Array<{ filename: string; data: string }> = [],
+  { keepOnboarding = false }: { keepOnboarding?: boolean } = {},
+) {
+  // Compatible cards carry no gallery, so baked greeting images go back to their web links.
+  data = data ? restoreBakedGreetingImages(data) : data;
   const extensions = { ...parseCharacterDataRecord(data?.extensions) };
+  delete extensions.bakedGreetingImages;
+  const description = [typeof data?.description === "string" ? data.description : ""];
+  for (const [key, label] of [
+    ["backstory", "Backstory"],
+    ["appearance", "Appearance"],
+  ] as const) {
+    const value = extensions[key];
+    if (typeof value !== "string" || !value.trim()) continue;
+    description.push(`${label}:\n${value}`);
+    // V2 readers use description; omit the moved extension to avoid duplicate
+    // prompt fields when this compatible card is imported back into Marinara.
+    delete extensions[key];
+  }
   delete extensions.characterSheetImageId;
+  if (!keepOnboarding) delete extensions.onboarding;
   extensions.useCharacterSheetAsReference = false;
   if (sprites.length > 0) {
     extensions.marinara = {
@@ -723,14 +808,14 @@ export function buildCompatibleCharacterExport(data: any, sprites: Array<{ filen
   return {
     spec: "chara_card_v2",
     spec_version: "2.0",
-    data: { ...data, extensions },
+    data: { ...data, description: description.filter(Boolean).join("\n\n"), extensions },
   };
 }
 
-async function buildNativePersonaEnvelope(
+async function buildNativePersonaExport(
   persona: Record<string, unknown>,
   galleryStorage: { listByPersonaId: (id: string) => Promise<any[]> },
-) {
+): Promise<NativeExport> {
   const {
     id: _id,
     createdAt,
@@ -742,28 +827,31 @@ async function buildNativePersonaEnvelope(
   } = persona;
   const personaId = typeof _id === "string" ? _id : "";
   const characterSheetImageId = typeof rawCharacterSheetImageId === "string" ? rawCharacterSheetImageId : null;
-  const [avatar, sprites, gallery] = await Promise.all([
-    readAvatarDataUrl(typeof avatarPath === "string" ? avatarPath : null),
-    personaId ? readSpritesForId(personaId) : Promise.resolve([] as Array<{ filename: string; data: string }>),
-    personaId
-      ? readGalleryForOwner(personaId, (id) => galleryStorage.listByPersonaId(id), characterSheetImageId)
-      : Promise.resolve([] as Array<Record<string, unknown>>),
-  ]);
+  const gallery = personaId ? await galleryStorage.listByPersonaId(personaId) : [];
+  const slot = createJsonSlot();
   return {
-    type: "marinara_persona",
-    version: 1,
-    exportedAt: new Date().toISOString(),
-    data: {
-      ...personaData,
-      ...(avatar ? { avatar } : {}),
-      ...(sprites.length > 0 ? { sprites } : {}),
-      ...(gallery.length > 0 ? { gallery } : {}),
-      metadata: {
-        createdAt,
-        updatedAt,
+    envelope: {
+      type: "marinara_persona",
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      data: {
+        ...personaData,
+        // avatar, sprites and gallery are streamed here, in that order.
+        [slot]: 0,
+        metadata: {
+          createdAt,
+          updatedAt,
+        },
       },
     },
-  } satisfies ExportEnvelope;
+    slot,
+    parts: nativeExportImageParts(
+      typeof avatarPath === "string" ? avatarPath : null,
+      personaId,
+      gallery,
+      characterSheetImageId,
+    ),
+  };
 }
 
 function buildCompatiblePersonaExport(persona: Record<string, unknown>) {
@@ -838,6 +926,10 @@ function canonicalizePersonaForExport(persona: Record<string, unknown>): {
   // Export the public boolean contract rather than the storage-only text flag
   // so compatible and native Persona payloads can be imported unchanged.
   row.versioningEnabled = parsed.data.versioningEnabled ?? true;
+  // Same text-column-to-boolean conversion for the image-appearance toggle
+  // (#7053): `row` is spread from the raw row above, so without this the export
+  // carries "false" and the re-import fails schema validation.
+  row.imageAppearanceEnabled = parsed.data.imageAppearanceEnabled ?? false;
   // Never restore raw rejected top-level paint over the repaired export copy.
   for (const field of topLevelPaintFields) if (!Object.hasOwn(parsed.data, field)) delete row[field];
   return { row, usesFallbackName };
@@ -942,6 +1034,109 @@ export async function charactersRoutes(app: FastifyInstance) {
   app.post<{ Body: { ids?: unknown } }>("/summaries", async (req) => {
     const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter((id): id is string => typeof id === "string") : [];
     return storage.listSummariesByIds(ids);
+  });
+
+  // ── Library maintenance: duplicate finder and bulk tag edits ──
+
+  /** Read-only similarity suggestions; cards are never modified or deleted here. */
+  app.get("/duplicates", async () => {
+    const rows = (await storage.list()).filter((row) => row.id !== PROFESSOR_MARI_ID);
+    const cards = rows.map((row) => ({ row, data: parseCharacterDataRecord(row.data) as Partial<CharacterData> }));
+    const groups = findDuplicateCharacters(
+      cards.map(({ row, data }) => ({
+        id: row.id,
+        name: typeof data.name === "string" ? data.name : "",
+        description: typeof data.description === "string" ? data.description : "",
+        personality: typeof data.personality === "string" ? data.personality : "",
+      })),
+    );
+    const cardById = new Map(cards.map((card) => [card.row.id, card]));
+    const preview = (value: unknown, length: number) =>
+      typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, length) : "";
+    return {
+      scanned: cards.length,
+      groups: groups.map((group) => ({
+        ...group,
+        characters: group.ids.flatMap((id) => {
+          const card = cardById.get(id);
+          if (!card) return [];
+          const { row, data } = card;
+          return [
+            {
+              id,
+              name: typeof data.name === "string" ? data.name : "",
+              comment: row.comment ?? "",
+              avatarPath: row.avatarPath ?? null,
+              creator: typeof data.creator === "string" ? data.creator : "",
+              version: typeof data.character_version === "string" ? data.character_version : "",
+              tags: Array.isArray(data.tags) ? data.tags.filter((tag): tag is string => typeof tag === "string") : [],
+              description: preview(data.description, 280),
+              personality: preview(data.personality, 160),
+              descriptionLength: typeof data.description === "string" ? data.description.length : 0,
+              createdAt: row.createdAt ?? null,
+              updatedAt: row.updatedAt ?? null,
+            },
+          ];
+        }),
+      })),
+    };
+  });
+
+  app.post("/bulk-tags", async (req, reply) => {
+    const body = req.body as Record<string, unknown> | null;
+    const rawIds = body && Array.isArray(body.ids) ? body.ids : [];
+    const ids = [
+      ...new Set(
+        rawIds.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((id) => id.trim()),
+      ),
+    ];
+    if (ids.length === 0 || ids.length > 5000)
+      return reply.status(400).send({ error: "Select between 1 and 5,000 characters" });
+    if (ids.some((id) => id.length > 256)) return reply.status(400).send({ error: "Character ID is too long" });
+    const edit = normalizeCharacterTagEdit({
+      add: Array.isArray(body?.add) ? body.add.filter((tag): tag is string => typeof tag === "string") : [],
+      remove: Array.isArray(body?.remove) ? body.remove.filter((tag): tag is string => typeof tag === "string") : [],
+      rename: Array.isArray(body?.rename)
+        ? body.rename.filter(
+            (item): item is { from: string; to: string } =>
+              !!item &&
+              typeof item === "object" &&
+              typeof (item as Record<string, unknown>).from === "string" &&
+              typeof (item as Record<string, unknown>).to === "string",
+          )
+        : [],
+    });
+    if (isEmptyCharacterTagEdit(edit)) return reply.status(400).send({ error: "Provide at least one tag change" });
+    const result = { updatedIds: [] as string[], unchangedIds: [] as string[], failedIds: [] as string[] };
+    for (const id of ids) {
+      if (id === PROFESSOR_MARI_ID) {
+        result.failedIds.push(id);
+        continue;
+      }
+      try {
+        const outcome = await enqueueUpdate(characterUpdateQueues, id, () =>
+          app.db.transaction(async () => {
+            const current = await storage.getById(id);
+            if (!current) return "missing" as const;
+            const data = parseCharacterDataRecord(current.data) as Partial<CharacterData>;
+            const tags = Array.isArray(data.tags)
+              ? data.tags.filter((tag): tag is string => typeof tag === "string")
+              : [];
+            const nextTags = applyCharacterTagEdit(tags, edit);
+            if (tags.length === nextTags.length && tags.every((tag, index) => tag === nextTags[index]))
+              return "unchanged" as const;
+            return (await storage.update(id, { tags: nextTags })) ? ("updated" as const) : ("missing" as const);
+          }),
+        );
+        if (outcome === "updated") result.updatedIds.push(id);
+        else if (outcome === "unchanged") result.unchangedIds.push(id);
+        else result.failedIds.push(id);
+      } catch (error) {
+        req.log.error(error, "Failed to edit tags for character %s", id);
+        result.failedIds.push(id);
+      }
+    }
+    return result;
   });
 
   app.post<{
@@ -1124,20 +1319,19 @@ export async function charactersRoutes(app: FastifyInstance) {
     const imageSettings = await loadImageGenerationUserSettings(app.db);
     const isCharacterSheet = body.purpose === "character-sheet";
     const dimensions = validateAvatarGenerationDimensions(
-      body.width ?? (isCharacterSheet ? imageSettings.background.width : imageSettings.portrait.width),
-      body.height ?? (isCharacterSheet ? imageSettings.background.height : imageSettings.portrait.height),
+      body.width ?? (isCharacterSheet ? imageSettings.characterSheet.width : imageSettings.portrait.width),
+      body.height ?? (isCharacterSheet ? imageSettings.characterSheet.height : imageSettings.portrait.height),
     );
     if ("error" in dimensions) return reply.status(400).send({ error: dimensions.error });
     const { width, height } = dimensions;
     const imageDefaults = resolveConnectionImageDefaults(resolved.conn);
-    const profileSubjectTags =
-      findImageStyleProfile(
-        imageSettings.styleProfiles,
-        body.styleProfileId || imageDefaults?.styleProfileId || imageSettings.styleProfiles.defaultProfileId,
-      ).subjectTags[isCharacterSheet ? "illustration" : "avatar"] ?? "";
+    const avatarStyleProfile = findImageStyleProfile(
+      imageSettings.styleProfiles,
+      body.styleProfileId || imageDefaults?.styleProfileId || imageSettings.styleProfiles.defaultProfileId,
+    );
     const compiled = compileImagePrompt({
       kind: isCharacterSheet ? "illustration" : "avatar",
-      prompt: await buildAvatarGenerationPrompt(promptOverridesStorage, body, profileSubjectTags),
+      prompt: await buildAvatarGenerationPrompt(promptOverridesStorage, body, avatarStyleProfile),
       userPositive: isCharacterSheet ? undefined : body.appearance,
       styleProfiles: imageSettings.styleProfiles,
       styleProfileId: body.styleProfileId,
@@ -1176,8 +1370,8 @@ export async function charactersRoutes(app: FastifyInstance) {
     const imageSettings = await loadImageGenerationUserSettings(app.db);
     const isCharacterSheet = body.purpose === "character-sheet";
     const dimensions = validateAvatarGenerationDimensions(
-      body.width ?? (isCharacterSheet ? imageSettings.background.width : imageSettings.portrait.width),
-      body.height ?? (isCharacterSheet ? imageSettings.background.height : imageSettings.portrait.height),
+      body.width ?? (isCharacterSheet ? imageSettings.characterSheet.width : imageSettings.portrait.width),
+      body.height ?? (isCharacterSheet ? imageSettings.characterSheet.height : imageSettings.portrait.height),
     );
     if ("error" in dimensions) return reply.status(400).send({ error: dimensions.error });
     const { width, height } = dimensions;
@@ -1211,11 +1405,10 @@ export async function charactersRoutes(app: FastifyInstance) {
     const imgSource = conn.imageGenerationSource || imgModel;
     const imgServiceHint = conn.imageService || imgSource;
     const imageDefaults = resolveConnectionImageDefaults(conn);
-    const profileSubjectTags =
-      findImageStyleProfile(
-        imageSettings.styleProfiles,
-        body.styleProfileId || imageDefaults?.styleProfileId || imageSettings.styleProfiles.defaultProfileId,
-      ).subjectTags[isCharacterSheet ? "illustration" : "avatar"] ?? "";
+    const avatarStyleProfile = findImageStyleProfile(
+      imageSettings.styleProfiles,
+      body.styleProfileId || imageDefaults?.styleProfileId || imageSettings.styleProfiles.defaultProfileId,
+    );
     const imageFallback = await resolveImageConnectionFallback(connections, conn.id);
     const compiled = promptOverride
       ? {
@@ -1224,7 +1417,7 @@ export async function charactersRoutes(app: FastifyInstance) {
         }
       : compileImagePrompt({
           kind: isCharacterSheet ? "illustration" : "avatar",
-          prompt: await buildAvatarGenerationPrompt(promptOverridesStorage, body, profileSubjectTags),
+          prompt: await buildAvatarGenerationPrompt(promptOverridesStorage, body, avatarStyleProfile),
           userPositive: isCharacterSheet ? undefined : body.appearance,
           styleProfiles: imageSettings.styleProfiles,
           styleProfileId: body.styleProfileId,
@@ -1418,6 +1611,9 @@ export async function charactersRoutes(app: FastifyInstance) {
       collectAvatarPaths: () => collectCharacterAvatarPaths(app.db, [id]),
       mutateReferences: () => storage.remove(id),
     });
+    await removeAvatarOwner({ ownerType: "character", ownerId: id }).catch((err) =>
+      logger.warn(err, "Failed to remove the avatar model of deleted character %s", id),
+    );
     // Cascade the character's Noodle presence, otherwise its account and posts stay
     // in the timeline forever as a ghost (issue #4295).
     try {
@@ -1858,6 +2054,53 @@ export async function charactersRoutes(app: FastifyInstance) {
     };
   });
 
+  // Saves web images from the greetings into the gallery, only when the user
+  // asks (#7221). The editor then points the greetings at the saved copies.
+  app.post<{ Params: { id: string } }>(
+    "/:id/gallery/bake",
+    { config: { rateLimit: GREETING_IMAGE_BAKE_RATE_LIMIT } },
+    async (req, reply) => {
+      const { urls } = bakeGreetingImagesSchema.parse(req.body ?? {});
+      const char = await storage.getById(req.params.id);
+      if (!char) return reply.status(404).send({ error: "Character not found" });
+      // Paths use the stored id, never the raw route parameter.
+      const id = char.id;
+
+      const dir = await ensureCharacterGalleryDir(id);
+      const results: Array<{ url: string; file?: string; error?: string }> = [];
+      for (const url of new Set(urls)) {
+        let image: Awaited<ReturnType<typeof downloadGreetingImage>>;
+        try {
+          image = await downloadGreetingImage(url);
+        } catch (error) {
+          logger.warn(error, "Could not download a greeting image from %s for character %s", URL.parse(url)?.host, id);
+          results.push({ url, error: error instanceof Error ? error.message : "Download failed" });
+          continue;
+        }
+        // App-generated name; nothing from the URL reaches the file system.
+        const file = `${newId()}.${image.ext}`;
+        let written = false;
+        try {
+          await writeFile(join(dir, file), image.buffer, { flag: "wx" });
+          written = true;
+          await characterGallery.create({
+            characterId: id,
+            filePath: `characters/${id}/${file}`,
+            width: image.width,
+            height: image.height,
+          });
+          results.push({ url, file });
+        } catch (error) {
+          if (written) await unlink(join(dir, file)).catch(() => undefined);
+          // Storage errors can name server paths, so the client gets a plain message.
+          logger.error(error, "Could not store a greeting image for character %s", id);
+          results.push({ url, error: "The image could not be stored" });
+        }
+      }
+      return { results };
+    },
+  );
+
   app.get<{ Params: { id: string; filename: string } }>("/:id/gallery/file/:filename", async (req, reply) => {
     const { id, filename } = req.params;
     if (
@@ -1970,17 +2213,15 @@ export async function charactersRoutes(app: FastifyInstance) {
   app.get<{ Params: { id: string }; Querystring: { format?: ExportFormat } }>("/:id/export", async (req, reply) => {
     const char = await storage.getById(req.params.id);
     if (!char) return reply.status(404).send({ error: "Character not found" });
-    const charData = JSON.parse(char.data);
+    const charData = await embedCharacterBookImages(JSON.parse(char.data));
     const compatible = req.query.format === "compatible";
-    const payload = compatible
-      ? buildCompatibleCharacterExport(charData)
-      : await buildNativeCharacterEnvelope(char, charData, characterGallery);
-    return reply
-      .header(
-        "Content-Disposition",
-        `attachment; filename="${encodeURIComponent(charData.name || "character")}.${compatible ? "json" : "marinara.json"}"`,
-      )
-      .send(payload);
+    reply.header(
+      "Content-Disposition",
+      `attachment; filename="${encodeURIComponent(charData.name || "character")}.${compatible ? "json" : "marinara.json"}"`,
+    );
+    if (compatible) return reply.send(buildCompatibleCharacterExport(charData));
+    const nativeExport = await buildNativeCharacterExport(char, charData, characterGallery);
+    return reply.type("application/json; charset=utf-8").send(toByteStream(streamNativeExport(nativeExport)));
   });
 
   app.post("/export-bulk", async (req, reply) => {
@@ -1989,26 +2230,30 @@ export async function charactersRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: "ids array is required" });
     }
 
-    const zip = new AdmZip();
-    let exportedCount = 0;
+    const chars = [];
     for (const id of ids) {
       const char = await storage.getById(id);
-      if (!char) continue;
-      const charData = JSON.parse(char.data);
-      const payload =
-        format === "compatible"
-          ? buildCompatibleCharacterExport(charData)
-          : await buildNativeCharacterEnvelope(char, charData, characterGallery);
-      zip.addFile(
-        `${toSafeExportName(String(charData.name ?? "character"), `character-${exportedCount + 1}`)}.${format === "compatible" ? "json" : "marinara.json"}`,
-        Buffer.from(JSON.stringify(payload, null, 2), "utf-8"),
-      );
-      exportedCount++;
+      if (char) chars.push(char);
     }
-
-    if (exportedCount === 0) {
+    if (chars.length === 0) {
       return reply.status(404).send({ error: "No characters found for the provided ids" });
     }
+
+    // Each file, and each image inside it, is read only as the ZIP is sent (#7115).
+    const exportBudget = { remainingBytes: LOREBOOK_EXPORT_IMAGE_MAX_BYTES };
+    const files = (async function* () {
+      for (const [index, char] of chars.entries()) {
+        const charData = await embedCharacterBookImages(JSON.parse(char.data), exportBudget);
+        yield {
+          stem: toSafeExportName(String(charData.name ?? "character"), `character-${index + 1}`),
+          extension: format === "compatible" ? "json" : "marinara.json",
+          content:
+            format === "compatible"
+              ? singleChunk(JSON.stringify(buildCompatibleCharacterExport(charData), null, 2))
+              : streamNativeExport(await buildNativeCharacterExport(char, charData, characterGallery), 2),
+        };
+      }
+    })();
 
     return reply
       .header("Content-Type", "application/zip")
@@ -2016,7 +2261,7 @@ export async function charactersRoutes(app: FastifyInstance) {
         "Content-Disposition",
         `attachment; filename="${format === "compatible" ? "compatible-characters.zip" : "marinara-characters.zip"}"`,
       )
-      .send(zip.toBuffer());
+      .send(streamExportZip(files));
   });
 
   app.post<{ Params: { id: string } }>("/:id/embedded-lorebook/import", async (req, reply) => {
@@ -2052,6 +2297,7 @@ export async function charactersRoutes(app: FastifyInstance) {
       app.db,
       {
         characterId: req.params.id,
+        allowLocalImagePaths: true,
         namePrefix: String(charData.name ?? "Character"),
         existingLorebookId:
           typeof embeddedLorebookMetadata.lorebookId === "string" ? embeddedLorebookMetadata.lorebookId : null,
@@ -2075,6 +2321,7 @@ export async function charactersRoutes(app: FastifyInstance) {
       extensions: extensions as any,
     });
 
+    await syncCharacterBookFromLorebook(app.db, result.lorebookId);
     return {
       success: true,
       lorebookId: result.lorebookId,
@@ -2172,12 +2419,12 @@ export async function charactersRoutes(app: FastifyInstance) {
     const char = await storage.getById(req.params.id);
     if (!char) return reply.status(404).send({ error: "Character not found" });
 
-    const charData = JSON.parse(char.data);
+    const charData = await embedCharacterBookImages(JSON.parse(char.data));
     const sprites = await readSpritesForId(char.id, true);
     if (!sprites) {
       return reply.status(413).send({ error: "Sprite collection exceeds compatible PNG export limits" });
     }
-    const v2Envelope = buildCompatibleCharacterExport(charData, sprites);
+    const v2Envelope = buildCompatibleCharacterExport(charData, sprites, { keepOnboarding: true });
     const charaBase64 = Buffer.from(JSON.stringify(v2Envelope), "utf-8").toString("base64");
 
     // Read avatar image or create a minimal 1x1 transparent PNG fallback
@@ -2303,11 +2550,8 @@ export async function charactersRoutes(app: FastifyInstance) {
     },
   );
 
-  app.get("/personas/active", async () => {
-    const personas = await storage.listPersonas();
-    const active = personas.find((persona) => persona.isActive === "true");
-    return active ? projectPersona(active) : null;
-  });
+  // Compatibility for older clients; there is no global Persona selection.
+  app.get("/personas/active", async () => null);
 
   app.get<{ Params: { id: string } }>("/personas/:id", async (req, reply) => {
     const persona = await storage.getPersona(req.params.id);
@@ -2520,15 +2764,11 @@ export async function charactersRoutes(app: FastifyInstance) {
     }
   });
 
-  app.put<{ Params: { id: string } }>("/personas/:id/activate", async (req, reply) => {
-    const { id } = req.params;
-    if (isUnsafePathSegment(id)) {
-      return reply.status(400).send({ error: "Invalid persona id" });
-    }
-    const activated = await storage.setActivePersona(id);
-    if (!activated) return reply.status(404).send({ error: "Persona not found" });
-    return { success: true };
-  });
+  app.put("/personas/:id/activate", async (_req, reply) =>
+    reply
+      .status(410)
+      .send({ error: "Global active personas have been retired. Select a persona in the chat instead." }),
+  );
 
   app.delete<{ Params: { id: string } }>("/personas/:id", async (req, reply) => {
     const { id } = req.params;
@@ -2544,6 +2784,9 @@ export async function charactersRoutes(app: FastifyInstance) {
       collectAvatarPaths: () => collectPersonaAvatarPaths(app.db, [id]),
       mutateReferences: () => storage.removePersona(id),
     });
+    await removeAvatarOwner({ ownerType: "persona", ownerId: id }).catch((err) =>
+      logger.warn(err, "Failed to remove the avatar model of deleted persona %s", id),
+    );
     for (const image of galleryImages) {
       await unlinkGalleryFileIfUnreferenced({ db: app.db, filePath: image.filePath });
     }
@@ -3094,15 +3337,13 @@ export async function charactersRoutes(app: FastifyInstance) {
       if (!persona) return reply.status(404).send({ error: "Persona not found" });
       const compatible = req.query.format === "compatible";
       const canonical = canonicalizePersonaForExport(persona as Record<string, unknown>);
-      const payload = compatible
-        ? buildCompatiblePersonaExport(canonical.row)
-        : await buildNativePersonaEnvelope(canonical.row, personaGallery);
-      return reply
-        .header(
-          "Content-Disposition",
-          `attachment; filename="${encodeURIComponent(toSafeExportName(canonical.usesFallbackName ? "" : String(canonical.row.name), "unnamed-persona"))}.${compatible ? "json" : "marinara.json"}"`,
-        )
-        .send(payload);
+      reply.header(
+        "Content-Disposition",
+        `attachment; filename="${encodeURIComponent(toSafeExportName(canonical.usesFallbackName ? "" : String(canonical.row.name), "unnamed-persona"))}.${compatible ? "json" : "marinara.json"}"`,
+      );
+      if (compatible) return reply.send(buildCompatiblePersonaExport(canonical.row));
+      const nativeExport = await buildNativePersonaExport(canonical.row, personaGallery);
+      return reply.type("application/json; charset=utf-8").send(toByteStream(streamNativeExport(nativeExport)));
     },
   );
 
@@ -3112,29 +3353,32 @@ export async function charactersRoutes(app: FastifyInstance) {
       return reply.status(400).send({ error: "ids array is required" });
     }
 
-    const zip = new AdmZip();
-    let exportedCount = 0;
+    const personas = [];
     for (const id of ids) {
       const persona = await storage.getPersona(id);
-      if (!persona) continue;
-      const canonical = canonicalizePersonaForExport(persona as Record<string, unknown>);
-      const payload =
-        format === "compatible"
-          ? buildCompatiblePersonaExport(canonical.row)
-          : await buildNativePersonaEnvelope(canonical.row, personaGallery);
-      zip.addFile(
-        `${toSafeExportName(
-          canonical.usesFallbackName ? "" : String(canonical.row.name),
-          `unnamed-persona-${exportedCount + 1}`,
-        )}.${format === "compatible" ? "json" : "marinara.json"}`,
-        Buffer.from(JSON.stringify(payload, null, 2), "utf-8"),
-      );
-      exportedCount++;
+      if (persona) personas.push(persona);
     }
-
-    if (exportedCount === 0) {
+    if (personas.length === 0) {
       return reply.status(404).send({ error: "No personas found for the provided ids" });
     }
+
+    // Each file, and each image inside it, is read only as the ZIP is sent (#7115).
+    const files = (async function* () {
+      for (const [index, persona] of personas.entries()) {
+        const canonical = canonicalizePersonaForExport(persona as Record<string, unknown>);
+        yield {
+          stem: toSafeExportName(
+            canonical.usesFallbackName ? "" : String(canonical.row.name),
+            `unnamed-persona-${index + 1}`,
+          ),
+          extension: format === "compatible" ? "json" : "marinara.json",
+          content:
+            format === "compatible"
+              ? singleChunk(JSON.stringify(buildCompatiblePersonaExport(canonical.row), null, 2))
+              : streamNativeExport(await buildNativePersonaExport(canonical.row, personaGallery), 2),
+        };
+      }
+    })();
 
     return reply
       .header("Content-Type", "application/zip")
@@ -3142,7 +3386,7 @@ export async function charactersRoutes(app: FastifyInstance) {
         "Content-Disposition",
         `attachment; filename="${format === "compatible" ? "compatible-personas.zip" : "marinara-personas.zip"}"`,
       )
-      .send(zip.toBuffer());
+      .send(streamExportZip(files));
   });
 
   // ── Character Groups ──

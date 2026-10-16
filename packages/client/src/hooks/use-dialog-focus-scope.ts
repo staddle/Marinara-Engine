@@ -19,6 +19,8 @@ export function useDialogFocusScope(
   initialFocusRef?: RefObject<HTMLElement | null>,
   restoreFocusRef?: RefObject<HTMLElement | null>,
   ownedPortalSelector?: string,
+  /** Trap focus only while this scope owns the topmost overlay. */
+  isActive?: () => boolean,
 ) {
   useEffect(() => {
     if (!open) return;
@@ -43,8 +45,15 @@ export function useDialogFocusScope(
 
     const trapFocus = (event: KeyboardEvent) => {
       if (event.key !== "Tab") return;
+      if (isActive && !isActive()) return;
       const container = containerRef.current;
       if (!container) return;
+      // Focus in another modal (one stacked above this one) belongs to that modal. Compare with this
+      // dialog's own overlay: the panel is inside it, so the panel itself never matches.
+      const activeModal =
+        document.activeElement instanceof Element ? document.activeElement.closest('[aria-modal="true"]') : null;
+      const ownModal = container.closest('[aria-modal="true"]');
+      if (activeModal && activeModal !== ownModal && !container.contains(activeModal)) return;
       const roots = [
         container,
         ...(ownedPortalSelector ? Array.from(document.querySelectorAll<HTMLElement>(ownedPortalSelector)) : []),
@@ -80,7 +89,11 @@ export function useDialogFocusScope(
     return () => {
       window.cancelAnimationFrame(focusInitial);
       document.removeEventListener("keydown", trapFocus);
-      restoreDialogFocus(restoreFocusRef, opener);
+      // Closing an underlying dialog must not move focus out of the topmost
+      // dialog that was opened above it.
+      if (!isActive || isActive()) restoreDialogFocus(restoreFocusRef, opener);
     };
+    // isActive is read at event time through a ref-backed callback.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [containerRef, initialFocusRef, open, ownedPortalSelector, restoreFocusRef]);
 }

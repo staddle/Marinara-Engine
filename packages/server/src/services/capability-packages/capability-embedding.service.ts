@@ -14,6 +14,7 @@ export function createCapabilityEmbeddingHost(): CapabilityEmbeddingHost {
   return Object.freeze({
     spaceId: LTM_EMBEDDING_SPACE_ID,
     label: LTM_EMBEDDING_LABEL,
+    // MiniLM uses no query or document prefix, so the input type does not change its input.
     async embed(texts: string[], signal?: AbortSignal): Promise<number[][] | null> {
       if (texts.length === 0 || texts.length > MAX_EMBEDDING_TEXTS) return null;
       if (texts.reduce((total, text) => total + text.length, 0) > MAX_EMBEDDING_CHARACTERS) return null;
@@ -33,10 +34,10 @@ export async function createConfiguredCapabilityEmbeddingHost(
     return Object.freeze({
       spaceId: source.spaceId ?? fallbackSpaceId,
       label: source.label,
-      async embed(texts: string[], signal?: AbortSignal): Promise<number[][] | null> {
+      async embed(texts: string[], signal?: AbortSignal, inputType?: "query" | "document"): Promise<number[][] | null> {
         if (texts.length === 0 || texts.length > MAX_EMBEDDING_TEXTS) return null;
         if (texts.reduce((total, text) => total + text.length, 0) > MAX_EMBEDDING_CHARACTERS) return null;
-        return source.embed(texts, signal);
+        return source.embed(texts, signal, inputType === "query" ? "query" : "document");
       },
     });
   } catch (error) {

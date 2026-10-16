@@ -20,6 +20,7 @@ import {
   type AgentToolContext,
 } from "./agent-executor.js";
 import { logger } from "../../lib/logger.js";
+import { failureLevel } from "../../lib/log-context.js";
 import { createAgentConcurrencyLimiter, settleAgentJobsWithConcurrencyLimit } from "./agent-concurrency.js";
 import { getCustomLorebookReadBehindMessages } from "../../routes/generate/lorebook-keeper-utils.js";
 export { settleAgentJobsWithConcurrencyLimit } from "./agent-concurrency.js";
@@ -251,7 +252,7 @@ async function executeGroup(
       if (entry.status === "fulfilled") return entry.value;
 
       const agent = toolAgents[index]!;
-      logger.error(entry.reason, "[agent-pipeline] Tool agent FAILED for %s", agent.type);
+      logger[failureLevel(entry.reason)](entry.reason, "[agent-pipeline] Tool agent FAILED for %s", agent.type);
       const errorResult: AgentResult = {
         agentId: agent.id,
         agentType: agent.type,
@@ -290,13 +291,17 @@ async function executePhase(
   if (phaseAgents.length === 0) return [];
 
   const groups = groupByProviderModel(phaseAgents).flatMap(splitGroupForParallelJobs);
+  const groupLimit = context.sequentialExecution ? 1 : AGENT_PHASE_MAX_CONCURRENT_GROUPS;
   const connectionLimits = new Map<number, number>();
   for (const group of groups) {
     const key = providerKey(group.provider);
     connectionLimits.set(key, Math.min(connectionLimits.get(key) ?? group.maxParallelJobs, group.maxParallelJobs));
   }
   const connectionLimiters = new Map(
-    Array.from(connectionLimits, ([key, limit]) => [key, createAgentConcurrencyLimiter(limit)]),
+    Array.from(connectionLimits, ([key, limit]) => [
+      key,
+      createAgentConcurrencyLimiter(context.sequentialExecution ? 1 : limit),
+    ]),
   );
 
   logger.debug(
@@ -316,7 +321,7 @@ async function executePhase(
     );
   }
 
-  const settled = await settleAgentJobsWithConcurrencyLimit(groups, AGENT_PHASE_MAX_CONCURRENT_GROUPS, (group) =>
+  const settled = await settleAgentJobsWithConcurrencyLimit(groups, groupLimit, (group) =>
     executeGroup(group, context, connectionLimiters.get(providerKey(group.provider))!, onResult, resolveAgentContext),
   );
 
@@ -329,7 +334,7 @@ async function executePhase(
       // Group rejected — log and produce error results so they're visible
       const group = groups[i]!;
       if (entry.reason instanceof Error) {
-        logger.error(
+        logger[failureLevel(entry.reason)](
           entry.reason,
           '[agent-pipeline] Group REJECTED in phase "%s": [%s]',
           phase,
@@ -508,22 +513,24 @@ export function createAgentPipeline(
      */
     async postGenerate(
       mainResponse: string,
-      options: { preGenInjections?: AgentInjection[]; parallelResults?: AgentResult[] } = {},
+      options: {
+        preGenInjections?: AgentInjection[];
+        parallelResults?: AgentResult[];
+        /** Decision answers taken with the finished reply, in place of the pre-reply ones. */
+        decisions?: AgentContext["decisions"];
+      } = {},
     ): Promise<AgentResult[]> {
+      const postAgents = agents.filter((agent) => agent.phase === "post_processing");
       const fullContext: AgentContext = {
         ...baseContext,
+        ...("decisions" in options ? { decisions: options.decisions } : {}),
         mainResponse,
         preGenInjections: options.preGenInjections ?? preGenerationInjections,
         parallelResults: options.parallelResults ?? parallelPhaseResults,
       };
 
-      const preparedContext = preparePostContext
-        ? await preparePostContext(
-            agents.filter((agent) => agent.phase === "post_processing"),
-            fullContext,
-          )
-        : fullContext;
-      return runPostProcessingAgents(agents, preparedContext, wrappedOnResult, resolveAgentContext);
+      const preparedContext = preparePostContext ? await preparePostContext(postAgents, fullContext) : fullContext;
+      return runPostProcessingAgents(postAgents, preparedContext, wrappedOnResult, resolveAgentContext);
     },
 
     /** All results collected so far. */

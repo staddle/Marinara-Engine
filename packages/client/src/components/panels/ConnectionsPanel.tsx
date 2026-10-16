@@ -1,3 +1,10 @@
+import { insertLibraryItems } from "../../lib/library-order";
+import { useLibraryOrder } from "../../hooks/use-library-order";
+import { useLibraryFolderDrag } from "../../hooks/use-library-folder-drag";
+import { type InsertEdge } from "../../lib/library-order";
+import { DecisionDefaultControl } from "../connections/DecisionDefaultControl";
+import { EmbeddingDefaultControl } from "../connections/EmbeddingDefaultControl";
+import { DecisionModelModal } from "../modals/DecisionModelModal";
 // ──────────────────────────────────────────────
 // Panel: API Connections (polished, with folders)
 // ──────────────────────────────────────────────
@@ -12,7 +19,7 @@ import {
   type ReactNode,
   type TouchEvent,
 } from "react";
-import { Reorder, useDragControls } from "framer-motion";
+import { Reorder } from "framer-motion";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   connectionKeys,
@@ -50,6 +57,7 @@ import {
   type ConnectionFolder,
   type SidecarSpeechModelId,
   type SidecarSpeechRuntimeDiagnostics,
+  isChatProvider,
 } from "@marinara-engine/shared";
 import { confirmNonEmptyFolderDelete, showConfirmDialog } from "../../lib/app-dialogs";
 import {
@@ -71,7 +79,6 @@ import {
   ChevronUp,
   ChevronRight,
   FolderPlus,
-  GripVertical,
   Camera,
   Sparkles,
   ImageIcon,
@@ -85,7 +92,7 @@ import {
   PowerOff,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
-import { sortBasicPanelItems } from "../../lib/panel-sort";
+import { sortBasicPanelItems, sortPanelFolders } from "../../lib/panel-sort";
 import { downloadJsonFile, sanitizeExportFilenamePart } from "../../lib/download-json";
 import { downloadZipFile } from "../../lib/download-zip";
 import {
@@ -95,11 +102,10 @@ import {
 } from "../../lib/connection-transfer";
 import { toast } from "sonner";
 import { TTSConfigCard } from "./settings/TTSConfigCard";
-import { STTConfigCard } from "./settings/STTConfigCard";
+import { SpeechToTextCard } from "./settings/SpeechToTextCard";
 import { SettingsSwitch, ToggleSetting } from "./settings/SettingControls";
 import { SelectionActionBar } from "../ui/SelectionActionBar";
 import { SmoothFolderContent } from "../ui/SmoothFolderContent";
-import { TouchDragHandle } from "../ui/TouchDragHandle";
 import { useLocalizedUiText } from "../../localization/use-localized-ui-text";
 import { useTranslation as useUiTranslation } from "react-i18next";
 import { clearActiveChatResourceDrag, writeChatResourceDragPayload } from "../../lib/chat-resource-drag";
@@ -126,10 +132,13 @@ const PROVIDER_COLORS: Record<string, { from: string; to: string; ring: string; 
   nanogpt: CONNECTION_ICON_COLORS,
   xai: CONNECTION_ICON_COLORS,
   arli: CONNECTION_ICON_COLORS,
+  zai: CONNECTION_ICON_COLORS,
+  deepseek: CONNECTION_ICON_COLORS,
   custom: CONNECTION_ICON_COLORS,
   image_generation: CONNECTION_ICON_COLORS,
   video_generation: CONNECTION_ICON_COLORS,
   audio: CONNECTION_ICON_COLORS,
+  decision: CONNECTION_ICON_COLORS,
 };
 const DEFAULT_COLOR = CONNECTION_ICON_COLORS;
 
@@ -208,6 +217,8 @@ function getDroppedConnectionIds(event: DragEvent<HTMLElement>, fallbackId: stri
 
 function SidecarCard() {
   const { t: localizeUi } = useUiTranslation();
+  /** The managed decision model installer, opened from inside this card. */
+  const [decisionModalOpen, setDecisionModalOpen] = useState(false);
   const { data: agentConfigs } = useAgentConfigs();
   const { data: capabilityAgents } = useCapabilityAgentRegistry();
   const { data: installedCapabilityPackages } = useInstalledCapabilityPackages();
@@ -669,6 +680,16 @@ function SidecarCard() {
               />
             </div>
           )}
+          {/* Outside the downloaded-model branch on purpose: the decision sidecar is
+              its own model and its own process, so it must not be reachable only by
+              people who already have a chat model installed. */}
+          <button
+            type="button"
+            onClick={() => setDecisionModalOpen(true)}
+            className="mari-chrome-control mari-chrome-control--compact mt-2 w-full text-center"
+          >
+            {localizeUi("ui.panels.sidecarcard.decisionSidecar")}
+          </button>
           {!isDownloaded && (
             <div className="mt-2.5 flex flex-col gap-2 border-t border-sky-400/10 pt-2.5">
               <button
@@ -690,6 +711,7 @@ function SidecarCard() {
               </button>
             </div>
           )}
+          <DecisionModelModal open={decisionModalOpen} onClose={() => setDecisionModalOpen(false)} />
           {status === "server_error" && (
             <div className="mt-2.5 rounded-lg border border-amber-500/20 bg-amber-500/5 p-2.5">
               <div className="text-[0.6875rem] font-medium text-amber-200">
@@ -720,6 +742,8 @@ function SidecarCard() {
 }
 
 type ConnectionRowData = {
+  credentialsFromConnectionId?: string | null;
+  profileImportReviewRequired?: boolean | string;
   id: string;
   name: string;
   provider: string;
@@ -1018,13 +1042,7 @@ function ConnectionDefaultsSection({ connectionsList }: { connectionsList: Conne
   const { t: localizeUi } = useUiTranslation();
   const [open, setOpen] = useState(false);
   const languageConnections = useMemo(
-    () =>
-      connectionsList.filter(
-        (connection) =>
-          connection.provider !== "image_generation" &&
-          connection.provider !== "video_generation" &&
-          connection.provider !== "audio",
-      ),
+    () => connectionsList.filter((connection) => isChatProvider(connection.provider)),
     [connectionsList],
   );
   const imageConnections = useMemo(
@@ -1209,6 +1227,8 @@ function ConnectionDefaultsSection({ connectionsList }: { connectionsList: Conne
             primaryEmptyLabel={localizeUi("ui.panels.connectiondefaultssection.noDefaultAudioConnection")}
             fallbackModelLabel={localizeUi("ui.panels.connectiondefaultssection.audioGeneration")}
           />
+          <EmbeddingDefaultControl connections={languageConnections} />
+          <DecisionDefaultControl />
         </div>
       </SmoothFolderContent>
     </section>
@@ -1238,7 +1258,7 @@ function ConnectionRow({
   onDragStart: (event: React.DragEvent<HTMLDivElement>) => void;
   onDragEnd: () => void;
   onDropOnRow: (event: React.DragEvent<HTMLDivElement>) => void;
-  onTouchStart?: (event: TouchEvent<HTMLButtonElement>) => void;
+  onTouchStart?: (event: TouchEvent<HTMLDivElement> | React.MouseEvent<HTMLDivElement>) => void;
   suppressClickRef?: { current: boolean };
   onImagePick: () => void;
 }) {
@@ -1264,6 +1284,20 @@ function ConnectionRow({
     <div
       data-connection-id={conn.id}
       data-touch-drag-card="connection"
+      data-drag-id={conn.id}
+      aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
+      data-drag-kind="connection"
+      data-drag-payload={JSON.stringify({
+        version: 1,
+        kind: "connection",
+        ids: [conn.id],
+        label: conn.name,
+        ...(isLanguageGenerationConnection(conn) ? {} : { unsupported: "connection-kind" }),
+      })}
+      onMouseDown={onTouchStart}
+      onTouchStart={(event) => {
+        onTouchStart?.(event);
+      }}
       onClick={() => {
         if (suppressClickRef?.current) return;
         onClickRow();
@@ -1277,20 +1311,12 @@ function ConnectionRow({
       }}
       onDrop={onDropOnRow}
       className={cn(
-        "group relative flex touch-pan-y cursor-pointer items-center gap-3 rounded-xl p-2.5 transition-all hover:bg-[var(--sidebar-accent)]",
+        "group relative flex touch-pan-y cursor-grab active:cursor-grabbing items-center gap-3 rounded-xl p-2.5 transition-all hover:bg-[var(--sidebar-accent)]",
         isSelected && `ring-1 ${colors.ring} bg-[var(--sidebar-accent)]/50`,
         selectionMode && isBulkSelected && "ring-1 ring-[var(--border)] bg-[var(--sidebar-accent)]/70",
         isDragging && "opacity-50",
       )}
     >
-      {onTouchStart && (
-        <TouchDragHandle
-          label={localizeUi("ui.panels.connectionrow.dragConnection")}
-          onTouchStart={(event) => {
-            onTouchStart(event);
-          }}
-        />
-      )}
       {selectionMode && (
         <div
           className={cn(
@@ -1361,7 +1387,7 @@ function ConnectionRow({
             ...(isLanguageGenerationConnection(conn) ? {} : { unsupported: "connection-kind" as const }),
           }}
         />
-        {conn.provider !== "audio" && (
+        {conn.provider !== "audio" && conn.provider !== "decision" && (
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -1422,6 +1448,7 @@ function ConnectionRow({
 }
 
 function ConnectionFolderRow({
+  folderDragBindings,
   folder,
   entries,
   forceExpanded = false,
@@ -1432,6 +1459,7 @@ function ConnectionFolderRow({
   draggedConnectionId,
   onDropConnection,
 }: {
+  folderDragBindings: ReturnType<ReturnType<typeof useLibraryFolderDrag>["bind"]>;
   folder: ConnectionFolder;
   entries: ConnectionRowData[];
   forceExpanded?: boolean;
@@ -1443,7 +1471,6 @@ function ConnectionFolderRow({
   onDropConnection: (connectionIds: string[], folderId: string | null) => void;
 }) {
   const { t: localizeUi } = useUiTranslation();
-  const dragControls = useDragControls();
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(folder.name);
   const [isDropTarget, setIsDropTarget] = useState(false);
@@ -1461,11 +1488,11 @@ function ConnectionFolderRow({
 
   return (
     <Reorder.Item
+      {...folderDragBindings}
       data-connection-folder-id={folder.id}
       value={folder.id}
       layout="position"
       dragListener={false}
-      dragControls={dragControls}
       as="div"
       onDragEnter={(event) => {
         if (!draggedConnectionId) return;
@@ -1497,6 +1524,7 @@ function ConnectionFolderRow({
     >
       {/* Folder header */}
       <div
+        data-drag-surface
         role="button"
         tabIndex={0}
         aria-expanded={isExpanded}
@@ -1522,12 +1550,6 @@ function ConnectionFolderRow({
         }}
         className="group relative flex items-center gap-1.5 rounded-lg px-2 py-1.5 hover:bg-[var(--sidebar-accent)]/40"
       >
-        <div
-          onPointerDown={(e) => dragControls.start(e)}
-          className="cursor-grab touch-none opacity-0 transition-opacity active:cursor-grabbing group-hover:opacity-100 max-md:opacity-100"
-        >
-          <GripVertical size="0.625rem" className="mari-chrome-accent-icon mari-accent-animated" />
-        </div>
         <ChevronRight
           size="0.75rem"
           className={cn(
@@ -1547,6 +1569,7 @@ function ConnectionFolderRow({
                 setRenaming(false);
               }
               if (e.key === "Escape") {
+                e.preventDefault();
                 setRenaming(false);
                 setRenameValue(folder.name);
               }
@@ -1642,13 +1665,14 @@ export function ConnectionsPanel() {
   // Sorted folder list + local order for optimistic drag-to-reorder
   const sortedFolders = useMemo(() => {
     if (!folders) return [] as ConnectionFolder[];
-    return [...folders].sort((a, b) => a.sortOrder - b.sortOrder);
-  }, [folders]);
+    return sortPanelFolders(folders, sort);
+  }, [folders, sort]);
 
   const [localFolderOrder, setLocalFolderOrder] = useState<string[]>([]);
   useEffect(() => {
-    setLocalFolderOrder(sortedFolders.map((f) => f.id));
-  }, [sortedFolders]);
+    setLocalFolderOrder(sortPanelFolders(folders ?? [], "custom").map((f) => f.id));
+  }, [folders]);
+  const folderOrder = sort === "custom" ? localFolderOrder : sortedFolders.map((folder) => folder.id);
 
   // Split connections into per-folder + unfiled buckets
   const { unfiledConnections, folderConnectionsMap } = useMemo(() => {
@@ -1672,9 +1696,13 @@ export function ConnectionsPanel() {
   };
 
   const handleFolderReorder = (newOrder: string[]) => {
+    if (sort !== "custom") setSort("custom");
     setLocalFolderOrder(newOrder);
     reorderFoldersMut.mutate(newOrder);
   };
+  const folderDrag = useLibraryFolderDrag("connection", (ids, target, edge) => {
+    handleFolderReorder(insertLibraryItems(folderOrder, ids, target, edge));
+  });
 
   const handleToggleCollapse = (folder: ConnectionFolder) => {
     updateFolderMut.mutate({ id: folder.id, collapsed: !folder.collapsed });
@@ -1730,7 +1758,7 @@ export function ConnectionsPanel() {
   );
 
   const reorderConnectionsInFolder = useCallback(
-    (connectionIds: string[], folderId: string | null, targetConnectionId?: string) => {
+    (connectionIds: string[], folderId: string | null, targetConnectionId?: string, edge: InsertEdge = "before") => {
       const draggedIds = Array.from(new Set(connectionIds.filter(Boolean)));
       if (draggedIds.length === 0) return;
       if (targetConnectionId && draggedIds.includes(targetConnectionId)) return;
@@ -1738,7 +1766,8 @@ export function ConnectionsPanel() {
       const bucketIds = getConnectionsInFolder(folderId).map((connection) => connection.id);
       const withoutDragged = bucketIds.filter((id) => !draggedIds.includes(id));
       const insertIndex = targetConnectionId ? withoutDragged.indexOf(targetConnectionId) : withoutDragged.length;
-      const safeInsertIndex = insertIndex >= 0 ? insertIndex : withoutDragged.length;
+      const safeInsertIndex =
+        insertIndex >= 0 ? insertIndex + (targetConnectionId && edge === "after" ? 1 : 0) : withoutDragged.length;
       const orderedConnectionIds = [
         ...withoutDragged.slice(0, safeInsertIndex),
         ...draggedIds,
@@ -1784,25 +1813,25 @@ export function ConnectionsPanel() {
   );
 
   const handleDropConnectionsOnRow = useCallback(
-    (connectionIds: string[], targetConnectionId: string) => {
+    (connectionIds: string[], targetConnectionId: string, edge: InsertEdge = "before") => {
       const targetConnection = connectionsList.find((connection) => connection.id === targetConnectionId);
       if (!targetConnection) return;
       const folderId =
         targetConnection.folderId && sortedFolders.some((folder) => folder.id === targetConnection.folderId)
           ? targetConnection.folderId
           : null;
-      reorderConnectionsInFolder(connectionIds, folderId, targetConnectionId);
+      reorderConnectionsInFolder(connectionIds, folderId, targetConnectionId, edge);
     },
     [connectionsList, reorderConnectionsInFolder, sortedFolders],
   );
 
   const finishConnectionTouchDrag = useCallback(
-    (connectionId: string, x: number, y: number) => {
+    (connectionId: string, x: number, y: number, dragIds?: string[]) => {
       const target = document.elementFromPoint(x, y);
       const connectionElement = target?.closest("[data-connection-id]") as HTMLElement | null;
       const targetConnectionId = connectionElement?.dataset.connectionId ?? null;
-      if (targetConnectionId && targetConnectionId !== connectionId) {
-        handleDropConnectionsOnRow(getDraggedConnectionIds(connectionId), targetConnectionId);
+      if (targetConnectionId && !(dragIds ?? getDraggedConnectionIds(connectionId)).includes(targetConnectionId)) {
+        handleDropConnectionsOnRow(dragIds ?? getDraggedConnectionIds(connectionId), targetConnectionId);
         window.setTimeout(() => {
           suppressConnectionClickRef.current = false;
         }, 0);
@@ -1812,10 +1841,9 @@ export function ConnectionsPanel() {
       const rootElement = target?.closest("[data-connection-folder-root]") as HTMLElement | null;
       const folderId = folderElement?.dataset.connectionFolderId ?? null;
       if (folderId || rootElement) {
-        handleDropConnectionsToFolder(getDraggedConnectionIds(connectionId), folderId);
-      } else {
-        setDraggedConnectionId(null);
+        handleDropConnectionsToFolder(dragIds ?? getDraggedConnectionIds(connectionId), folderId);
       }
+      setDraggedConnectionId(null);
       window.setTimeout(() => {
         suppressConnectionClickRef.current = false;
       }, 0);
@@ -1834,7 +1862,13 @@ export function ConnectionsPanel() {
     }
   }, []);
 
+  useLibraryOrder("connection", handleDropConnectionsOnRow);
   const { startTouchDrag: startConnectionTouchDrag } = useTouchFolderDrag({
+    getDragIds: getDraggedConnectionIds,
+    reorderHandlesDrop: true,
+    onReorder: (ids, target, edge) => {
+      handleDropConnectionsOnRow(ids, target, edge);
+    },
     onActivate: (connectionId) => {
       suppressConnectionClickRef.current = true;
       setDraggedConnectionId(connectionId);
@@ -1906,21 +1940,23 @@ export function ConnectionsPanel() {
       if (!confirmed) return;
 
       const envelope = createConnectionExportEnvelope(connectionsToExport as ConnectionTransferRow[]);
-      if (connectionsToExport.length > 1) {
-        downloadZipFile(
-          [{ path: "marinara-connections.json", content: JSON.stringify(envelope, null, 2) }],
-          "marinara-connections.zip",
+      const saveStatus =
+        connectionsToExport.length > 1
+          ? await downloadZipFile(
+              [{ path: "marinara-connections.json", content: JSON.stringify(envelope, null, 2) }],
+              "marinara-connections.zip",
+            )
+          : await downloadJsonFile(
+              envelope,
+              `${sanitizeExportFilenamePart(connectionsToExport[0]?.name, "connection")}.connection.json`,
+            );
+      if (saveStatus === "saved")
+        toast.success(
+          localizeUi("ui.panels.connectionspanel.exportedValue1ConnectionValue2", {
+            value1: connectionsToExport.length,
+            value2: connectionsToExport.length === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s"),
+          }),
         );
-      } else {
-        const filename = `${sanitizeExportFilenamePart(connectionsToExport[0]?.name, "connection")}.connection.json`;
-        downloadJsonFile(envelope, filename);
-      }
-      toast.success(
-        localizeUi("ui.panels.connectionspanel.exportedValue1ConnectionValue2", {
-          value1: connectionsToExport.length,
-          value2: connectionsToExport.length === 1 ? "" : localizeUi("ui.noodle.stageprofileview.s"),
-        }),
-      );
     },
     [localizeUi],
   );
@@ -2021,7 +2057,6 @@ export function ConnectionsPanel() {
         }}
         onTouchStart={(event) => {
           startConnectionTouchDrag(event, conn.id, {
-            allowInteractiveTarget: true,
             chatResourcePayload: {
               version: 1,
               kind: "connection",
@@ -2105,7 +2140,9 @@ export function ConnectionsPanel() {
         <div className="relative">
           <select
             value={sort}
-            onChange={(event) => setSort(event.target.value as ConnectionPanelSort)}
+            onChange={(event) => {
+              setSort(event.target.value as ConnectionPanelSort);
+            }}
             className="mari-chrome-field mari-chrome-sort-field mari-accent-animated h-10 appearance-none py-0 pl-2.5 pr-7 text-[0.6875rem] md:h-9"
             title={localizeUi("ui.panels.agentspanel.sortOrder")}
             aria-label={localizeUi("ui.panels.connectionspanel.sortConnections")}
@@ -2150,7 +2187,7 @@ export function ConnectionsPanel() {
       <TTSConfigCard />
 
       {/* ── Speech to Text ── */}
-      <STTConfigCard />
+      <SpeechToTextCard />
 
       {isLoading && (
         <div className="flex flex-col gap-2 py-2">
@@ -2217,34 +2254,37 @@ export function ConnectionsPanel() {
       )}
 
       {/* Folders (drag-to-reorder) */}
-      {localFolderOrder.length > 0 && (
+      {folderOrder.length > 0 && (
         <Reorder.Group
           axis="y"
-          values={localFolderOrder}
+          values={folderDrag.orderItems(folderOrder, (id) => id)}
           onReorder={handleFolderReorder}
           as="div"
           className="flex flex-col gap-0.5 mt-1"
         >
-          {localFolderOrder.map((folderId) => {
-            const folder = sortedFolders.find((f) => f.id === folderId);
-            if (!folder) return null;
-            const folderEntries = folderConnectionsMap.get(folderId) ?? [];
-            if (searchActive && folderEntries.length === 0) return null;
-            return (
-              <ConnectionFolderRow
-                key={folderId}
-                folder={folder}
-                entries={folderEntries}
-                forceExpanded={searchActive && folderEntries.length > 0}
-                renderConnectionRow={renderConnectionRow}
-                onToggleCollapse={handleToggleCollapse}
-                onRename={handleRenameFolder}
-                onDelete={handleDeleteFolder}
-                draggedConnectionId={draggedConnectionId}
-                onDropConnection={handleDropConnectionsToFolder}
-              />
-            );
-          })}
+          {folderDrag
+            .orderItems(folderOrder, (id) => id)
+            .map((folderId) => {
+              const folder = sortedFolders.find((f) => f.id === folderId);
+              if (!folder) return null;
+              const folderEntries = folderConnectionsMap.get(folderId) ?? [];
+              if (searchActive && folderEntries.length === 0) return null;
+              return (
+                <ConnectionFolderRow
+                  folderDragBindings={folderDrag.bind(folderId)}
+                  key={folderId}
+                  folder={folder}
+                  entries={folderEntries}
+                  forceExpanded={searchActive && folderEntries.length > 0}
+                  renderConnectionRow={renderConnectionRow}
+                  onToggleCollapse={handleToggleCollapse}
+                  onRename={handleRenameFolder}
+                  onDelete={handleDeleteFolder}
+                  draggedConnectionId={draggedConnectionId}
+                  onDropConnection={handleDropConnectionsToFolder}
+                />
+              );
+            })}
         </Reorder.Group>
       )}
 

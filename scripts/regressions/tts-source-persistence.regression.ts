@@ -4,8 +4,18 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
-import { TTS_API_KEY_MASK, ttsConfigSchema } from "../../packages/shared/src/types/tts.js";
-import { buildTTSVoiceRequests, findTTSCharacterIdBySpeakerName } from "../../packages/client/src/lib/tts-dialogue.ts";
+import ts from "typescript";
+import { setCharacterVoiceAssignment, TTS_API_KEY_MASK, ttsConfigSchema } from "../../packages/shared/src/types/tts.js";
+import {
+  buildTTSVoiceRequests,
+  cleanTTSInputText,
+  splitTTSChunks,
+  filterTTSText,
+  findTTSCharacterIdBySpeakerName,
+  getCharacterNameVoice,
+  getCharacterVoiceAssignment,
+  resolveTTSVoiceForSpeaker,
+} from "../../packages/client/src/lib/tts-dialogue.ts";
 import { buildExtractedRoleplayTTSVoiceRequests } from "../../packages/client/src/lib/tts-roleplay-speaker-extractor.ts";
 import { normalizeTTSPlaybackDelayMs, ttsService } from "../../packages/client/src/lib/tts-service.ts";
 import {
@@ -179,6 +189,98 @@ try {
 
 const legacyConfigWithoutDialoguePause = ttsConfigSchema.parse({});
 assert.equal(legacyConfigWithoutDialoguePause.dialoguePauseMs, 1000);
+assert.equal(legacyConfigWithoutDialoguePause.skipTagContent, false);
+assert.equal(legacyConfigWithoutDialoguePause.skipCodeBlocks, true);
+assert.equal(legacyConfigWithoutDialoguePause.skipBracketedText, false);
+const filteredConfig = ttsConfigSchema.parse({ skipTagContent: true, skipBracketedText: true });
+// Exercise the component's cache helpers without mounting its browser-only combat surface.
+const combatSource = ts.createSourceFile(
+  "GameCombatUI.tsx",
+  readFileSync(join(repositoryRoot, "packages/client/src/components/game/GameCombatUI.tsx"), "utf8"),
+  ts.ScriptTarget.Latest,
+  true,
+  ts.ScriptKind.TSX,
+);
+const combatCacheFunctions = ["hashCombatVoiceKey", "buildCombatVoiceConfigSignature", "buildCombatVoiceLineKey"];
+const combatCacheCode = combatCacheFunctions
+  .map((name) => {
+    const declaration = combatSource.statements.find(
+      (statement) => ts.isFunctionDeclaration(statement) && statement.name?.text === name,
+    );
+    assert.ok(declaration, `${name} remains available for the combat cache regression`);
+    return declaration.getText(combatSource);
+  })
+  .join("\n");
+const combatCache = new Function(
+  `${ts.transpileModule(combatCacheCode, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText}
+   return { signature: buildCombatVoiceConfigSignature, key: buildCombatVoiceLineKey };`,
+)() as {
+  signature: (config: typeof filteredConfig) => string;
+  key: (
+    signature: string,
+    line: { character: string; type: string; content: string },
+    chunks: string[],
+    voice?: string,
+  ) => string;
+};
+const combatLine = { character: "Mari", type: "main", content: "Strike! [Private tactic] <secret>Wait.</secret>" };
+const combatConfig = ttsConfigSchema.parse({});
+const combatSignature = combatCache.signature(combatConfig);
+const combatKey = combatCache.key(combatSignature, combatLine, splitTTSChunks(combatLine.content, combatConfig));
+for (const flag of ["skipTagContent", "skipCodeBlocks", "skipBracketedText"] as const) {
+  const changed = { ...combatConfig, [flag]: !combatConfig[flag] };
+  assert.notEqual(combatCache.signature(changed), combatSignature, `${flag} must invalidate combat audio`);
+  assert.notEqual(
+    combatCache.key(combatCache.signature(changed), combatLine, splitTTSChunks(combatLine.content, changed)),
+    combatKey,
+  );
+}
+assert.notEqual(
+  combatCache.key(combatSignature, combatLine, ["Strike!", "Wait."]),
+  combatCache.key(combatSignature, combatLine, ["Strike! Wait."]),
+  "A changed filtered chunk boundary cannot reuse audio by chunk index",
+);
+assert.notEqual(
+  combatCache.key(combatSignature, combatLine, ["Strike!"]),
+  combatCache.key(combatSignature, combatLine, ["Wait."]),
+  "Combat audio is keyed to the text actually spoken",
+);
+assert.equal(
+  cleanTTSInputText("Visible <simulation>private <b>nested</b> planning</simulation> ending.", filteredConfig),
+  "Visible ending.",
+);
+assert.equal(
+  cleanTTSInputText("Visible <!-- <unclosed> --> <div>card</div> ending.", filteredConfig),
+  "Visible ending.",
+);
+assert.equal(
+  cleanTTSInputText("<div>Readable card</div> [aside]", legacyConfigWithoutDialoguePause),
+  "Readable card [aside]",
+);
+assert.deepEqual(splitTTSChunks("Before.\n```xml\n<secret>hidden</secret>\n```\nAfter.", filteredConfig), [
+  "Before.",
+  "After.",
+]);
+assert.equal(cleanTTSInputText("Before '''\nprivate code\n''' after.", filteredConfig), "Before after.");
+assert.equal(
+  cleanTTSInputText("Before ```text\nspoken code\n``` after.", { skipCodeBlocks: false }),
+  "Before spoken code after.",
+);
+assert.equal(
+  cleanTTSInputText("Before [private aside] [linked aside](https://example.invalid) after.", filteredConfig),
+  "Before after.",
+);
+assert.deepEqual(
+  buildTTSVoiceRequests(
+    '<speaker="Mari">"Hello." <simulation>"Do not read."</simulation></speaker>',
+    filteredConfig,
+  ).map((request) => ({ text: request.text, speaker: request.speaker })),
+  [{ text: "Hello.", speaker: "Mari" }],
+);
+assert.ok(
+  !filterTTSText("Visible <simulation>secret thought</simulation>", filteredConfig).includes("secret"),
+  "Speaker extraction must receive filtered text",
+);
 
 const legacySubSecondPause = ttsConfigSchema.parse({ dialoguePauseMs: 300 });
 assert.equal(legacySubSecondPause.dialoguePauseMs, 1000);
@@ -238,10 +340,15 @@ class RegressionAudio {
   onended: (() => void) | null = null;
   onerror: (() => void) | null = null;
 
-  constructor(_url: string) {}
+  src = "";
+  constructor(_url?: string) {}
+  removeAttribute(name: string): void {
+    if (name === "src") this.src = "";
+  }
+  load(): void {}
 
   play(): Promise<void> {
-    setTimeout(() => this.onended?.(), 0);
+    if (!this.src.startsWith("data:audio/")) setTimeout(() => this.onended?.(), 0);
     return Promise.resolve();
   }
 
@@ -612,6 +719,105 @@ assert.equal(
   null,
   "duplicate exact character names must not select an arbitrary voice assignment",
 );
+
+// The Character Editor's Voice section edits one character's row of the shared list (Agents#1176).
+const sharedVoiceRows = [
+  { characterId: "alice-original", characterName: "Alice", voice: "original-voice" },
+  { characterId: "dottore-id", characterName: "Dottore", voice: "dottore-voice" },
+];
+const withAuVoice = setCharacterVoiceAssignment(
+  sharedVoiceRows,
+  { characterId: "alice-au", characterName: "Alice" },
+  "au-voice",
+);
+assert.deepEqual(withAuVoice, [
+  ...sharedVoiceRows,
+  { characterId: "alice-au", characterName: "Alice", voice: "au-voice" },
+]);
+assert.equal(sharedVoiceRows.length, 2, "setting a voice must not mutate the saved list");
+assert.equal(getCharacterVoiceAssignment(withAuVoice, "alice-au"), "au-voice");
+const characterVoiceConfig = ttsConfigSchema.parse({
+  source: "openai",
+  voice: "default-voice",
+  voiceMode: "per-character",
+  voiceAssignments: withAuVoice,
+});
+assert.equal(
+  resolveTTSVoiceForSpeaker(characterVoiceConfig, "Alice", "alice-au"),
+  "au-voice",
+  "a character's own voice must win over an earlier card that only shares its name",
+);
+assert.equal(resolveTTSVoiceForSpeaker(characterVoiceConfig, "Alice", "alice-original"), "original-voice");
+assert.equal(
+  resolveTTSVoiceForSpeaker(characterVoiceConfig, "Alice", null),
+  "original-voice",
+  "speakers known only by name keep the first matching row",
+);
+const renamedDottore = setCharacterVoiceAssignment(
+  withAuVoice,
+  { characterId: "dottore-id", characterName: "Il Dottore" },
+  "new-dottore-voice",
+);
+assert.deepEqual(
+  renamedDottore.map(({ characterName, voice }) => `${characterName}:${voice}`),
+  ["Alice:original-voice", "Il Dottore:new-dottore-voice", "Alice:au-voice"],
+  "changing a voice updates the existing row in place with the current name",
+);
+const clearedDottore = setCharacterVoiceAssignment(
+  [...renamedDottore, { characterId: "dottore-id", characterName: "Dottore", voice: "" }],
+  { characterId: "dottore-id", characterName: "Il Dottore" },
+  " ",
+);
+assert.deepEqual(
+  clearedDottore.map(({ characterId }) => characterId),
+  ["alice-original", "alice-au"],
+  "a blank voice removes every row for that character",
+);
+assert.equal(
+  resolveTTSVoiceForSpeaker({ ...characterVoiceConfig, voiceAssignments: clearedDottore }, "Il Dottore", "dottore-id"),
+  "default-voice",
+  "a character without its own row falls back to the default voice",
+);
+// Without a row of its own, a card still speaks with a voice set for its name, so the section must say so.
+const auCard = { characterId: "alice-au", characterName: "Alice" };
+assert.equal(
+  resolveTTSVoiceForSpeaker({ ...characterVoiceConfig, voiceAssignments: sharedVoiceRows }, "Alice", "alice-au"),
+  "original-voice",
+);
+assert.equal(getCharacterNameVoice(sharedVoiceRows, auCard), "original-voice", "an AU card shows the voice it uses");
+assert.equal(getCharacterNameVoice(withAuVoice, auCard), "original-voice", "its own row is not the name's voice");
+assert.equal(getCharacterNameVoice(withAuVoice, { characterId: "dottore-id", characterName: "Dottore" }), "");
+assert.equal(
+  getCharacterNameVoice([{ characterId: "alice-au", characterName: "Alice (Modern AU)", voice: "au-voice" }], {
+    characterId: "alice-original",
+    characterName: "Alice",
+  }),
+  "au-voice",
+  "a voice shared by every variant of the name counts too",
+);
+assert.equal(
+  getCharacterNameVoice([{ characterId: "", characterName: "Alice", voice: "legacy-voice" }], auCard),
+  "legacy-voice",
+  "a row saved with only a name counts too",
+);
+// Replay and autoplay find the speaking card the same way, so same-named cards in one chat keep their voices.
+const twoAlices = new Map([
+  ["alice-original", { name: "Alice" }],
+  ["alice-au", { name: "Alice" }],
+]);
+assert.deepEqual(
+  buildTTSVoiceRequests('"Hello there."', characterVoiceConfig, "Alice", "alice-au", (speaker) =>
+    findTTSCharacterIdBySpeakerName(speaker, twoAlices),
+  ).map(({ voice }) => voice),
+  ["au-voice"],
+);
+for (const file of ["ChatArea.tsx", "ChatMessage.tsx"]) {
+  assert.match(
+    readFileSync(join(repositoryRoot, "packages/client/src/components/chat", file), "utf8"),
+    /findTTSCharacterIdBySpeakerName\([^)]*\)/u,
+    `${file} must find the speaking card like the other chat playback path`,
+  );
+}
 assert.equal(buildElevenLabsTextInput('"Skill issue."', "chuckle"), '[chuckle] "Skill issue."');
 assert.equal(buildElevenLabsTextInput('[chuckle] "Skill issue."', "chuckle"), '[chuckle] "Skill issue."');
 

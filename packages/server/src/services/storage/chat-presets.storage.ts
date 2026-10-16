@@ -7,9 +7,17 @@ import { eq, and, ne, asc } from "../../db/file-query.js";
 import type { DB } from "../../db/connection.js";
 import { chats, chatPresets } from "../../db/schema/index.js";
 import { newId, now } from "../../utils/id-generator.js";
-import { withChatMetadataPatchQueue } from "./chats.storage.js";
+import { logger } from "../../lib/logger.js";
+import { createChatsStorage, withChatMetadataPatchQueue } from "./chats.storage.js";
+import { summaryHidingPatch } from "../../routes/generate/generate-route-utils.js";
 import {
   CHAT_PRESET_EXCLUDED_METADATA_KEYS,
+  CHAT_PRESET_EXCLUDED_PACKAGE_METADATA_KEYS,
+  CHAT_PROFILE_FOLLOWER_SYNC_KEYS,
+  chatFollowsChatPreset,
+  TRANSLATOR_DEFAULTS_SETTINGS_KEY,
+  TRANSLATOR_SETTINGS_KEYS,
+  normalizeTranslatorSettings,
   isRetiredBuiltInAgentId,
   type ChatMode,
   type ChatPresetSettings,
@@ -17,11 +25,38 @@ import {
   type UpdateChatPresetInput,
 } from "@marinara-engine/shared";
 
+import { createAppSettingsStorage } from "./app-settings.storage.js";
+
 const CHAT_MODES: ChatMode[] = ["conversation", "roleplay"];
-const EXCLUDED_METADATA_SET = new Set(CHAT_PRESET_EXCLUDED_METADATA_KEYS);
+const EXCLUDED_METADATA_SET = new Set([
+  ...CHAT_PRESET_EXCLUDED_METADATA_KEYS,
+  ...CHAT_PRESET_EXCLUDED_PACKAGE_METADATA_KEYS,
+]);
+/** Advanced Memory values tied to one chat's messages and characters; the rest are profile settings. */
+const ADVANCED_MEMORY_CHAT_KEYS = ["knowledgeStarts", "knowledgeConfirmed", "narratorCharacterId"];
+/**
+ * Agents set up for one chat when they are added: knowledge sources, a target lorebook, sprite
+ * characters, a prompt template. That setup is not copied to other chats, and without it these agents
+ * fall back to another chat's sources or books, so updating other chats leaves them on or off, with
+ * their prompt templates, as each chat has them.
+ */
+const CHAT_SETUP_AGENT_IDS = new Set(["knowledge-retrieval", "knowledge-router", "lorebook-keeper", "expression"]);
+/**
+ * Settings edited against the chat's connection. Advanced Parameters can send options another provider
+ * rejects, such as OpenRouter routing, and image captioning without a value uses the chat's own
+ * connection's defaults, so updating other chats changes these only in chats on the profile's connection.
+ */
+/** `scene…` keys that are Chat Settings a profile carries, unlike the rest of a chat's scene state. */
+const PROFILE_SCENE_SETTING_KEYS = new Set(["sceneVideoConnectionId", "sceneVideoFirstFrame"]);
+const CONNECTION_SETTING_KEYS = new Set(["chatParameters", "imageCaptioningEnabled", "imageCaptioningConnectionId"]);
 
 function isPresetExcludedMetadataKey(key: string) {
-  return EXCLUDED_METADATA_SET.has(key) || key.startsWith("scene");
+  return (
+    EXCLUDED_METADATA_SET.has(key) ||
+    // The Illustrator's scene video connection and video first frame are settings, not part of one chat's scene.
+    (key.startsWith("scene") && !PROFILE_SCENE_SETTING_KEYS.has(key)) ||
+    key.startsWith("multiplayer")
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -59,12 +94,59 @@ function sanitizePresetAgentMap(value: unknown) {
   return out;
 }
 
+function pickAdvancedMemoryKeys(value: unknown, chatOwned: boolean) {
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).filter(([key]) => ADVANCED_MEMORY_CHAT_KEYS.includes(key) === chatOwned),
+  );
+}
+
 function sanitizePresetMetadataValue(key: string, value: unknown) {
+  if (key === "chatSettingsHintDismissed") return value === true;
+  if (key === "advancedMemory" && isRecord(value)) return pickAdvancedMemoryKeys(value, false);
   if (key === "activeAgentIds") return sanitizePresetAgentIds(value);
   if (key === "agentOverrides" || key === "agentPromptTemplateIds" || key === "customAgentImageSettings") {
     return sanitizePresetAgentMap(value);
   }
   return value;
+}
+
+function pickSetUpAgentEntries(value: unknown, setUp: boolean) {
+  return Object.fromEntries(
+    Object.entries(sanitizePresetAgentMap(value)).filter(([agentId]) => CHAT_SETUP_AGENT_IDS.has(agentId) === setUp),
+  );
+}
+
+/**
+ * A follower's metadata after its profile was saved. Each of CHAT_PROFILE_FOLLOWER_SYNC_KEYS becomes what
+ * applying the profile by hand (`applied`) gives it, so a setting the profile has no value for goes back
+ * to its default, except where that default comes from the chat's own connection or characters, and
+ * except the agents each chat sets up. Every other key stays the chat's own.
+ */
+function syncFollowerMetadata(
+  current: Record<string, unknown>,
+  applied: Record<string, unknown>,
+  onProfileConnection: boolean,
+) {
+  const next = { ...current };
+  for (const key of CHAT_PROFILE_FOLLOWER_SYNC_KEYS) {
+    if (CONNECTION_SETTING_KEYS.has(key) && !onProfileConnection) continue;
+    // Without a value, schedules run whenever the chat's own characters have one, so a profile without
+    // a value leaves the chat's own choice. Removing a chat's "off" would turn its schedules back on.
+    if (key === "conversationSchedulesEnabled" && typeof applied[key] !== "boolean") continue;
+    if (Object.prototype.hasOwnProperty.call(applied, key)) next[key] = applied[key];
+    else delete next[key];
+  }
+  // An empty list runs no agents, which is right when the profile's only agents are ones each chat sets up.
+  next.activeAgentIds = [
+    ...sanitizePresetAgentIds(applied.activeAgentIds).filter((id) => !CHAT_SETUP_AGENT_IDS.has(id)),
+    ...sanitizePresetAgentIds(current.activeAgentIds).filter((id) => CHAT_SETUP_AGENT_IDS.has(id)),
+  ];
+  next.agentPromptTemplateIds = {
+    ...pickSetUpAgentEntries(applied.agentPromptTemplateIds, false),
+    ...pickSetUpAgentEntries(current.agentPromptTemplateIds, true),
+  };
+  return next;
 }
 
 interface ChatPresetRow {
@@ -272,8 +354,18 @@ export function createChatPresetsStorage(db: DB) {
      * snapshot, with system defaults filled in for keys the profile doesn't
      * specify. Selecting the Default profile therefore resets the chat's
      * profile-controlled settings to their system defaults.
+     *
+     * `asFollower` refreshes a chat after its profile was saved: it skips a chat that no longer
+     * follows the profile and sets only CHAT_PROFILE_FOLLOWER_SYNC_KEYS, as an apply by hand would
+     * (Advanced Parameters and image captioning only on the profile's connection, schedules only when
+     * the profile has a value, agents minus the ones each chat sets up).
+     * Every other key, the connection, the prompt preset and the recent-chat order stay the chat's own.
      */
-    async applyToChat(presetId: string, chatId: string, options: { connectionId?: string | null } = {}) {
+    async applyToChat(
+      presetId: string,
+      chatId: string,
+      options: { connectionId?: string | null; asFollower?: boolean } = {},
+    ) {
       return withChatMetadataPatchQueue(chatId, async () => {
         const preset = await storage.getById(presetId);
         if (!preset) return null;
@@ -289,8 +381,12 @@ export function createChatPresetsStorage(db: DB) {
             return {};
           }
         })();
+        if (options.asFollower && !chatFollowsChatPreset(currentMetadata, preset.id)) return null;
 
         const presetMetadata = (sanitizePresetSettings(preset.settings).metadata ?? {}) as Record<string, unknown>;
+        const translatorSettings = normalizeTranslatorSettings(presetMetadata);
+        // Filter this application copy; keep the saved profile intact.
+        for (const key of TRANSLATOR_SETTINGS_KEYS) delete presetMetadata[key];
 
         // Preserve only chat-specific (non-profile) metadata keys.
         const preserved: Record<string, unknown> = {};
@@ -309,37 +405,87 @@ export function createChatPresetsStorage(db: DB) {
         if (!Object.prototype.hasOwnProperty.call(presetMetadata, "customAgentImageSettings")) {
           preserved.customAgentImageSettings = sanitizePresetAgentMap(currentMetadata.customAgentImageSettings);
         }
+        const ownMemory = pickAdvancedMemoryKeys(currentMetadata.advancedMemory, true);
+        if (Object.keys(ownMemory).length > 0) {
+          preserved.advancedMemory = { ...pickAdvancedMemoryKeys(presetMetadata.advancedMemory, false), ...ownMemory };
+        }
+        // Profiles saved before they held window layouts or the video settings leave the chat's own.
+        for (const key of ["windowLayout", ...PROFILE_SCENE_SETTING_KEYS]) {
+          if (
+            !Object.prototype.hasOwnProperty.call(presetMetadata, key) &&
+            Object.prototype.hasOwnProperty.call(currentMetadata, key)
+          ) {
+            preserved[key] = currentMetadata[key];
+          }
+        }
 
         const baseDefaults: Record<string, unknown> = {
+          ...normalizeTranslatorSettings(await createAppSettingsStorage(db).get(TRANSLATOR_DEFAULTS_SETTINGS_KEY)),
           summary: null,
           tags: [],
           enableAgents: true,
           activeToolIds: [],
+          chatSettingsHintDismissed: false,
         };
 
-        const newMetadata: Record<string, unknown> = {
+        const appliedMetadata: Record<string, unknown> = {
           ...baseDefaults,
           ...presetMetadata,
+          ...translatorSettings,
           ...preserved,
           appliedChatPresetId: preset.id,
         };
+        const newMetadata = options.asFollower
+          ? syncFollowerMetadata(
+              currentMetadata,
+              appliedMetadata,
+              (chatRow.connectionId ?? null) === (preset.settings.connectionId ?? null),
+            )
+          : appliedMetadata;
+        // A profile that turns "Hide summarised messages" on or off hides or shows those messages too.
+        Object.assign(
+          newMetadata,
+          await summaryHidingPatch(createChatsStorage(db), chatId, currentMetadata, newMetadata),
+        );
         const nextConnectionId =
           options.connectionId !== undefined ? options.connectionId : (preset.settings.connectionId ?? null);
 
-        const ts = now();
         await db
           .update(chats)
           .set({
-            connectionId: nextConnectionId,
-            promptPresetId: preset.settings.promptPresetId ?? null,
+            ...(!options.asFollower && {
+              connectionId: nextConnectionId,
+              promptPresetId: preset.settings.promptPresetId ?? null,
+              updatedAt: now(),
+            }),
             metadata: JSON.stringify(newMetadata),
-            updatedAt: ts,
           })
           .where(eq(chats.id, chatId));
 
         const updatedRows = await db.select().from(chats).where(eq(chats.id, chatId));
         return updatedRows[0] ?? null;
       });
+    },
+
+    /** After a profile is saved, apply its chat settings to the other chats that follow it. */
+    async applyToFollowers(presetId: string, exceptChatId: string | null) {
+      const chatIds: string[] = [];
+      let failed = 0;
+      const preset = await storage.getById(presetId);
+      if (!preset) return { chatIds, failed };
+      const rows = await db.select().from(chats).where(eq(chats.mode, preset.mode));
+      for (const row of rows) {
+        if (row.id === exceptChatId || !chatFollowsChatPreset(parseStoredChatMetadata(row.metadata), preset.id))
+          continue;
+        try {
+          if (await storage.applyToChat(preset.id, row.id, { asFollower: true })) chatIds.push(row.id);
+        } catch (err) {
+          // One chat failing must not hide the chats already updated.
+          failed += 1;
+          logger.warn(err, "Could not update chat %s from settings profile %s", row.id, preset.id);
+        }
+      }
+      return { chatIds, failed };
     },
 
     /** Ensure a Default profile exists for every chat mode and exactly one profile is active per mode. */

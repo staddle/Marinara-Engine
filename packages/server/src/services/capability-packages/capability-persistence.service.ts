@@ -16,6 +16,7 @@ import {
   type SpatialSnapshotSource,
 } from "@marinara-engine/shared";
 import type { DB } from "../../db/connection.js";
+import { logger } from "../../lib/logger.js";
 import { and, desc, eq, inArray, ne, or } from "../../db/file-query.js";
 import { IMPORTED_GAME_ENGINE_ANCHOR_PREFIX } from "../../db/file-backed-store.js";
 import { FileUniqueConstraintError } from "../../db/file-schema.js";
@@ -31,7 +32,17 @@ import {
   spatialContextSnapshots,
 } from "../../db/schema/index.js";
 import { withChatMetadataPatchQueue } from "../storage/chats.storage.js";
+import { createCharactersStorage } from "../storage/characters.storage.js";
 import { withNewGlobalGalleryCapabilityReferences } from "../image/global-gallery-capability-references.js";
+import { resolveChatUserIdentity } from "../chat-user-identity.js";
+import { parseExtra } from "../generation/prompt-attachments.js";
+import {
+  parseRoleplayUserCommands,
+  roleplayAgentsSeeWhispers,
+  roleplayAgentText,
+} from "../generation/roleplay-commands.js";
+import { resolveCharacterNameMap } from "../../routes/generate/generate-route-utils.js";
+import { conversationPromptHistoryContent } from "../../routes/generate/conversation-prompt-formatting.js";
 
 function parseStringArray(value: unknown): string[] {
   if (Array.isArray(value)) return value.filter((entry): entry is string => typeof entry === "string");
@@ -106,7 +117,20 @@ function mapChat(row: typeof chats.$inferSelect): CapabilityChatRecord {
   };
 }
 
-function mapMessage(row: typeof messages.$inferSelect): CapabilityMessageRecord {
+/**
+ * A Roleplay message as the generate route's agents read it: a user turn without leftover private tags, a reply with
+ * its documents, and each whisper at its place (roleplayAgentText).
+ */
+function roleplayAgentContent(row: typeof messages.$inferSelect, names: ReadonlyMap<string, string>): string {
+  const source = row.role === "user" ? { ...row, content: parseRoleplayUserCommands(row.content).content } : row;
+  return roleplayAgentText(conversationPromptHistoryContent(source, "roleplay"), source, names);
+}
+
+/** `names` gives each message its agent view (roleplayAgentContent); null leaves `agentContent` out. */
+function mapMessage(
+  row: typeof messages.$inferSelect,
+  names: ReadonlyMap<string, string> | null = null,
+): CapabilityMessageRecord {
   return {
     id: row.id,
     chatId: row.chatId,
@@ -116,7 +140,23 @@ function mapMessage(row: typeof messages.$inferSelect): CapabilityMessageRecord 
     activeSwipeIndex: row.activeSwipeIndex,
     extra: row.extra,
     createdAt: row.createdAt,
+    ...(names ? { agentContent: roleplayAgentContent(row, names) } : {}),
   };
+}
+
+/**
+ * Whisper recipients' names for agents reading this chat, as Engine-run agents get them (#7443), or null where
+ * agents do not read whispers (see roleplayAgentsSeeWhispers).
+ */
+async function agentWhisperNames(db: DB, chatId: string): Promise<ReadonlyMap<string, string> | null> {
+  const chat = (await db.select().from(chats).where(eq(chats.id, chatId)).limit(1))[0];
+  if (!chat || !roleplayAgentsSeeWhispers(chat.mode, parseExtra(chat.metadata))) return null;
+  const characters = createCharactersStorage(db);
+  const identity = await resolveChatUserIdentity(characters, chat);
+  return new Map([
+    ...(await resolveCharacterNameMap(parseStringArray(chat.characterIds), (id) => characters.getById(id))),
+    [identity?.id ?? "user", identity?.name ?? "User"],
+  ]);
 }
 
 function parsePresentCharacterIds(value: unknown): string[] {
@@ -268,9 +308,15 @@ function createDocumentStore(db: DB): CapabilityDocumentStore {
   };
 }
 
-function createSpatialSnapshotStore(db: DB): CapabilitySpatialSnapshotStore {
+type PersistencePermissionCheck = (permission: "chat-read" | "chat-write") => void;
+
+function createSpatialSnapshotStore(
+  db: DB,
+  assertPermission: PersistencePermissionCheck,
+): CapabilitySpatialSnapshotStore {
   const store: CapabilitySpatialSnapshotStore = {
     async getById(id, chatId) {
+      assertPermission("chat-read");
       const condition = chatId
         ? and(eq(spatialContextSnapshots.chatId, chatId), eq(spatialContextSnapshots.id, id))
         : eq(spatialContextSnapshots.id, id);
@@ -278,6 +324,7 @@ function createSpatialSnapshotStore(db: DB): CapabilitySpatialSnapshotStore {
       return rows[0] ? mapSnapshot(rows[0]) : null;
     },
     async getByAnchor(chatId, messageId, swipeIndex) {
+      assertPermission("chat-read");
       const rows = await db
         .select()
         .from(spatialContextSnapshots)
@@ -292,6 +339,7 @@ function createSpatialSnapshotStore(db: DB): CapabilitySpatialSnapshotStore {
       return rows[0] ? mapSnapshot(rows[0]) : null;
     },
     async getByCommand(chatId, commandId) {
+      assertPermission("chat-read");
       const rows = await db
         .select()
         .from(spatialContextSnapshots)
@@ -302,6 +350,7 @@ function createSpatialSnapshotStore(db: DB): CapabilitySpatialSnapshotStore {
       return rows[0] ? mapSnapshot(rows[0]) : null;
     },
     async listByAnchors(chatId, anchors) {
+      assertPermission("chat-read");
       if (anchors.length === 0) return [];
       const rows = await db
         .select()
@@ -322,10 +371,12 @@ function createSpatialSnapshotStore(db: DB): CapabilitySpatialSnapshotStore {
       return rows.map(mapSnapshot);
     },
     async listForChat(chatId) {
+      assertPermission("chat-read");
       const rows = await db.select().from(spatialContextSnapshots).where(eq(spatialContextSnapshots.chatId, chatId));
       return rows.map(mapSnapshot);
     },
     async hasMessageSnapshots(chatId) {
+      assertPermission("chat-read");
       const rows = await db
         .select({ id: spatialContextSnapshots.id })
         .from(spatialContextSnapshots)
@@ -334,6 +385,7 @@ function createSpatialSnapshotStore(db: DB): CapabilitySpatialSnapshotStore {
       return rows.length > 0;
     },
     async getLatest(chatId) {
+      assertPermission("chat-read");
       const rows = await db
         .select()
         .from(spatialContextSnapshots)
@@ -343,6 +395,7 @@ function createSpatialSnapshotStore(db: DB): CapabilitySpatialSnapshotStore {
       return rows[0] ? mapSnapshot(rows[0]) : null;
     },
     async getBootstrap(chatId) {
+      assertPermission("chat-read");
       const rows = await db
         .select()
         .from(spatialContextSnapshots)
@@ -352,10 +405,12 @@ function createSpatialSnapshotStore(db: DB): CapabilitySpatialSnapshotStore {
       return rows[0] ? mapSnapshot(rows[0]) : null;
     },
     async create(input) {
+      assertPermission("chat-write");
       await db.insert(spatialContextSnapshots).values(input);
       return mapSnapshot(input as typeof spatialContextSnapshots.$inferSelect);
     },
     async replaceBootstrap(input) {
+      assertPermission("chat-write");
       return db.transaction(async (tx) => {
         await tx
           .delete(spatialContextSnapshots)
@@ -365,6 +420,7 @@ function createSpatialSnapshotStore(db: DB): CapabilitySpatialSnapshotStore {
       });
     },
     async replaceAtAnchor(input) {
+      assertPermission("chat-write");
       return db.transaction(async (tx) => {
         await tx
           .delete(spatialContextSnapshots)
@@ -383,24 +439,33 @@ function createSpatialSnapshotStore(db: DB): CapabilitySpatialSnapshotStore {
   return store;
 }
 
-function createPersistenceSession(db: DB): CapabilityPersistenceSession {
+function createPersistenceSession(db: DB, assertPermission: PersistencePermissionCheck): CapabilityPersistenceSession {
   return {
     async listChats() {
+      assertPermission("chat-read");
       return (await db.select().from(chats).orderBy(desc(chats.updatedAt))).map(mapChat);
     },
     async getChat(chatId) {
+      assertPermission("chat-read");
       const rows = await db.select().from(chats).where(eq(chats.id, chatId)).limit(1);
       return rows[0] ? mapChat(rows[0]) : null;
     },
     async listMessages(chatId) {
+      assertPermission("chat-read");
       const rows = await db
         .select()
         .from(messages)
         .where(eq(messages.chatId, chatId))
         .orderBy(messages.createdAt, messages.id);
-      return rows.map(mapMessage);
+      // A failed name lookup costs the agent view, never the messages.
+      const names = await agentWhisperNames(db, chatId).catch((err) => {
+        logger.warn(err, "Agent whisper names unavailable for chat %s; listing messages without agentContent", chatId);
+        return null;
+      });
+      return rows.map((row) => mapMessage(row, names));
     },
     async getGameState(chatId) {
+      assertPermission("chat-read");
       const rows = await db
         .select()
         .from(gameStateSnapshots)
@@ -410,6 +475,7 @@ function createPersistenceSession(db: DB): CapabilityPersistenceSession {
       return rows[0] ? mapGameState(rows[0]) : null;
     },
     async appendRoleplayEvent(input: CapabilityRoleplayEventInput): Promise<CapabilityRoleplayEventRecord | null> {
+      assertPermission("chat-write");
       const scopedOwner = engineEventOwner(input.chatId);
       const text = input.text.trim().slice(0, MAX_ROLEPLAY_EVENT_TEXT_CHARS);
       if (!text || input.idempotencyKey.length === 0) return null;
@@ -447,6 +513,7 @@ function createPersistenceSession(db: DB): CapabilityPersistenceSession {
       return requestedIds.filter((entryId) => existingIds.has(entryId));
     },
     async createMessageWithSwipe(input: CapabilityCreateMessageWithSwipeInput) {
+      assertPermission("chat-write");
       // `imported:` is RESERVED for synthetic experience-state anchors (#5405), and this is the
       // only message writer that takes a caller-supplied id — every other path builds one with
       // newId() (nanoid, whose alphabet has no colon). The reservation is load-bearing: the
@@ -495,6 +562,7 @@ function createPersistenceSession(db: DB): CapabilityPersistenceSession {
       });
     },
     async markGameStateSnapshotCommitted(chatId, snapshotId) {
+      assertPermission("chat-write");
       await db
         .update(gameStateSnapshots)
         .set({ committed: 1 })
@@ -505,6 +573,7 @@ function createPersistenceSession(db: DB): CapabilityPersistenceSession {
     // a key written here keeps a stale ordinal. Safe only while the keys packages order against
     // are reachable solely through the chat metadata PATCH path.
     async updateChatActivity(input: CapabilityChatActivityUpdate) {
+      assertPermission("chat-write");
       await db.transaction(async (transaction) => {
         const rows = input.metadata
           ? await transaction
@@ -526,6 +595,7 @@ function createPersistenceSession(db: DB): CapabilityPersistenceSession {
       });
     },
     async updateChatMetadata(input: CapabilityChatMetadataUpdate) {
+      assertPermission("chat-write");
       await db.transaction(async (transaction) => {
         const rows = await transaction
           .select({ metadata: chats.metadata })
@@ -544,15 +614,25 @@ function createPersistenceSession(db: DB): CapabilityPersistenceSession {
       });
     },
     documents: createDocumentStore(db),
-    spatialSnapshots: createSpatialSnapshotStore(db),
+    spatialSnapshots: createSpatialSnapshotStore(db, assertPermission),
   };
 }
 
-export function createCapabilityPersistenceHost(db: DB): CapabilityPersistenceHost {
-  const session = createPersistenceSession(db);
+/** Omitted permissions are reserved for trusted Engine callers; package activation always passes its manifest. */
+export function createCapabilityPersistenceHost(db: DB, permissions?: readonly string[]): CapabilityPersistenceHost {
+  const granted = permissions ? new Set(permissions) : null;
+  const assertPermission: PersistencePermissionCheck = (permission) => {
+    if (granted && !granted.has(permission)) throw new Error(`Package persistence requires ${permission} permission.`);
+  };
+  const session = createPersistenceSession(db, assertPermission);
   return {
     ...session,
-    withChatLock: (chatId, operation) => withChatMetadataPatchQueue(chatId, operation),
-    transaction: (operation) => db.transaction((tx) => operation(createPersistenceSession(tx))),
+    withChatLock: (chatId, operation) => {
+      if (granted && !granted.has("chat-read") && !granted.has("chat-write")) {
+        return Promise.reject(new Error("Package chat locks require chat-read or chat-write permission."));
+      }
+      return withChatMetadataPatchQueue(chatId, operation);
+    },
+    transaction: (operation) => db.transaction((tx) => operation(createPersistenceSession(tx, assertPermission))),
   };
 }

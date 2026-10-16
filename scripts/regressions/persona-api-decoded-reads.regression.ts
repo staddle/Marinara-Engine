@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { eq } from "../../packages/server/src/db/file-query.js";
 import { cleanTrackerCardColorConfig } from "../../packages/client/src/lib/tracker-card-colors.js";
 
 const legacyTrackerColors = {
@@ -85,10 +86,22 @@ try {
   process.env.NODE_ENV = "test";
   process.env.MARINARA_LITE = "true";
 
-  const [{ buildApp }, { getDB }, { personas }] = await Promise.all([
+  const [
+    { buildApp },
+    { getDB },
+    { personas },
+    { createCharactersStorage },
+    { resolveChatUserIdentity },
+    { MariDbService },
+    { PROFESSOR_MARI_APP_DATA_ACTIONS },
+  ] = await Promise.all([
     import("../../packages/server/src/app.js"),
     import("../../packages/server/src/db/connection.js"),
     import("../../packages/server/src/db/schema/index.js"),
+    import("../../packages/server/src/services/storage/characters.storage.js"),
+    import("../../packages/server/src/services/chat-user-identity.js"),
+    import("../../packages/server/src/services/mari-db/mari-db.service.js"),
+    import("../../packages/server/src/services/professor-mari/workspace-agent.service.js"),
   ]);
 
   app = await buildApp();
@@ -110,7 +123,10 @@ try {
     assert.equal(typeof value.isActive, "boolean");
     assert.equal(Array.isArray(value.tags), true);
     assert.equal(Array.isArray(value.savedStatusOptions), true);
-    assert.equal(value.avatarCrop === null || (typeof value.avatarCrop === "object" && !Array.isArray(value.avatarCrop)), true);
+    assert.equal(
+      value.avatarCrop === null || (typeof value.avatarCrop === "object" && !Array.isArray(value.avatarCrop)),
+      true,
+    );
     assert.equal(
       value.personaStats == null || (typeof value.personaStats === "object" && !Array.isArray(value.personaStats)),
       true,
@@ -119,6 +135,10 @@ try {
       value.convoBehavior == null || (typeof value.convoBehavior === "object" && !Array.isArray(value.convoBehavior)),
       true,
     );
+    // Image-prompt override: always projected as a real boolean + string, even
+    // for rows written before the columns existed (#7053).
+    assert.equal(typeof value.imageAppearanceEnabled, "boolean");
+    assert.equal(typeof value.imageAppearance, "string");
     assert.equal(
       value.trackerCardColors !== null &&
         typeof value.trackerCardColors === "object" &&
@@ -194,11 +214,93 @@ try {
   const pageActive = (page.items as Array<Record<string, unknown>>).find((persona) => persona.id === activeId)!;
   assertDecodedPersona(pageActive, activeId);
 
+  // ── Back-compat: rows inserted WITHOUT the image-override columns (#7053) ──
+  // The fixtures above never set the image-override columns, so this models a
+  // persona row written before those columns existed. `normalizeRow` fills a
+  // missing key from the column's declared default, so such a row must READ as
+  // disabled + empty rather than throwing or surfacing undefined.
+  //
+  // Do not assert key absence on a `db.select()` result: the select path returns
+  // the normalized resident row, where the defaults have already been
+  // materialized. The absence is a property of the stored shard JSON, and the
+  // observable contract is the decoded value asserted below.
+  assert.equal(listedActive.imageAppearanceEnabled, false, "a legacy row must read as disabled, not throw");
+  assert.equal(listedActive.imageAppearance, "", "a legacy row must read as an empty override");
+  assert.equal(malformed.imageAppearanceEnabled, false);
+  assert.equal(malformed.imageAppearance, "");
+
   const detail = await requestJson("GET", `/api/characters/personas/${activeId}`);
   assertDecodedPersona(detail, activeId);
 
-  const activeEndpointPersona = await requestJson("GET", "/api/characters/personas/active");
-  assertDecodedPersona(activeEndpointPersona, activeId);
+  const charactersStorage = createCharactersStorage(db);
+  for (const mode of ["conversation", "roleplay", "game"]) {
+    assert.equal(
+      await resolveChatUserIdentity(charactersStorage, { mode, personaId: null }),
+      null,
+      `${mode} must remain anonymous despite a legacy active Persona`,
+    );
+    assert.equal(
+      await resolveChatUserIdentity(charactersStorage, { mode, personaId: "missing-persona" }),
+      null,
+      `${mode} must not replace a missing explicit Persona with a legacy active Persona`,
+    );
+    assert.equal((await resolveChatUserIdentity(charactersStorage, { mode, personaId: activeId }))?.id, activeId);
+    assert.equal((await resolveChatUserIdentity(charactersStorage, { mode, personaId: malformedId }))?.id, malformedId);
+  }
+
+  assert.equal(
+    await requestJson("GET", "/api/characters/personas/active"),
+    null,
+    "The compatibility endpoint must not expose a global selection",
+  );
+  const beforeActivation = await db.select().from(personas);
+  const activation = await app.inject({
+    method: "PUT",
+    url: `/api/characters/personas/${malformedId}/activate`,
+    payload: {},
+  });
+  assert.equal(activation.statusCode, 410);
+  assert.deepEqual(
+    await db.select().from(personas),
+    beforeActivation,
+    "Retired activation must not change saved flags, timestamps, or Persona content",
+  );
+  assertExactActivePersona(await requestJson("GET", `/api/characters/personas/${activeId}`));
+
+  const mari = new MariDbService(db);
+  for (const result of [
+    await mari.executeAction({ action: "persona.active" }),
+    await mari.executeCli({ argv: ["personas", "active"] }),
+  ]) {
+    assert.equal(result.ok, true);
+    assert.equal(result.output, null, "Legacy Mari active-persona reads must remain compatible and inert");
+  }
+  assert.equal((PROFESSOR_MARI_APP_DATA_ACTIONS as readonly string[]).includes("persona.active"), false);
+
+  const chat = await requestJson("POST", "/api/chats", {
+    name: "Explicit identity",
+    mode: "conversation",
+    personaId: activeId,
+  });
+  const sent = await requestJson("POST", `/api/chats/${chat.id}/messages`, { role: "user", content: "Saved identity" });
+  const sentExtra = typeof sent.extra === "string" ? JSON.parse(sent.extra) : sent.extra;
+  assert.equal(sentExtra.personaSnapshot.personaId, activeId);
+  await requestJson("PATCH", `/api/chats/${chat.id}`, { personaId: null });
+  const savedMessages = (await requestJson("GET", `/api/chats/${chat.id}/messages`)) as unknown as Array<
+    Record<string, unknown>
+  >;
+  const saved = savedMessages.find((message) => message.id === sent.id)!;
+  assert.deepEqual(
+    typeof saved.extra === "string" ? JSON.parse(saved.extra) : saved.extra,
+    sentExtra,
+    "Clearing a chat identity must preserve previously captured user identity snapshots",
+  );
+  const anonymous = await requestJson("POST", `/api/chats/${chat.id}/messages`, {
+    role: "user",
+    content: "Anonymous now",
+  });
+  const anonymousExtra = typeof anonymous.extra === "string" ? JSON.parse(anonymous.extra) : anonymous.extra;
+  assert.equal(anonymousExtra?.personaSnapshot, undefined);
 
   const created = await requestJson("POST", "/api/characters/personas", {
     name: "Serialized Writer",
@@ -213,6 +315,65 @@ try {
   });
   assertDecodedPersona(updated, createdId);
   assert.deepEqual(updated.tags, ["updated"]);
+
+  // ── Round-trip: the persona image-prompt override must actually persist (#7053) ──
+  // This is the regression for the silent-data-loss bug: the editor sent both
+  // keys but the persona column allowlist dropped them, so the override
+  // vanished on save. Proven here through the real API + a fresh read.
+  const overrideText = "1girl, silver hair, green eyes, oversized hoodie";
+  const savedOverride = await requestJson("PATCH", `/api/characters/personas/${createdId}`, {
+    imageAppearanceEnabled: true,
+    imageAppearance: overrideText,
+  });
+  assertDecodedPersona(savedOverride, createdId);
+  assert.equal(savedOverride.imageAppearanceEnabled, true);
+  assert.equal(savedOverride.imageAppearance, overrideText);
+
+  const rereadOverride = await requestJson("GET", `/api/characters/personas/${createdId}`);
+  assert.equal(rereadOverride.imageAppearanceEnabled, true, "override must survive a save -> reopen cycle");
+  assert.equal(rereadOverride.imageAppearance, overrideText);
+
+  // The stored column is the text convention this table already uses.
+  const [storedOverrideRow] = await db.select().from(personas).where(eq(personas.id, createdId));
+  assert.equal(storedOverrideRow?.imageAppearanceEnabled, "true");
+  assert.equal(storedOverrideRow?.imageAppearance, overrideText);
+
+  // Disabling must not erase the authored text (the user can toggle back on).
+  const disabledOverride = await requestJson("PATCH", `/api/characters/personas/${createdId}`, {
+    imageAppearanceEnabled: false,
+  });
+  assert.equal(disabledOverride.imageAppearanceEnabled, false);
+  assert.equal(disabledOverride.imageAppearance, overrideText, "toggling off must keep the typed override");
+  await requestJson("PATCH", `/api/characters/personas/${createdId}`, { imageAppearanceEnabled: true });
+
+  // A create that sets both fields must persist them too (not just update).
+  const createdWithOverride = await requestJson("POST", "/api/characters/personas", {
+    name: "Override On Create",
+    imageAppearanceEnabled: true,
+    imageAppearance: "1boy, black coat",
+  });
+  assert.equal(createdWithOverride.imageAppearanceEnabled, true);
+  assert.equal(createdWithOverride.imageAppearance, "1boy, black coat");
+  assert.equal(
+    (await requestJson("GET", `/api/characters/personas/${createdWithOverride.id}`)).imageAppearance,
+    "1boy, black coat",
+  );
+
+  // resolveChatUserIdentity must keep the override SEPARATE from `appearance`.
+  // `appearance` stays the authored text because narrator/roleplay prompt text
+  // and `{{appearance}}` macros read it; the image path reads
+  // `imageAppearanceOverride` instead. Collapsing them here would leak the
+  // image-optimized tags into roleplay lore (#7053).
+  const identityWithOverride = await resolveChatUserIdentity(charactersStorage, {
+    mode: "conversation",
+    personaId: createdWithOverride.id as string,
+  });
+  assert.equal(identityWithOverride?.imageAppearanceOverride, "1boy, black coat");
+  assert.notEqual(
+    identityWithOverride?.appearance,
+    "1boy, black coat",
+    "the image override must not replace the authored appearance on the identity",
+  );
 
   const painted = await requestJson("PATCH", `/api/characters/personas/${createdId}/tracker-card-colors`, {
     paint: { mode: "custom", nameColor: "#c00" },

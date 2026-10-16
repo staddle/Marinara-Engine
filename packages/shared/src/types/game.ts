@@ -1,10 +1,23 @@
+import type { CombatAttackTraits } from "../features/combat-conditions.js";
+import type { CombatAiHints, CombatController, CombatTactics } from "../features/combat-ai.js";
 // ──────────────────────────────────────────────
 // Game Mode Types
 // ──────────────────────────────────────────────
 import type { GenerationParameters } from "./prompt.js";
-import type { CombatItemEffect, CombatMechanic, CombatDialogueCue } from "./combat-encounter.js";
+import type {
+  CombatItemEffect,
+  CombatMechanic,
+  CombatDialogueCue,
+  CombatStyleNotes,
+  RulesetEncounterBlueprint,
+} from "./combat-encounter.js";
 import type { SpotifySourceType } from "./spotify.js";
 import type { SpatialMapDraftSize, SpatialMapGroundingMode } from "./spatial-context.js";
+import type {
+  TacticalBattlefieldBrief,
+  TacticalBattlefieldSetup,
+  TacticalMovementMode,
+} from "../features/tactical-combat/types.js";
 
 /** The four main states a game can be in during a session. */
 export type GameActiveState = "exploration" | "dialogue" | "combat" | "travel_rest";
@@ -21,6 +34,23 @@ export type GameCombatStyle = "classic" | "tactical";
 
 /** Status of a game session. */
 export type GameSessionStatus = "setup" | "active" | "concluded";
+
+/**
+ * Which Game Mode a game is played in, chosen when it is created and fixed for its lifetime.
+ * - `classic`: the story-led Game Mode as it always was: narration, the scene map, menu or grid
+ *   battles. No setting kit, no generated world, no overworld, towns or dungeon maps.
+ * - `overworld`: the Overworld RPG: a setting kit and a generated world walked on an overworld, with
+ *   its towns, sites and dungeon maps.
+ */
+export type GameStyle = "classic" | "overworld";
+
+/** A game's style. A game made before the choice existed has none stored: it is Overworld when it
+ *  has a world and Classic when it has none, so every older game plays exactly as it did. */
+export function gameStyleFromMetadata(metadata: Record<string, unknown> | null | undefined): GameStyle {
+  const stored = metadata?.gameStyle;
+  if (stored === "classic" || stored === "overworld") return stored;
+  return metadata?.gameWorld != null ? "overworld" : "classic";
+}
 
 /** Which system owns the campaign-scale map when a new game begins. */
 export type GameWorldMapMode = "standard" | "hierarchical";
@@ -137,6 +167,9 @@ export interface GameCharacterCard {
     hp: { value: number; max: number };
     pools?: import("./character.js").RPGStatPool[];
   };
+  /** This game's copy of the character's sheet for the pinned ruleset (`chat.metadata.gameRuleset`).
+   *  Edited in the game, never written back to the library card or persona. */
+  rulesetSheet?: import("../schemas/ruleset.schema.js").RulesetSheetEnvelope;
 }
 
 // ── NPCs ──
@@ -147,8 +180,9 @@ export interface GameNpc {
   name: string;
   emoji: string;
   description: string;
-  /** Origin of the description. "model", "library", and "user" descriptions are canonical profile text. */
-  descriptionSource?: "model" | "library" | "narration" | "user";
+  /** Origin of the description. "model", "library", "user" and "world" descriptions are canonical profile
+   *  text; "world" is a person the game's world drew (worldgen W2), described by their sheet. */
+  descriptionSource?: "model" | "library" | "narration" | "user" | "world";
   /** Optional presentation hint used for systems like NPC voice matching. */
   gender?: string | null;
   /** Optional pronoun hint used for systems like NPC voice matching. */
@@ -160,6 +194,10 @@ export interface GameNpc {
   notes: string[];
   /** Optional avatar URL (generated or uploaded) */
   avatarUrl?: string | null;
+  /** The world's id for this person, when the game's world drew them (worldgen W2). */
+  worldId?: string;
+  /** What they do, for a person the world drew. */
+  role?: string;
 }
 
 // ── Sessions ──
@@ -202,8 +240,23 @@ export interface GameSetupConfig {
   gmMode: GameGmMode;
   /** Content rating: sfw or nsfw */
   rating: "sfw" | "nsfw";
+  /** Classic Game Mode or the Overworld RPG (see `GameStyle`), stored as `chat.metadata.gameStyle`.
+   *  Absent in setups made before the choice: read as Overworld with a world, Classic without. */
+  gameStyle?: GameStyle;
+  /** The Game Master's intro message (Capability API 1.339), stored as `chat.metadata.gameIntro`: defined
+   *  (the first message, exactly) or guided, or `{ mode: "none" }`. Absent is the Experience's own. An
+   *  Experience's locked intro wins over it. */
+  gameIntro?: import("../features/world/game-intro.js").GameIntroChoice;
   /** Combat presentation preference (classic menu battles vs tactical grid battles). Defaults to "classic". */
   combatStyle?: GameCombatStyle;
+  /** Versioned server-owned combat with interruption windows; absent preserves legacy battles. */
+  combatDirector?: boolean;
+  gmBossControl?: boolean;
+  /** Optional tactical battlefield preferences used for newly-created encounters. */
+  tacticalBattlefield?: TacticalBattlefieldSetup;
+  /** Who acts when in a new tactical fight (combat C6c): one unit at a time in a rolled order, or the
+   *  party's phase then the enemies'. Absent means by side, as every game before it was. */
+  tacticalTurnOrder?: "side" | "initiative";
   /** Optional user prompt used to create the initial hierarchical world map draft. */
   spatialMapInstructions?: string;
   /** Campaign-scale map authority selected during New Game. Older saves default to "standard". */
@@ -227,6 +280,22 @@ export interface GameSetupConfig {
    *  own surface over the shared narration. Chosen at creation and fixed for the game's lifetime, since an
    *  experience owns the whole run. Omitted = the built-in Game mode, unchanged. */
   gameExperienceId?: string;
+  /** The Game Mode ruleset chosen for a NEW game. The server pins it as `chat.metadata.gameRuleset`
+   *  from its own registry, so only `id` is trusted. Absent means Marinara's own rules. */
+  ruleset?: import("../schemas/ruleset.schema.js").RulesetRef;
+  /** The setting kit chosen or written for a NEW game (worldgen W0): the world's own words and the
+   *  kinds of change it allows. The server stores it as `chat.metadata.gameWorldKit`. Absent means
+   *  no kit: the Game Master works from genre, setting and tone alone, as before. */
+  worldKit?: import("../schemas/world-kit.schema.js").WorldKit;
+  /** The generated world for a NEW game (worldgen W1): its seed, generator version, grounding and
+   *  brief, stored as `chat.metadata.gameWorld`. Needs `worldKit`; absent means no world. */
+  world?: import("../features/world/game-world.js").GameWorldInput;
+  /** A world another generator made, as it was made (W11): sent to create a game from it and in a setup
+   *  file, never kept in a game's metadata. */
+  worldSnapshot?: import("../features/world/snapshot.js").WorldSnapshot;
+  /** The world's story script (worldgen W10), checked against the world and stored as
+   *  `chat.metadata.gameStory`. Needs `world`. */
+  story?: import("../features/world/story.js").StoryScript;
   /** Whatever the experience's own setup collected, stored verbatim and never interpreted by the host, so
    *  it can always recover the options the game was created with. */
   experienceConfig?: Record<string, unknown>;
@@ -274,6 +343,8 @@ export interface GameSetupConfig {
   imageStyleProfileId?: string | null;
   /** Lorebook IDs to activate for this game */
   activeLorebookIds?: string[];
+  /** Entries explicitly selected for world generation, additive to ordinary lore. */
+  activeLorebookEntryIds?: string[];
   /** Enable custom HUD widgets (model designs them at game start and updates during play) */
   enableCustomWidgets?: boolean;
   /** User-defined starting HUD widgets. When present, these replace model-designed setup widgets. */
@@ -334,6 +405,10 @@ export interface GameInitialSetupConnectionSnapshot {
 
 /** Creation-time display names for local resources referenced by the setup. */
 export interface GameInitialSetupLabels {
+  experienceName?: string;
+  /** Display name of the chosen ruleset, so a shared setup can name one the recipient lacks. */
+  rulesetName?: string;
+  experienceSeedKey?: string;
   characterNames?: Record<string, string>;
   lorebookNames?: Record<string, string>;
   promptPresetNames?: Record<string, string>;
@@ -371,6 +446,8 @@ export interface DiceRollResult {
   modifier: number;
   /** Final total */
   total: number;
+  /** Optional difficulty class declared before the roll. */
+  dc?: number;
 }
 
 /** Result of a skill check resolution. */
@@ -395,12 +472,220 @@ export interface SkillCheckResult {
    * non-d20 systems (pool systems like V20) reach the dice card intact.
    */
   dice?: string;
+  /**
+   * The party member the check was rolled for, in a game with a pinned ruleset. Absent means the
+   * player, and always absent under the Engine's own rules, which only ever check the player.
+   */
+  who?: string;
+  /**
+   * Per-die target a success pool counted with, so a card can mark the dice that counted. Set by
+   * both pool paths: the legacy `resolution="successes"` tag, which knows the threshold it was
+   * given, and a `dice-pool` ruleset, which knows the one its rules chose. Absent on every summed
+   * check, where there is no such thing.
+   */
+  threshold?: number;
+  /**
+   * What a ruleset check actually applied of the tag's `with=` and `bonus=`: the ability's label
+   * when the skill was rolled with another ability than its own, and the situational dice after the
+   * ruleset's clamp. Absent when nothing was applied, so a record never claims an ask that the roll
+   * ignored. Only a ruleset game sets them.
+   */
+  withAbility?: string;
+  bonusDice?: number;
+  /**
+   * What the roller's wound track took off this check, when the ruleset names one with
+   * `resolution.penaltyFrom` and the character is marked. Always negative, and absent when there
+   * was no penalty, so a record never claims a wound nobody has. A summed check has it folded into
+   * `modifier` as well, because it IS a modifier there; a pool check spent it on dice instead, so
+   * this is the only place the pool's missing dice are said.
+   */
+  penalty?: number;
+  /**
+   * What this check actually paid out of a pool, when the Game Master wrote `spend=` and the
+   * ruleset offers such a purchase. Absent when nothing was bought, and never what the tag asked
+   * for: a spend the pool could not cover buys nothing and costs nothing, so a record only ever
+   * says what really left the sheet.
+   */
+  spent?: { pool: string; amount: number };
+  /**
+   * Successes a purchase added that nobody rolled. They are inside `total` already; this is what
+   * lets a card show which part of the result came out of the dice. Only a ruleset game sets it.
+   */
+  autoSuccesses?: number;
+  /**
+   * The catalog entry this check actually applied, by the label the ruleset gives it. Absent when
+   * the Game Master named none, when the character does not have it, or when the pool could not
+   * cover it, so a record never claims a charm that did nothing.
+   */
+  used?: string;
+  /** How many dice a bought re-throw replaced. Absent when none were. */
+  rerolled?: number;
+  /**
+   * The faces a pool check exploded and doubled from, set only when the check moved them off the
+   * ruleset's own default (a Game Master's `explode=` or `double=`, or an entry that grants it).
+   */
+  explodeFrom?: number;
+  doubleFrom?: number;
+  /**
+   * The roll did not botch outright, but something went wrong on the side of it: a pool ruleset whose
+   * `botch.rule` is `halfOrMore` saw low faces on half its dice or more while a die still succeeded.
+   * `success` is still the outcome; this is what happens beside it. Absent everywhere else.
+   */
+  complication?: boolean;
+  /**
+   * What the sheet itself added to or took off the check through `resolution.adjust`, beside any
+   * wound penalty: dice on a pool, a flat number on a sum (where it is inside `modifier` too). Absent
+   * when nothing applied.
+   */
+  adjust?: number;
+  /** The standing re-throw the Game Master named with `reroll=` and the check applied, by its id. */
+  reroll?: string;
+  /**
+   * What the character's conditions and worn or carried items added to or took off the check, their
+   * dice rolled: dice on a pool, a flat number on a sum (where it is inside `modifier` too). Absent
+   * when nothing did.
+   */
+  effects?: number;
+  /**
+   * The conditions and items that changed this check, by name: its number, how it was thrown, or that
+   * it failed without a roll. Only a ruleset game sets it, and only what changed something.
+   */
+  from?: string[];
+  /** The save failed without a roll, because something named in `from` makes it fail. */
+  automatic?: boolean;
+  /**
+   * The label of the outcome band the check landed in, where the ruleset declares bands (Capability
+   * API 1.135): "Barely", "Hard success", "Success with style". `success` and the criticals are the
+   * band's own. Absent on a ruleset without bands.
+   */
+  outcome?: string;
+  /**
+   * What each face of the die is worth, lowest face first, where the ruleset's dice are not their own
+   * numbers (1.136): Fate's `[-1, 0, 1]`. `rolls` are still the faces thrown, 1 to the die's sides.
+   */
+  faces?: number[];
+  /** The face a single die showed, where the ruleset marks it as rolled unmodified (1.136). */
+  unmodified?: number;
+  /** Which way a pool's dice counted against `threshold`, where a stance made them count below or
+   *  above it rather than at or above it (1.137). */
+  compare?: "below" | "above";
+  /** How many dice showed exactly the target, and what the ruleset calls that, where it names the
+   *  face (1.137): Lasers & Feelings' LASER FEELINGS. */
+  exact?: number;
+  exactLabel?: string;
+  /** How many of the highest dice were kept, on a keep-the-highest check (1.138). The total is
+   *  theirs; `zeroDice` says the character had no dice and the lower of two was kept. */
+  highest?: number;
+  zeroDice?: boolean;
+  /** How many of `rolls`, at the end, were dark dice, what the ruleset calls them, and whether one
+   *  strictly beat every light die (1.138): Trophy Dark's Ruin. */
+  dark?: number;
+  darkLabel?: string;
+  darkHighest?: boolean;
+  /** Only light dice decided the outcome (1.149); absent means all dice. */
+  darkOutcome?: "light";
+  /** A roll read against the sheet's number (1.139): `at-most` succeeds at or under `dc`, which is
+   *  then the target; `at-least` at or over it. `tens` is the bonus (+) or penalty (-) tens dice
+   *  thrown, each candidate d100 one of `rolls`. */
+  against?: "at-most" | "at-least";
+  tens?: number;
+  /** Independent setback dice and own upgrades actually applied (1.150). */
+  setback?: number;
+  upgradeOwn?: number;
+  /** Narrative dice (1.141): net symbols, die ids beside their 1-based rolls, and the face symbols
+   *  with the ruleset's labels, so a saved check needs no installed ruleset to display. */
+  symbols?: Record<string, number>;
+  thrown?: string[];
+  symbolLabels?: Record<string, string>;
+  symbolFaces?: string[][];
+}
+
+// ── The sighted dice pool (opt-in, last) ──
+
+/** The seven sizes the engine pre-throws. Anything else is an overflow, not a pool miss. */
+export type GameDicePoolSize = "d4" | "d6" | "d8" | "d10" | "d12" | "d20" | "d100";
+
+/**
+ * One chat's dice pool as it stood for one turn.
+ *
+ * Stored per (chat, message, swipe) in `game_dice_pools` rather than in the game-state
+ * snapshot or in chat metadata, for reasons that are load-bearing: the snapshot is only
+ * written when a tracker agent runs, so with agents off no row exists at all; its writer
+ * is a delete-then-insert from an explicit field list, so any column a caller does not
+ * name is silently lost; and metadata is client-writable and not per-swipe, so a swipe
+ * would spend dice and never give them back.
+ */
+export interface GameDicePool {
+  /** On-disk revision. A row of another revision is refused, never half-read. */
+  v: 1;
+  /** Accepted turns this pool has lived through. Advisory; the aging clock is per size. */
+  turn: number;
+  /** Each size's queue, head first. Consumption is from the head, refill at the tail. */
+  values: Record<GameDicePoolSize, number[]>;
+  /** Accepted turns each size has gone unspent, which is what bounds the frozen head. */
+  idle: Record<GameDicePoolSize, number>;
+}
+
+/** One value the engine actually spent, in the order it spent it. */
+export interface GameDicePoolConsumption {
+  size: GameDicePoolSize;
+  /** Zero-based index into the size's queue. The slot NAME in a tag is one-based. */
+  slot: number;
+  /** The value spent. The engine's record, not the model's claim. */
+  value: number;
+  /** Which tag of the turn spent it, in reading order, so the ledger reads as a sequence. */
+  tagIndex: number;
+}
+
+/**
+ * What the model wrote in `pool=` or `rolls=` disagreeing with what the engine spent.
+ *
+ * Recorded and never obeyed. The slot name is a checksum, not an instruction: the engine
+ * spends the next unconsumed value of that size in reading order whatever the tag says,
+ * so a mismatch changes the log and the notice and changes no number at all.
+ */
+export interface GameDicePoolMismatch {
+  /**
+   * `slot`: a slot other than the one spent, which covers a skipped slot and a reordered
+   * one alike. `value`: a number other than the one spent. `reuse`: a slot this turn had
+   * already spent.
+   *
+   * There is deliberately no attribute-order kind. The design re-grades "declaration
+   * before value" as a weak signal with no defensive worth — for a thinking model the DC
+   * is chosen in reasoning tokens long before any attribute is emitted — and the engine's
+   * own record writes `pool=` last, so a positional rule would flag the engine's own
+   * shape on every turn. A signal that fires on the correct answer is noise.
+   */
+  kind: "slot" | "value" | "reuse";
+  size: GameDicePoolSize;
+  /** What the engine spent, zero-based. */
+  slot: number;
+  /** What the model claimed, verbatim and truncated, for the log line. */
+  wrote?: string;
+}
+
+/** The head values the prompt shows, at the configured window. One entry per size. */
+export type GameDicePoolView = Array<{ size: GameDicePoolSize; values: number[] }>;
+
+/** A parsed `pool="d6:1|2|3"` value: the size, and its slots as zero-based indices. */
+export interface GameDicePoolSlotName {
+  size: GameDicePoolSize;
+  slots: number[];
 }
 
 // ── Combat ──
 
 /** A combatant (player or enemy) in the battle system. */
-export interface Combatant {
+/** The ruleset terms (`creature`, `tier`, `proposed`) ride along for a fight the game's ruleset
+ *  resolves; the numbers below stay the Engine's. */
+export interface Combatant extends CombatAttackTraits, RulesetEncounterBlueprint {
+  boss?: import("../features/combat-director.js").CombatBoss;
+  spellSlots?: Record<string, number>;
+  combatRound?: number;
+  tactics?: CombatTactics;
+  aiHints?: CombatAiHints;
+  controller?: CombatController;
+  skillCooldowns?: Record<string, number>;
   id: string;
   name: string;
   hp: number;
@@ -424,6 +709,8 @@ export interface Combatant {
   elementAura?: { element: string; gauge: number; sourceId: string } | null;
   /** Tactical-combat class hint (fighter/knight/rogue/archer/mage/healer). Classic combat ignores this. */
   combatClass?: string;
+  /** Tactical traversal rule. Classic combat ignores this; missing means walk. */
+  movementMode?: TacticalMovementMode;
 }
 
 export interface CombatStatusEffect {
@@ -433,7 +720,15 @@ export interface CombatStatusEffect {
   turnsLeft: number;
 }
 
-export interface CombatSkill {
+export interface CombatSkill extends CombatAttackTraits {
+  areaRadius?: number;
+  friendlyFire?: boolean;
+  targetScope?: "single" | "all-enemies";
+  spell?: boolean;
+  reaction?: "counterspell" | "guard";
+  range?: number;
+  slotLevel?: number;
+  legendaryCost?: number;
   id: string;
   name: string;
   /** "attack" | "heal" | "buff" | "debuff" */
@@ -457,6 +752,8 @@ export interface ElementInfo {
 
 /** A single attack result in combat. */
 export interface CombatAttackResult {
+  /** What the log says instead of the usual line, as an item whose gate its user failed (#6909). */
+  note?: string;
   attackerId: string;
   defenderId: string;
   attackRoll: number;
@@ -510,9 +807,9 @@ export type CombatPlayerAction =
 /**
  * Snapshot of an in-progress combat encounter, persisted to chat metadata so a
  * page refresh during a fight restores the live party/enemy state instead of
- * dropping back into prose narration. Internal GameCombatUI state (round
- * number, action queue, animation phase) is intentionally NOT persisted —
- * those resume from the start of the round on restore.
+ * dropping back into prose narration. Combatants carry the next Classic round,
+ * profiles, controllers and cooldowns. Pending manual orders and cosmetic
+ * animation are not persisted; restore presents the last accepted result.
  */
 export interface GameCombatStateSnapshot {
   party: Combatant[];
@@ -525,6 +822,15 @@ export interface GameCombatStateSnapshot {
   /** Encounter tier for context-bound combat music (#5161). Optional so
    *  snapshots from older clients stay valid. */
   musicTier?: string | null;
+  /** Combat UI style pinned for the active encounter so settings changes cannot remount a different engine. */
+  combatStyle?: GameCombatStyle | null;
+  /** Tactical scene data needed to resume exact generated/fallback battlefield setup after refresh. */
+  sceneEnvironment?: string | null;
+  sceneEnvironmentType?: string | null;
+  formation?: string | null;
+  battlefield?: TacticalBattlefieldBrief | null;
+  battlefieldError?: string | null;
+  styleNotes?: CombatStyleNotes | null;
 }
 
 /** Post-combat summary handed to the GM for narration. */
@@ -536,6 +842,9 @@ export interface CombatSummary {
     hp: number;
     maxHp: number;
     ko: boolean;
+    mp?: number;
+    maxMp?: number;
+    spellSlots?: Record<string, number>;
     statusEffects: string[];
   }>;
   enemies: Array<{
@@ -544,7 +853,13 @@ export interface CombatSummary {
     hp: number;
     maxHp: number;
   }>;
-  loot?: Array<{ name: string; quantity?: number }>;
+  /** Resolved tactical terrain retained after the live combat snapshot is cleared. */
+  battlefieldSummary?: string;
+  /** What the win dropped into the party's bags, and how many of each nobody could carry. */
+  loot?: Array<{ name: string; quantity?: number; left?: number }>;
+  /** What a ruleset fight really ended on, in the ruleset's own numbers. Present only for a fight
+   *  the ruleset resolved, and the recap is written from it instead of the shares above. */
+  ruleset?: import("../features/ruleset-combat/types.js").RulesetEncounterSummary;
 }
 
 // ── Cinematic Direction ──
@@ -587,14 +902,7 @@ export interface DirectionCommand {
 
 /** Available widget types the model can use for custom HUD elements. */
 export type HudWidgetType =
-  | "progress_bar"
-  | "gauge"
-  | "relationship_meter"
-  | "counter"
-  | "stat_block"
-  | "list"
-  | "inventory_grid"
-  | "timer";
+  "progress_bar" | "gauge" | "relationship_meter" | "counter" | "stat_block" | "list" | "inventory_grid" | "timer";
 
 /** Milestone marker on a progress/relationship bar. */
 export interface WidgetMilestone {
@@ -720,13 +1028,7 @@ export interface PartyDialogueLine {
 // ── Checkpoints ──
 
 export type CheckpointTrigger =
-  | "manual"
-  | "session_start"
-  | "session_end"
-  | "combat_start"
-  | "combat_end"
-  | "location_change"
-  | "auto_interval";
+  "manual" | "session_start" | "session_end" | "combat_start" | "combat_end" | "location_change" | "auto_interval";
 
 export interface GameCheckpoint {
   id: string;
@@ -761,20 +1063,10 @@ export interface GeneratedSceneVideo {
 }
 
 export type GameStoryboardStatus =
-  | "planning"
-  | "rendering_images"
-  | "rendering_videos"
-  | "complete"
-  | "partial"
-  | "failed";
+  "planning" | "rendering_images" | "rendering_videos" | "complete" | "partial" | "failed";
 
 export type GameStoryboardKeyframeStatus =
-  | "planned"
-  | "rendering_image"
-  | "image_complete"
-  | "rendering_video"
-  | "complete"
-  | "failed";
+  "planned" | "rendering_image" | "image_complete" | "rendering_video" | "complete" | "failed";
 
 export type StoryboardAnimationSuitability = "suitable" | "simplify" | "subtle" | "regenerate";
 

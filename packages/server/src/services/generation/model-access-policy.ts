@@ -1,4 +1,9 @@
-import { findKnownModel, shouldSuppressUnknownModelParameters, type APIProvider } from "@marinara-engine/shared";
+import {
+  findKnownModel,
+  shouldSuppressUnknownModelParameters,
+  type APIProvider,
+  type ContextFitSummary,
+} from "@marinara-engine/shared";
 import {
   fitMessagesToContext,
   type ChatMessage,
@@ -61,6 +66,7 @@ export function fitMessagesToModelAccessContext(args: {
   policy: ModelAccessPolicy;
   maxTokens?: number;
   tools?: ChatOptions["tools"];
+  responseFormat?: ChatOptions["responseFormat"];
 }): ContextFitResult {
   return fitMessagesToContext(
     args.messages,
@@ -68,10 +74,29 @@ export function fitMessagesToModelAccessContext(args: {
       maxContext: args.policy.effectiveMaxContext,
       maxTokens: args.maxTokens,
       tools: args.tools,
+      responseFormat: args.responseFormat,
       suppressModelParameters: false,
     },
     args.policy.connectionMaxContext,
   );
+}
+
+function countHistoryMessages(messages: ChatMessage[]): number {
+  return messages.filter((message) => message.contextKind === "history").length;
+}
+
+/** Summarize what a context fit cut, for `generationInfo.contextFit` (slice 60, R1). */
+function summarizeContextFit(originalMessages: ChatMessage[], fit: ContextFitResult): ContextFitSummary {
+  const replyBudgetFrom = fit.requestedMaxTokens ?? fit.maxTokens ?? 0;
+  return {
+    trimmed: fit.trimmed,
+    droppedHistory: Math.max(0, countHistoryMessages(originalMessages) - countHistoryMessages(fit.messages)),
+    tokensBefore: fit.estimatedTokensBefore,
+    tokensAfter: fit.estimatedTokensAfter,
+    inputBudget: fit.inputBudget ?? 0,
+    replyBudgetFrom,
+    replyBudgetTo: fit.maxTokens ?? replyBudgetFrom,
+  };
 }
 
 export function fitMessagesForModelAccess(args: {
@@ -79,10 +104,12 @@ export function fitMessagesForModelAccess(args: {
   policy: ModelAccessPolicy;
   maxTokens?: number;
   tools?: ChatOptions["tools"];
-}): { messages: ChatMessage[]; maxTokensForSend?: number } {
+  responseFormat?: ChatOptions["responseFormat"];
+}): { messages: ChatMessage[]; maxTokensForSend?: number; contextFit: ContextFitSummary } {
   const fit = fitMessagesToModelAccessContext(args);
   return {
     messages: fit.messages,
     maxTokensForSend: fit.maxTokens ?? args.maxTokens,
+    contextFit: summarizeContextFit(args.messages, fit),
   };
 }

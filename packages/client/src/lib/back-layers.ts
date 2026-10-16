@@ -6,6 +6,8 @@
 // the last entry.
 // ──────────────────────────────────────────────
 import { isMobileShellViewport, useUIStore } from "../stores/ui.store";
+import { TRACKER_PANEL_BUBBLE_ID, useFloatingWindowStore } from "../stores/floating-window.store";
+import { closeTrackerPanel } from "./tracker-panel-surface";
 import { useDialogStore } from "../stores/dialog.store";
 import { dismissActiveDialog, showConfirmDialog } from "./app-dialogs";
 import { translate } from "../localization/i18n";
@@ -65,8 +67,12 @@ export function getStoreBackLayers(): BackLayer[] {
   if (isShellOverlayMode()) {
     if (ui.sidebarOpen) layers.push({ id: "sidebar", close: () => useUIStore.getState().setSidebarOpen(false) });
     if (ui.rightPanelOpen) layers.push({ id: "right-panel", close: () => useUIStore.getState().closeRightPanel() });
-    if (ui.trackerPanelOpen)
-      layers.push({ id: "tracker-panel", close: () => useUIStore.getState().setTrackerPanelOpen(false) });
+    // The chat's panel preference leaves a button on screen; only the open panel is a layer.
+    const trackerPanelShowing =
+      ui.trackerPanelEnabled &&
+      ui.trackerPanelOpen &&
+      useFloatingWindowStore.getState().open[TRACKER_PANEL_BUBBLE_ID] === true;
+    if (trackerPanelShowing) layers.push({ id: "tracker-panel", close: () => closeTrackerPanel() });
   }
 
   if (ui.hasAnyDetailOpen())

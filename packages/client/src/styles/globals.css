@@ -1,6 +1,8 @@
 @import "tailwindcss";
 @source "./capability-package-safelist.html";
 @import "./themes/sillytavern.css";
+@import "./themes/chat-widgets.css";
+@import "./themes/chat-widget-surfaces.css";
 
 /* World state & tracker widgets: equal flex sizing on mobile */
 @media (max-width: 767px) {
@@ -35,6 +37,8 @@
     2.  Dark Theme Variables .............. colors, palette, fonts
     3.  Light Theme Variables ............. light-mode overrides
     4.  Light Theme Component Overrides ... glass, grid, scrollbar tweaks
+    4a1. Professor Mari ................. @import ./mari.css (kept in place for the cascade)
+    4a2. Floating Windows & Drawers ..... .mari-window, .mari-drawer, --mari-window-*
     5.  Base Reset & Body ................. border reset, body defaults
     6.  Custom Cursors .................... Y2K SVG cursors
     7.  Scrollbars ........................ retro scrollbar styling
@@ -184,34 +188,34 @@
   --card-foreground: #d4d4d4;
   --popover: #141414d9;
   --popover-foreground: #d4d4d4;
-  --primary: #d4acfb;
+  --primary: #ec4b97;
   --primary-foreground: #0a0a0a;
   --secondary: #1a1a2e;
   --secondary-foreground: #e8d4ff;
   --marinara-conversation-gradient-from: #0a0a0e;
   --marinara-conversation-gradient-to: #1c2133;
   --muted: #1a1a2e;
-  --muted-foreground: #d4adfc;
+  --muted-foreground: #a1a1aa;
   --accent: #2a1a3e;
   --accent-foreground: #f0e8ff;
-  --destructive: var(--primary);
-  --destructive-foreground: var(--primary-foreground);
-  --border: #d4adfc33;
-  --input: #d4adfc33;
-  --ring: #d4acfb;
+  --destructive: #ff6b9d;
+  --destructive-foreground: #0a0a0a;
+  --border: color-mix(in srgb, var(--primary) 20%, transparent);
+  --input: var(--border);
+  --ring: var(--primary);
   --radius: 0.75rem;
-  --sidebar: #08061a;
+  --sidebar: var(--marinara-shell-surface, #121114);
   --sidebar-foreground: #e8d4ff;
-  --sidebar-border: #d4adfc22;
-  --sidebar-accent: #d4acfb1a;
-  --sidebar-accent-foreground: #d4acfb;
+  --sidebar-border: color-mix(in srgb, var(--primary) 13%, transparent);
+  --sidebar-accent: color-mix(in srgb, var(--primary) 10%, transparent);
+  --sidebar-accent-foreground: var(--primary);
   --glow-primary: color-mix(in srgb, var(--primary) 15%, transparent);
   --glow-accent: color-mix(in srgb, var(--primary) 12%, transparent);
 
   /* Theme hooks for shared chat, roleplay, and game chrome. */
   --marinara-topbar-surface: color-mix(in srgb, var(--card) 80%, transparent);
   --marinara-topbar-border: color-mix(in srgb, var(--border) 30%, transparent);
-  --marinara-shell-edge-border: color-mix(in srgb, var(--foreground) 14%, var(--background) 86%);
+  --marinara-shell-edge-border: color-mix(in srgb, var(--primary) 14%, var(--background) 86%);
   --marinara-music-player-shell-bg: var(--marinara-topbar-surface);
   --marinara-music-player-shell-border: var(--marinara-topbar-border);
   --marinara-music-player-text: #f7f3ef;
@@ -236,22 +240,11 @@
   --mari-logo-title-cyan: #22d3ee;
   --mari-logo-title-orange: #fb923c;
   --mari-logo-title-pink: #ec4899;
+  --marinara-mode-game-accent: #ec4b97;
   --marinara-app-accent-solid: var(--primary);
   --marinara-app-accent-static: var(--primary);
-  --marinara-app-accent-gradient: linear-gradient(
-    90deg,
-    color-mix(in srgb, var(--marinara-app-accent-solid) 72%, var(--background) 28%),
-    var(--marinara-app-accent-solid),
-    color-mix(in srgb, var(--marinara-app-accent-solid) 76%, var(--foreground) 24%),
-    var(--marinara-app-accent-solid)
-  );
-  --marinara-app-accent-static-gradient: linear-gradient(
-    90deg,
-    color-mix(in srgb, var(--marinara-app-accent-static) 72%, var(--background) 28%),
-    var(--marinara-app-accent-static),
-    color-mix(in srgb, var(--marinara-app-accent-static) 76%, var(--foreground) 24%),
-    var(--marinara-app-accent-static)
-  );
+  --marinara-app-accent-gradient: linear-gradient(90deg, #ec4b97, #f29744, #36cdde);
+  --marinara-app-accent-static-gradient: linear-gradient(90deg, #ec4b97, #f29744, #36cdde);
   --marinara-chat-chrome-accent: var(--marinara-app-accent-solid);
   --marinara-chat-chrome-accent-gradient: var(--marinara-app-accent-gradient);
   --marinara-chat-chrome-text: var(--card-foreground);
@@ -408,10 +401,10 @@
   --scrollbar-track: #1a1a2e40;
   --scrollbar-border: #0a0a0a66;
 
-  --marinara-custom-cursor-fill: #d4acfb;
+  --marinara-custom-cursor-fill: var(--primary);
   --marinara-custom-cursor-stroke: #050312;
-  --cursor-pink: url("data:image/svg+xml,%3Csvg width='24' height='24' viewBox='0 0 24 24' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M3 3L10 20L12 12L20 10L3 3Z' fill='%23D4ACFB' stroke='%23050312' stroke-width='1'/%3E%3C/svg%3E")
-    3 3;
+  /* Legacy theme hook; App supplies a cursor painted with the current accent. */
+  --cursor-pink: none;
   --marinara-custom-cursor: var(--cursor-pink), auto;
 
   --y2k-pink: var(--primary);
@@ -422,7 +415,7 @@
   --y2k-lavender: #e8d4ff;
   --y2k-yellow: #fff5a8;
 
-  --pastel-rose: #ffd1e3;
+  --pastel-rose: var(--marinara-app-accent-solid);
   --pastel-lilac: #e0b8ff;
   --pastel-sky: #c5e7ff;
   --pastel-mint: #c7f5e8;
@@ -458,26 +451,26 @@
   --card-foreground: #1a1025;
   --popover: #ffffffee;
   --popover-foreground: #1a1025;
-  --primary: #d4acfb;
+  --primary: #ec4b97;
   --primary-foreground: #0a0a0a;
   --secondary: #f0eaf7;
   --secondary-foreground: #3a2960;
   --marinara-conversation-gradient-from: #f2eff7;
   --marinara-conversation-gradient-to: #eae6f0;
   --muted: #f0eaf7;
-  --muted-foreground: #7a64a0;
+  --muted-foreground: #65656f;
   --accent: #ede4f7;
   --accent-foreground: #1a1025;
-  --destructive: var(--primary);
-  --destructive-foreground: var(--primary-foreground);
-  --border: #d4adfc44;
-  --input: #d4adfc44;
-  --ring: #d4acfb;
+  --destructive: #c44040;
+  --destructive-foreground: #ffffff;
+  --border: color-mix(in srgb, var(--primary) 27%, transparent);
+  --input: var(--border);
+  --ring: var(--primary);
   --sidebar: #f5f0fc;
   --sidebar-foreground: #3a2960;
-  --sidebar-border: #d4adfc33;
-  --sidebar-accent: #d4acfb18;
-  --sidebar-accent-foreground: #d4acfb;
+  --sidebar-border: color-mix(in srgb, var(--primary) 20%, transparent);
+  --sidebar-accent: color-mix(in srgb, var(--primary) 9%, transparent);
+  --sidebar-accent-foreground: var(--primary);
   --glow-primary: color-mix(in srgb, var(--primary) 12%, transparent);
   --glow-accent: color-mix(in srgb, var(--primary) 8%, transparent);
   --marinara-music-player-shell-bg: color-mix(in srgb, var(--card) 94%, var(--secondary) 6%);
@@ -620,7 +613,8 @@
   color: var(--marinara-chat-chrome-button-text-active);
 }
 
-[data-marinara-chat-chrome-accent-mode="gradient"] .marinara-chat-popover {
+/* Windows take these colours from --mari-window-* so custom themes can override them. */
+[data-marinara-chat-chrome-accent-mode="gradient"] .marinara-chat-popover:not(.mari-window) {
   border-color: var(--marinara-chat-chrome-panel-border);
   background: var(--marinara-chat-chrome-panel-bg);
 }
@@ -658,6 +652,565 @@
 
 .marinara-chat-popover.marinara-chat-toolbar-overflow-menu {
   border-radius: 0.5rem;
+}
+
+@import "./mari.css";
+
+/* ─────────────────────────────────────────────
+   4a2. FLOATING WINDOWS AND DRAWERS
+   Every chat window (Chat Settings, the Trackers window, popped-out drawers)
+   renders through <FloatingWindow>, and every collapsible section through
+   <Drawer>, so custom themes can restyle them all at once.
+
+   Classes:     .mari-window, .mari-window__header, .mari-window__title,
+                .mari-window__controls, .mari-window__control, .mari-window__body,
+                .mari-window__resize-handle, .mari-window__resize-grip (the
+                corner's resize cue, shown on hover or focus); .mari-drawer, .mari-drawer__header,
+                .mari-drawer__icon, .mari-drawer__title, .mari-drawer__count,
+                .mari-drawer__summary, .mari-drawer__help, .mari-drawer__actions,
+                .mari-drawer__popout, .mari-drawer__arrow, .mari-drawer__body;
+                .mari-drawer-ghost (the preview while a drawer is dragged out);
+                .mari-window-bubble (a minimized window's button, and every
+                phone bubble: [data-presentation="sheet"]), .mari-window-bubble__banner
+                (a bubble's live summary, World State's date and time, on
+                [data-banner="true"]) and
+                .mari-window-snap-guide (the line shown while a bubble snaps)
+   Attributes:  [data-window="<id>"], [data-drawer="<id>"], [data-pinned],
+                [data-locked], [data-detached], [data-presentation="window|sheet"],
+                [data-window-control="pin|lock|close"], [data-edge],
+                [data-minimized="true"] with [data-window] on a bubble, [data-axis="x|y"]
+                on a snap guide,
+                [data-drawer-control="pop-out"], [data-drawer-host="<id>"] and
+                [data-detached="true"] on a popped-out drawer's window
+                (data-window="drawer:<host id>:<drawer id>"), [data-dragging]
+                on a drawer being dragged, [data-outside] on its preview, and
+                [data-drop-target] on a window a drawer will dock back into
+   Variables:   set them on :root (every window) or on a selector such as
+                [data-window="chat-settings"]. Unset, each falls back to the
+                theme token shown, read where the window or drawer is drawn.
+     --mari-window-bg                   var(--marinara-chat-chrome-panel-bg)
+     --mari-window-text                 var(--marinara-chat-chrome-panel-text)
+     --mari-window-border               var(--marinara-chat-chrome-panel-border)
+     --mari-window-border-width         1px
+     --mari-window-radius               calc(var(--radius) + 0.25rem)
+     --mari-window-shadow               0 25px 50px -12px rgb(0 0 0 / 0.4)
+     --mari-window-backdrop-filter      blur(12px)
+     --mari-window-header-bg            transparent
+     --mari-window-header-text          var(--marinara-chat-chrome-panel-title)
+     --mari-window-header-border        var(--marinara-chat-chrome-panel-divider)
+     --mari-window-header-padding       0.625rem 0.75rem
+     --mari-window-control-color        var(--marinara-chat-chrome-panel-muted)
+     --mari-window-control-color-hover  var(--marinara-chat-chrome-panel-text)
+     --mari-window-control-bg-hover     var(--marinara-chat-chrome-highlight-bg)
+     --mari-window-control-color-active var(--marinara-chat-chrome-button-text-active)
+     --mari-window-control-bg-active    var(--marinara-chat-chrome-highlight-bg)
+     --mari-window-control-radius       var(--radius)
+     --mari-window-control-gap          0.125rem
+     --mari-window-focus-ring           var(--marinara-chat-chrome-focus-ring)
+     --mari-window-resize-handle-size   0.5rem
+     --mari-window-bubble-size          2rem
+     --mari-window-bubble-bg            var(--marinara-chat-chrome-button-bg)
+     --mari-window-bubble-bg-hover      var(--marinara-chat-chrome-button-bg-hover)
+     --mari-window-bubble-text          var(--marinara-chat-chrome-button-text)
+     --mari-window-bubble-text-hover    var(--marinara-chat-chrome-button-text-hover)
+     --mari-window-bubble-border        var(--marinara-chat-chrome-button-border)
+     --mari-window-bubble-radius        calc(var(--radius) + 0.125rem)
+     --mari-window-bubble-shadow        0 4px 12px rgb(0 0 0 / 0.25)
+     --mari-window-snap-guide           var(--marinara-chat-chrome-focus-ring)
+     --mari-drawer-bg                   transparent
+     --mari-drawer-border               var(--border)
+     --mari-drawer-header-bg            transparent
+     --mari-drawer-header-bg-hover      color-mix(in oklab, var(--accent) 50%, transparent)
+     --mari-drawer-header-padding       0.75rem 1rem
+     --mari-drawer-title-color          inherit
+     --mari-drawer-icon-color           var(--muted-foreground)
+     --mari-drawer-arrow-color          var(--muted-foreground)
+     --mari-drawer-count-bg             color-mix(in oklab, var(--primary) 15%, transparent)
+     --mari-drawer-count-text           var(--primary)
+     --mari-drawer-body-padding-inline  1rem
+     --mari-drawer-body-padding-bottom  0.75rem
+   ───────────────────────────────────────────── */
+/* In the components layer, so Tailwind classes passed to <FloatingWindow> or <Drawer> (className,
+   bodyClassName…) override these defaults; custom theme CSS, which is not layered, overrides both. */
+@layer components {
+  .mari-window {
+    --mari-widget-field-option-bg: var(--mari-widget-custom-background-solid);
+    --mari-widget-field-option-text: var(--mari-widget-custom-text-solid);
+    border: var(--mari-window-border-width, 1px) solid
+      var(
+        --mari-widget-shell-border,
+        var(
+          --mari-window-border,
+          var(--mari-widget-custom-border-solid, var(--mari-widget-border, var(--marinara-chat-chrome-panel-border)))
+        )
+      );
+    border-radius: var(--mari-window-radius, var(--mari-widget-radius, calc(var(--radius) + 0.25rem)));
+    background: var(
+      --mari-widget-shell-bg,
+      var(
+        --mari-window-bg,
+        var(--mari-widget-custom-background, var(--mari-widget-bg, var(--marinara-chat-chrome-panel-bg)))
+      )
+    );
+    color: var(
+      --mari-window-text,
+      var(--mari-widget-custom-text-solid, var(--mari-widget-text, var(--marinara-chat-chrome-panel-text)))
+    );
+    box-shadow: var(
+      --mari-window-shadow,
+      var(--mari-widget-shadow, var(--mari-widget-frame-shadow, 0 25px 50px -12px rgb(0 0 0 / 0.4)))
+    );
+    -webkit-backdrop-filter: var(--mari-widget-shell-backdrop-filter, var(--mari-window-backdrop-filter, blur(12px)));
+    backdrop-filter: var(--mari-widget-shell-backdrop-filter, var(--mari-window-backdrop-filter, blur(12px)));
+  }
+
+  .mari-window__header {
+    border-bottom: 1px solid
+      var(
+        --mari-window-header-border,
+        var(--mari-widget-custom-border-solid, var(--mari-widget-border, var(--marinara-chat-chrome-panel-divider)))
+      );
+    border-top-left-radius: inherit;
+    border-top-right-radius: inherit;
+    background: var(
+      --mari-widget-header-shell-bg,
+      var(--mari-window-header-bg, var(--mari-widget-custom-background, var(--mari-widget-header-bg, transparent)))
+    );
+    padding: var(--mari-window-header-padding, var(--mari-widget-header-padding, 0.625rem 0.75rem));
+  }
+
+  .mari-window__header:focus-visible {
+    outline: none;
+    box-shadow: inset 0 0 0 2px
+      var(
+        --mari-window-focus-ring,
+        var(--mari-widget-custom-border-solid, var(--mari-widget-accent, var(--marinara-chat-chrome-focus-ring)))
+      );
+  }
+
+  .mari-window__title {
+    color: var(
+      --mari-window-header-text,
+      var(--mari-widget-custom-text-solid, var(--mari-widget-accent, var(--marinara-chat-chrome-panel-title)))
+    );
+  }
+
+  .mari-window__controls {
+    gap: var(--mari-window-control-gap, 0.125rem);
+  }
+
+  .mari-window__control {
+    display: inline-flex;
+    width: 1.75rem;
+    height: 1.75rem;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--mari-window-control-radius, var(--radius));
+    color: var(
+      --mari-window-control-color,
+      var(--mari-widget-custom-border-solid, var(--mari-widget-accent, var(--marinara-chat-chrome-panel-muted)))
+    );
+    transition:
+      background-color 150ms ease,
+      color 150ms ease;
+  }
+
+  .mari-window__control[aria-pressed="true"] {
+    background: var(
+      --mari-window-control-bg-active,
+      var(--mari-widget-custom-background, var(--mari-widget-soft, var(--marinara-chat-chrome-highlight-bg)))
+    );
+    color: var(
+      --mari-window-control-color-active,
+      var(--mari-widget-custom-border-solid, var(--mari-widget-accent, var(--marinara-chat-chrome-button-text-active)))
+    );
+  }
+
+  @media (hover: hover) {
+    .mari-window__control:hover {
+      background: var(
+        --mari-window-control-bg-hover,
+        var(--mari-widget-custom-background, var(--mari-widget-soft, var(--marinara-chat-chrome-highlight-bg)))
+      );
+      color: var(
+        --mari-window-control-color-hover,
+        var(--mari-widget-custom-border-solid, var(--mari-widget-text, var(--marinara-chat-chrome-panel-text)))
+      );
+    }
+  }
+
+  /* A minimized window: a small button the user places anywhere, like the chat's toolbar buttons. */
+  .mari-window-bubble {
+    display: inline-flex;
+    width: var(--mari-window-bubble-size, 2rem);
+    height: var(--mari-window-bubble-size, 2rem);
+    align-items: center;
+    justify-content: center;
+    border: 1px solid
+      var(
+        --mari-widget-button-shell,
+        var(
+          --mari-window-bubble-border,
+          var(--mari-widget-custom-border-solid, var(--mari-widget-gold, var(--marinara-chat-chrome-button-border)))
+        )
+      );
+    border-radius: var(--mari-window-bubble-radius, var(--mari-widget-bubble-radius, calc(var(--radius) + 0.125rem)));
+    background: var(
+      --mari-widget-button-shell,
+      var(
+        --mari-window-bubble-bg,
+        var(
+          --mari-widget-bubble-bg,
+          var(--mari-widget-custom-background, var(--mari-widget-bg, var(--marinara-chat-chrome-button-bg)))
+        )
+      )
+    );
+    color: var(
+      --mari-window-bubble-text,
+      var(
+        --mari-widget-button-text,
+        var(--mari-widget-custom-border-solid, var(--mari-widget-accent, var(--marinara-chat-chrome-button-text)))
+      )
+    );
+    box-shadow: var(--mari-window-bubble-shadow, var(--mari-widget-button-shadow, 0 4px 12px rgb(0 0 0 / 0.25)));
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    cursor: pointer;
+    touch-action: none;
+    user-select: none;
+    transition:
+      background-color 150ms ease,
+      color 150ms ease;
+  }
+
+  @media (hover: hover) {
+    .mari-window-bubble:hover {
+      background: var(
+        --mari-widget-button-shell,
+        var(
+          --mari-window-bubble-bg-hover,
+          var(--mari-widget-custom-background, var(--mari-widget-soft, var(--marinara-chat-chrome-button-bg-hover)))
+        )
+      );
+      color: var(
+        --mari-window-bubble-text-hover,
+        var(--mari-widget-custom-border-solid, var(--mari-widget-accent, var(--marinara-chat-chrome-button-text-hover)))
+      );
+    }
+  }
+
+  .mari-window-bubble[data-dragging="true"] {
+    cursor: grabbing;
+  }
+
+  /* Chat-local modals can live in a lower stacking context. Their controls must stay above windows. */
+  body:has([data-chat-mode] [role="dialog"][aria-modal="true"]) .mari-window-bubble,
+  body:has([data-chat-mode] [role="dialog"][aria-modal="true"])
+    .mari-window:not(:has([role="dialog"][aria-modal="true"])) {
+    visibility: hidden;
+  }
+
+  /* Narrow or touch layouts lay panels, editors and the Tracker Panel over a chat that stays open
+     (AppShell marks it). The chat's windows sit above those layers, so they wait until it shows again. */
+  [data-chat-covered="true"] :is(.mari-window, .mari-window-bubble, [data-chat-settings-move-tip]) {
+    visibility: hidden;
+  }
+
+  .mari-window-bubble__icon {
+    display: contents;
+  }
+
+  /* An explicit pixel size also grows SVG icons and character portraits, independent of Display Size. */
+  :root[data-chat-widget-button-size] .mari-window-bubble__icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: calc(var(--mari-window-bubble-size) * 0.5);
+    height: calc(var(--mari-window-bubble-size) * 0.5);
+    font-size: calc(var(--mari-window-bubble-size) * 0.3125);
+    line-height: 1;
+  }
+
+  :root[data-chat-widget-button-size] .mari-window-bubble__icon > * {
+    width: 100% !important;
+    height: 100% !important;
+    font-size: inherit !important;
+  }
+
+  /* Agent activity's status wraps the drawer's own icon, which grows the same way. */
+  :root[data-chat-widget-button-size] .mari-window-bubble__icon > .mari-agent-activity-icon > svg {
+    width: 100% !important;
+    height: 100% !important;
+  }
+
+  /* Phones draw bubbles like their toolbar buttons, in pixels so their default row lines up. */
+  .mari-window-bubble[data-presentation="sheet"] {
+    width: var(--mari-window-bubble-size, 36px);
+    height: var(--mari-window-bubble-size, 36px);
+  }
+
+  /* A bubble showing a live summary (World State's date, time and weather) is as wide as the summary. */
+  .mari-window-bubble[data-banner="true"] {
+    width: auto;
+    padding-inline: 0.5rem;
+  }
+
+  .mari-window-bubble__banner {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 0.25rem;
+    white-space: nowrap;
+  }
+
+  /* Touch gets a 44px tap area around every bubble, centred on it, without changing its look. */
+  @media (pointer: coarse) {
+    .mari-window-bubble::before {
+      content: "";
+      position: absolute;
+      inset: min(0px, calc((100% - 44px) / 2));
+    }
+  }
+
+  .mari-window-snap-guide {
+    position: fixed;
+    background: var(--mari-window-snap-guide, var(--marinara-chat-chrome-focus-ring));
+    pointer-events: none;
+  }
+
+  .mari-window-bubble:focus-visible,
+  .mari-window__control:focus-visible,
+  .mari-window__resize-handle:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px
+      var(
+        --mari-window-focus-ring,
+        var(--mari-widget-custom-border-solid, var(--mari-widget-accent, var(--marinara-chat-chrome-focus-ring)))
+      );
+  }
+
+  /* The body clips its content to the window's rounded corners; the root does not
+     clip, so the resize handles can sit on the border, clear of the scrollbar. */
+  .mari-window__body {
+    overflow: hidden;
+    border-bottom-left-radius: inherit;
+    border-bottom-right-radius: inherit;
+  }
+
+  .mari-window__resize-handle {
+    --mari-window-resize-hit: var(--mari-window-resize-handle-size, 0.5rem);
+    --mari-window-resize-offset: calc(2px - var(--mari-window-resize-hit));
+    position: absolute;
+    z-index: 1;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    touch-action: none;
+  }
+
+  .mari-window__resize-handle[data-edge="n"],
+  .mari-window__resize-handle[data-edge="s"] {
+    left: var(--mari-window-resize-hit);
+    right: var(--mari-window-resize-hit);
+    height: var(--mari-window-resize-hit);
+    cursor: ns-resize;
+  }
+
+  .mari-window__resize-handle[data-edge="e"],
+  .mari-window__resize-handle[data-edge="w"] {
+    top: var(--mari-window-resize-hit);
+    bottom: var(--mari-window-resize-hit);
+    width: var(--mari-window-resize-hit);
+    cursor: ew-resize;
+  }
+
+  .mari-window__resize-handle:is([data-edge="ne"], [data-edge="nw"], [data-edge="se"], [data-edge="sw"]) {
+    width: calc(var(--mari-window-resize-hit) * 1.5);
+    height: calc(var(--mari-window-resize-hit) * 1.5);
+  }
+
+  .mari-window__resize-handle:is([data-edge="n"], [data-edge="ne"], [data-edge="nw"]) {
+    top: var(--mari-window-resize-offset);
+  }
+
+  .mari-window__resize-handle:is([data-edge="s"], [data-edge="se"], [data-edge="sw"]) {
+    bottom: var(--mari-window-resize-offset);
+  }
+
+  .mari-window__resize-handle:is([data-edge="e"], [data-edge="ne"], [data-edge="se"]) {
+    right: var(--mari-window-resize-offset);
+  }
+
+  .mari-window__resize-handle:is([data-edge="w"], [data-edge="nw"], [data-edge="sw"]) {
+    left: var(--mari-window-resize-offset);
+  }
+
+  .mari-window__resize-handle:is([data-edge="ne"], [data-edge="sw"]) {
+    cursor: nesw-resize;
+  }
+
+  .mari-window__resize-handle:is([data-edge="nw"], [data-edge="se"]) {
+    cursor: nwse-resize;
+  }
+
+  /* The resize cue in the bottom-right corner, like Echo Chamber's: shown while the pointer or focus is
+     in the window. It belongs to the corner handle, so dragging it resizes. Locked windows have none. */
+  .mari-window__resize-grip {
+    position: absolute;
+    right: -2px;
+    bottom: -2px;
+    display: flex;
+    width: 1.5rem;
+    height: 1.5rem;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid
+      var(--mari-widget-custom-border-solid, var(--mari-widget-border, var(--marinara-chat-chrome-button-border)));
+    border-radius: calc(var(--radius) - 0.125rem);
+    background: var(--mari-widget-custom-background, var(--mari-widget-bg, var(--marinara-chat-chrome-button-bg)));
+    color: var(--mari-widget-custom-border-solid, var(--mari-widget-accent, var(--marinara-chat-chrome-button-text)));
+    box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.2);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 150ms ease;
+  }
+
+  .mari-window__resize-grip::after {
+    content: "";
+    width: 0.625rem;
+    height: 0.625rem;
+    border-right: 2px solid currentColor;
+    border-bottom: 2px solid currentColor;
+  }
+
+  .mari-window:is(:hover, :focus-within) .mari-window__resize-grip {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .mari-window__resize-handle:is(:hover, :focus-visible) .mari-window__resize-grip {
+    border-color: var(
+      --mari-widget-custom-border-solid,
+      var(--mari-widget-accent, var(--marinara-chat-chrome-button-border-hover))
+    );
+    background: var(
+      --mari-widget-custom-background,
+      var(--mari-widget-soft, var(--marinara-chat-chrome-button-bg-hover))
+    );
+    color: var(
+      --mari-widget-custom-border-solid,
+      var(--mari-widget-text, var(--marinara-chat-chrome-button-text-hover))
+    );
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .mari-window__resize-grip {
+      transition: none;
+    }
+  }
+
+  .mari-drawer {
+    border-bottom: 1px solid
+      var(--mari-drawer-border, var(--mari-widget-custom-border-solid, var(--mari-widget-border, var(--border))));
+    background: var(--mari-drawer-bg, var(--mari-widget-custom-background, var(--mari-widget-field, transparent)));
+  }
+
+  .mari-drawer__header {
+    padding: var(--mari-drawer-header-padding, 0.75rem 1rem);
+    background: var(
+      --mari-drawer-header-bg,
+      var(--mari-widget-custom-background, var(--mari-widget-field, transparent))
+    );
+  }
+
+  @media (hover: hover) {
+    .mari-drawer__header:hover {
+      background: var(
+        --mari-drawer-header-bg-hover,
+        var(
+          --mari-widget-custom-background,
+          var(--mari-widget-soft, color-mix(in oklab, var(--accent) 50%, transparent))
+        )
+      );
+    }
+  }
+
+  .mari-drawer__icon {
+    color: var(
+      --mari-drawer-icon-color,
+      var(--mari-widget-custom-border-solid, var(--mari-widget-accent, var(--muted-foreground)))
+    );
+  }
+
+  .mari-drawer__title {
+    color: var(--mari-drawer-title-color, var(--mari-widget-custom-text-solid, var(--mari-widget-text, inherit)));
+  }
+
+  .mari-drawer__count {
+    background: var(
+      --mari-drawer-count-bg,
+      var(
+        --mari-widget-custom-background,
+        var(--mari-widget-soft, color-mix(in oklab, var(--primary) 15%, transparent))
+      )
+    );
+    color: var(
+      --mari-drawer-count-text,
+      var(--mari-widget-custom-text-solid, var(--mari-widget-accent, var(--primary)))
+    );
+  }
+
+  .mari-drawer__arrow {
+    color: var(
+      --mari-drawer-arrow-color,
+      var(--mari-widget-custom-border-solid, var(--mari-widget-accent, var(--muted-foreground)))
+    );
+  }
+
+  .mari-drawer__body {
+    padding-inline: var(--mari-drawer-body-padding-inline, 1rem);
+    padding-bottom: var(--mari-drawer-body-padding-bottom, 0.75rem);
+  }
+
+  .mari-drawer[data-dragging="true"] > .mari-drawer__header {
+    opacity: 0.5;
+  }
+
+  .mari-drawer-ghost {
+    border: var(--mari-window-border-width, 1px) solid
+      var(
+        --mari-window-border,
+        var(--mari-widget-custom-border-solid, var(--mari-widget-border, var(--marinara-chat-chrome-panel-border)))
+      );
+    border-radius: var(--mari-window-radius, var(--mari-widget-radius, calc(var(--radius) + 0.25rem)));
+    background: var(
+      --mari-window-bg,
+      var(--mari-widget-custom-background, var(--mari-widget-bg, var(--marinara-chat-chrome-panel-bg)))
+    );
+    color: var(
+      --mari-window-header-text,
+      var(--mari-widget-custom-text-solid, var(--mari-widget-accent, var(--marinara-chat-chrome-panel-title)))
+    );
+    box-shadow: var(
+      --mari-window-shadow,
+      var(--mari-widget-shadow, var(--mari-widget-frame-shadow, 0 25px 50px -12px rgb(0 0 0 / 0.4)))
+    );
+    opacity: 0.6;
+  }
+
+  .mari-drawer-ghost[data-outside="true"] {
+    opacity: 1;
+  }
+
+  .mari-window[data-drop-target="true"] {
+    outline: 2px solid
+      var(
+        --mari-window-focus-ring,
+        var(--mari-widget-custom-border-solid, var(--mari-widget-accent, var(--marinara-chat-chrome-focus-ring)))
+      );
+    outline-offset: 2px;
+  }
 }
 
 /* ─────────────────────────────────────────────
@@ -739,6 +1292,37 @@
   font-weight: 400;
 }
 
+/* Inline token chip, such as a prompt variable: tighter sides so several fit on one row.
+   Pair with --small. */
+.mari-chrome-control--chip {
+  gap: 0.25rem;
+  padding-inline: 0.375rem;
+}
+
+/* Square icon-only button; pair with --small so the height matches. */
+.mari-chrome-control--icon {
+  width: 1.75rem;
+  padding: 0;
+}
+
+/* One-of-N choice card: title, description and optional preview stacked on the left.
+   Idle titles keep the body text colour so they stay readable; hover and aria-pressed tint them. */
+.mari-chrome-control--card {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  color: var(--foreground);
+  font-weight: 400;
+  text-align: left;
+}
+
+.mari-chrome-control--card > span {
+  overflow: visible;
+  white-space: normal;
+}
+
 .mari-character-row-action {
   height: 1.75rem;
   min-height: 1.75rem;
@@ -753,11 +1337,32 @@
 }
 
 .mari-chrome-control--selected,
+.mari-chrome-control[aria-current="page"],
 .mari-chrome-control[aria-pressed="true"] {
   border-color: var(--marinara-chat-chrome-button-border-active);
   background: var(--marinara-chat-chrome-button-bg-active);
   color: var(--marinara-chat-chrome-button-text-active);
   box-shadow: 0 0 0 1px var(--marinara-chat-chrome-focus-ring);
+}
+
+/* A selected choice card gets a solid 2px accent ring so the pick reads at a glance. It is a
+   box-shadow because the gradient-accent rules below own the selected border colour. */
+.mari-chrome-control--card[aria-pressed="true"] {
+  box-shadow: 0 0 0 2px var(--marinara-chat-chrome-accent);
+}
+
+.mari-chrome-control--card[aria-pressed="true"]:focus-visible {
+  box-shadow:
+    0 0 0 2px var(--marinara-chat-chrome-accent),
+    0 0 0 4px var(--marinara-chat-chrome-focus-ring);
+}
+
+/* Accent Pulse animates --primary, and --destructive defaults to it. Delete buttons hold the
+   steady accent instead, like the editor shells in 4c.
+   ponytail: a theme that sets its own --destructive shows the steady accent while Accent Pulse
+   runs; a dedicated --marinara-danger-* theme hook is the upgrade path. */
+[data-marinara-accent-animation] .mari-chrome-control--danger {
+  --destructive: var(--marinara-app-accent-static);
 }
 
 .mari-chrome-control--danger {
@@ -852,9 +1457,9 @@
 }
 
 .mari-chat-logo-mode--game {
-  --mari-chat-logo-mode-color: var(--mari-logo-pink);
-  --mari-chat-logo-mode-color-deep: var(--mari-logo-pink-deep);
-  --mari-chat-logo-mode-text: #fff7fb;
+  --mari-chat-logo-mode-color: var(--marinara-mode-game-accent);
+  --mari-chat-logo-mode-color-deep: color-mix(in srgb, var(--marinara-mode-game-accent) 85%, var(--background));
+  --mari-chat-logo-mode-text: #260d19;
 }
 
 .mari-chat-mode-action {
@@ -932,6 +1537,7 @@
   filter: none;
 }
 
+/* Resource sections keep their identifying palettes when the app accent changes. */
 .mari-panel-gradient--characters {
   --mari-panel-gradient-start: #f472b6;
   --mari-panel-gradient-end: #f43f5e;
@@ -998,12 +1604,11 @@
   --mari-suggestion-chips-fade-right: 0px;
 
   display: flex;
+  min-width: 0;
   flex-wrap: wrap;
   gap: 0.375rem;
   align-items: center;
-  overflow-x: auto;
   margin-bottom: 0.375rem;
-  padding-bottom: 0.1875rem;
   /* Keeps a chip reached by Tab from landing underneath its own edge fade. */
   scroll-padding-inline: var(--mari-suggestion-chips-fade);
 }
@@ -1062,8 +1667,9 @@
   gap: 0.3125rem;
   min-height: 2rem;
   padding: 0.375rem 0.6875rem;
-  border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--chip-tint) 24%, var(--border) 76%);
+  border-radius: 0.75rem;
+  /* Neutral tints are derived colors; mixing them with the derived --border can abort WebKit. */
+  border: 1px solid color-mix(in srgb, var(--chip-tint) 24%, transparent);
   background: color-mix(in srgb, var(--chip-tint) 7%, var(--card) 93%);
   color: color-mix(in srgb, var(--chip-tint) 42%, var(--foreground) 58%);
   font-weight: 600;
@@ -1080,7 +1686,7 @@
 
 .mari-suggestion-chip:hover:not(:disabled) {
   background: color-mix(in srgb, var(--chip-tint) 12%, var(--card) 88%);
-  border-color: color-mix(in srgb, var(--chip-tint) 38%, var(--border) 62%);
+  border-color: color-mix(in srgb, var(--chip-tint) 38%, transparent);
   box-shadow:
     inset 0 1px color-mix(in srgb, var(--foreground) 9%, transparent),
     0 0.25rem 0.65rem color-mix(in srgb, var(--chip-tint) 12%, transparent);
@@ -1104,29 +1710,37 @@
 .mari-suggestion-chips--compact .mari-suggestion-chip {
   min-height: 1.75rem;
   padding: 0.3125rem 0.5625rem;
+  border-radius: 0.625rem;
   font-size: 0.6875rem;
 }
 
-@media (max-width: 767px) {
+.mari-suggestion-turn > :last-child:not(.mari-suggestion-question-turn) {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.mari-suggestion-turn .mari-suggestion-chips {
+  margin-top: 0.125rem;
+}
+
+@media (max-width: 39.99rem) {
   .mari-suggestion-chips {
     flex-wrap: nowrap;
     overflow-x: auto;
-    overflow-y: hidden;
-    scroll-snap-type: x proximity;
+    /* G8: room for the focus ring, pulled back so the first chip starts on L0. */
+    margin-inline-start: -0.125rem;
+    padding-inline: 0.125rem 0.75rem;
+    scroll-padding-inline: 0.125rem;
     scrollbar-width: none;
-    -webkit-overflow-scrolling: touch;
     overscroll-behavior-x: contain;
-    touch-action: pan-x;
   }
 
   .mari-suggestion-chips::-webkit-scrollbar {
     display: none;
   }
 
-  .mari-suggestion-chip {
+  .mari-suggestion-chips > * {
     flex: 0 0 auto;
-    max-width: calc(100% - 1rem);
-    scroll-snap-align: start;
   }
 }
 
@@ -1155,7 +1769,7 @@
  */
 .mari-suggestion-chip--selected {
   background: color-mix(in srgb, var(--chip-tint) 16%, var(--card) 84%);
-  border-color: color-mix(in srgb, var(--chip-tint) 48%, var(--border) 52%);
+  border-color: color-mix(in srgb, var(--chip-tint) 48%, transparent);
   box-shadow:
     inset 0 1px color-mix(in srgb, var(--foreground) 10%, transparent),
     inset 0 0 0 1px color-mix(in srgb, var(--chip-tint) 18%, transparent);
@@ -1176,9 +1790,9 @@
 }
 
 .mari-avatar-placeholder--character {
-  --mari-avatar-placeholder-start: #f472b6;
-  --mari-avatar-placeholder-end: #f43f5e;
-  --mari-avatar-placeholder-text: #fff7fb;
+  --mari-avatar-placeholder-start: var(--marinara-app-accent-solid);
+  --mari-avatar-placeholder-end: color-mix(in srgb, var(--marinara-app-accent-solid) 76%, var(--foreground) 24%);
+  --mari-avatar-placeholder-text: var(--primary-foreground);
 }
 
 .mari-avatar-placeholder--persona {
@@ -1349,7 +1963,7 @@
   color-scheme: dark;
   border-color: var(--marinara-chat-chrome-input-border);
   background-color: var(--marinara-chat-chrome-panel-bg);
-  color: var(--marinara-chat-chrome-panel-text);
+  color: var(--mari-widget-field-option-text, var(--marinara-chat-chrome-panel-text));
 }
 
 [data-theme="light"] .mari-chat-settings-popover select,
@@ -1361,14 +1975,17 @@
 .mari-chat-settings-popover select optgroup,
 .mari-chat-settings-drawer select option,
 .mari-chat-settings-drawer select optgroup {
-  background-color: var(--marinara-chat-chrome-panel-bg);
-  color: var(--marinara-chat-chrome-panel-text);
+  background-color: var(--mari-widget-field-option-bg, var(--marinara-chat-chrome-panel-bg));
+  color: var(--mari-widget-field-option-text, var(--marinara-chat-chrome-panel-text));
 }
 
 .mari-preset-native-select {
   color-scheme: dark;
   background-color: var(--marinara-preset-select-bg, var(--marinara-chat-chrome-panel-bg));
-  color: var(--marinara-preset-select-text, var(--marinara-chat-chrome-panel-text));
+  color: var(
+    --marinara-preset-select-text,
+    var(--mari-widget-field-option-text, var(--marinara-chat-chrome-panel-text))
+  );
 }
 
 [data-theme="light"] .mari-preset-native-select {
@@ -1377,8 +1994,14 @@
 
 .mari-preset-native-select option,
 .mari-preset-native-select optgroup {
-  background-color: var(--marinara-preset-select-option-bg, var(--marinara-chat-chrome-panel-bg)) !important;
-  color: var(--marinara-preset-select-option-text, var(--marinara-chat-chrome-panel-text)) !important;
+  background-color: var(
+    --marinara-preset-select-option-bg,
+    var(--mari-widget-field-option-bg, var(--marinara-chat-chrome-panel-bg))
+  ) !important;
+  color: var(
+    --marinara-preset-select-option-text,
+    var(--mari-widget-field-option-text, var(--marinara-chat-chrome-panel-text))
+  ) !important;
 }
 
 .mari-preset-native-select option:checked {
@@ -1470,6 +2093,26 @@
   color: var(--marinara-chat-chrome-panel-muted);
 }
 
+/* Older social-app bundles copy Engine's default accent into their scoped CSS.
+   Forward the live host accent while allowing explicit inline package themes. */
+:root
+  :is(
+    marinara-capability-noodle,
+    marinara-capability-slurp,
+    marinara-capability-slurp2,
+    [data-marinara-capability-scope="noodle"],
+    [data-marinara-capability-scope="slurp"],
+    [data-marinara-capability-scope="slurp2"]
+  ) {
+  --primary: inherit;
+  --marinara-app-accent-solid: inherit;
+  --marinara-app-accent-static: inherit;
+  --marinara-app-accent-gradient: inherit;
+  --marinara-app-accent-static-gradient: inherit;
+  --marinara-chat-chrome-accent: inherit;
+  --marinara-chat-chrome-accent-gradient: inherit;
+}
+
 .mari-chrome-token-scope,
 .mari-settings-panel-chrome {
   --accent: var(--marinara-chat-chrome-highlight-bg);
@@ -1479,6 +2122,12 @@
   --sidebar-accent: var(--marinara-chat-chrome-highlight-bg);
   --sidebar-accent-foreground: var(--marinara-chat-chrome-panel-title);
   --sidebar-foreground: var(--marinara-chat-chrome-panel-text);
+}
+
+/* Settings sections and fields share their enclosing sidebar surface. */
+.mari-settings-panel-chrome {
+  --background: var(--sidebar);
+  --secondary: var(--sidebar);
 }
 
 .mari-chrome-text-accent-scope {
@@ -1659,6 +2308,11 @@
     transform 180ms linear;
 }
 
+/* Same specificity as the rule above and later, so delete icons keep their button's steady colour. */
+[data-marinara-accent-animation] .mari-chrome-control--danger svg {
+  color: inherit;
+}
+
 .mari-topbar-active-underline {
   background: var(--marinara-chat-chrome-button-text-hover);
 }
@@ -1724,6 +2378,18 @@
   transition:
     opacity 180ms linear,
     transform 180ms linear;
+}
+
+/* Touch accents should repaint at their tick cadence, not start color, border
+   and shadow transitions across every mounted control between ticks.
+   ponytail: root colors still update at 2 Hz; isolated accent layers are the
+   upgrade path if device profiles need a smaller rendering budget. */
+@media (pointer: coarse) {
+  html[data-marinara-accent-animation] *,
+  html[data-marinara-accent-animation] *::before,
+  html[data-marinara-accent-animation] *::after {
+    transition-property: opacity, transform, translate, scale, rotate !important;
+  }
 }
 
 /* ─────────────────────────────────────────────
@@ -1908,7 +2574,8 @@
   width: auto;
   min-width: 4rem;
   max-width: 100%;
-  flex: 0 1 auto;
+  /* The byline gives way first; the name only truncates when the line itself is too narrow. */
+  flex: 0 0 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2160,7 +2827,7 @@ html[data-mari-ios-webkit] .mari-modal-panel {
 
 /* Full-screen mobile navigation needs no translucent copy of the covered chat. */
 html[data-mari-ios-webkit] :is([data-component="RightPanelMobile"], [data-component="ChatSidebarPanel"]) {
-  background-color: var(--background) !important;
+  background-color: var(--sidebar) !important;
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
 }
@@ -2307,6 +2974,13 @@ html[data-mari-ios-webkit] :is([data-component="RightPanelMobile"], [data-compon
 
 .mari-editor-field::placeholder {
   color: var(--marinara-editor-muted);
+}
+
+/* Prompt text stays monospace until the user sets an app font, then uses the app font stack like other
+   fields (#7438). App.tsx sets --font-prompt to var(--font-y2k), keeping its "Straight Quotes" face.
+   A utility, like font-mono before it, so custom themes that restyle textareas still win. */
+@utility mari-prompt-font {
+  font-family: var(--font-prompt, var(--font-mono));
 }
 
 .mari-editor-chip {
@@ -2617,7 +3291,6 @@ html[data-mari-ios-webkit] :is([data-component="RightPanelMobile"], [data-compon
 
   .mari-editor-header-main--identity .mari-editor-byline {
     max-width: 24rem;
-    flex: 0 1 24rem;
   }
 }
 
@@ -3103,10 +3776,9 @@ body {
 
 .mari-home-widget {
   --mari-home-widget-hover-transform: translate3d(0, -0.18rem, 0) scale(1.015);
-  --mari-home-widget-hover-filter: brightness(1.055) saturate(1.045)
-    drop-shadow(
-      0 0.7rem 0.9rem color-mix(in srgb, var(--home-module-accent, var(--marinara-app-accent-solid)) 22%, transparent)
-    );
+  --mari-home-widget-hover-filter: brightness(1.055) saturate(1.045);
+  --mari-home-widget-hover-glow: 0 0.7rem 1.8rem
+    color-mix(in srgb, var(--home-module-accent, var(--marinara-app-accent-solid)) 22%, transparent);
   grid-column: span 1;
   grid-row: span 1;
 
@@ -3114,8 +3786,26 @@ body {
   container-type: inline-size;
 }
 
-.mari-home-professor-widget .mari-professor-pixel-scene [data-part="sprite"] {
-  width: 68%;
+/* The hover glow is a box-shadow behind the card that fades in with opacity. As a filter
+   drop-shadow() its color-mix() accent resolved to an oklab() color, which Chromium's compositor
+   leaves out while it runs the filter transition, so the whole shadow and its edges popped in
+   only after the card had finished lifting (#7032). */
+.mari-home-widget::before {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: 1rem;
+  box-shadow: var(--mari-home-widget-hover-glow);
+  opacity: 0;
+}
+
+.mari-home-widget[data-home-widget-kind="package"] {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  background: var(--card);
 }
 
 .mari-home-widget--achievements header > div > p:last-child {
@@ -3123,14 +3813,10 @@ body {
   line-height: 1.375;
 }
 
-.mari-home-professor-widget .mari-professor-pixel-scene [data-part="laptop"] {
-  width: 76%;
-}
-
 @container (max-width: 19rem) {
   .mari-home-professor-widget {
-    grid-template-columns: minmax(0, 1fr) minmax(4.5rem, 34%);
-    padding: 0.65rem;
+    /* The card's padding; its text column reaches into it by the same amount. */
+    --mari-home-professor-pad: 0.65rem;
   }
 
   .mari-home-professor-widget [data-home-professor-description] {
@@ -3170,6 +3856,25 @@ body {
   }
 }
 
+/* Slice 85: the Home Mari widget blinks on a 5.6 s loop. The blink frame sits on top of the idle frame. */
+.mari-home-professor-blink {
+  opacity: 0;
+  animation: mari-home-professor-blink 5.6s steps(1, end) infinite;
+}
+
+@keyframes mari-home-professor-blink {
+  0%,
+  72%,
+  76%,
+  100% {
+    opacity: 0;
+  }
+  73%,
+  75% {
+    opacity: 1;
+  }
+}
+
 @media (max-height: 52rem) {
   .mari-home-widget--learn .mari-home-widget-shortcut,
   .mari-home-widget--community .mari-home-widget-shortcut {
@@ -3201,13 +3906,20 @@ body {
 }
 
 [data-theme="light"] .mari-home-widget {
-  --mari-home-widget-hover-filter: brightness(1.012) saturate(1.035)
-    drop-shadow(
-      0 0.7rem 0.9rem color-mix(in srgb, var(--home-module-accent, var(--marinara-app-accent-solid)) 16%, transparent)
-    );
+  --mari-home-widget-hover-filter: brightness(1.012) saturate(1.035);
+  --mari-home-widget-hover-glow: 0 0.7rem 1.8rem
+    color-mix(in srgb, var(--home-module-accent, var(--marinara-app-accent-solid)) 16%, transparent);
+}
+
+/* Image grids use their cards' hover feedback without resampling or filtering the artwork. */
+.mari-home-widget:is(.mari-home-widget--recent, .mari-home-widget--character-library) {
+  --mari-home-widget-hover-transform: none;
+  --mari-home-widget-hover-filter: none;
+  --mari-home-widget-hover-glow: none;
 }
 
 @media (hover: hover) and (pointer: fine) {
+  .mari-home-widget::before,
   .mari-home-widget > :not(.mari-home-widget__drag-handle) {
     transform-origin: center;
     transition:
@@ -3215,10 +3927,19 @@ body {
       filter 190ms cubic-bezier(0.16, 1, 0.3, 1);
   }
 
+  .mari-home-widget::before {
+    transition-property: transform, opacity;
+  }
+
   html:not(.mari-home-widget-drag-active) .mari-home-widget:not(.mari-home-widget--dragging):hover {
     z-index: 6;
   }
 
+  html:not(.mari-home-widget-drag-active) .mari-home-widget:not(.mari-home-widget--dragging):hover::before {
+    opacity: 1;
+  }
+
+  html:not(.mari-home-widget-drag-active) .mari-home-widget:not(.mari-home-widget--dragging):hover::before,
   html:not(.mari-home-widget-drag-active)
     .mari-home-widget:not(.mari-home-widget--dragging):hover
     > :not(.mari-home-widget__drag-handle) {
@@ -3228,6 +3949,16 @@ body {
 }
 
 .mari-home-feed-grid[data-home-grid-columns="1"] :is(.mari-home-widget--recent, .mari-home-widget--character-library) {
+  grid-column: span 1;
+  grid-row: span 2;
+}
+
+.mari-home-feed-grid .mari-home-widget[data-home-widget-size="large"] {
+  grid-column: span 2;
+  grid-row: span 2;
+}
+
+.mari-home-feed-grid[data-home-grid-columns="1"] .mari-home-widget[data-home-widget-size="large"] {
   grid-column: span 1;
   grid-row: span 2;
 }
@@ -3338,147 +4069,6 @@ html.mari-home-widget-drag-active * {
   transform: translate3d(-50%, -50%, 0) rotate(45deg) scale(0.6);
 }
 
-.mari-home-professor-popup {
-  transform-origin: bottom right;
-}
-
-.mari-home-professor-popup__sprite {
-  animation: mari-home-professor-arrive 900ms cubic-bezier(0.16, 1, 0.3, 1) both;
-  transform-origin: bottom center;
-}
-
-.mari-home-professor-popup__bubble {
-  animation: mari-home-professor-bubble-arrive 650ms 280ms cubic-bezier(0.16, 1, 0.3, 1) both;
-  transition: opacity 120ms cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-.mari-home-professor-popup__bubble::before,
-.mari-home-professor-popup__bubble::after {
-  content: none;
-  display: none;
-}
-
-.mari-home-professor-popup__bubble-tail {
-  display: block;
-  position: absolute;
-  left: -0.82rem;
-  bottom: 1.1rem;
-  width: 0.9rem;
-  height: 1.25rem;
-  z-index: -1;
-  transform-origin: center;
-}
-
-.mari-home-professor-popup__bubble-tail::before,
-.mari-home-professor-popup__bubble-tail::after {
-  content: "";
-  position: absolute;
-  clip-path: polygon(0 50%, 100% 0, 100% 100%);
-}
-
-.mari-home-professor-popup__bubble-tail::before {
-  inset: 0;
-  background: color-mix(in srgb, var(--marinara-chat-chrome-accent) 48%, var(--border));
-}
-
-.mari-home-professor-popup__bubble-tail::after {
-  left: 0.2rem;
-  bottom: 0.09rem;
-  width: 0.72rem;
-  height: 1.05rem;
-  background: color-mix(in srgb, var(--marinara-chat-chrome-accent) 8%, var(--card));
-}
-
-.mari-home-professor-popup__bubble[data-tail-side="right"] .mari-home-professor-popup__bubble-tail {
-  right: -0.82rem;
-  left: auto;
-  transform: scaleX(-1);
-}
-
-.mari-home-professor-popup__arrival-frame {
-  background-position: 0% 0;
-  animation: mari-home-professor-frame-cycle 1.45s steps(3, end) 80ms both;
-  will-change: background-position;
-}
-
-.mari-home-professor-popup__drag-frame {
-  left: 45%;
-  top: 9%;
-  width: 120%;
-  height: 114%;
-  background-position: 3.1% 0;
-  animation:
-    mari-home-professor-drag-frame-cycle 680ms steps(1, end) infinite,
-    mari-home-professor-dangle-sway 680ms cubic-bezier(0.45, 0, 0.55, 1) infinite;
-  animation-play-state: paused;
-  backface-visibility: hidden;
-  contain: paint;
-  filter: brightness(0.97) saturate(0.66) hue-rotate(1deg) contrast(1.1);
-  image-rendering: pixelated;
-  opacity: 0;
-  transform-origin: 45% 12.2%;
-  transform: translate3d(-45%, -12.2%, 0);
-  visibility: hidden;
-  will-change: background-position, transform;
-}
-
-.mari-home-professor-popup[data-dragging="true"] .mari-home-professor-popup__drag-frame {
-  animation-play-state: running;
-  opacity: 1;
-  visibility: visible;
-}
-
-.mari-home-professor-popup[data-dragging="true"] .mari-home-professor-popup__rest-frame {
-  visibility: hidden;
-}
-
-.mari-home-professor-popup[data-dragging="true"] .mari-home-professor-popup__bubble {
-  pointer-events: none;
-}
-
-html.mari-home-professor-drag-active,
-html.mari-home-professor-drag-active * {
-  cursor: grabbing !important;
-  user-select: none !important;
-}
-
-.mari-home-professor-popup__idle-stage {
-  animation: mari-home-professor-idle 5.6s ease-in-out infinite;
-  animation-play-state: paused;
-  transform-origin: bottom center;
-}
-
-.mari-home-professor-popup__idle-stage--active {
-  animation-play-state: running;
-}
-
-.mari-home-professor-popup__idle {
-  opacity: 1;
-}
-
-.mari-home-professor-popup__blink {
-  opacity: 0;
-  animation: mari-home-professor-blink 5.6s steps(1, end) infinite;
-  animation-play-state: paused;
-}
-
-.mari-home-professor-popup__idle-stage--active .mari-home-professor-popup__blink {
-  animation-play-state: running;
-}
-
-.mari-home-professor-popup__state-image {
-  transform-origin: bottom center;
-  will-change: transform, opacity;
-}
-
-.mari-home-professor-popup__state-image--map {
-  animation: mari-home-professor-map 520ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-.mari-home-professor-popup__state-image--shrug {
-  animation: mari-home-professor-shrug 480ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
 .mari-home-discovery-card {
   animation: mari-home-discovery-swap 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
@@ -3499,119 +4089,6 @@ html.mari-home-professor-drag-active * {
   }
 }
 
-@keyframes mari-home-professor-drag-frame-cycle {
-  0%,
-  24.99% {
-    background-position: 3.1% 0;
-  }
-  25%,
-  49.99% {
-    background-position: 34.48% 0;
-  }
-  50%,
-  74.99% {
-    background-position: 66.12% 0;
-  }
-  75%,
-  100% {
-    background-position: 98.15% 0;
-  }
-}
-
-@keyframes mari-home-professor-dangle-sway {
-  0%,
-  100% {
-    transform: translate3d(-45%, -12.2%, 0) rotate(-0.7deg);
-  }
-  50% {
-    transform: translate3d(-45%, -12.2%, 0) rotate(0.7deg);
-  }
-}
-
-@keyframes mari-home-professor-arrive {
-  from {
-    opacity: 0;
-    transform: translate3d(0, 4.5rem, 0) scale(0.94);
-  }
-  to {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-}
-
-@keyframes mari-home-professor-bubble-arrive {
-  from {
-    opacity: 0;
-    transform: translate3d(0.75rem, 0.5rem, 0) scale(0.96);
-  }
-  to {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-}
-
-@keyframes mari-home-professor-frame-cycle {
-  from {
-    background-position: 0% 0;
-  }
-  to {
-    background-position: 100% 0;
-  }
-}
-
-@keyframes mari-home-professor-idle {
-  0%,
-  100% {
-    transform: translate3d(0, 0, 0) scaleY(1);
-  }
-  50% {
-    transform: translate3d(0, -0.12rem, 0) scaleY(1.006);
-  }
-}
-
-@keyframes mari-home-professor-blink {
-  0%,
-  72%,
-  76%,
-  100% {
-    opacity: 0;
-  }
-  73%,
-  75% {
-    opacity: 1;
-  }
-}
-
-@keyframes mari-home-professor-map {
-  0% {
-    opacity: 1;
-    transform: translate3d(0, 0.5rem, 0) scale(0.9, 0.96);
-  }
-  72% {
-    opacity: 1;
-    transform: translate3d(0, -0.12rem, 0) scale(1.018, 1.01);
-  }
-  100% {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-}
-
-@keyframes mari-home-professor-shrug {
-  0% {
-    opacity: 1;
-    transform: translate3d(0, 0.4rem, 0) scale(0.94);
-  }
-  62% {
-    opacity: 1;
-    transform: translate3d(0, -0.16rem, 0) scale(1.015);
-  }
-  100% {
-    opacity: 1;
-    transform: translate3d(0, 0, 0) scale(1);
-  }
-}
-
 @keyframes mari-home-discovery-swap {
   from {
     opacity: 0;
@@ -3624,11 +4101,14 @@ html.mari-home-professor-drag-active * {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .mari-home-widget {
+  /* :root keeps this ahead of the light-theme glow. */
+  :root .mari-home-widget {
     --mari-home-widget-hover-filter: none;
+    --mari-home-widget-hover-glow: none;
     --mari-home-widget-hover-transform: none;
   }
 
+  .mari-home-widget::before,
   .mari-home-widget > :not(.mari-home-widget__drag-handle) {
     transition: none;
   }
@@ -3638,23 +4118,8 @@ html.mari-home-professor-drag-active * {
     opacity: 0.24;
   }
 
-  .mari-home-professor-popup {
-    animation: none;
-  }
-
-  .mari-home-professor-popup__sprite,
-  .mari-home-professor-popup__bubble,
-  .mari-home-professor-popup__arrival-frame,
-  .mari-home-professor-popup__drag-frame,
-  .mari-home-professor-popup__idle-stage,
-  .mari-home-professor-popup__blink,
-  .mari-home-professor-popup__state-image,
   .mari-home-discovery-card {
     animation: none;
-  }
-
-  .mari-home-professor-popup__arrival-frame {
-    background-position: 100% 0;
   }
 }
 
@@ -3667,42 +4132,24 @@ html[data-marinara-effects-paused="true"] .mari-home-browser-star {
 html[data-marinara-reduced-effects="true"] .mari-home-widget,
 html[data-marinara-effects-paused="true"] .mari-home-widget {
   --mari-home-widget-hover-filter: none;
+  --mari-home-widget-hover-glow: none;
   --mari-home-widget-hover-transform: none;
 }
 
+html[data-marinara-reduced-effects="true"] .mari-home-widget::before,
+html[data-marinara-effects-paused="true"] .mari-home-widget::before,
 html[data-marinara-reduced-effects="true"] .mari-home-widget > :not(.mari-home-widget__drag-handle),
 html[data-marinara-effects-paused="true"] .mari-home-widget > :not(.mari-home-widget__drag-handle) {
   transition: none;
 }
 
-html[data-marinara-reduced-effects="true"] .mari-home-professor-popup {
-  animation: none;
-}
-
-html[data-marinara-reduced-effects="true"] .mari-home-professor-popup__sprite,
-html[data-marinara-reduced-effects="true"] .mari-home-professor-popup__bubble,
-html[data-marinara-reduced-effects="true"] .mari-home-professor-popup__arrival-frame,
-html[data-marinara-reduced-effects="true"] .mari-home-professor-popup__drag-frame,
-html[data-marinara-reduced-effects="true"] .mari-home-professor-popup__idle-stage,
-html[data-marinara-reduced-effects="true"] .mari-home-professor-popup__blink,
-html[data-marinara-reduced-effects="true"] .mari-home-professor-popup__state-image,
 html[data-marinara-reduced-effects="true"] .mari-home-discovery-card {
   animation: none;
 }
 
-html[data-marinara-reduced-effects="true"] .mari-home-professor-popup__arrival-frame {
-  background-position: 100% 0;
-}
-
 /* Preserve the current Mari frame while the browser tab/window is inactive.
    App.tsx owns the single visibility/focus listener; Home only consumes it. */
-html[data-marinara-effects-paused="true"] .mari-home-professor-popup__sprite,
-html[data-marinara-effects-paused="true"] .mari-home-professor-popup__bubble,
-html[data-marinara-effects-paused="true"] .mari-home-professor-popup__arrival-frame,
-html[data-marinara-effects-paused="true"] .mari-home-professor-popup__drag-frame,
-html[data-marinara-effects-paused="true"] .mari-home-professor-popup__idle-stage,
-html[data-marinara-effects-paused="true"] .mari-home-professor-popup__blink,
-html[data-marinara-effects-paused="true"] .mari-home-professor-popup__state-image,
+html[data-marinara-effects-paused="true"] .mari-home-professor-blink,
 html[data-marinara-effects-paused="true"] .mari-professor-pixel-scene [data-part="sprite"],
 html[data-marinara-effects-paused="true"] .mari-professor-pixel-scene [data-part="screen"] span,
 html[data-marinara-effects-paused="true"] .mari-professor-pixel-scene [data-part="base"] i {
@@ -3739,9 +4186,12 @@ html[data-marinara-reduced-effects="true"] .game-expression-reaction__bubble,
 html[data-marinara-reduced-effects="true"] .game-expression-reaction__drop,
 html[data-marinara-reduced-effects="true"] [class^="anim-text-"],
 html[data-marinara-reduced-effects="true"] [class*=" anim-text-"],
+html[data-marinara-reduced-effects="true"] .mari-home-professor-blink,
 html[data-marinara-reduced-effects="true"] .mari-professor-pixel-scene [data-part="sprite"],
 html[data-marinara-reduced-effects="true"] .mari-professor-pixel-scene [data-part="screen"] span,
-html[data-marinara-reduced-effects="true"] .mari-professor-pixel-scene [data-part="base"] i {
+html[data-marinara-reduced-effects="true"] .mari-professor-pixel-scene [data-part="base"] i,
+html[data-marinara-reduced-effects="true"] .mari-workspace-glow-band::before,
+html[data-marinara-reduced-effects="true"] .mari-workspace-glow-band::after {
   animation: none !important;
 }
 
@@ -3847,11 +4297,11 @@ strong {
 .mari-message-content .mari-md-inline-code {
   font-family: "Consolas", "Monaco", "Courier New", monospace;
   font-size: 0.85em;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: var(--secondary);
+  border: 1px solid var(--border);
   border-radius: 4px;
   padding: 0.1em 0.35em;
-  color: #e8e6e3;
+  color: var(--foreground);
   overflow-wrap: anywhere;
   word-break: break-word;
   /* Code is LTR syntax whatever surrounds it. The direction must live in CSS,
@@ -3859,6 +4309,12 @@ strong {
      markup with an attribute allowlist that strips `dir`. */
   direction: ltr;
   unicode-bidi: isolate;
+}
+
+.docs-reader-content .mari-md-inline-code {
+  color: var(--foreground);
+  background: var(--secondary);
+  border-color: var(--border);
 }
 
 /* Mixed-direction defence, docs viewer only: links and bold runs frequently
@@ -3895,6 +4351,17 @@ strong {
   color: var(--muted-foreground);
   font-size: 0.8125em;
   line-height: 1.35;
+}
+
+/* One-request dice: a number the engine rolled after the Game Master committed the
+   sentence. The saved content carries a bare number, so this marker is reattached at
+   render time and its breakdown rides on the title attribute. Kept deliberately quiet:
+   it sits inside prose, and a loud badge on every damage number would read as noise. */
+.game-dice-marker {
+  color: var(--primary);
+  text-decoration: underline dotted currentColor;
+  text-underline-offset: 0.18em;
+  cursor: help;
 }
 
 /* Fenced code blocks */
@@ -3961,11 +4428,11 @@ strong {
 
 /* Blockquotes */
 .mari-message-content .mari-md-blockquote {
-  border: 1px solid var(--border);
+  border: 1px solid var(--marinara-app-accent-solid);
   border-radius: 0.5rem;
   padding: 0.5em 0.75em;
   margin: 0.35em 0;
-  background: color-mix(in srgb, var(--card) 94%, var(--accent));
+  background: color-mix(in srgb, var(--card) 94%, var(--marinara-app-accent-solid));
   color: inherit;
   font-style: italic;
 }
@@ -4434,6 +4901,12 @@ strong {
   }
 }
 
+/* Use the same opaque surface as sidebar headers and item action trays.
+   Keep specificity low so authored theme backgrounds still take precedence. */
+:where(.mari-sidebar, .mari-right-panel) {
+  background-color: var(--sidebar);
+}
+
 /* Firefox on Windows can rasterize text inside large blurred/translucent layout layers,
    which shows up most clearly on high-DPI displays. Fall back to opaque shell chrome there. */
 @supports (-moz-appearance: none) {
@@ -4468,21 +4941,20 @@ strong {
   }
 
   .mari-topbar,
-  .mari-sidebar-header,
-  .mari-sidebar-footer,
-  .mari-right-panel-header {
+  .mari-sidebar-footer {
     background: var(--card) !important;
   }
 
   [data-chat-mode="roleplay"] .marinara-chat-input-shell {
-    background: linear-gradient(var(--card), var(--card)), var(--background) !important;
+    --mari-chat-existing-bg: linear-gradient(var(--card), var(--card)), var(--background);
+    background: var(--mari-chat-surface-paint, var(--mari-chat-existing-bg)) !important;
     contain: layout paint;
     isolation: isolate;
   }
 
   .mari-sidebar,
   .mari-right-panel {
-    background: var(--background) !important;
+    background-color: var(--sidebar) !important;
   }
 }
 
@@ -5339,6 +5811,8 @@ strong {
   animation: fade-in-up 0.25s ease-out;
 }
 
+@import "./omnibar.css";
+
 @keyframes scale-in {
   from {
     opacity: 0;
@@ -5659,15 +6133,38 @@ strong {
 }
 
 [data-chat-mode="roleplay"] {
-  --mari-roleplay-message-column-width: 58rem;
+  /* 100cqw is the chat pane (CenterContent is a container). A docked Tracker Panel needs room on each
+     side of the column (AppShell sets it), so a pane too narrow for both narrows the column instead of
+     squeezing the panel to a sliver. */
+  --mari-roleplay-message-column-width: min(58rem, 100cqw - 2 * var(--tracker-panel-column-room, 0px));
+  --mari-roleplay-row-gutter: clamp(0.25rem, 1.5vw, 1.5rem);
+}
+
+/* The transcript's side padding on a wide chat pane (a narrow pane uses 0.75rem). */
+@media (min-width: 768px) {
+  [data-chat-mode="roleplay"] {
+    --mari-roleplay-transcript-gutter: 2rem;
+  }
+}
+
+@media (min-width: 1024px) {
+  [data-chat-mode="roleplay"] {
+    --mari-roleplay-transcript-gutter: 2.5rem;
+  }
+}
+
+@media (min-width: 1280px) {
+  [data-chat-mode="roleplay"] {
+    --mari-roleplay-transcript-gutter: 3rem;
+  }
 }
 
 [data-chat-mode="roleplay"] .rpg-narrator-msg,
 [data-chat-mode="roleplay"] .mari-roleplay-message-row {
   justify-content: center;
   width: 100%;
-  padding-left: clamp(0.25rem, 1.5vw, 1.5rem);
-  padding-right: clamp(0.25rem, 1.5vw, 1.5rem);
+  padding-left: var(--mari-roleplay-row-gutter);
+  padding-right: var(--mari-roleplay-row-gutter);
 }
 
 [data-chat-mode="roleplay"] .rpg-narrator-msg {
@@ -5707,7 +6204,9 @@ strong {
   width: min(100%, var(--mari-roleplay-message-column-width));
 }
 
-[data-chat-mode="roleplay"] .mari-scrollable-roleplay-avatar {
+/* R14: Mari beside her newest reply stays on screen while it scrolls, like the scrollable avatars. */
+[data-chat-mode="roleplay"] .mari-scrollable-roleplay-avatar,
+.mari-answer__sprite > * {
   position: sticky;
   top: var(--mari-roleplay-scrollable-avatar-top, max(0.75rem, env(safe-area-inset-top)));
   align-self: flex-start;
@@ -5770,6 +6269,76 @@ strong {
 
   [data-chat-mode="roleplay"] .mari-roleplay-message-body--editing {
     width: 100%;
+  }
+}
+
+/* Chat position Left / Right (Center has no attribute and keeps the layout above). The transcript's
+   children share one box: the column plus, on each side, a row gutter and an avatar slot with its two
+   gaps, so every row type keeps its column exactly where the composer is. The box sits against the
+   chosen edge of the visible chat area, the composer follows its column, and both fall back to the
+   centred layout when the area has no width to spare. */
+@media (min-width: 768px) {
+  [data-chat-mode="roleplay"][data-chat-position] {
+    --mari-chat-position-avatar-space: calc(2.5rem * var(--roleplay-avatar-scale, 1) + 1.5rem);
+    --mari-chat-position-unit: calc(
+      var(--mari-roleplay-message-column-width) + 2 *
+        (var(--mari-roleplay-row-gutter) + var(--mari-chat-position-avatar-space))
+    );
+    --mari-chat-position-composer-width: min(
+      100% - var(--mari-chat-position-clearance, 0px),
+      var(--mari-roleplay-message-column-width)
+    );
+  }
+
+  [data-chat-mode="roleplay"][data-chat-position][data-roleplay-avatar-style="rectangles"] {
+    --mari-chat-position-avatar-space: calc(2.75rem * var(--roleplay-avatar-scale, 1) + 1.5rem);
+  }
+
+  [data-chat-mode="roleplay"][data-chat-position][data-roleplay-avatar-style="none"] {
+    --mari-chat-position-avatar-space: 0rem;
+  }
+
+  /* The box already keeps choices clear of the Tracker Panel. */
+  [data-chat-mode="roleplay"][data-roleplay-presentation="classic"][data-chat-position] [data-chat-scroll] {
+    --tracker-panel-overlay-clearance: 0px;
+  }
+
+  [data-chat-mode="roleplay"][data-roleplay-presentation="classic"][data-chat-position] [data-chat-scroll] > * {
+    width: min(var(--mari-chat-position-unit), 100% - var(--mari-chat-position-clearance, 0px));
+    margin-left: var(--mari-chat-position-clearance, 0px);
+    margin-right: auto;
+  }
+
+  /* 100cqw is the chat pane (CenterContent is a size container), so the right edge ignores the
+     transcript's scrollbar, as the composer does. */
+  [data-chat-mode="roleplay"][data-roleplay-presentation="classic"][data-chat-position="right"] [data-chat-scroll] > * {
+    margin-left: max(
+      0px,
+      100cqw - 2 * var(--mari-roleplay-transcript-gutter) - var(--mari-chat-position-clearance, 0px) -
+        var(--mari-chat-position-unit)
+    );
+  }
+
+  /* The composer, and the Visual Novel history above it. */
+  [data-chat-mode="roleplay"][data-chat-position] .mari-roleplay-input-column {
+    width: var(--mari-chat-position-composer-width);
+    margin-right: auto;
+  }
+
+  [data-chat-mode="roleplay"][data-chat-position="left"] .mari-roleplay-input-column {
+    margin-left: min(
+      (100% - var(--mari-chat-position-composer-width) + var(--mari-chat-position-clearance, 0px)) / 2,
+      var(--mari-roleplay-transcript-gutter) + var(--mari-chat-position-clearance, 0px) +
+        (var(--mari-chat-position-unit) - var(--mari-chat-position-composer-width)) / 2
+    );
+  }
+
+  [data-chat-mode="roleplay"][data-chat-position="right"] .mari-roleplay-input-column {
+    margin-left: max(
+      (100% - var(--mari-chat-position-composer-width) - var(--mari-chat-position-clearance, 0px)) / 2,
+      100% - var(--mari-roleplay-transcript-gutter) - var(--mari-chat-position-clearance, 0px) -
+        (var(--mari-chat-position-unit) + var(--mari-chat-position-composer-width)) / 2
+    );
   }
 }
 
@@ -6088,6 +6657,10 @@ strong {
   font-size: 0.6875rem;
 }
 
+.mari-message {
+  -webkit-tap-highlight-color: transparent;
+}
+
 /* ─────────────────────────────────────────────
    18. RESPONSIVE / MOBILE
    ───────────────────────────────────────────── */
@@ -6145,6 +6718,20 @@ strong {
   .mari-gallery-image-actions .mari-chrome-accent-surface {
     @apply border-transparent bg-white/20 text-white hover:bg-white/30;
   }
+}
+
+/* Touch tablets get the phone shell (MOBILE_SHELL_MEDIA_QUERY in ui.store.ts),
+   so they also need its keyboard-aware viewport. */
+@media (max-width: 767px), (max-width: 1440px) and (hover: none) and (any-pointer: coarse) {
+  .mari-topbar {
+    /* Match native page backing even over gradients; also override Gecko's card fallback. */
+    background-color: var(--marinara-page-backing, var(--marinara-topbar-surface)) !important;
+  }
+
+  /* Home's browser chrome continues the TopBar, so it and its address row shade the same backing. */
+  .mari-home-browser-chrome {
+    --marinara-topbar-surface: var(--marinara-page-backing, var(--card));
+  }
 
   /*
    * WKWebView native backing color is set by the literal background-color in
@@ -6163,6 +6750,8 @@ strong {
   body {
     position: fixed;
     inset: 0;
+    /* Keep authored gradients inside the app, not over the keyboard backing. */
+    background-image: none;
     width: 100%;
     height: 100%;
     overflow: hidden;
@@ -6196,9 +6785,12 @@ strong {
   }
 
   /* Cover both the app and body-portal dialogs. Character/persona fields use
-     the same viewport contract as chat instead of falling back to fixed UI. */
+     the same viewport contract as chat instead of falling back to fixed UI.
+     A floating panel whose editor shell fills it (a package's full-screen
+     editor, such as World Maps) is a body-portal dialog too. */
   html[data-mari-ios-webkit] .mari-app,
-  html[data-mari-ios-webkit] .mari-modal {
+  html[data-mari-ios-webkit] .mari-modal,
+  html[data-mari-ios-webkit] body > [data-chat-floating-panel]:has(> .mari-editor-shell.flex-1) {
     position: absolute;
     top: var(--mari-visual-viewport-offset-top, 0px);
     bottom: auto;
@@ -6208,10 +6800,14 @@ strong {
 
   /* Body-portalled chat menus otherwise stay in layout-viewport coordinates
      while iPhone pans the visual viewport for its keyboard. Keep the focused
-     menu and its scroll shell inside the screen the user can actually see. */
+     menu and its scroll shell inside the screen the user can actually see.
+     Full-screen editors stay out: shrinking one to its content scrolled its
+     header and Save button out of reach on Android (#7452). */
   html[data-mari-software-keyboard-open]
     body
-    > [data-chat-floating-panel]:not(.mari-modal):not([data-component="ExpandedTextarea"]):focus-within {
+    > [data-chat-floating-panel]:not(.mari-modal):not([data-component="ExpandedTextarea"]):not(
+      :has(> .mari-editor-shell.flex-1)
+    ):focus-within {
     position: absolute !important;
     top: calc(var(--mari-visual-viewport-offset-top, 0px) + 0.5rem) !important;
     bottom: auto !important;
@@ -6239,6 +6835,21 @@ strong {
     flex: 1 1 auto !important;
   }
 
+  /* A window you type in on a touch screen (the phone Chat Settings sheet, or the window on a phone
+     turned sideways) fits the same visible screen; its scroll area keeps the field in view. */
+  html[data-mari-software-keyboard-open] .mari-window:focus-within {
+    top: calc(var(--mari-visual-viewport-offset-top, 0px) + 0.5rem) !important;
+    bottom: auto !important;
+    height: calc(var(--mari-visual-viewport-height, 100dvh) - 1rem) !important;
+    max-height: none !important;
+  }
+
+  /* Chat Settings' rows above its sections (Tracker Panel, Reset View, the drag-and-drop hint) step
+     aside while you type, so a phone turned sideways still shows the field. */
+  html[data-mari-software-keyboard-open] .mari-window:focus-within [data-chat-settings-top-row] {
+    display: none;
+  }
+
   html[data-mari-ios-webkit] body > [data-component="ExpandedTextarea"] {
     position: absolute;
     top: var(--mari-visual-viewport-offset-top, 0px);
@@ -6246,7 +6857,9 @@ strong {
     height: var(--mari-visual-viewport-height, 100dvh);
     min-height: 0;
   }
+}
 
+@media (max-width: 767px) {
   .app-sidebar-mobile {
     position: fixed !important;
     inset: 0 !important;
@@ -6427,9 +7040,17 @@ strong {
     width: calc(100% - var(--mari-roleplay-mobile-avatar-space, 3rem));
   }
 
-  [data-component="ChatArea.Roleplay"][data-mobile-composer-active="true"] [data-roleplay-agent-window],
-  [data-component="ChatArea.Roleplay"]:has(.mari-roleplay-message-body--editing) [data-roleplay-agent-window] {
+  [data-component="ChatArea.Roleplay"][data-mobile-composer-active="true"]
+    [data-roleplay-agent-window]:not([data-roleplay-agent-window="echo"]),
+  [data-component="ChatArea.Roleplay"]:has(.mari-roleplay-message-body--editing)
+    [data-roleplay-agent-window]:not([data-roleplay-agent-window="echo"]) {
     display: none;
+  }
+
+  /* Echo keeps its layout box while hidden, so reactions revealed during typing still pin it to the newest one. */
+  [data-component="ChatArea.Roleplay"][data-mobile-composer-active="true"] [data-roleplay-agent-window="echo"],
+  [data-component="ChatArea.Roleplay"]:has(.mari-roleplay-message-body--editing) [data-roleplay-agent-window="echo"] {
+    visibility: hidden;
   }
 
   [data-chat-mode="conversation"] [data-chat-scroll]:has([data-chat-message-editor]) {
@@ -6506,8 +7127,22 @@ strong {
     white-space: nowrap;
   }
 
-  .chat-input-container .marinara-chat-input-shell {
+  :root:not([data-chat-widget-apply-shape="true"]) .chat-input-container .marinara-chat-input-shell {
     border-radius: 1em !important;
+  }
+}
+
+@media (max-width: 639px) {
+  .mari-topbar {
+    gap: 0.5rem;
+  }
+
+  .mari-topbar-action {
+    flex: 0 0 auto;
+    width: 3.5rem !important;
+    /* UX-16: 2.6rem is 44 px at the 17 px root, the minimum touch target. */
+    height: 2.6rem !important;
+    padding: 0 !important;
   }
 }
 
@@ -6539,8 +7174,21 @@ strong {
   *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
+    /* 0s, not a tiny duration: every element's initial transition-property is `all`, so any
+       nonzero duration here made a theme or accent change transition every property of every element. */
+    transition-duration: 0s !important;
   }
+}
+
+/* Floating windows open in place without the entrance animation. */
+@media (prefers-reduced-motion: reduce) {
+  .mari-window {
+    animation: none;
+  }
+}
+
+html[data-marinara-reduced-effects="true"] .mari-window {
+  animation: none;
 }
 
 /* ─────────────────────────────────────────────
@@ -6605,6 +7253,8 @@ strong {
 .game-narration-prose {
   line-height: 1.75;
   letter-spacing: 0.01em;
+  /* Model text can hold runs no browser wraps on its own, such as `happy|sad|angry` or a long URL. */
+  overflow-wrap: anywhere;
 }
 .game-narration-prose p {
   margin-bottom: 0.75em;
@@ -7568,6 +8218,7 @@ strong {
   position: absolute;
   bottom: var(--mari-professor-sprite-bottom, 15%);
   width: clamp(8.25rem, 37%, 11rem);
+  height: auto;
   image-rendering: pixelated;
   image-rendering: crisp-edges;
   filter: drop-shadow(0.45rem 0.55rem 0 rgba(0, 0, 0, 0.2));
@@ -7755,4 +8406,100 @@ strong {
     transform: translateY(0.16rem);
     background: #151a22;
   }
+}
+
+@import "./omnibar-settings.css";
+
+/* Short landscape screens need the chat list to share the sidebar's scroll. */
+@media (max-height: 500px) and (orientation: landscape) {
+  .mari-chat-sidebar {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .mari-chat-sidebar > * {
+    flex-shrink: 0;
+  }
+
+  .mari-chat-sidebar > .mari-sidebar-header {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+  }
+
+  .mari-chat-sidebar > [data-chat-root-drop-zone] {
+    flex: 1 0 auto;
+    min-height: 12rem;
+    overflow-y: visible;
+  }
+}
+
+/* Items gathered by a second-finger tap remain visible in their list. */
+[data-drag-stacked="true"] {
+  opacity: 0.5;
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+/* Make before/after insertion different from dropping into a folder. */
+[data-drag-insert] {
+  position: relative;
+  overflow: visible;
+  transition: margin 150ms ease;
+}
+[data-drag-insert="before"] {
+  margin-block-start: 24px;
+}
+[data-drag-insert="after"] {
+  margin-block-end: 24px;
+}
+[data-drag-insert]::after {
+  content: "";
+  position: absolute;
+  inset-inline: 6px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--primary);
+  pointer-events: none;
+}
+[data-drag-insert="before"]::after {
+  top: -14px;
+}
+[data-drag-insert="after"]::after {
+  bottom: -14px;
+}
+[data-drag-target="inside"] {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+  background-color: var(--sidebar-accent);
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-drag-insert] {
+    transition: none;
+  }
+}
+[data-drag-insert-axis="x"] {
+  margin-block: 0;
+}
+[data-drag-insert-axis="x"][data-drag-insert="before"] {
+  margin-inline-start: 24px;
+}
+[data-drag-insert-axis="x"][data-drag-insert="after"] {
+  margin-inline-end: 24px;
+}
+[data-drag-insert-axis="x"]::after {
+  inset-block: 6px;
+  width: 4px;
+  height: auto;
+}
+[data-drag-insert-axis="x"][data-drag-insert="before"]::after {
+  left: -14px;
+  right: auto;
+}
+[data-drag-insert-axis="x"][data-drag-insert="after"]::after {
+  right: -14px;
+  left: auto;
+}
+[data-drag-source="true"] {
+  opacity: 0.5;
 }

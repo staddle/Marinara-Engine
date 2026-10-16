@@ -397,7 +397,8 @@ try {
           try { fs.readFileSync(${JSON.stringify(outsideSecretPath)}, "utf8"); } catch { outsideReadBlocked = true; }
           try { fs.writeFileSync(escapedProcess.env.HOME + "/extension-owned.txt", "unsafe"); } catch { arbitraryWriteBlocked = true; }
           try { childProcess.spawnSync("/bin/echo", ["unsafe"]); } catch { childProcessBlocked = true; }
-          try { escapedProcess.kill(escapedProcess.ppid, 0); } catch { parentSignalBlocked = true; }
+          // Inside Bubblewrap, ppid is its isolated supervisor, not the Engine host process.
+          try { escapedProcess.kill(${process.pid}, 0); } catch { parentSignalBlocked = true; }
           await new Promise((resolve) => {
             let socket;
             try {
@@ -551,6 +552,7 @@ try {
   assert.match(worker, /"ui-contribution-event"/u, "Worker must receive host-rendered control events");
   assert.match(worker, /contributionSurfaces/u, "Worker must validate safe contribution surfaces");
   assert.match(worker, /contributionPositions/u, "Worker must validate safe contribution positions");
+  assert.match(worker, /command contributions cannot register callbacks/u);
   assert.doesNotMatch(worker, /\bdocument\b/u, "Worker source must never touch the DOM");
 
   const surfaceMessages: Array<{ type?: string; contribution?: Record<string, unknown> }> = [];
@@ -715,6 +717,120 @@ try {
     doc.includes("new Worker(") && doc.includes("marinara.ui.showWindow"),
     "Extension JS must run in the worker embedded by the bootstrap, not in the document",
   );
+
+  // #7260: background tabs, sleep and suspended mobile apps throttle timers.
+  // The heartbeat watchdog must not stop a healthy worker for that silence,
+  // but must still stop a worker that hangs on a visible page.
+  {
+    const bootstrap = /<script nonce="test-nonce">([\s\S]*?)<\/script>/u.exec(doc)?.[1];
+    assert.ok(bootstrap, "Sandbox bootstrap script must be present");
+    let now = 1_000_000;
+    let watchdogTick: (() => void) | undefined;
+    let deliverWorkerMessage: ((event: { data: unknown }) => void) | undefined;
+    let terminated = false;
+    const revokedUrls: string[] = [];
+    const posted: Array<{ type?: string; stopped?: boolean; message?: string }> = [];
+    const fakeElement = () => ({
+      style: { setProperty: () => undefined },
+      setAttribute: () => undefined,
+      appendChild: () => undefined,
+      addEventListener: () => undefined,
+      remove: () => undefined,
+    });
+    const fakeDocument = {
+      hidden: false,
+      createElement: fakeElement,
+      documentElement: { style: {} },
+      body: { style: {}, appendChild: () => undefined },
+    };
+    const startSandbox = () => {
+      terminated = false;
+      posted.length = 0;
+      runInNewContext(bootstrap, {
+        Date: { now: () => now },
+        Blob: class {},
+        URL: { createObjectURL: () => "blob:test", revokeObjectURL: (url: string) => revokedUrls.push(url) },
+        Worker: class {
+          addEventListener(type: string, listener: (event: { data: unknown }) => void) {
+            if (type === "message") deliverWorkerMessage = listener;
+          }
+          postMessage() {}
+          terminate() {
+            terminated = true;
+          }
+        },
+        document: fakeDocument,
+        window: {
+          parent: { postMessage: (message: (typeof posted)[number]) => posted.push(message) },
+          setInterval: (callback: () => void) => {
+            watchdogTick = callback;
+            return 1;
+          },
+          clearInterval: () => undefined,
+          setTimeout: () => 0,
+          addEventListener: () => undefined,
+        },
+      });
+    };
+    startSandbox();
+    assert.ok(watchdogTick && deliverWorkerMessage, "Sandbox must start the heartbeat watchdog");
+    // Safari/WebKit loads a Worker script after new Worker() returns, so
+    // revoking its blob URL at once made the extension fail to start.
+    assert.deepEqual(revokedUrls, [], "The worker blob URL must outlive the Worker constructor call");
+    const tick = (elapsedMs: number) => {
+      now += elapsedMs;
+      watchdogTick!();
+    };
+    const heartbeat = () => deliverWorkerMessage!({ data: { type: "heartbeat" } });
+
+    // Hidden tab: the worker's heartbeat stalls while the watchdog keeps ticking.
+    heartbeat();
+    fakeDocument.hidden = true;
+    for (let second = 0; second < 30; second += 1) tick(1_000);
+    tick(60_000);
+    assert.equal(terminated, false, "A hidden page must not stop a worker whose heartbeat is throttled");
+    fakeDocument.hidden = false;
+    tick(1_000);
+    tick(1_000);
+    assert.equal(terminated, false, "Returning to the tab must give the worker a fresh heartbeat window");
+    heartbeat();
+
+    // Sleep or a frozen page on a visible tab: the watchdog's own tick arrives late.
+    tick(120_000);
+    tick(1_000);
+    assert.equal(terminated, false, "A late watchdog tick proves throttling, not a hung worker");
+
+    // A worker that hangs on a visible page is still stopped within the same window.
+    heartbeat();
+    for (let second = 0; second < 5; second += 1) tick(1_000);
+    assert.equal(terminated, false, "Five seconds of silence must stay within the heartbeat window");
+    tick(1_000);
+    assert.equal(terminated, true, "A worker silent for over five seconds on a visible page must be stopped");
+    assert.deepEqual(
+      posted.filter((message) => message.type === "error").map(({ stopped, message }) => ({ stopped, message })),
+      [{ stopped: true, message: "Browser extension was stopped because its sandbox became unresponsive" }],
+      "The host must be told the worker was stopped so it can drop dead controls",
+    );
+    // e2e/personal-extension-restart.e2e.ts covers what the host does with it.
+
+    // Heartbeats skipped the message limit, so an extension could send them
+    // without end and freeze the page. The worker sends one a second, so a
+    // backlog that arrives at once after a pause (an open browser dialog, a
+    // frozen tab) stays within that rate and must not stop the worker.
+    startSandbox();
+    tick(300_000);
+    for (let beat = 0; beat < 300; beat += 1) heartbeat();
+    tick(1_000);
+    assert.equal(terminated, false, "A heartbeat backlog after a pause must not stop a healthy worker");
+    // Browsers drop a terminated worker's queued messages, so stop delivering.
+    for (let beat = 0; beat < 1_000 && !terminated; beat += 1) heartbeat();
+    assert.equal(terminated, true, "A heartbeat flood must count toward the sandbox message limit");
+    assert.deepEqual(
+      posted.filter((message) => message.type === "error").map(({ stopped, message }) => ({ stopped, message })),
+      [{ stopped: true, message: "Browser extension was stopped for exceeding the sandbox message limit" }],
+      "The host must be told a flooding worker was stopped",
+    );
+  }
 
   const fullPageExtension = {
     ...uiExtension,
@@ -913,8 +1029,15 @@ try {
 }
 
 {
-  const { normalizePersonalExtensionContribution } =
-    await import("../../packages/client/src/lib/personal-extension-contributions.js");
+  const {
+    activatePersonalExtensionCommand,
+    collectPersonalExtensionCommands,
+    normalizePersonalExtensionContribution,
+    registerPersonalExtensionContribution,
+    removePersonalExtensionContributions,
+    resolvePersonalExtensionCommand,
+    setPersonalExtensionContributionDispatcher,
+  } = await import("../../packages/client/src/lib/personal-extension-contributions.js");
   const normalized = normalizePersonalExtensionContribution({
     id: "weather.panel",
     kind: "panel",
@@ -998,6 +1121,99 @@ try {
     }),
     null,
   );
+  assert.deepEqual(
+    normalizePersonalExtensionContribution({
+      id: "weather-command",
+      kind: "command",
+      label: "Open weather controls",
+      description: "Opens the extension panel",
+      icon: "cloud-sun",
+      targetContributionId: "weather.panel",
+    }),
+    {
+      id: "weather-command",
+      kind: "command",
+      label: "Open weather controls",
+      description: "Opens the extension panel",
+      icon: "cloud-sun",
+      targetContributionId: "weather.panel",
+    },
+  );
+  assert.equal(
+    normalizePersonalExtensionContribution({
+      id: "unsafe-command",
+      kind: "command",
+      label: "Unsafe command",
+      targetContributionId: "weather.panel",
+      url: "https://example.invalid",
+    }),
+    null,
+  );
+  assert.equal(
+    normalizePersonalExtensionContribution({
+      id: "self-command",
+      kind: "command",
+      label: "Invalid",
+      targetContributionId: "self-command",
+    }),
+    null,
+  );
+
+  const runtime = {
+    id: "command-extension",
+    name: "Command Extension",
+    description: "",
+    capabilities: [],
+    contentHash: "sha256:command-extension",
+    executionMode: "sandboxed" as const,
+    runtimeUrl: "",
+    styleUrl: null,
+  };
+  assert.equal(
+    registerPersonalExtensionContribution(runtime, {
+      id: "weather.panel",
+      kind: "menu-item",
+      label: "Weather controls",
+    }),
+    true,
+  );
+  assert.equal(
+    registerPersonalExtensionContribution(runtime, {
+      id: "weather-command",
+      kind: "command",
+      label: "Open weather controls",
+      targetContributionId: "weather.panel",
+    }),
+    true,
+  );
+  const commandTarget = resolvePersonalExtensionCommand("command-extension:weather-command");
+  assert.equal(commandTarget?.key, "command-extension:weather.panel");
+  assert.equal(commandTarget?.kind, "menu-item");
+  assert.equal(resolvePersonalExtensionCommand("command-extension:weather.panel"), null);
+  assert.deepEqual(collectPersonalExtensionCommands(), [
+    {
+      id: "personal-extension:command-extension:weather-command",
+      title: "Open weather controls",
+      kind: "action",
+      icon: "extensions",
+      aliases: ["Command Extension"],
+    },
+  ]);
+  const commandMessages: Record<string, unknown>[] = [];
+  setPersonalExtensionContributionDispatcher(runtime, (message) => commandMessages.push(message));
+  assert.equal(activatePersonalExtensionCommand("personal-extension:command-extension:weather-command"), true);
+  assert.deepEqual(commandMessages, [{ type: "ui-contribution-activate", contributionId: "weather.panel" }]);
+  assert.equal(activatePersonalExtensionCommand("personal-extension:other-extension:weather-command"), false);
+  assert.equal(
+    registerPersonalExtensionContribution(
+      { ...runtime, contentHash: "sha256:changed-extension" },
+      { id: "weather.panel", kind: "menu-item", label: "Changed weather controls" },
+    ),
+    true,
+  );
+  assert.deepEqual(collectPersonalExtensionCommands(), []);
+  assert.equal(activatePersonalExtensionCommand("personal-extension:command-extension:weather-command"), false);
+  removePersonalExtensionContributions(runtime.id);
 }
 
 console.log("Personal Extension sandbox and policy regression passed.");

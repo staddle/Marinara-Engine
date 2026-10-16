@@ -14,15 +14,16 @@ import { join } from "node:path";
 // which is how ten Noodle keys broke during the platform rename.
 
 const repoRoot = join(import.meta.dirname, "..", "..");
-const en = JSON.parse(readFileSync(join(repoRoot, "packages/client/src/localization/locales/en.json"), "utf8")) as Record<
-  string,
-  unknown
->;
+const en = JSON.parse(
+  readFileSync(join(repoRoot, "packages/client/src/localization/locales/en.json"), "utf8"),
+) as Record<string, unknown>;
 
 // i18next resolves a plural call to suffixed catalog entries, so the base key itself is
 // never present. Treat any key with a plural family as resolved.
 const PLURAL_SUFFIX = /_(zero|one|two|few|many|other)$/;
-const pluralBases = new Set(Object.keys(en).flatMap((key) => (PLURAL_SUFFIX.test(key) ? [key.replace(PLURAL_SUFFIX, "")] : [])));
+const pluralBases = new Set(
+  Object.keys(en).flatMap((key) => (PLURAL_SUFFIX.test(key) ? [key.replace(PLURAL_SUFFIX, "")] : [])),
+);
 
 const files = execFileSync("git", ["ls-files", "packages/client/src"], { cwd: repoRoot, encoding: "utf8" })
   .split("\n")
@@ -48,7 +49,6 @@ for (const file of files) {
 // Shrink this list when you fix one; never grow it.
 const KNOWN_MISSING = new Set([
   // Genuinely dangling: no such key and no plural family in en.json.
-  "ui.game.gamecharactersheet.regenerating",
 ]);
 
 const unexpected = [...missing].filter(([key]) => !KNOWN_MISSING.has(key)).map(([, display]) => display);
@@ -59,10 +59,6 @@ assert.equal(
 );
 
 const fixed = [...KNOWN_MISSING].filter((key) => !missing.has(key));
-assert.equal(
-  fixed.length,
-  0,
-  `These keys resolve now — remove them from KNOWN_MISSING:\n${fixed.join("\n")}`,
-);
+assert.equal(fixed.length, 0, `These keys resolve now — remove them from KNOWN_MISSING:\n${fixed.join("\n")}`);
 
 process.stdout.write(`Localization key-reference regression passed (${missing.size} known-missing, none new).\n`);

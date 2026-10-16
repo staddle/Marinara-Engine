@@ -5,6 +5,7 @@ import { create } from "zustand";
 import {
   ECHO_CHAMBER_MESSAGE_LIMIT,
   enqueueEchoChamberMessages,
+  normalizeEchoChamberMessages,
   type EchoChamberMessage,
 } from "../lib/echo-chamber-queue";
 import type {
@@ -133,6 +134,8 @@ interface AgentState {
   failedAgentChatId: string | null;
   /** Rich failure details for the retry UI and troubleshooting copy */
   failedAgentFailures: AgentFailure[];
+  /** Agent activity was on screen since the last failure, so its icon drops the failure dot (#7322). */
+  failedAgentsSeen: boolean;
   thoughtBubbles: Array<{
     agentId: string;
     agentName: string;
@@ -182,12 +185,13 @@ interface AgentState {
   setFailedAgentTypes: (types: string[], chatId?: string | null) => void;
   setFailedAgentFailures: (failures: AgentFailure[], chatId?: string | null) => void;
   clearFailedAgentTypes: (chatId?: string | null) => void;
+  markFailedAgentsSeen: (chatId: string) => void;
   addThoughtBubble: (agentId: string, agentName: string, content: string) => void;
   dismissThoughtBubble: (index: number) => void;
   clearThoughtBubbles: () => void;
   addEchoMessage: (characterName: string, reaction: string) => void;
-  enqueueEchoMessages: (reactions: Array<{ characterName: string; reaction: string }>) => void;
-  setEchoMessages: (messages: Array<{ characterName: string; reaction: string; timestamp: number }>) => void;
+  enqueueEchoMessages: (reactions: unknown) => void;
+  setEchoMessages: (messages: unknown) => void;
   clearEchoMessages: () => void;
   setEchoVisibleCount: (count: number) => void;
   revealNextEchoMessage: () => void;
@@ -213,7 +217,7 @@ interface AgentState {
   enqueuePendingAgentWriteApproval: (entry: PendingAgentWriteApproval) => void;
   dismissPendingAgentWriteApproval: (id: string) => void;
   clearPendingAgentWriteApprovals: () => void;
-  /** Clear chat-runtime Agent state while retaining Professor Mari's chat-scoped continuation UI. */
+  /** Clear chat-scoped Agent state, including Professor Mari's suggestions and guided plan, so they cannot leak into another chat. */
   resetForChatChange: () => void;
   reset: () => void;
 }
@@ -231,6 +235,7 @@ type AgentDataState = Pick<
   | "failedAgentTypes"
   | "failedAgentChatId"
   | "failedAgentFailures"
+  | "failedAgentsSeen"
   | "thoughtBubbles"
   | "echoMessages"
   | "echoVisibleCount"
@@ -265,6 +270,7 @@ function createInitialAgentDataState(): AgentDataState {
     failedAgentTypes: [],
     failedAgentChatId: null,
     failedAgentFailures: [],
+    failedAgentsSeen: false,
     thoughtBubbles: [],
     echoMessages: [],
     echoVisibleCount: 0,
@@ -406,18 +412,24 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         reasonLabel: null,
         retryTarget: null,
       })),
+      failedAgentsSeen: false,
     }),
   setFailedAgentFailures: (failures, chatId = null) =>
     set({
       failedAgentTypes: Array.from(new Set(failures.map((failure) => failure.agentType))),
       failedAgentChatId: chatId,
       failedAgentFailures: failures,
+      failedAgentsSeen: false,
     }),
   clearFailedAgentTypes: (chatId = null) =>
     set((s) => {
       if (chatId && s.failedAgentChatId && s.failedAgentChatId !== chatId) return {};
       return { failedAgentTypes: [], failedAgentChatId: null, failedAgentFailures: [] };
     }),
+  markFailedAgentsSeen: (chatId) =>
+    set((s) =>
+      s.failedAgentsSeen || (s.failedAgentChatId && s.failedAgentChatId !== chatId) ? s : { failedAgentsSeen: true },
+    ),
 
   addThoughtBubble: (agentId, agentName, content) =>
     set((s) => ({
@@ -467,7 +479,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   setEchoMessages: (messages) =>
     set((state) => {
-      const nextMessages = messages.slice(-ECHO_CHAMBER_MESSAGE_LIMIT);
+      const nextMessages = normalizeEchoChamberMessages(messages, 0).slice(-ECHO_CHAMBER_MESSAGE_LIMIT);
       return {
         echoMessages: nextMessages,
         echoVisibleCount: Math.min(state.echoVisibleCount, nextMessages.length),
@@ -526,15 +538,12 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     })),
   clearPendingAgentWriteApprovals: () => set({ pendingAgentWriteApprovals: [] }),
 
-  resetForChatChange: () =>
-    set((state) => ({
-      ...createInitialAgentDataState(),
-      mariChips: state.mariChips,
-      mariChipsChatId: state.mariChipsChatId,
-      mariPlan: state.mariPlan,
-      mariPlanChatId: state.mariPlanChatId,
-      mariPlanCursor: state.mariPlanCursor,
-      mariPlanAnswers: state.mariPlanAnswers,
-    })),
+  resetForChatChange: () => set(createInitialAgentDataState()),
   reset: () => set(createInitialAgentDataState()),
 }));
+
+/** How many of the chat's failed agents Agent activity has not shown yet: its icon's failure dot (#7322). */
+export function selectUnseenAgentFailureCount(state: AgentState, chatId: string): number {
+  if (state.failedAgentsSeen || (state.failedAgentChatId && state.failedAgentChatId !== chatId)) return 0;
+  return state.failedAgentTypes.length;
+}

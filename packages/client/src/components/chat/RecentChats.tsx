@@ -1,5 +1,5 @@
 import { useMemo, type CSSProperties } from "react";
-import { MessageSquare, RefreshCw } from "lucide-react";
+import { MessageCircleQuestion, MessageSquare, RefreshCw } from "lucide-react";
 import { normalizeAvatarCrop, type AvatarCrop } from "@marinara-engine/shared";
 import { useCharacterSpritePreviews, useCharacterSummaries, type SpriteInfo } from "../../hooks/use-characters";
 import { useHomeFeed } from "../../hooks/use-home-feed";
@@ -13,6 +13,7 @@ import { cn, getAvatarCropStyle } from "../../lib/utils";
 import { useChatStore } from "../../stores/chat.store";
 import { useTranslation } from "react-i18next";
 import { ChatModeIcon } from "./ChatModeIcon";
+import { requestProfessorMariOpen } from "../../lib/professor-mari-open";
 
 const MODE_BADGE = {
   conversation: {
@@ -153,14 +154,34 @@ export function RecentChats() {
         <p className="mt-1 text-xs leading-relaxed text-[var(--muted-foreground)]">
           {t("home.recentChats.errorDescription")}
         </p>
-        <button
-          type="button"
-          onClick={() => void feed.refetch()}
-          className="mt-3 inline-flex min-h-8 w-fit items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 text-xs font-bold text-[var(--foreground)] hover:bg-[var(--accent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--marinara-app-accent-solid)]"
-        >
-          <RefreshCw size="0.78rem" aria-hidden="true" />
-          {t("home.recentChats.retry")}
-        </button>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => void feed.refetch()}
+            className="inline-flex min-h-8 w-fit items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--secondary)] px-3 text-xs font-bold text-[var(--foreground)] hover:bg-[var(--accent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--marinara-app-accent-solid)]"
+          >
+            <RefreshCw size="0.78rem" aria-hidden="true" />
+            {t("home.recentChats.retry")}
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              requestProfessorMariOpen({
+                draft: t("professorMari.handoff.recentChatsErrorDraft"),
+                context: {
+                  source: "chat-error",
+                  capability: "repair",
+                  error: { message: t("home.recentChats.errorDescription") },
+                  action: "Troubleshoot the Recent Chats load failure",
+                },
+              })
+            }
+            className="inline-flex min-h-8 w-fit items-center gap-1.5 rounded-lg border border-[var(--primary)]/35 bg-[var(--primary)]/10 px-3 text-xs font-bold text-[var(--primary)] hover:bg-[var(--primary)]/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--marinara-app-accent-solid)]"
+          >
+            <MessageCircleQuestion size="0.78rem" aria-hidden="true" />
+            {t("professorMari.handoff.ask")}
+          </button>
+        </div>
       </div>
     );
   }
@@ -223,7 +244,7 @@ export function RecentChats() {
             data-has-sprite={sprite ? "true" : "false"}
             data-sprite-layout={sprite?.layout}
             className={cn(
-              "group relative min-h-0 overflow-hidden rounded-xl border border-[color-mix(in_srgb,var(--recent-chat-accent)_45%,var(--border))] bg-[color-mix(in_srgb,var(--recent-chat-accent)_10%,var(--card))] p-2 text-left shadow-[0_16px_34px_-28px_color-mix(in_srgb,var(--recent-chat-accent)_60%,transparent)] transition-[border-color,background-color,transform,box-shadow] hover:-translate-y-0.5 hover:border-[color-mix(in_srgb,var(--recent-chat-accent)_76%,var(--border))] hover:bg-[color-mix(in_srgb,var(--recent-chat-accent)_15%,var(--card))] hover:shadow-[0_19px_36px_-25px_color-mix(in_srgb,var(--recent-chat-accent)_72%,transparent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--recent-chat-accent)] motion-reduce:transform-none md:min-h-36 md:rounded-2xl md:p-3.5",
+              "group relative min-h-0 overflow-hidden rounded-xl border border-[color-mix(in_srgb,var(--recent-chat-accent)_45%,var(--border))] bg-[color-mix(in_srgb,var(--recent-chat-accent)_10%,var(--card))] p-2 text-left shadow-[0_16px_34px_-28px_color-mix(in_srgb,var(--recent-chat-accent)_60%,transparent)] transition-[border-color,background-color,box-shadow] hover:border-[color-mix(in_srgb,var(--recent-chat-accent)_76%,var(--border))] hover:bg-[color-mix(in_srgb,var(--recent-chat-accent)_15%,var(--card))] hover:shadow-[0_19px_36px_-25px_color-mix(in_srgb,var(--recent-chat-accent)_72%,transparent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--recent-chat-accent)] motion-reduce:transform-none md:min-h-36 md:rounded-2xl md:p-3.5",
               index === 3 && "hidden md:block",
               index >= 4 && "hidden",
             )}
@@ -251,7 +272,7 @@ export function RecentChats() {
                 loading="lazy"
                 decoding="async"
                 className={cn(
-                  "absolute bottom-0 right-0 origin-bottom object-contain object-bottom object-center opacity-95 drop-shadow-[0_10px_18px_rgba(0,0,0,0.48)] transition-transform duration-300 ease-out group-hover:scale-[1.025] motion-reduce:transition-none",
+                  "absolute bottom-0 right-0 origin-bottom object-contain object-bottom object-center opacity-95 drop-shadow-[0_10px_18px_rgba(0,0,0,0.48)]",
                   sprite.layout === "full-body" ? "h-[96%] w-[46%] px-1 pt-1" : "h-[90%] w-[44%] pb-1 pr-1",
                 )}
               />

@@ -27,6 +27,7 @@ import {
   normalizeMaybeJsonStringArray,
 } from "../../../features/tracker-panel/lib/tracker-metadata";
 import { TrackerCardColorControls, type TrackerCardColorEntityLabel } from "../../ui/TrackerCardColorControls";
+import { SETTINGS_BUTTON_CLASS, SETTINGS_COMPACT_PRIMARY_BUTTON_CLASS } from "./SettingControls";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
 type TrackerCardColorSaveState = "idle" | "saving" | "saved" | "error";
@@ -176,10 +177,7 @@ export function TrackerCardColorSettings() {
       activeChat && typeof activeChat.personaId === "string" && activeChat.personaId.trim()
         ? activeChat.personaId
         : null;
-    const activePersona =
-      (chatPersonaId ? personas.find((persona) => persona.id === chatPersonaId) : null) ??
-      personas.find((persona) => persona.isActive) ??
-      null;
+    const activePersona = (chatPersonaId ? personas.find((persona) => persona.id === chatPersonaId) : null) ?? null;
 
     if (activePersona) {
       const config = parseTrackerCardColorConfig(activePersona.trackerCardColors);
@@ -424,11 +422,7 @@ export function TrackerCardColorSettings() {
       ) : gameStateLoadStatus === "error" ? (
         <div className="flex flex-wrap items-center justify-center gap-2 rounded-md bg-[var(--secondary)]/42 px-2 py-2 text-[0.625rem] leading-relaxed text-[var(--muted-foreground)]">
           <span>{localizeUi("ui.chat.agentsuitemodal.couldNotLoadTrackerData")}</span>
-          <button
-            type="button"
-            onClick={retryGameState}
-            className="rounded-sm bg-[var(--foreground)]/8 px-2 py-1 font-medium text-[var(--foreground)]/75 ring-1 ring-[var(--border)]/70 transition-colors hover:bg-[var(--foreground)]/12 hover:text-[var(--foreground)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] active:scale-95"
-          >
+          <button type="button" onClick={retryGameState} className={SETTINGS_BUTTON_CLASS}>
             {localizeUi("capabilities.actions.tryAgain")}
           </button>
         </div>
@@ -472,22 +466,18 @@ export function TrackerCardColorSettings() {
                 onClick={handleRevert}
                 disabled={!hasUnsavedChanges || saveState === "saving"}
                 title={localizeUi("ui.panels.trackercardcolorsettings.revertToPreviousSave")}
-                className="inline-flex h-6 min-w-0 items-center gap-1 rounded-md border border-[var(--border)] bg-[var(--secondary)] px-1.5 text-[0.625rem] font-semibold text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-45"
+                className={SETTINGS_BUTTON_CLASS}
               >
-                <RotateCcw size="0.6875rem" />
+                <RotateCcw size="0.75rem" />
                 <span>{localizeUi("ui.panels.trackercardcolorsettings.revert")}</span>
               </button>
               <button
                 type="button"
                 onClick={() => void handleSave()}
                 disabled={!hasUnsavedChanges || saveState === "saving"}
-                className="inline-flex h-6 min-w-0 items-center gap-1 rounded-md border border-[var(--primary)]/30 bg-[var(--primary)]/12 px-1.5 text-[0.625rem] font-semibold text-[var(--primary)] transition-colors hover:bg-[var(--primary)]/18 disabled:cursor-not-allowed disabled:border-[var(--border)] disabled:bg-[var(--secondary)] disabled:text-[var(--muted-foreground)] disabled:opacity-45"
+                className={SETTINGS_COMPACT_PRIMARY_BUTTON_CLASS}
               >
-                {saveState === "saving" ? (
-                  <Loader2 size="0.6875rem" className="animate-spin" />
-                ) : (
-                  <Save size="0.6875rem" />
-                )}
+                {saveState === "saving" ? <Loader2 size="0.75rem" className="animate-spin" /> : <Save size="0.75rem" />}
                 <span>{localizeUi("ui.noodle.noodlehome.save")}</span>
               </button>
             </div>

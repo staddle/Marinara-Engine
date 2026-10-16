@@ -1,3 +1,6 @@
+import { useState } from "react";
+import { useTranslation as useUiTranslation } from "react-i18next";
+import { Eye, Loader2, Shirt } from "lucide-react";
 import type { PresentCharacter } from "@marinara-engine/shared";
 import { useCharacterSprites, type SpriteInfo } from "../../../../hooks/use-characters";
 import {
@@ -23,6 +26,7 @@ export function FeaturedCharacterPortrait({
   characterPicture,
   outsideSide,
   onUploadAvatar,
+  onGeneratePortrait,
   onPortraitFocusChange,
 }: {
   character: PresentCharacter;
@@ -32,8 +36,12 @@ export function FeaturedCharacterPortrait({
   characterPicture?: string | null;
   outsideSide: TrackerProfileSide;
   onUploadAvatar: () => void;
+  /** Set when the Character Tracker has an image connection. */
+  onGeneratePortrait?: (includeOutfit: boolean) => Promise<void>;
   onPortraitFocusChange: (focusX: number, focusY: number, zoom: number) => void;
 }) {
+  const { t: localizeUi } = useUiTranslation();
+  const [generating, setGenerating] = useState<"look" | "outfit" | null>(null);
   const resolvedSpriteCharacterId =
     expressionSpritesEnabled && isSpriteLookupCharacterId(spriteCharacterId) ? (spriteCharacterId ?? null) : null;
   const expression = expressionSpritesEnabled ? getCharacterExpressionHint(character, spriteExpression) : null;
@@ -67,6 +75,31 @@ export function FeaturedCharacterPortrait({
       Math.round(clampNumber(nextZoom, TRACKER_PORTRAIT_MIN_ZOOM, TRACKER_PORTRAIT_MAX_ZOOM) * 100) / 100,
     );
   const characterName = visibleText(character.name, "character");
+  const generatePortrait = (mode: "look" | "outfit") => {
+    if (!onGeneratePortrait || generating) return;
+    setGenerating(mode);
+    void onGeneratePortrait(mode === "outfit").finally(() => setGenerating(null));
+  };
+  const portraitActions =
+    canUploadTrackerArt && onGeneratePortrait
+      ? (typeof character.outfit === "string" && character.outfit.trim()
+          ? (["look", "outfit"] as const)
+          : (["look"] as const)
+        ).map((mode) => {
+          const Icon = generating === mode ? Loader2 : mode === "look" ? Eye : Shirt;
+          return {
+            key: mode,
+            icon: <Icon size="0.75rem" className={generating === mode ? "animate-spin" : undefined} />,
+            onClick: () => generatePortrait(mode),
+            title: localizeUi(
+              mode === "look"
+                ? "ui.trackerPanel.featuredcharacterportrait.newPortraitFromLook"
+                : "ui.trackerPanel.featuredcharacterportrait.newPortraitFromLookAndOutfit",
+            ),
+            disabled: !!generating,
+          };
+        })
+      : undefined;
 
   return (
     <TrackerPortraitStage
@@ -86,6 +119,7 @@ export function FeaturedCharacterPortrait({
             }
           : undefined
       }
+      actions={portraitActions}
       view={{
         defaultY: defaultPortraitFocusY,
         onChange: setPortraitFocus,

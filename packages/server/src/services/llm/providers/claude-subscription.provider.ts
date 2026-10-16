@@ -21,9 +21,17 @@
 //   • SDK docs: https://docs.anthropic.com/en/docs/claude-code/sdk
 //
 import { randomUUID } from "node:crypto";
-import { isClaudeAdaptiveOnlyNoSamplingModel, shouldSuppressUnknownModelParameters } from "@marinara-engine/shared";
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  isClaudeAdaptiveOnlyNoSamplingModel,
+  isClaudeSonnet55Model,
+  isClaudeStrictRequestModel,
+  shouldSuppressUnknownModelParameters,
+} from "@marinara-engine/shared";
 import { BaseLLMProvider, type ChatMessage, type ChatOptions, type LLMUsage } from "../base-provider.js";
-import { supportsAnthropicThinkingDisable } from "./anthropic.provider.js";
+import { resolveAnthropicAdaptiveEffort, supportsAnthropicThinkingDisable } from "./anthropic.provider.js";
 import { logger } from "../../../lib/logger.js";
 import { isClaudeSubscriptionResumeEnabled } from "../../../config/runtime-config.js";
 import {
@@ -35,17 +43,35 @@ import {
   type SdkUserMessageForPrompt,
 } from "./claude-subscription/jsonl-entries.js";
 import { ResumeSessionStore, resumeScratchCwd } from "./claude-subscription/session-store.js";
+import { claudeCodeExecutableOption } from "./claude-subscription/installed-cli.js";
 
 /**
- * Prompt-cache cost multipliers relative to one fresh (uncached) input token.
- * The Agent SDK uses Claude's default 5-minute cache: writing a token into the
- * cache is billed at 1.25x, reading one back at 0.1x, an uncached token at 1x.
- * Used to estimate — in fresh-input-token equivalents — whether caching is a
- * net saving on a request. Break-even is ~2 uses of a cached prefix:
- * 1.25x (write) + 0.1x (one read) = 1.35x, vs 2x for two uncached sends.
+ * Standard API cost equivalents, not subscription billing. Claude chooses its
+ * default TTL by billing path, so use the reported 5m/1h write buckets.
  */
-const CACHE_WRITE_COST_MULTIPLIER = 1.25;
+const CACHE_WRITE_5M_COST_MULTIPLIER = 1.25;
+const CACHE_WRITE_1H_COST_MULTIPLIER = 2;
 const CACHE_READ_COST_MULTIPLIER = 0.1;
+
+/** Claude Code mod that removes the coding-agent context the CLI adds to every
+ * chat. Plain files under `src/assets`, which the build copies to `dist/assets`. */
+const CHAT_CONTEXT_PLUGIN_DIR = fileURLToPath(new URL("../../../assets/claude-code-plugin", import.meta.url));
+const CHAT_CONTEXT_PLUGIN_NAME = "marinara-chat-context";
+const CHAT_CONTEXT_PLUGIN_FILES = [".claude-plugin/plugin.json", "hooks/hooks.json", "hooks/register.mjs"];
+
+/**
+ * Refuse to start a request without the chat-context mod. This runs before the
+ * SDK: the CLI sends its request without waiting for Marinara to read `init`,
+ * so a load error reported there arrives too late to stop it.
+ */
+export function assertChatContextPlugin(dir = CHAT_CONTEXT_PLUGIN_DIR): void {
+  const missing = CHAT_CONTEXT_PLUGIN_FILES.filter((file) => !existsSync(join(dir, file)));
+  if (missing.length > 0) {
+    throw new Error(
+      `Claude (Subscription) needs Marinara's chat-context plugin, which keeps your account email and this computer's details out of the prompt. Missing from ${dir}: ${missing.join(", ")}. Reinstall or update Marinara, then try again.`,
+    );
+  }
+}
 
 /** Model-generation SDK options that Custom Parameters may tune. Everything
  * else owns process, tool, filesystem, environment, or session behavior and
@@ -69,7 +95,7 @@ const CUSTOMIZABLE_SDK_OPTION_KEYS = [
  */
 type SdkModule = typeof import("@anthropic-ai/claude-agent-sdk");
 let cachedSdk: Promise<SdkModule> | null = null;
-function loadSdk(): Promise<SdkModule> {
+export function loadSdk(): Promise<SdkModule> {
   if (!cachedSdk) {
     cachedSdk = import("@anthropic-ai/claude-agent-sdk").catch((err) => {
       cachedSdk = null;
@@ -127,6 +153,38 @@ function formatClaudeSdkError(err: unknown): string {
     return `${message}. Confirm \`claude login\` was run by the same OS user/HOME as the Marinara server, or set ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN in the server environment. HOME=${process.env.HOME ?? "unset"}.`;
   }
   return message;
+}
+
+/**
+ * Hard stop for Claude Code's startup (`init`) message. Marinara runs Claude Code with no tools and
+ * permission checks off, so any MCP server or tool listed there (usually the account's claude.ai
+ * connectors, which a Claude Code that ignores `ENABLE_CLAUDEAI_MCP_SERVERS=false` still loads) aborts
+ * the request before the model turn is used.
+ */
+export function stopIfClaudeCodeExposesMcp(
+  init: { mcp_servers: Array<{ name: string; status: string }>; tools: string[]; claude_code_version?: string },
+  abortController: AbortController,
+): void {
+  const mcpTools = init.tools.filter((tool) => tool.startsWith("mcp__"));
+  if (init.mcp_servers.length === 0 && mcpTools.length === 0) return;
+  abortController.abort();
+  logger.error(
+    {
+      mcpServers: init.mcp_servers.map((server) => `${server.name} (${server.status})`),
+      mcpTools,
+      claudeCodeVersion: init.claude_code_version,
+    },
+    "[claude-subscription] Claude Code exposed MCP servers/tools (likely claude.ai connectors) with permission checks off; request stopped",
+  );
+  const names = init.mcp_servers.length > 0 ? init.mcp_servers.map((server) => server.name) : mcpTools;
+  // Android has no bundled copy to fall back to.
+  const bundledFallback =
+    process.platform === "android"
+      ? ""
+      : ", or set CLAUDE_SUBSCRIPTION_USE_INSTALLED_CLI=false to use the copy bundled with Marinara";
+  throw new Error(
+    `Claude Code turned on claude.ai connectors (${names.join(", ")}). Marinara runs Claude Code with permission checks off, so it stopped the request. The installed Claude Code is likely too old to turn connectors off: update it${bundledFallback}.`,
+  );
 }
 
 /** @internal Test-only seam. Replaces the cached SDK module with a fake or clears it. */
@@ -344,6 +402,7 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
   }
 
   async *chat(messages: ChatMessage[], options: ChatOptions): AsyncGenerator<string, LLMUsage | void, unknown> {
+    assertChatContextPlugin();
     const suppressModelParameters = this.shouldSuppressModelParameters(options);
     const configuredMaxTokens = this.applyMaxTokensCap(options.maxTokens ?? 4096);
     const contextFit = this.fitMessagesToContext(messages, { ...options, maxTokens: configuredMaxTokens });
@@ -395,11 +454,23 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
     //     permission resolution framing.
     //   • `maxTurns: 1` — single assistant turn per call; we drive any
     //     multi-turn agent loop ourselves at the route layer.
+    //   • `title` — a preset session title. Without it the CLI spends a
+    //     second, hidden model request (`generate_session_title`) naming
+    //     every new session: the first message of a chat, every one-off
+    //     `[system, user]` call and every fold-path request. Resumed
+    //     sessions never trigger it.
+    //   • `plugins` — loads the `marinara-chat-context` mod
+    //     (`src/assets/claude-code-plugin`). It drops every message the CLI
+    //     puts between the system prompt and the chat: the account email,
+    //     the `# Environment` block, the model note, the date and the like.
+    //     `chat()` refuses to start when the plugin's files are missing, and
+    //     the `init` guard below warns when it reports a load error. Where
+    //     mods can't run (disabled by settings or policy), Claude Code
+    //     reports nothing and that context comes back.
     //
-    // Wire-level artifacts the SDK still injects (`<system-reminder>`
-    // userEmail/currentDate, metadata account/device UUIDs, the SDK
-    // preamble system block) need a loopback passthrough to strip; that's
-    // tracked as future work.
+    // What stays: the billing-header and SDK-identity system blocks the CLI
+    // prepends, and the metadata account/device UUIDs. No SDK option or mod
+    // event controls them.
 
     const sdkOptions: Parameters<SdkModule["query"]>[0]["options"] = {
       abortController,
@@ -411,18 +482,27 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
       permissionMode: "bypassPermissions",
       allowDangerouslySkipPermissions: true,
       settingSources: [],
+      title: "Title",
+      plugins: [{ type: "local", path: CHAT_CONTEXT_PLUGIN_DIR }],
       // Always pass `settings.fastMode` explicitly so the SDK can't fall back
       // on a persisted CLI value that would silently downgrade the model. The
       // value comes from the connection-level toggle — default `false` so
       // unconfigured connections keep the requested model.
-      settings: { fastMode: this.fastMode },
+      settings: {
+        fastMode: this.fastMode,
+        ...(options.anthropicExtendedCacheTtl ? { promptCacheTtl: "1h" as const } : {}),
+      },
     };
     if (systemPrompt !== undefined) sdkOptions.systemPrompt = systemPrompt;
 
+    // ponytail: Agent SDK 0.3.282 has no "between_tools" thinking type and Sonnet 5.5 rejects
+    // "disabled", so its Off runs adaptive at low effort here. Upgrade path: send between_tools
+    // once the SDK's ThinkingConfig accepts it.
     if (
       !suppressModelParameters &&
       options.reasoningEffort === "none" &&
-      supportsAnthropicThinkingDisable(options.model)
+      supportsAnthropicThinkingDisable(options.model) &&
+      !isClaudeSonnet55Model(options.model)
     ) {
       sdkOptions.thinking = { type: "disabled" };
     } else if (!suppressModelParameters && (options.enableThinking || isAdaptiveOnly)) {
@@ -434,8 +514,11 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
       // remains an independent request control. Preserve an explicit effort
       // even when callers only opt into displaying the summarized reasoning.
       const activeEffort = options.reasoningEffort !== "none" ? options.reasoningEffort : undefined;
-      if (activeEffort || options.enableThinking) {
-        sdkOptions.effort = (activeEffort ?? "high") as "low" | "medium" | "high" | "xhigh" | "max";
+      if (
+        this.shouldSendParameter(options, "reasoningEffort") &&
+        (activeEffort || options.enableThinking || isClaudeStrictRequestModel(options.model))
+      ) {
+        sdkOptions.effort = resolveAnthropicAdaptiveEffort(options) as "low" | "medium" | "high" | "xhigh" | "max";
       }
     }
 
@@ -448,7 +531,7 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
     // connectors only load under subscription auth, not when ANTHROPIC_API_KEY
     // is set — so the flag is harmlessly redundant on the API-key path below,
     // but set unconditionally so the subscription path is always covered. The
-    // `init`-message guard above warns if a future CLI stops honoring it.
+    // `init`-message guard below stops the request if a CLI does not honor it.
     //
     // `ANTHROPIC_API_KEY` is the opt-in API-billing fallback when the
     // connection sets an explicit key.
@@ -457,6 +540,9 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
       ENABLE_CLAUDEAI_MCP_SERVERS: "false",
       ...(this.apiKey ? { ANTHROPIC_API_KEY: this.apiKey } : {}),
     };
+    // Run the host's self-updating Claude Code when it is at least as new as the
+    // SDK's bundled build, so new models work without an SDK bump.
+    Object.assign(sdkOptions, await claudeCodeExecutableOption());
 
     const sdkOptionRecord = sdkOptions as Record<string, unknown>;
     const customGenerationOptions: Record<string, unknown> = {};
@@ -470,6 +556,14 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
       if (Object.prototype.hasOwnProperty.call(customGenerationOptions, key)) {
         sdkOptionRecord[key] = customGenerationOptions[key];
       }
+    }
+    if (isClaudeStrictRequestModel(options.model)) {
+      sdkOptions.thinking = {
+        type: "adaptive",
+        ...(options.captureReasoning ? { display: "summarized" as const } : {}),
+      };
+      delete sdkOptions.maxThinkingTokens;
+      if (sdkOptionRecord.effort === "none") sdkOptions.effort = "low";
     }
 
     // Resume wiring is always provider-derived. Custom Parameters are filtered
@@ -516,31 +610,36 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
         } else if (message.type === "system" && message.subtype === "init") {
           // Isolation guard — the SDK's `init` message enumerates every tool,
           // MCP server, and skill it is exposing to the model. This provider is
-          // a zero-tool, text-only surface, so any non-empty set here means
+          // a zero-tool, text-only surface, so any MCP server or tool here means
           // something slipped past the isolation options (`tools: []`,
-          // `settingSources: []`, `ENABLE_CLAUDEAI_MCP_SERVERS=false`). The
-          // `warn` below fires if that regresses — e.g. a CLI predating the
-          // opt-out flag, or a future change to connector defaults.
-          const mcpServers = message.mcp_servers;
-          const mcpTools = message.tools.filter((t) => t.startsWith("mcp__"));
+          // `settingSources: []`, `ENABLE_CLAUDEAI_MCP_SERVERS=false`) — e.g. a
+          // CLI predating the opt-out flag, or a future change to connector
+          // defaults — and the request stops before the model turn is used.
           logger.debug(
             {
               tools: message.tools,
-              mcpServers,
+              mcpServers: message.mcp_servers,
               skills: message.skills,
+              plugins: message.plugins?.map((p) => p.name),
               slashCommandCount: message.slash_commands.length,
               claudeCodeVersion: message.claude_code_version,
               apiKeySource: message.apiKeySource,
             },
             "[claude-subscription] SDK init surface",
           );
-          if (mcpServers.length > 0 || mcpTools.length > 0) {
+          stopIfClaudeCodeExposesMcp(message, abortController);
+          // Only our mod's errors: a built-in Claude Code plugin's failure
+          // doesn't bring the context back. This warns and doesn't throw,
+          // because by now the CLI may already have sent the request.
+          const pluginErrors = message.plugin_errors?.filter(
+            (error) =>
+              error.plugin.startsWith(`${CHAT_CONTEXT_PLUGIN_NAME}@`) ||
+              (error.path !== undefined && resolve(error.path) === CHAT_CONTEXT_PLUGIN_DIR),
+          );
+          if (pluginErrors?.length) {
             logger.warn(
-              {
-                mcpServers: mcpServers.map((s) => `${s.name} (${s.status})`),
-                mcpTools,
-              },
-              "[claude-subscription] SDK exposed MCP servers/tools to the model despite zero-tool config — likely account-level claude.ai connectors",
+              { pluginErrors },
+              "[claude-subscription] chat-context mod failed to load; the CLI's email, date and environment context reach the model",
             );
           }
         } else if (message.type === "assistant" && !(options.stream ?? true)) {
@@ -565,20 +664,20 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
               cachedTokens = usage.cache_read_input_tokens ?? 0;
               cacheWriteTokens = usage.cache_creation_input_tokens ?? 0;
             }
-            // Prompt-cache economics — a per-request breakdown so cache
-            // behavior can be audited and confirmed to be a real saving, not
-            // just token-shuffling. Costs are in fresh-input-token equivalents
-            // (write 1.25x, read 0.1x, uncached 1x). `savingsPct` < 0 means the
-            // cache cost more than it saved this request — expected on the
-            // first turn (pure write) or after the 5-minute TTL lapses; across
-            // a live multi-turn chat it should trend positive.
+            // Never infer write TTL from our requested setting: account defaults
+            // and CLI environment overrides can differ from the connection.
+            const cacheWrite5mTokens = usage?.cache_creation?.ephemeral_5m_input_tokens ?? 0;
+            const cacheWrite1hTokens = usage?.cache_creation?.ephemeral_1h_input_tokens ?? 0;
+            const hasCacheWriteBreakdown = cacheWrite5mTokens + cacheWrite1hTokens === cacheWriteTokens;
             const totalInputTokens = inputTokens + cachedTokens + cacheWriteTokens;
             if (totalInputTokens > 0) {
-              const effectiveInputCost =
-                inputTokens +
-                cacheWriteTokens * CACHE_WRITE_COST_MULTIPLIER +
-                cachedTokens * CACHE_READ_COST_MULTIPLIER;
-              const savedTokenEquiv = totalInputTokens - effectiveInputCost;
+              const effectiveInputCost = hasCacheWriteBreakdown
+                ? inputTokens +
+                  cacheWrite5mTokens * CACHE_WRITE_5M_COST_MULTIPLIER +
+                  cacheWrite1hTokens * CACHE_WRITE_1H_COST_MULTIPLIER +
+                  cachedTokens * CACHE_READ_COST_MULTIPLIER
+                : null;
+              const savedTokenEquiv = effectiveInputCost === null ? null : totalInputTokens - effectiveInputCost;
               logger.debug(
                 {
                   session: resumeSessionId ?? "fold-path",
@@ -586,13 +685,22 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
                   freshInputTokens: inputTokens,
                   cacheReadTokens: cachedTokens,
                   cacheWriteTokens,
+                  cacheWrite5mTokens,
+                  cacheWrite1hTokens,
+                  costBasis: "standard-api-input-token-equivalent",
                   outputTokens,
                   cacheHitRatio: Number((cachedTokens / totalInputTokens).toFixed(3)),
-                  effectiveInputCostEquiv: Math.round(effectiveInputCost),
+                  effectiveInputCostEquiv: effectiveInputCost === null ? null : Math.round(effectiveInputCost),
                   uncachedInputCostEquiv: totalInputTokens,
-                  savedTokenEquiv: Math.round(savedTokenEquiv),
-                  savingsPct: Number(((savedTokenEquiv / totalInputTokens) * 100).toFixed(1)),
-                  verdict: savedTokenEquiv > 0 ? "cache-saving" : "cache-cost",
+                  savedTokenEquiv: savedTokenEquiv === null ? null : Math.round(savedTokenEquiv),
+                  savingsPct:
+                    savedTokenEquiv === null ? null : Number(((savedTokenEquiv / totalInputTokens) * 100).toFixed(1)),
+                  verdict:
+                    savedTokenEquiv === null
+                      ? "unknown-cache-ttl"
+                      : savedTokenEquiv > 0
+                        ? "cache-saving"
+                        : "cache-cost",
                 },
                 "[claude-subscription] prompt-cache usage",
               );
@@ -635,8 +743,11 @@ export class ClaudeSubscriptionProvider extends BaseLLMProvider {
         }
       }
     } catch (err) {
-      logger.error(
-        err,
+      // The caller logs the failure once; this debug line keeps the raw SDK error with the model and session.
+      // No `cause`: `friendly` already holds err.message, and the SSE and agent error formatters append a
+      // cause's message, which would show the same text twice.
+      logger.debug(
+        { err },
         "Claude Agent SDK query failed for model %s (session=%s)",
         options.model,
         resumeSessionId ?? "fold-path",

@@ -11,6 +11,7 @@ import {
   type QuoteFormat,
 } from "@marinara-engine/shared";
 import { cn } from "../../lib/utils";
+import { useBackdropDismiss } from "../../hooks/use-backdrop-dismiss";
 import type { ReactionSegmentTarget } from "../../lib/reactions";
 import { applyInlineMarkdown, renderMarkdownBlocks } from "../../lib/markdown";
 import { resolveSelfCardAssets, type ChatGalleryIndex } from "../../lib/card-asset-links";
@@ -19,10 +20,12 @@ import { renderWithStickerBlocks } from "../../lib/sticker-render";
 import { applyTextareaQuoteFormat } from "../../lib/textarea-quotes";
 import { ImagePromptPanel } from "./ImagePromptPanel";
 import { ChatImagePreview } from "./ChatImagePreview";
+import { ChatVideoAttachment, isAttachmentHiddenByImageText, isVideoAttachment } from "./ChatVideoAttachment";
 import { MessageActionButton } from "./MessageActionButton";
 import { SwipeJumpControl } from "./SwipeJumpControl";
 import { useUIStore } from "../../stores/ui.store";
-import { AnimatedDiceRoll, isDiceRollResult, shouldAnimateDiceRollMessage } from "../dice/AnimatedDiceRoll";
+import { AnimatedDiceRoll, shouldAnimateDiceRollMessage } from "../dice/AnimatedDiceRoll";
+import { isDiceRollResult } from "../../lib/dice-roll-result";
 import type { CharacterMap } from "./chat-area.types";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
@@ -72,6 +75,15 @@ export function DiceMessageContent({
 }) {
   if (!isDiceRollResult(diceRollResult)) return null;
   return <AnimatedDiceRoll {...diceRollResult} mode="chat" animate={shouldAnimateDiceRollMessage(createdAt)} />;
+}
+
+/**
+ * A `/roll` message is nothing but its roll, so the card stands in for the text. An
+ * assistant turn that called the dice tool mid-narration has prose of its own, and the
+ * card sits alongside it instead of swallowing the message.
+ */
+export function diceRollReplacesMessageContent(role: string, diceRollResult: unknown): boolean {
+  return isDiceRollResult(diceRollResult) && role !== "assistant";
 }
 
 /** Everything the layout sub-components (Bubble, Line, Grouped) need, pre-resolved by the shell. */
@@ -543,17 +555,33 @@ export function ConversationMessageAttachments({
   onImageOpen,
   onRemove,
 }: {
-  attachments: Array<{ type: string; url?: string; data?: string; filename?: string; name?: string; prompt?: string }>;
+  attachments: Array<{
+    type: string;
+    url?: string;
+    data?: string;
+    filename?: string;
+    name?: string;
+    prompt?: string;
+    videoId?: string;
+  }>;
   renderedContent: string;
   onImageOpen: (url: string, prompt?: string | null) => void;
   onRemove: (i: number) => void;
 }) {
   const { t: localizeUi } = useUiTranslation();
-  if (!attachments.length || IMAGE_URL_RE.test(renderedContent.trim())) return null;
+  const textIsImageUrl = IMAGE_URL_RE.test(renderedContent.trim());
+  if (!attachments.some((att) => !isAttachmentHiddenByImageText(att, textIsImageUrl))) return null;
   return (
     <div className="mt-1.5 flex flex-col items-start gap-2">
       {attachments.map((att, i) =>
-        att.type === "image" || att.type?.startsWith("image/") ? (
+        isAttachmentHiddenByImageText(att, textIsImageUrl) ? null : isVideoAttachment(att) && att.url ? (
+          <ChatVideoAttachment
+            key={att.videoId ?? att.url}
+            src={att.url}
+            prompt={att.prompt}
+            onRemove={() => onRemove(i)}
+          />
+        ) : att.type === "image" || att.type?.startsWith("image/") ? (
           <div key={i} className="group/att relative inline-block">
             <button
               type="button"
@@ -632,33 +660,29 @@ export function ConversationMessageTranslation({
 }
 
 /** Compact swipe control — consistent style for all Conversation layouts. */
-export function ConversationMessageSwipes({
-  isUser,
-  messageId,
-  activeSwipeIndex,
-  swipeCount,
-  onSetActiveSwipe,
-  onCreateNextSwipe,
-  className,
-}: {
-  isUser: boolean;
-  messageId: string;
-  activeSwipeIndex: number;
-  swipeCount: number;
-  onSetActiveSwipe: (index: number) => void;
-  onCreateNextSwipe?: () => void;
-  className?: string;
-}) {
+export function ConversationMessageSwipes({ ctx }: { ctx: MessageRenderContext }) {
   const alwaysShow = useUIStore((state) => state.alwaysDisplayConversationSwipeMenu);
+  const {
+    message,
+    isUser,
+    hideActions,
+    isHiddenCollapsed,
+    hasSwipes,
+    swipeCount,
+    onSetActiveSwipe,
+    canRegenerate,
+    onRegenerate,
+  } = ctx;
+  if (hideActions || isHiddenCollapsed || (!hasSwipes && !(canRegenerate && onRegenerate))) return null;
   return (
     <SwipeJumpControl
       alwaysShow={alwaysShow && !isUser}
-      messageId={messageId}
-      activeSwipeIndex={activeSwipeIndex}
+      messageId={message.id}
+      activeSwipeIndex={message.activeSwipeIndex}
       swipeCount={swipeCount}
-      onSetActiveSwipe={onSetActiveSwipe}
-      onCreateNextSwipe={onCreateNextSwipe}
-      className={className}
+      onSetActiveSwipe={(idx) => onSetActiveSwipe?.(message.id, idx)}
+      onCreateNextSwipe={canRegenerate && onRegenerate ? () => onRegenerate(message.id) : undefined}
+      className={ctx.isBubbleStyle && isUser ? "justify-end" : undefined}
     />
   );
 }
@@ -674,10 +698,11 @@ export function ConversationMessageLightbox({
   onClose: () => void;
 }) {
   const { t: localizeUi } = useUiTranslation();
+  const backdropDismiss = useBackdropDismiss(onClose);
   return (
     <div
       className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm max-md:pt-[env(safe-area-inset-top)]"
-      onClick={onClose}
+      {...backdropDismiss}
     >
       <div
         className="flex max-h-[90vh] w-[min(90vw,64rem)] max-w-[90vw] flex-col items-center gap-2"

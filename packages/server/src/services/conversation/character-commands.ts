@@ -328,6 +328,7 @@ export interface CreatePresetSectionCommand {
   injectionDepth?: number;
   injectionOrder?: number;
   forbidOverrides?: boolean;
+  skipWrap?: boolean;
 }
 
 export interface CreatePresetGroupCommand {
@@ -552,7 +553,7 @@ const QUOTE_PAIRS: Record<string, string> = {
   "\u2019": "\u2019",
 };
 
-function parseQuotedParam(params: string, key: string, allowEmpty = false): string | undefined {
+export function parseQuotedParam(params: string, key: string, allowEmpty = false): string | undefined {
   const match = params.match(new RegExp(`${key}\\s*=\\s*(["\u201c\u201d\u2018\u2019])`));
   if (!match || match.index === undefined) return undefined;
 
@@ -967,6 +968,7 @@ function parseCreatePresetBlock(raw: string): CreatePresetCommand | null {
           injectionDepth: parseOptionalInteger(data.injectionDepth),
           injectionOrder: parseOptionalInteger(data.injectionOrder),
           forbidOverrides: typeof data.forbidOverrides === "boolean" ? data.forbidOverrides : undefined,
+          skipWrap: typeof data.skipWrap === "boolean" ? data.skipWrap : undefined,
         } satisfies CreatePresetSectionCommand;
       })
       .filter((section): section is CreatePresetSectionCommand => section !== null);
@@ -1601,16 +1603,20 @@ export function parseDirectMessageCommands(content: string): {
 }
 
 /**
- * Parse a duration string like "2h", "30m", "1h30m" into minutes.
+ * Parse a duration string like "2h", "1.5h", "30m", "1h30m" into minutes.
+ * A bare number is hours, as the command prompt asks for "number of hours".
  * Returns null if unparseable.
  */
 export function parseDuration(duration: string): number | null {
-  const hourMatch = duration.match(/(\d+)\s*h/i);
-  const minMatch = duration.match(/(\d+)\s*m/i);
+  const bareHours = duration.match(/^\s*(\d+(?:\.\d+)?)\s*$/);
+  // A unit must end at a non-letter, so "months" is not minutes and "1h30m" still splits.
+  const hourMatch = bareHours ?? duration.match(/(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)(?![a-z])/i);
+  const minMatch = bareHours ? null : duration.match(/(\d+(?:\.\d+)?)\s*(?:minutes?|mins?|m)(?![a-z])/i);
 
   let total = 0;
-  if (hourMatch) total += parseInt(hourMatch[1]!) * 60;
-  if (minMatch) total += parseInt(minMatch[1]!);
+  if (hourMatch) total += Number(hourMatch[1]) * 60;
+  if (minMatch) total += Number(minMatch[1]);
 
+  total = Math.round(total);
   return total > 0 ? total : null;
 }

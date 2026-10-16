@@ -1,0 +1,1092 @@
+// ──────────────────────────────────────────────
+// A world's story script (worldgen W10): the flags, standing directions, events and cutscenes a creator
+// writes for a world, played by the Engine. No code: data the Engine checks against the world it names
+// and walks, as it does a kit. What the story did is folded from the replies, as the world's ledger is,
+// so a swipe or regeneration takes back what its reply tripped.
+// ──────────────────────────────────────────────
+import { z } from "zod";
+import { promptSafeText } from "../../schemas/ruleset.schema.js";
+import { gameIntroSchema } from "./game-intro.js";
+import type { GameWorld } from "./game-world.js";
+import { WORLD_DEED_KINDS, readWorldLedger, type WorldDeed, type WorldLedgerEntry } from "./ledger.js";
+import { worldPlaceNamed } from "./edits.js";
+import { worldCast, type WorldPerson } from "./people.js";
+import { worldPlaceMap, worldPlaceMapReach } from "./place-maps.js";
+import { worldTown, worldTownReach } from "./town.js";
+
+export const STORY_VERSION = 1;
+export const STORY_MAX = Object.freeze({
+  flags: 64,
+  directions: 64,
+  events: 128,
+  cutscenes: 64,
+  actions: 32,
+  conditions: 8,
+  pages: 40,
+  beats: 20,
+  /** The characters of the beats the Game Master is told with its own events, in every turn's prompt. */
+  gmBeatChars: 16_000,
+});
+/** The expressions a cutscene's speaker can wear: the Game Master's own list. */
+export const STORY_EXPRESSIONS = Object.freeze([
+  "neutral",
+  "happy",
+  "sad",
+  "angry",
+  "surprised",
+  "scared",
+  "disgusted",
+  "thinking",
+  "laughing",
+  "crying",
+  "blushing",
+  "smirk",
+  "embarrassed",
+  "determined",
+  "confused",
+  "sleepy",
+] as const);
+/** A cutscene page spoken by the game's player. */
+export const STORY_PLAYER = "player";
+/** What a fight can end in, as the combat recap says it. */
+export const STORY_FIGHT_OUTCOMES = Object.freeze(["victory", "defeat", "flee"] as const);
+
+const id = z.string().regex(/^[a-z0-9_-]{1,40}$/, "An id is 1 to 40 lowercase letters, digits, _ or -");
+/** A name written into a tag (a group, a background): one line, no brackets or quotes. */
+const tagWord = (max: number) =>
+  promptSafeText(max).refine((value) => !value.includes('"'), "Text cannot contain double quotes");
+const value = z.union([z.boolean(), z.number().finite()]);
+const conditions = z
+  .array(z.object({ flag: id, is: z.enum(["=", "!=", ">", ">=", "<", "<="]), value }).strict())
+  .max(STORY_MAX.conditions)
+  .optional();
+
+const trigger = z.discriminatedUnion("on", [
+  z.object({ on: z.literal("start") }).strict(),
+  z.object({ on: z.literal("arrive"), place: z.string().min(1).max(120) }).strict(),
+  z.object({ on: z.literal("meet"), person: z.string().min(1).max(140) }).strict(),
+  z.object({ on: z.literal("day"), day: z.number().int().min(0).max(1_000_000) }).strict(),
+  z.object({ on: z.literal("turn"), turn: z.number().int().min(1).max(1_000_000) }).strict(),
+  z.object({ on: z.literal("fight"), outcome: z.enum(STORY_FIGHT_OUTCOMES) }).strict(),
+  /** A fight broke this prop (Capability API 1.316), by its label: an oil jar, the mill's sluice gate. */
+  z.object({ on: z.literal("broke"), prop: z.string().trim().min(1).max(40) }).strict(),
+  z
+    .object({
+      on: z.literal("deed"),
+      deed: z.enum(Object.keys(WORLD_DEED_KINDS) as [WorldDeed, ...WorldDeed[]]).optional(),
+      place: z.string().min(1).max(120).optional(),
+    })
+    .strict(),
+  z.object({ on: z.literal("flags") }).strict(),
+  z.object({ on: z.literal("gm") }).strict(),
+  /** The party walks onto a cell (map editor item 4): of a settlement's town, or of a place's hand-made map
+   *  (`place` says which: a settlement never has one). From the map's top-left, 0-based. */
+  z
+    .object({
+      on: z.literal("step"),
+      place: z.string().min(1).max(120),
+      x: z.number().int().min(0).max(255),
+      y: z.number().int().min(0).max(255),
+    })
+    .strict(),
+]);
+
+const worldDeed = z
+  .object({
+    deed: z.enum(Object.keys(WORLD_DEED_KINDS) as [WorldDeed, ...WorldDeed[]]),
+    place: z.string().min(1).max(120).optional(),
+    group: tagWord(80).optional(),
+    with: tagWord(80).optional(),
+    who: tagWord(80).optional(),
+  })
+  .strict();
+
+const action = z.union([
+  z.object({ set: id, value }).strict(),
+  z.object({ add: id, amount: z.number().finite() }).strict(),
+  z.object({ tell: promptSafeText(600) }).strict(),
+  z.object({ cutscene: id }).strict(),
+  z.object({ show: id }).strict(),
+  z.object({ world: worldDeed }).strict(),
+]);
+
+const page = z
+  .object({
+    /** A person of the world by id, or `player` (the game's player, named at play); none for narration.
+     *  A world's story is played with any party, so its party members are not speakers. */
+    speaker: z.string().min(1).max(140).optional(),
+    expression: z.enum(STORY_EXPRESSIONS).optional(),
+    text: promptSafeText(600),
+  })
+  .strict();
+
+export const storyScriptSchema = z
+  .object({
+    storyVersion: z.literal(STORY_VERSION),
+    flags: z
+      .array(
+        z
+          .object({
+            id,
+            kind: z.enum(["bool", "number"]),
+            initial: value,
+            /** The Game Master may set it with a story tag. */
+            gm: z.literal(true).optional(),
+            note: promptSafeText(200).optional(),
+            /** A quest objective in the journal: open until the flag is true (or at its goal). */
+            quest: z
+              .object({
+                title: promptSafeText(80),
+                text: promptSafeText(300),
+                goal: z.number().int().min(1).max(1_000_000).optional(),
+                /** Kept out of the journal until an event shows it. */
+                hidden: z.literal(true).optional(),
+              })
+              .strict()
+              .optional(),
+          })
+          .strict(),
+      )
+      .max(STORY_MAX.flags)
+      .default([]),
+    directions: z
+      .array(z.object({ id, text: promptSafeText(600), if: conditions }).strict())
+      .max(STORY_MAX.directions)
+      .default([]),
+    events: z
+      .array(
+        z
+          .object({
+            id,
+            when: trigger,
+            if: conditions,
+            repeat: z.literal(true).optional(),
+            /** The Game Master may trip it with a story tag. */
+            gm: z.literal(true).optional(),
+            note: promptSafeText(200).optional(),
+            do: z.array(action).min(1).max(STORY_MAX.actions),
+          })
+          .strict(),
+      )
+      .max(STORY_MAX.events)
+      .default([]),
+    cutscenes: z
+      .array(
+        z.discriminatedUnion("kind", [
+          z
+            .object({
+              id,
+              kind: z.literal("pages"),
+              /** A background as a Game Master's [bg:] names one: installed, or generated. */
+              background: z
+                .string()
+                .max(120)
+                .regex(/^backgrounds:[a-z0-9:_-]+$/i, "A background is a backgrounds: tag")
+                .optional(),
+              pages: z.array(page).min(1).max(STORY_MAX.pages),
+            })
+            .strict(),
+          z
+            .object({
+              id,
+              kind: z.literal("beats"),
+              beats: z.array(promptSafeText(600)).min(1).max(STORY_MAX.beats),
+            })
+            .strict(),
+        ]),
+      )
+      .max(STORY_MAX.cutscenes)
+      .default([]),
+    /** The Game Master's intro message (Capability API 1.339): exactly the game's first message
+     *  (`"defined"`) or guidance for the one the Game Master writes (`"guided"`); `locked` keeps a player
+     *  from changing it at setup. */
+    intro: gameIntroSchema.optional(),
+  })
+  .strict();
+export type StoryScript = z.infer<typeof storyScriptSchema>;
+export type StoryScriptInput = z.input<typeof storyScriptSchema>;
+export type StoryEvent = StoryScript["events"][number];
+export type StoryFlag = StoryScript["flags"][number];
+export type StoryAction = StoryEvent["do"][number];
+export type StoryCutscene = StoryScript["cutscenes"][number];
+
+/** A person of the world by their id (`<place id>-<n>`, or `-e<n>` for one added by hand). */
+export function storyPerson(game: GameWorld, personId: string): WorldPerson | undefined {
+  const match = /^(.+)-e?\d+$/.exec(personId);
+  return match ? worldCast(game, match[1]!).find((person) => person.id === personId) : undefined;
+}
+
+const NEEDS_GROUP: readonly WorldDeed[] = [
+  "help",
+  "hinder",
+  "befriend",
+  "set_against",
+  "ally",
+  "betray",
+  "take",
+  "destroy",
+  "crown",
+];
+const NEEDS_PLACE: readonly WorldDeed[] = ["improve", "damage", "take", "fall"];
+
+/**
+ * A story script, checked against the world it is for: every flag, cutscene, place, person and group
+ * it names is there, its values fit their flags, and only what it declares the Game Master's is.
+ * Strict, as a kit is: a script that does not fit is refused whole, with the reasons.
+ */
+/** The beats a `gm` event's scenes have, each scene once: told to the Game Master with the event, to
+ *  narrate as it marks it. */
+function gmEventBeats(event: StoryEvent, cutscenes: ReadonlyMap<string, StoryScript["cutscenes"][number]>) {
+  const ids = new Set(event.do.flatMap((action) => ("cutscene" in action ? [action.cutscene] : [])));
+  return [...ids].flatMap((id) => {
+    const scene = cutscenes.get(id);
+    return scene?.kind === "beats" ? scene.beats : [];
+  });
+}
+
+export function checkStoryScript(
+  game: GameWorld,
+  input: unknown,
+): { ok: true; story: StoryScript } | { ok: false; issues: string[] } {
+  const parsed = storyScriptSchema.safeParse(input);
+  if (!parsed.success) {
+    return {
+      ok: false,
+      issues: parsed.error.issues.slice(0, 20).map((issue) => `${issue.path.join(".") || "story"}: ${issue.message}`),
+    };
+  }
+  const story = parsed.data;
+  const issues: string[] = [];
+  const unique = (list: Array<{ id: string }>, what: string) => {
+    const seen = new Set<string>();
+    for (const item of list) {
+      if (seen.has(item.id)) issues.push(`Two ${what} are called "${item.id}".`);
+      seen.add(item.id);
+    }
+  };
+  unique(story.flags, "flags");
+  unique(story.directions, "directions");
+  unique(story.events, "events");
+  unique(story.cutscenes, "cutscenes");
+
+  const flags = new Map(story.flags.map((flag) => [flag.id, flag]));
+  const cutscenes = new Set(story.cutscenes.map((cutscene) => cutscene.id));
+  const places = new Set(game.world.places.map((place) => place.id));
+  const groups = new Set(game.brief.groups.map((group) => group.name.toLowerCase()));
+  const fits = (flag: StoryFlag, given: boolean | number) =>
+    flag.kind === "bool" ? typeof given === "boolean" : typeof given === "number";
+  const flagOf = (flagId: string, where: string) => {
+    const flag = flags.get(flagId);
+    if (!flag) issues.push(`${where}: no flag "${flagId}".`);
+    return flag;
+  };
+  const checkConditions = (list: StoryEvent["if"], where: string) => {
+    for (const condition of list ?? []) {
+      const flag = flagOf(condition.flag, where);
+      if (!flag) continue;
+      if (!fits(flag, condition.value)) issues.push(`${where}: "${flag.id}" is a ${flag.kind} flag.`);
+      if (flag.kind === "bool" && condition.is !== "=" && condition.is !== "!=") {
+        issues.push(`${where}: a yes-or-no flag is only = or !=.`);
+      }
+    }
+  };
+  const placeOk = (placeId: string, where: string) => {
+    if (!places.has(placeId)) issues.push(`${where}: no place "${placeId}" in this world.`);
+  };
+  const personOk = (personId: string, where: string) => {
+    const person = storyPerson(game, personId);
+    if (!person) issues.push(`${where}: no person "${personId}" in this world.`);
+    else if (!person.named) issues.push(`${where}: "${personId}" has no name the story can know them by.`);
+  };
+  const groupOk = (name: string | undefined, where: string) => {
+    if (name !== undefined && !groups.has(name.toLowerCase())) issues.push(`${where}: no group "${name}".`);
+  };
+
+  for (const flag of story.flags) {
+    const where = `Flag "${flag.id}"`;
+    if (!fits(flag, flag.initial)) issues.push(`${where}: its first value is not a ${flag.kind}.`);
+    if (flag.quest?.goal !== undefined && flag.kind !== "number") issues.push(`${where}: only a number has a goal.`);
+  }
+  for (const direction of story.directions) checkConditions(direction.if, `Direction "${direction.id}"`);
+  for (const event of story.events) {
+    const where = `Event "${event.id}"`;
+    checkConditions(event.if, where);
+    const when = event.when;
+    if (when.on === "gm" && !event.gm) issues.push(`${where}: only the Game Master trips it, so it must be its.`);
+    if (when.on === "arrive") placeOk(when.place, where);
+    if (when.on === "meet") personOk(when.person, where);
+    if (when.on === "deed" && when.place) placeOk(when.place, where);
+    // Only what stands on one of the world's battlefields can be broken (1.316).
+    if (when.on === "broke") {
+      const label = when.prop.trim().toLowerCase();
+      const painted = (game.edits?.battlefields ?? []).some((map) =>
+        (map.props ?? []).some((prop) => prop.label.trim().toLowerCase() === label),
+      );
+      if (!painted) issues.push(`${where}: no battlefield of this world has a prop called "${when.prop}".`);
+    }
+    if (when.on === "step") {
+      const issue = storyStepIssue(game, when);
+      if (issue) issues.push(`${where}: ${issue}`);
+    }
+    for (const action of event.do) {
+      if ("set" in action) {
+        const flag = flagOf(action.set, where);
+        if (flag && !fits(flag, action.value)) issues.push(`${where}: "${flag.id}" is a ${flag.kind} flag.`);
+      } else if ("add" in action) {
+        const flag = flagOf(action.add, where);
+        if (flag && flag.kind !== "number") issues.push(`${where}: only a number flag is added to.`);
+      } else if ("show" in action) {
+        const flag = flagOf(action.show, where);
+        if (flag && !flag.quest) issues.push(`${where}: "${flag.id}" is not a quest objective to show.`);
+      } else if ("cutscene" in action) {
+        if (!cutscenes.has(action.cutscene)) issues.push(`${where}: no cutscene "${action.cutscene}".`);
+        const scene = story.cutscenes.find((each) => each.id === action.cutscene);
+        const person = when.on === "meet" && event.repeat ? storyPerson(game, when.person) : undefined;
+        if (scene && person?.named) {
+          const name = person.name.toLowerCase();
+          const texts = scene.kind === "pages" ? scene.pages.map((page) => page.text) : scene.beats;
+          const speaks = scene.kind === "pages" && scene.pages.some((page) => page.speaker === person.id);
+          if (speaks || texts.some((text) => text.toLowerCase().includes(name))) {
+            issues.push(`${where}: its own scene names ${person.name}, so it would meet them again every turn.`);
+          }
+        }
+      } else if ("world" in action) {
+        const deed = action.world;
+        if (NEEDS_GROUP.includes(deed.deed) && !deed.group) issues.push(`${where}: ${deed.deed} needs a group.`);
+        if (NEEDS_PLACE.includes(deed.deed) && !deed.place) issues.push(`${where}: ${deed.deed} needs a place.`);
+        if ((deed.deed === "befriend" || deed.deed === "set_against") && !deed.with) {
+          issues.push(`${where}: ${deed.deed} needs the group it is with.`);
+        }
+        if (deed.deed === "crown" && !deed.who) issues.push(`${where}: crown needs who is crowned.`);
+        if (deed.place) placeOk(deed.place, where);
+        if (
+          when.on === "deed" &&
+          event.repeat &&
+          (!when.deed || when.deed === deed.deed) &&
+          (!when.place || when.place === deed.place)
+        ) {
+          issues.push(`${where}: it does the deed it waits for, so it would happen again every turn.`);
+        }
+        groupOk(deed.group, where);
+        groupOk(deed.with, where);
+        // As the world's ledger answers it: a kind of change the kit has off is always refused.
+        if (!game.kit.change.kinds[WORLD_DEED_KINDS[deed.deed]].on) {
+          issues.push(
+            `${where}: this kit has "${WORLD_DEED_KINDS[deed.deed]}" changes off, so ${deed.deed} never happens.`,
+          );
+        }
+        if (deed.with && deed.group && deed.with.toLowerCase() === deed.group.toLowerCase()) {
+          issues.push(`${where}: ${deed.deed} needs two different groups.`);
+        }
+      }
+    }
+  }
+  for (const cutscene of story.cutscenes) {
+    if (cutscene.kind !== "pages") continue;
+    for (const page of cutscene.pages) {
+      if (page.speaker && page.speaker !== STORY_PLAYER) personOk(page.speaker, `Cutscene "${cutscene.id}"`);
+    }
+  }
+  // The Game Master is told its own events' beats on every turn, so they are kept to a prompt's share.
+  const scenes = new Map(story.cutscenes.map((cutscene) => [cutscene.id, cutscene]));
+  const gmBeatChars = story.events
+    .filter((event) => event.gm)
+    .reduce((sum, event) => sum + gmEventBeats(event, scenes).reduce((chars, beat) => chars + beat.length, 0), 0);
+  if (gmBeatChars > STORY_MAX.gmBeatChars) {
+    issues.push(
+      `The Game Master's own events have ${gmBeatChars} characters of beats, told on every turn; keep them to ${STORY_MAX.gmBeatChars}.`,
+    );
+  }
+  const unique20 = [...new Set(issues)].slice(0, 20);
+  return unique20.length ? { ok: false, issues: unique20 } : { ok: true, story };
+}
+
+/**
+ * Why a step event's cell is not one the party can walk onto, or null. A town's cell (the town as play
+ * lays it out, a snapshot's own town included) is walkable ground a walk from the square reaches, and not on
+ * a free lot, where the story's added places can be built. A place's cell is floor of its hand-made map that
+ * a walk from its entry reaches; a place with no hand-made map has no cells to name (its generated map's
+ * cells change with its layout).
+ */
+export function storyStepIssue(game: GameWorld, step: { place: string; x: number; y: number }): string | null {
+  const place = game.world.places.find((each) => each.id === step.place);
+  if (!place) return `no place "${step.place}" in this world.`;
+  const cell = `column ${step.x + 1}, row ${step.y + 1}`;
+  if (place.rank !== undefined) {
+    const town = worldTown(game, place.id);
+    if (!town) return `${place.name} has no town.`;
+    if (step.x >= town.width || step.y >= town.height)
+      return `${cell} is outside ${place.name} (${town.width} by ${town.height}).`;
+    const at = step.y * town.width + step.x;
+    if (!worldTownReach(town).has(at)) return `${cell} of ${place.name} is not ground a walk from the square reaches.`;
+    const under = (box: { x: number; y: number; w: number; h: number }) =>
+      step.x >= box.x && step.y >= box.y && step.x < box.x + box.w && step.y < box.y + box.h;
+    const freeLot = town.lots.find(
+      (lot) =>
+        under(lot) &&
+        !town.buildings.some(
+          (building) =>
+            building.x < lot.x + lot.w &&
+            lot.x < building.x + building.w &&
+            building.y < lot.y + lot.h &&
+            lot.y < building.y + building.h,
+        ),
+    );
+    if (freeLot) return `${cell} of ${place.name} is on a free lot, where the story may build.`;
+    return null;
+  }
+  const map = worldPlaceMap(game, place.id);
+  if (!map) return `${place.name} has no map made by hand, so its cells cannot be named.`;
+  if (step.x >= map.width || step.y >= map.height)
+    return `${cell} is outside ${place.name}'s map (${map.width} by ${map.height}).`;
+  if (!worldPlaceMapReach(map).has(step.y * map.width + step.x))
+    return `${cell} of ${place.name}'s map is not floor a walk from its entry reaches.`;
+  return null;
+}
+
+// ── What the story did: folded from the answered [story:] tags of the replies ──
+
+/** One answered story tag: the event it tripped (none for a flag the Game Master set), what it set,
+ *  and the objectives it showed. Recorded in the tag, so a script changed later never rewrites it. */
+export interface StoryLedgerEntry {
+  event?: string;
+  /** Tripped by the Engine (on what it saw), not by the Game Master's own tag. */
+  by?: "engine";
+  set: Array<[string, boolean | number]>;
+  show: string[];
+}
+
+// A body never holds "[", so a tag opener repeated without a "]" is read in one pass.
+const STORY_TAG = /\[story:([^[\]]*)\]/gi;
+
+function attributes(body: string): Map<string, string> {
+  const values = new Map<string, string>();
+  // A name starts only where a word does, so a long run of letters with no "=" is read once, not from each letter.
+  for (const match of body.matchAll(/\b([a-z]+)\s*=\s*"([^"]*)"/gi)) values.set(match[1]!.toLowerCase(), match[2]!);
+  return values;
+}
+
+/** A recorded value: `true`/`false` or a number. */
+const readValue = (text: string): boolean | number | undefined =>
+  text === "true"
+    ? true
+    : text === "false"
+      ? false
+      : text.trim() !== "" && Number.isFinite(Number(text))
+        ? Number(text)
+        : undefined;
+
+/** Every story tag answered ok in these replies, oldest first. */
+export function readStoryLedger(replies: readonly string[]): StoryLedgerEntry[] {
+  const entries: StoryLedgerEntry[] = [];
+  for (const reply of replies) {
+    for (const match of reply.matchAll(STORY_TAG)) {
+      const values = attributes(match[1] ?? "");
+      if (values.get("result") !== "ok") continue;
+      const set: Array<[string, boolean | number]> = [];
+      for (const pair of (values.get("set") ?? "").split(";")) {
+        const [flag, raw] = pair.split("=");
+        const read = raw === undefined ? undefined : readValue(raw);
+        if (flag && read !== undefined) set.push([flag.trim(), read]);
+      }
+      const show = (values.get("show") ?? "")
+        .split(";")
+        .map((each) => each.trim())
+        .filter(Boolean);
+      const event = values.get("event")?.trim();
+      entries.push({
+        ...(event ? { event } : {}),
+        ...(values.get("by") === "engine" ? { by: "engine" } : {}),
+        set,
+        show,
+      });
+    }
+  }
+  return entries;
+}
+
+export interface StoryState {
+  flags: Record<string, boolean | number>;
+  /** How many times each event has tripped. */
+  fired: Record<string, number>;
+  /** The hidden objectives shown so far. */
+  shown: string[];
+}
+
+/** The story as its ledger left it: each flag's value (a recorded value the script no longer fits is
+ *  skipped), the events tripped and the objectives shown. */
+export function storyState(story: StoryScript, ledger: readonly StoryLedgerEntry[]): StoryState {
+  const kinds = new Map(story.flags.map((flag) => [flag.id, flag.kind]));
+  const flags: StoryState["flags"] = Object.fromEntries(story.flags.map((flag) => [flag.id, flag.initial]));
+  const fired: StoryState["fired"] = {};
+  const shown = new Set<string>();
+  for (const entry of ledger) {
+    if (entry.event) fired[entry.event] = (fired[entry.event] ?? 0) + 1;
+    for (const [flag, given] of entry.set) {
+      const kind = kinds.get(flag);
+      if (kind && (kind === "bool" ? typeof given === "boolean" : typeof given === "number")) flags[flag] = given;
+    }
+    for (const flag of entry.show) if (kinds.has(flag)) shown.add(flag);
+  }
+  return { flags, fired, shown: [...shown] };
+}
+
+/** A quest objective the story shows the player (worldgen W10): open until its flag is true, or its
+ *  number reaches the goal. */
+export interface StoryObjective {
+  flag: string;
+  title: string;
+  text: string;
+  done: boolean;
+  /** A number objective with a goal: how far along it is. */
+  progress?: { at: number; goal: number };
+}
+
+/** The objectives the player can see: every quest flag, but a hidden one only once the story shows it. */
+export function storyObjectives(story: StoryScript, state: StoryState): StoryObjective[] {
+  return story.flags.flatMap((flag) => {
+    if (!flag.quest || (flag.quest.hidden && !state.shown.includes(flag.id))) return [];
+    const value = state.flags[flag.id];
+    const goal = flag.kind === "number" ? (flag.quest.goal ?? 1) : undefined;
+    const at = Number(value) || 0;
+    return [
+      {
+        flag: flag.id,
+        title: flag.quest.title,
+        text: flag.quest.text,
+        done: goal === undefined ? value === true : at >= goal,
+        ...(goal !== undefined && flag.quest.goal !== undefined ? { progress: { at: Math.min(at, goal), goal } } : {}),
+      },
+    ];
+  });
+}
+
+/** Whether every condition holds for these flag values. */
+export function storyConditionsHold(list: StoryEvent["if"], flags: StoryState["flags"]): boolean {
+  return (list ?? []).every(({ flag, is, value: wanted }) => {
+    const current = flags[flag];
+    if (current === undefined) return false;
+    switch (is) {
+      case "=":
+        return current === wanted;
+      case "!=":
+        return current !== wanted;
+      case ">":
+        return Number(current) > Number(wanted);
+      case ">=":
+        return Number(current) >= Number(wanted);
+      case "<":
+        return Number(current) < Number(wanted);
+      case "<=":
+        return Number(current) <= Number(wanted);
+    }
+  });
+}
+
+/** The story a game keeps (`gameStory`), checked against its world, or null: one that no longer fits
+ *  its world is not played at all. */
+export function gameStoryFromMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+  game: GameWorld | null,
+): StoryScript | null {
+  if (!game || !metadata || metadata.gameStory == null) return null;
+  const checked = checkStoryScript(game, metadata.gameStory);
+  return checked.ok ? checked.story : null;
+}
+
+// ── Playing a story (worldgen W10b): one evaluation a turn, before the Game Master's reply ──
+
+/** What a fight ended in, read off the combat recap the player's message carries. */
+export function storyFightOutcome(playerMessage: string | null | undefined): StoryFightOutcome | null {
+  if (!playerMessage || !/\[combat_result\]/i.test(playerMessage)) return null;
+  const outcome = /^OUTCOME:\s*(VICTORY|DEFEAT|FLEE)\b/im.exec(playerMessage)?.[1]?.toLowerCase();
+  return (STORY_FIGHT_OUTCOMES as readonly string[]).includes(outcome ?? "") ? (outcome as StoryFightOutcome) : null;
+}
+export type StoryFightOutcome = (typeof STORY_FIGHT_OUTCOMES)[number];
+
+/** What a fight broke (1.316), read off the combat recap the player's message carries: its labels. */
+export function storyFightBroken(playerMessage: string | null | undefined): string[] {
+  if (!playerMessage || !/\[combat_result\]/i.test(playerMessage)) return [];
+  // Only the Engine's recap says what broke: it is the message's last block, after anything the player wrote.
+  const lower = playerMessage.toLowerCase();
+  const start = lower.lastIndexOf("[combat_result]");
+  const end = lower.indexOf("[/combat_result]", start);
+  const recap = playerMessage.slice(start, end < 0 ? undefined : end);
+  // Read line by line, not with one regex over the recap: a long run of blanks after "Broken:" must stay cheap.
+  const found = recap.split("\n").find((one) => one.slice(0, 7).toLowerCase() === "broken:");
+  const line = found?.slice(7) ?? "";
+  return line
+    .split(";")
+    .map((label) => label.trim())
+    .filter(Boolean);
+}
+
+/** The world as a story turn reads it. */
+export interface StoryTurnWorld {
+  game: GameWorld;
+  /** The Game Master's replies before this one in the whole game (earlier sessions' tags carried in first). */
+  replies: readonly string[];
+  /** How many there were (a session's carry counts the replies it stands for). */
+  repliesBefore: number;
+  /** The latest of them with anything in it (at a session's start, the last one of the session before),
+   *  whose Game Master story tags are delivered this turn. */
+  latest: string | null;
+  /** What the walk and the visit this turn tells add to the world's ledger (their tags go before the
+   *  reply), so an arrival they bring counts this very turn. */
+  told: readonly WorldLedgerEntry[];
+  /** The places the story's world has added (the Game Master's new places), so the party can be in one. */
+  added?: ReadonlyArray<{ id: string; name: string; parentId: string }>;
+  /** The world's day as this reply finds it, the walk's days included. */
+  day: number;
+  /** What this turn's player message says a fight ended in. */
+  fight: StoryFightOutcome | null;
+  /** What this turn's player message says a fight broke (1.316), by label. */
+  broke?: readonly string[];
+  /** The player's name, for a page the player speaks. */
+  playerName?: string;
+  /** The cells this turn's walk went over (a town visit's path, a map walk's path, the end cell included):
+   *  a step event on one of them trips. */
+  steps?: ReadonlyArray<{ place: string; x: number; y: number }>;
+}
+
+export interface StoryTurn {
+  /** The events this turn trips, in order. */
+  tripped: string[];
+  /** Put before the reply: the trips' answered tags, the scenes shown as written, the world deeds. */
+  prepend: string;
+  /** The scenes shown as written, as the player sees them: told to the Game Master to follow on, and
+   *  kept as written by any rewrite. */
+  shown: string[];
+  /** What the story asks of the Game Master this turn. */
+  tells: string[];
+  /** Scenes for the Game Master to narrate this turn, each a list of beats. */
+  beats: string[][];
+  /** The story after this turn's trips: what the Game Master is told of its flags and directions. */
+  state: StoryState;
+}
+
+const STORY_TRIPS_A_TURN = 32;
+const recordValue = (value: boolean | number) => String(value);
+
+/** The tag a trip is recorded in: what it set and showed, so the fold never replays the script. */
+function storyRecord(
+  entry: { event?: string; flag?: string; set: Array<[string, boolean | number]>; show: string[] },
+  by?: "engine",
+) {
+  const parts = [
+    ...(entry.event ? [`event="${entry.event}"`] : []),
+    ...(entry.flag ? [`flag="${entry.flag}"`] : []),
+    ...(entry.set.length
+      ? [`set="${entry.set.map(([flag, value]) => `${flag}=${recordValue(value)}`).join(";")}"`]
+      : []),
+    ...(entry.show.length ? [`show="${entry.show.join(";")}"`] : []),
+    ...(by ? [`by="${by}"`] : []),
+    `result="ok"`,
+  ];
+  return `[story: ${parts.join(" ")}]`;
+}
+
+/** An event's flag changes and reveals against these flag values (applied to them). A sum that is no
+ *  longer a number a record can hold is left as it was. */
+function applyActions(story: StoryScript, event: StoryEvent, flags: StoryState["flags"]) {
+  const kinds = new Map(story.flags.map((flag) => [flag.id, flag.kind]));
+  const set: Array<[string, boolean | number]> = [];
+  const show: string[] = [];
+  for (const action of event.do) {
+    if ("set" in action) {
+      flags[action.set] = action.value;
+      set.push([action.set, action.value]);
+    } else if ("add" in action && kinds.get(action.add) === "number") {
+      const next = Number(flags[action.add] ?? 0) + action.amount;
+      if (!Number.isFinite(next)) continue;
+      flags[action.add] = next;
+      set.push([action.add, next]);
+    } else if ("show" in action) {
+      show.push(action.show);
+    }
+  }
+  return { set, show };
+}
+
+/** A matcher for a person's full name, whole words only. */
+function fullName(name: string): RegExp {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}(?=$|[^\\p{L}\\p{N}])`, "iu");
+}
+
+/** A scene shown as written, in the narration's own grammar: narration lines as they are, a person's
+ *  words as their line with their expression. Names are the world's, never the script's, and keep no
+ *  brackets. */
+function storyPages(
+  game: GameWorld,
+  cutscene: Extract<StoryCutscene, { kind: "pages" }>,
+  playerName: string | undefined,
+): string {
+  const lines = cutscene.background ? [`[bg: ${cutscene.background}]`] : [];
+  for (const page of cutscene.pages) {
+    const speaker =
+      page.speaker === STORY_PLAYER
+        ? playerName?.trim()
+        : page.speaker
+          ? storyPerson(game, page.speaker)?.name
+          : undefined;
+    const name = speaker?.replace(/[[\]":]/g, "").trim();
+    if (!name) {
+      lines.push(page.text);
+      continue;
+    }
+    lines.push(`[${name}] [main] [${page.expression ?? "neutral"}]: "${page.text.replace(/"/g, "'")}"`);
+  }
+  return lines.join("\n\n");
+}
+
+/** A world deed an event does, as a world tag for the world's ledger to answer like the Game Master's. */
+function storyWorldTag(game: GameWorld, deed: Extract<StoryAction, { world: unknown }>["world"]): string {
+  const place = deed.place ? game.world.places.find((each) => each.id === deed.place)?.name : undefined;
+  const parts = [
+    `deed="${deed.deed}"`,
+    ...(deed.group ? [`group="${deed.group}"`] : []),
+    ...(deed.with ? [`with="${deed.with}"`] : []),
+    ...(place ? [`place="${place.replace(/["[\]]/g, "")}"`] : []),
+    ...(deed.who ? [`who="${deed.who}"`] : []),
+  ];
+  return `[world: ${parts.join(" ")}]`;
+}
+
+/**
+ * This turn of a story: what the Game Master tripped in the latest reply is delivered (its scenes and
+ * what it asks), then the events the Engine sees happen trip, in the script's order, each once unless
+ * it repeats, at most once a turn, 32 at most. The replies are read in order, so the story knows where
+ * the party is and when it came in, when each event last happened, and what the latest reply named and
+ * did. Deterministic: a regeneration of the same reply finds the same turn.
+ */
+export function storyTurn(story: StoryScript, world: StoryTurnWorld): StoryTurn {
+  const { game } = world;
+  const events = new Map(story.events.map((event) => [event.id, event]));
+  const cutscenes = new Map(story.cutscenes.map((cutscene) => [cutscene.id, cutscene]));
+
+  // Where places are: the world's (by any name they went by) and the ones the story added.
+  const parents = new Map<string, string | null | undefined>(
+    game.world.places.map((place) => [place.id, place.parentId]),
+  );
+  for (const added of world.added ?? []) parents.set(added.id, added.parentId);
+  const placeOf = (name: string): string | null =>
+    worldPlaceNamed(game.world.places, name)?.id ??
+    world.added?.find((place) => place.name.trim().toLowerCase() === name.trim().toLowerCase())?.id ??
+    null;
+  const inside = (placeId: string | null, target: string) => {
+    for (let at = placeId ?? undefined, hops = 0; at && hops < 64; hops++) {
+      if (at === target) return true;
+      at = parents.get(at) ?? undefined;
+    }
+    return false;
+  };
+
+  // The replies in order, then this turn's walk and visit: where the party was, and when it came into
+  // each place an event waits for; when each event last happened; whether a repeating flags event's
+  // conditions have been false since.
+  const targets = new Set(story.events.flatMap((event) => (event.when.on === "arrive" ? [event.when.place] : [])));
+  const rising = story.events.filter((event) => event.repeat && event.when.on === "flags");
+  let at: string | null = game.world.startId ?? null;
+  const cameIn = new Map<string, number>();
+  for (const target of targets) if (inside(at, target)) cameIn.set(target, -1);
+  const lastHappened = new Map<string, number>();
+  const ledger: StoryLedgerEntry[] = [];
+  let flagsSoFar = storyState(story, []).flags;
+  const risen = new Map(rising.map((event) => [event.id, !storyConditionsHold(event.if, flagsSoFar)]));
+  const segments = [
+    ...world.replies.map((reply) => ({ world: readWorldLedger([reply]), reply })),
+    { world: world.told, reply: "" },
+  ];
+  segments.forEach((segment, index) => {
+    for (const entry of segment.world) {
+      if (entry.at === undefined) continue;
+      const next = placeOf(entry.at);
+      for (const target of targets) if (inside(next, target) && !inside(at, target)) cameIn.set(target, index);
+      at = next;
+    }
+    const entries = readStoryLedger([segment.reply]);
+    if (!entries.length) return;
+    ledger.push(...entries);
+    for (const entry of entries) if (entry.event) lastHappened.set(entry.event, index);
+    flagsSoFar = storyState(story, ledger).flags;
+    for (const event of rising) {
+      if (entries.some((entry) => entry.event === event.id)) risen.set(event.id, false);
+      if (!storyConditionsHold(event.if, flagsSoFar)) risen.set(event.id, true);
+    }
+  });
+
+  const state = storyState(story, ledger);
+  const flags = { ...state.flags };
+  const fired = { ...state.fired };
+  const shownFlags = new Set(state.shown);
+  const prepend: string[] = [];
+  const shown: string[] = [];
+  const tells: string[] = [];
+  const beats: string[][] = [];
+  const tripped: string[] = [];
+
+  /** An event's scenes, asks and deeds: by the Engine this turn, or as the Game Master marked it last
+   *  reply, whose deeds went with its tag and whose beats it was told to narrate as it marked it. */
+  const deliver = (event: StoryEvent, byEngine: boolean) => {
+    for (const action of event.do) {
+      if ("tell" in action) tells.push(action.tell);
+      else if ("cutscene" in action) {
+        const cutscene = cutscenes.get(action.cutscene);
+        if (cutscene?.kind === "pages") {
+          const pages = storyPages(game, cutscene, world.playerName);
+          prepend.push(pages);
+          shown.push(pages);
+        } else if (cutscene?.kind === "beats" && byEngine) beats.push([...cutscene.beats]);
+      } else if ("world" in action && byEngine) prepend.push(storyWorldTag(game, action.world));
+    }
+  };
+
+  // What the Game Master tripped last reply: its scenes and asks arrive now (its deeds went with it).
+  for (const entry of world.latest ? readStoryLedger([world.latest]) : []) {
+    const event = entry.event ? events.get(entry.event) : undefined;
+    if (event && entry.by !== "engine") deliver(event, false);
+  }
+
+  // What the latest reply named and did, for the events that happen again each time.
+  const latestDeeds = world.latest ? readWorldLedger([world.latest]) : [];
+  const deedMatches = (entry: WorldLedgerEntry, deed: string | undefined, placeId: string | undefined) =>
+    entry.deed !== undefined &&
+    (!deed || entry.deed === deed) &&
+    (!placeId || (entry.place !== undefined && placeOf(entry.place) === placeId));
+  const named = (personId: string, texts: readonly string[]) => {
+    const person = storyPerson(game, personId);
+    if (!person?.named) return false;
+    const matcher = fullName(person.name);
+    return texts.some((text) => matcher.test(text));
+  };
+
+  const turnNumber = world.repliesBefore + 1;
+  const now = segments.length - 1;
+  const matches = (event: StoryEvent): boolean => {
+    const times = fired[event.id] ?? 0;
+    const when = event.when;
+    switch (when.on) {
+      case "start":
+        return world.repliesBefore === 0 && times === 0;
+      case "turn":
+        return turnNumber >= when.turn && times === 0;
+      case "day":
+        return world.day >= when.day && times === 0;
+      case "arrive":
+        // The party is there now; again only once it has come in since it last happened.
+        return (
+          inside(at, when.place) &&
+          (times === 0 ||
+            (event.repeat === true && (cameIn.get(when.place) ?? -2) > (lastHappened.get(event.id) ?? now)))
+        );
+      case "meet":
+        return times === 0
+          ? named(when.person, world.replies)
+          : event.repeat === true && named(when.person, world.latest ? [world.latest] : []);
+      case "deed":
+        return times === 0
+          ? world.replies.some((reply) =>
+              readWorldLedger([reply]).some((entry) => deedMatches(entry, when.deed, when.place)),
+            )
+          : event.repeat === true && latestDeeds.some((entry) => deedMatches(entry, when.deed, when.place));
+      case "fight":
+        return world.fight === when.outcome && (event.repeat || times === 0);
+      case "broke":
+        return (
+          (world.broke ?? []).some((label) => label.trim().toLowerCase() === when.prop.trim().toLowerCase()) &&
+          (event.repeat === true || times === 0)
+        );
+      case "flags":
+        return times === 0 || (event.repeat === true && risen.get(event.id) === true);
+      case "gm":
+        return false;
+      case "step":
+        // Walked onto this turn: once, or each turn the walk goes over it when it repeats.
+        return (
+          (times === 0 || event.repeat === true) &&
+          (world.steps ?? []).some((step) => step.place === when.place && step.x === when.x && step.y === when.y)
+        );
+    }
+  };
+
+  const thisTurn = new Set<string>();
+  for (let pass = 0; pass < STORY_TRIPS_A_TURN && tripped.length < STORY_TRIPS_A_TURN; pass++) {
+    const next = story.events.find(
+      (event) => !thisTurn.has(event.id) && storyConditionsHold(event.if, flags) && matches(event),
+    );
+    if (!next) break;
+    thisTurn.add(next.id);
+    tripped.push(next.id);
+    fired[next.id] = (fired[next.id] ?? 0) + 1;
+    const record = applyActions(story, next, flags);
+    for (const flag of record.show) shownFlags.add(flag);
+    prepend.push(storyRecord({ event: next.id, ...record }, "engine"));
+    deliver(next, true);
+  }
+
+  return {
+    tripped,
+    prepend: prepend.length ? `${prepend.join("\n\n")}\n\n` : "",
+    shown,
+    tells,
+    beats,
+    state: { flags, fired, shown: [...shownFlags] },
+  };
+}
+
+/**
+ * The Game Master's own story tags in a reply, answered in place against the story as this turn left
+ * it: an event the script made its own, its conditions met, not yet tripped unless it repeats; a flag
+ * the script made its own, set or added to with a value of its kind. Anything else is refused with the
+ * reason, as world tags are. A trip's world deeds go in right after its tag, for the world's ledger to
+ * answer; its scenes and asks come at the start of the next reply.
+ */
+export function applyStoryTags(
+  content: string,
+  story: StoryScript,
+  game: GameWorld,
+  before: StoryState,
+  /** The events this turn has already tripped: at most once a turn, as the Engine's own. */
+  thisTurn: readonly string[] = [],
+): string {
+  const flags = { ...before.flags };
+  const fired = { ...before.fired };
+  const tripped = new Set(thisTurn);
+  const events = new Map(story.events.map((event) => [event.id, event]));
+  const declared = new Map(story.flags.map((flag) => [flag.id, flag]));
+  return content.replace(STORY_TAG, (_whole, body: string) => {
+    const values = attributes(body);
+    const eventId = values.get("event")?.trim();
+    const flagId = values.get("flag")?.trim();
+    const refuse = (reason: string) =>
+      `[story: ${eventId ? `event="${eventId.replace(/["[\]]/g, "")}"` : `flag="${(flagId ?? "").replace(/["[\]]/g, "")}"`} result="refused" reason="${reason}"]`;
+    if (eventId) {
+      const event = events.get(eventId);
+      if (!event) return refuse("unknown-event");
+      if (!event.gm) return refuse("not-yours");
+      if (!event.repeat && (fired[event.id] ?? 0) > 0) return refuse("done");
+      if (tripped.has(event.id)) return refuse("this-turn");
+      if (!storyConditionsHold(event.if, flags)) return refuse("conditions");
+      fired[event.id] = (fired[event.id] ?? 0) + 1;
+      tripped.add(event.id);
+      const record = applyActions(story, event, flags);
+      const deeds = event.do.flatMap((action) => ("world" in action ? [storyWorldTag(game, action.world)] : []));
+      return [storyRecord({ event: event.id, ...record }), ...deeds].join("");
+    }
+    if (flagId) {
+      const flag = declared.get(flagId);
+      if (!flag) return refuse("unknown-flag");
+      if (!flag.gm) return refuse("not-yours");
+      const raw = values.get("value");
+      const add = values.get("add");
+      let next: boolean | number | undefined;
+      if (add !== undefined) {
+        const amount = Number(add);
+        next =
+          flag.kind === "number" && add.trim() !== "" && Number.isFinite(amount)
+            ? Number(flags[flag.id] ?? 0) + amount
+            : undefined;
+      } else if (raw !== undefined) {
+        const read =
+          flag.kind === "bool" ? (raw === "true" ? true : raw === "false" ? false : undefined) : readValue(raw);
+        next = typeof read === (flag.kind === "bool" ? "boolean" : "number") ? read : undefined;
+      }
+      if (next === undefined || (typeof next === "number" && !Number.isFinite(next))) return refuse("unreadable");
+      flags[flag.id] = next;
+      return storyRecord({ flag: flag.id, set: [[flag.id, next]], show: [] });
+    }
+    return refuse("unreadable");
+  });
+}
+
+/** Every story tag in a reply refused: a game with no story to answer them (worldgen W10), so a tag
+ *  that looks answered can never count later. */
+export function refuseStoryTags(content: string): string {
+  return content.replace(STORY_TAG, (_whole, body: string) => {
+    const values = attributes(body);
+    const id = (values.get("event") ?? values.get("flag") ?? "").replace(/["[\]]/g, "");
+    const key = values.has("event") ? "event" : "flag";
+    return `[story: ${id ? `${key}="${id}" ` : ""}result="refused" reason="no-story"]`;
+  });
+}
+
+/** The story as the Game Master is told it once, with the world: how to write its tags, and what of the
+ *  script is its own, with the beats it narrates as it marks a moment (told after the moment, they would
+ *  only tell it again; a beats scene an Engine event shares is so known from the start). Nothing else
+ *  of the script (the Engine's events and every other scene stay unknown until they happen). Empty
+ *  when the script gives the Game Master nothing. */
+export function storyScriptPromptText(story: StoryScript): string {
+  const events = story.events.filter((event) => event.gm);
+  const flags = story.flags.filter((flag) => flag.gm);
+  if (!events.length && !flags.length) return "";
+  const cutscenes = new Map(story.cutscenes.map((cutscene) => [cutscene.id, cutscene]));
+  return [
+    "This world has a story script. When the story reaches one of these moments, mark it with a story tag; the Engine answers it in place, and refuses anything else.",
+    ...(events.length
+      ? [
+          'Moments you may trip, with [story: event="<id>"]:',
+          ...events.flatMap((event) => {
+            const beats = gmEventBeats(event, cutscenes);
+            return [
+              `- ${event.id}${event.note ? `: ${event.note}` : ""}`,
+              ...(beats.length
+                ? [
+                    "  When you mark it, narrate this with it, in your own words, beat by beat:",
+                    ...beats.map((beat) => `  - ${beat}`),
+                  ]
+                : []),
+            ];
+          }),
+        ]
+      : []),
+    ...(flags.length
+      ? [
+          'Story values you may set, with [story: flag="<id>" value="<value>"] (or add="<number>" for a number):',
+          ...flags.map(
+            (flag) =>
+              `- ${flag.id} (${flag.kind === "bool" ? "true or false" : "a number"})${flag.note ? `: ${flag.note}` : ""}`,
+          ),
+        ]
+      : []),
+  ].join("\n");
+}
+
+/** What the story says to the Game Master this turn: its values (hidden from the player), the standing
+ *  directions in force, what it asks now, the scene just shown, any scene to narrate now, and which of
+ *  its own moments are not open now. */
+export function storyTurnPromptText(story: StoryScript, turn: StoryTurn): string {
+  const lines: string[] = [];
+  const values = story.flags.map((flag) => {
+    const value = turn.state.flags[flag.id];
+    return `${flag.id} = ${typeof value === "boolean" ? (value ? "yes" : "no") : value}`;
+  });
+  if (values.length) lines.push(`Story values (the player never sees these): ${values.join(", ")}.`);
+  const directions = story.directions.filter((direction) => storyConditionsHold(direction.if, turn.state.flags));
+  if (directions.length)
+    lines.push("Keep to these while they hold:", ...directions.map((direction) => `- ${direction.text}`));
+  if (turn.shown.length) {
+    lines.push(
+      "Just before your reply, the player was shown this scene as written. Carry on from it; do not repeat it:",
+      ...turn.shown,
+    );
+  }
+  for (const scene of turn.beats) {
+    lines.push("Narrate this scene now, in your own words, beat by beat:", ...scene.map((beat) => `- ${beat}`));
+  }
+  if (turn.tells.length) lines.push("The story asks this of you now:", ...turn.tells.map((tell) => `- ${tell}`));
+  // Its own moments it cannot mark now (done, held back by their conditions, or the Engine's this turn),
+  // so it never marks, and tells the beats of, a moment the Engine would refuse. Only the marking is
+  // closed: a scene the Engine asks for this turn is still told, even one such a moment shares.
+  const closed = story.events.filter(
+    (event) =>
+      event.gm &&
+      (turn.tripped.includes(event.id) ||
+        (!event.repeat && (turn.state.fired[event.id] ?? 0) > 0) ||
+        !storyConditionsHold(event.if, turn.state.flags)),
+  );
+  if (closed.length) {
+    lines.push(`Story moments you cannot mark now: ${closed.map((event) => event.id).join(", ")}.`);
+  }
+  return lines.join("\n");
+}

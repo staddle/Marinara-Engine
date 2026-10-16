@@ -1,3 +1,5 @@
+import { normalizeIllustratorRunInterval } from "@marinara-engine/shared";
+
 type AgentsStore = {
   getLastSuccessfulRunByType(agentType: string, chatId: string): Promise<{ messageId?: string | null } | null>;
 };
@@ -14,6 +16,21 @@ export function resolveAgentRunInterval(settings: unknown, fallback: number): nu
   const parsed =
     typeof rawInterval === "number" ? rawInterval : typeof rawInterval === "string" ? Number(rawInterval) : NaN;
   return Number.isFinite(parsed) && parsed >= 1 ? Math.min(100, Math.floor(parsed)) : normalizedFallback;
+}
+
+/**
+ * Illustrator settings with a Roleplay chat's Run Interval (0-100) in place of the agent's. Other agents and other
+ * modes pass through: Game orders its illustrations by scenes and asset needs, not by a per-chat interval.
+ */
+export function applyIllustratorChatRunInterval(
+  agentType: string,
+  settings: Record<string, unknown>,
+  chatMetadata: Record<string, unknown> | null | undefined,
+  chatMode: unknown,
+): Record<string, unknown> {
+  if (agentType !== "illustrator" || chatMode !== "roleplay") return settings;
+  const runInterval = normalizeIllustratorRunInterval(chatMetadata?.illustratorRunInterval);
+  return runInterval === null ? settings : { ...settings, runInterval };
 }
 
 export async function shouldSkipAgentByMessageInterval({
@@ -43,11 +60,21 @@ export async function shouldSkipAgentByMessageInterval({
   const lastRun = await agentsStore.getLastSuccessfulRunByType(agentType, chatId);
   if (!lastRun) return false;
 
-  const lastRunIdx = messages.findIndex((message) => message.id === lastRun.messageId);
-  if (lastRunIdx < 0) return false;
+  const messagesSince = countMessagesSinceAgentRun(messages, lastRun.messageId, countUpcomingAssistantMessage);
+  return messagesSince !== null && messagesSince < runInterval;
+}
+
+/** Shared cadence/activation count; null means there is no usable successful-run anchor. */
+export function countMessagesSinceAgentRun(
+  messages: ChatMessageLike[],
+  lastMessageId: string | null | undefined,
+  countUpcomingAssistantMessage = false,
+): number | null {
+  if (!lastMessageId) return null;
+  const lastRunIdx = messages.findIndex((message) => message.id === lastMessageId);
+  if (lastRunIdx < 0) return null;
   const messagesSince = messages
     .slice(lastRunIdx + 1)
     .filter((message) => message.role === "user" || message.role === "assistant");
-  const upcomingMessages = countUpcomingAssistantMessage ? 1 : 0;
-  return messagesSince.length + upcomingMessages < runInterval;
+  return messagesSince.length + (countUpcomingAssistantMessage ? 1 : 0);
 }

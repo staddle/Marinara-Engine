@@ -14,6 +14,7 @@ import {
   resolveSpatialBreadcrumb,
   resolveSpatialDestinations,
   resolveSpatialRoute,
+  SPATIAL_CONTEXT_LIMITS,
   spatialContextDefinitionSchema,
   spatialContextSnapshotSchema,
   pendingSpatialTransitionSchema,
@@ -50,7 +51,11 @@ import {
   shouldSuppressAssistantSpatialMutation,
   validateSpatialGenerationRequest,
 } from "../../packages/server/src/routes/generate/spatial-transition-request.js";
-import { buildCyoaChoiceSubmissionPayload } from "../../packages/client/src/components/chat/cyoa-choice-submission.js";
+import {
+  appendCyoaChoiceToDraft,
+  buildCyoaChoiceSubmissionPayload,
+  resolveCyoaChoiceAction,
+} from "../../packages/client/src/components/chat/cyoa-choice-submission.js";
 import {
   shouldKeepPendingSpatialTransition,
   spatialOwnerTurnRecoveryPath,
@@ -94,8 +99,7 @@ assert.equal(
 assert.equal(
   shouldSaveHiddenGenerationAnchor({
     impersonate: true,
-    parsedCommandCount: 0,
-    parsedRawCommandCount: 0,
+    hasActionableOutput: false,
     spatialDirectiveDetected: true,
   }),
   true,
@@ -104,8 +108,7 @@ assert.equal(
 assert.equal(
   shouldSaveHiddenGenerationAnchor({
     impersonate: false,
-    parsedCommandCount: 0,
-    parsedRawCommandCount: 0,
+    hasActionableOutput: false,
     spatialDirectiveDetected: true,
   }),
   true,
@@ -114,8 +117,7 @@ assert.equal(
 assert.equal(
   shouldSaveHiddenGenerationAnchor({
     impersonate: true,
-    parsedCommandCount: 1,
-    parsedRawCommandCount: 1,
+    hasActionableOutput: true,
     spatialDirectiveDetected: false,
   }),
   false,
@@ -188,6 +190,16 @@ assert.equal(standardChoiceSubmission.pendingSpatialTransition, impersonatedMove
 assert.equal(impersonatedChoiceSubmission.pendingSpatialTransition, impersonatedMove);
 assert.equal(impersonatedChoiceSubmission.impersonate, true);
 assert.equal(impersonatedChoiceSubmission.impersonatePromptTemplate, "Stay in character.");
+assert.equal(appendCyoaChoiceToDraft("", "Take the bridge"), "Take the bridge");
+assert.equal(appendCyoaChoiceToDraft("  \n", "Take the bridge"), "Take the bridge");
+assert.equal(
+  appendCyoaChoiceToDraft(appendCyoaChoiceToDraft("I hesitate.\n", "Take the bridge"), "Wave"),
+  "I hesitate.\n\nTake the bridge\n\nWave",
+);
+assert.equal(resolveCyoaChoiceAction({ addToMessage: false, impersonate: false }), "send");
+assert.equal(resolveCyoaChoiceAction({ addToMessage: false, impersonate: true }), "impersonate");
+assert.equal(resolveCyoaChoiceAction({ addToMessage: true, impersonate: false }), "add");
+assert.equal(resolveCyoaChoiceAction({ addToMessage: true, impersonate: true }), "add");
 assert.deepEqual(
   resolveVisibleGameStateAnchor([
     { id: "assistant-anchor", role: "assistant", activeSwipeIndex: 2 },
@@ -917,6 +929,11 @@ const deepLocations = Array.from({ length: 21 }, (_, index) =>
   }),
 );
 assert.ok(issueCodes(definition(deepLocations)).includes("maximum_depth_exceeded"));
+// A chain as long as the location limit is still reported, with the walk bounded at maxDepth.
+const locationLimitChain = Array.from({ length: SPATIAL_CONTEXT_LIMITS.maxLocations }, (_, index) =>
+  location(`chain_${index}`, `Chain ${index}`, { parentId: index === 0 ? null : `chain_${index - 1}` }),
+);
+assert.ok(issueCodes(definition(locationLimitChain)).includes("maximum_depth_exceeded"));
 
 const invalidLayers = definition(
   [
@@ -958,6 +975,18 @@ const tooManyLinks = definition([
 ]);
 assert.ok(issueCodes(tooManyLinks).includes("too_many_links"));
 assert.equal(spatialContextDefinitionSchema.safeParse(tooManyLinks).success, false);
+
+// Whole-world maps with floors and rooms outgrew 500 locations (Marinara-Agents#1132).
+const locationsAtLimit = Array.from({ length: SPATIAL_CONTEXT_LIMITS.maxLocations }, (_, index) =>
+  location(`place_${index}`, `Place ${index}`),
+);
+assert.equal(SPATIAL_CONTEXT_LIMITS.maxLocations, 5_000);
+assert.equal(spatialContextDefinitionSchema.safeParse(definition(locationsAtLimit)).success, true);
+assert.ok(
+  issueCodes(definition([...locationsAtLimit, location("one_too_many", "One Too Many")])).includes(
+    "too_many_locations",
+  ),
+);
 
 assert.equal(
   spatialContextDefinitionSchema.safeParse({

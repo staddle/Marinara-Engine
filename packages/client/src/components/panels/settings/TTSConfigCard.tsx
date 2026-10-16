@@ -48,6 +48,7 @@ import type {
   TTSSourceProfiles,
   TTSVoiceAssignment,
   TTSVoiceMode,
+  TTSVoicesResponse,
   TTSAudioFormat,
   TTSConversationCallAudioInputMode,
 } from "@marinara-engine/shared";
@@ -60,6 +61,7 @@ import {
   TTS_CLONE_VOICE_ID,
   isTTSCloneVoice,
   ttsSourceProfileFromConfig,
+  isChatProvider,
 } from "@marinara-engine/shared";
 import { HelpTooltip } from "../../ui/HelpTooltip";
 import { SettingsCheckbox, SettingsSwitch } from "./SettingControls";
@@ -223,9 +225,7 @@ function isTTSLanguageConnectionOption(value: unknown): value is TTSLanguageConn
     typeof connection.id === "string" &&
     typeof connection.name === "string" &&
     typeof connection.model === "string" &&
-    connection.provider !== "image_generation" &&
-    connection.provider !== "video_generation" &&
-    connection.provider !== "audio"
+    isChatProvider(connection.provider)
   );
 }
 
@@ -266,6 +266,19 @@ const CLONE_VOICE_OPTION: VoiceOption = {
   name: "🎙️ Voice Cloning (reference clip)",
   category: "clone",
 };
+
+/** The provider's voices (ElevenLabs falls back to its defaults) plus saved voices the list lacks. */
+export function buildTTSVoiceOptions(
+  voicesData: TTSVoicesResponse | undefined,
+  source: TTSSource,
+  savedVoices: readonly string[],
+): VoiceOption[] {
+  const fetched = voicesData?.voiceOptions ?? (voicesData?.voices ?? []).map((id) => ({ id, name: id }));
+  let options: VoiceOption[] =
+    fetched.length > 0 ? fetched : source === "elevenlabs" ? ELEVENLABS_DEFAULT_VOICE_OPTIONS : [];
+  for (const savedVoice of savedVoices) options = addSavedVoiceOption(options, savedVoice);
+  return options;
+}
 
 function formatVoiceOptionLabel(option: VoiceOption): string {
   if (option.id === TTS_CLONE_VOICE_ID) return option.name;
@@ -680,8 +693,13 @@ function TtsSearchableSelect({
                     size="0.75rem"
                     className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--primary)]"
                   />
+                  {/* A combobox for the open list, so Escape here closes only the picker, not its panel. */}
                   <input
                     autoFocus
+                    role="combobox"
+                    aria-expanded
+                    aria-controls={listboxId}
+                    aria-autocomplete="list"
                     value={search}
                     onChange={(event) => setSearch(event.target.value)}
                     placeholder={searchPlaceholder}
@@ -752,7 +770,7 @@ function TtsSearchableSelect({
   );
 }
 
-function VoiceSelect({
+export function VoiceSelect({
   value,
   options,
   disabled,
@@ -791,7 +809,7 @@ function VoiceSelect({
   );
 }
 
-function CustomizableVoiceInput({
+export function CustomizableVoiceInput({
   value,
   options,
   placeholder,
@@ -1011,6 +1029,9 @@ export function TTSConfigCard() {
   const [autoplayGame, setAutoplayGame] = useState(false);
   const [progressivePlayback, setProgressivePlayback] = useState(false);
   const [dialogueOnly, setDialogueOnly] = useState(false);
+  const [skipTagContent, setSkipTagContent] = useState(false);
+  const [skipCodeBlocks, setSkipCodeBlocks] = useState(true);
+  const [skipBracketedText, setSkipBracketedText] = useState(false);
   const [roleplaySpeakerExtractorEnabled, setRoleplaySpeakerExtractorEnabled] = useState(false);
   const [roleplaySpeakerExtractorConnectionId, setRoleplaySpeakerExtractorConnectionId] = useState("");
   const [roleplaySpeakerExtractorEmotionsEnabled, setRoleplaySpeakerExtractorEmotionsEnabled] = useState(false);
@@ -1087,6 +1108,9 @@ export function TTSConfigCard() {
     setAutoplayGame(savedConfig.autoplayGame);
     setProgressivePlayback(savedConfig.progressivePlayback ?? false);
     setDialogueOnly(savedConfig.dialogueOnly ?? false);
+    setSkipTagContent(savedConfig.skipTagContent ?? false);
+    setSkipCodeBlocks(savedConfig.skipCodeBlocks ?? true);
+    setSkipBracketedText(savedConfig.skipBracketedText ?? false);
     setRoleplaySpeakerExtractorEnabled(savedConfig.roleplaySpeakerExtractorEnabled ?? false);
     setRoleplaySpeakerExtractorConnectionId(savedConfig.roleplaySpeakerExtractorConnectionId ?? "");
     setRoleplaySpeakerExtractorEmotionsEnabled(savedConfig.roleplaySpeakerExtractorEmotionsEnabled ?? false);
@@ -1167,6 +1191,9 @@ export function TTSConfigCard() {
     autoplayGame,
     progressivePlayback,
     dialogueOnly,
+    skipTagContent,
+    skipCodeBlocks,
+    skipBracketedText,
     roleplaySpeakerExtractorEnabled,
     roleplaySpeakerExtractorConnectionId,
     roleplaySpeakerExtractorEmotionsEnabled,
@@ -1311,6 +1338,7 @@ export function TTSConfigCard() {
         return;
       }
 
+      ttsService.preparePlayback();
       try {
         try {
           await saveNow(payload);
@@ -1382,34 +1410,19 @@ export function TTSConfigCard() {
   };
 
   const voices = voicesData?.voices ?? [];
-  const fetchedVoiceOptions = voicesData?.voiceOptions ?? voices.map((v) => ({ id: v, name: v }));
   const voiceOptions = useMemo(() => {
-    let nextOptions = fetchedVoiceOptions.length > 0 ? fetchedVoiceOptions : [];
-    if (source === "elevenlabs" && nextOptions.length === 0) {
-      nextOptions = ELEVENLABS_DEFAULT_VOICE_OPTIONS;
-    }
-    if (source === "openai") {
-      nextOptions = [CLONE_VOICE_OPTION, ...nextOptions];
-    }
-    for (const savedVoice of [
+    const options = buildTTSVoiceOptions(voicesData, source, [
       voice,
       narratorVoice,
       ...voiceAssignments.map((assignment) => assignment.voice),
       ...npcDefaultMaleVoices,
       ...npcDefaultFemaleVoices,
-    ]) {
-      nextOptions = addSavedVoiceOption(nextOptions, savedVoice);
-    }
-    return nextOptions;
-  }, [
-    fetchedVoiceOptions,
-    narratorVoice,
-    npcDefaultFemaleVoices,
-    npcDefaultMaleVoices,
-    source,
-    voice,
-    voiceAssignments,
-  ]);
+    ]);
+    // OpenAI-compatible servers can clone from a reference clip; offer that first, once.
+    return source === "openai"
+      ? [CLONE_VOICE_OPTION, ...options.filter((option) => option.id !== TTS_CLONE_VOICE_ID)]
+      : options;
+  }, [narratorVoice, npcDefaultFemaleVoices, npcDefaultMaleVoices, source, voice, voiceAssignments, voicesData]);
   const voicesFromProvider = voicesData?.fromProvider ?? false;
   const voicesErrorMessage = voicesError
     ? getTtsRequestErrorMessage(voicesRequestError, localizeUi("ui.panels.ttsconfigcard.couldNotRefreshVoices"))
@@ -2266,6 +2279,7 @@ export function TTSConfigCard() {
               >
                 <option value="mp3">{localizeUi("ui.panels.ttsconfigcard.mp3")}</option>
                 <option value="wav">{localizeUi("ui.panels.ttsconfigcard.wav")}</option>
+                <option value="pcm">{localizeUi("ui.panels.ttsconfigcard.pcm")}</option>
               </select>
             </FieldRow>
           )}
@@ -2559,6 +2573,30 @@ export function TTSConfigCard() {
                 </div>
               </FieldRow>
             )}
+            <ToggleRow
+              label={localizeUi("tts.filters.tags")}
+              checked={skipTagContent}
+              onChange={(value) => {
+                setSkipTagContent(value);
+                mark({ skipTagContent: value });
+              }}
+            />
+            <ToggleRow
+              label={localizeUi("tts.filters.code")}
+              checked={skipCodeBlocks}
+              onChange={(value) => {
+                setSkipCodeBlocks(value);
+                mark({ skipCodeBlocks: value });
+              }}
+            />
+            <ToggleRow
+              label={localizeUi("tts.filters.brackets")}
+              checked={skipBracketedText}
+              onChange={(value) => {
+                setSkipBracketedText(value);
+                mark({ skipBracketedText: value });
+              }}
+            />
           </div>
 
           <div className="flex items-center gap-2 rounded-xl border border-sky-400/15 bg-sky-400/5 px-2.5 py-2">

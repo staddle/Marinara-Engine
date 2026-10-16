@@ -59,13 +59,29 @@ export const GM_VERB_TABLE_MAX_BYTES = 64 * 1024;
  *  parse regex is case-insensitive, so a lowercase `note` verb would shadow the journal tag.
  *  `party-chat`/`party-turn` cannot collide anyway — a verb name may not contain a hyphen — and are
  *  kept so the pin matches its sources exactly, which is also what leaves them free to serve as the
- *  tag parser's canary. */
+ *  tag parser's canary.
+ *  `roll` is the one name here that no sweep above yields, and it is reserved by hand for two
+ *  colliding readers a package verb would shadow: Roleplay mode's own `[roll: character="…"]`
+ *  command (`packages/server/src/services/generation/roleplay-commands.ts`), and the inner
+ *  `[roll: 2d6+3]` of a Game placeholder, both of which match `CAPABILITY_COMMAND_TAG_PATTERN`
+ *  exactly. `capability-gm-verbs.regression.ts` pins the reservation rather than derives it.
+ *  `branch` and `on` are reserved by hand for the same reason and are NOT the same case as each
+ *  other, so the difference is written down rather than implied. `[branch: crates]` matches
+ *  `CAPABILITY_COMMAND_TAG_PATTERN` exactly, so a package verb named `branch` would intercept
+ *  every one-request dice branch block before the engine's own arm ever saw it: that one is a
+ *  real shadow. `on` is DEFENSIVE ONLY and cannot fire — `[on success]` puts a space between the
+ *  name and the `]`, which that pattern does not accept — so it closes the name space without
+ *  buying a fix, and it must never be cited as the reason the delimiters get stripped. What
+ *  strips them is a literal pattern in `utils/dice-branch.ts`; no name set on either side
+ *  reaches `[on success]` or `[/branch]` at all. */
 export const RESERVED_GM_TAG_NAMES = Object.freeze([
   "action",
   "ambient",
   "bg",
   "book",
+  "branch",
   "choices",
+  "clock",
   "combat",
   "combat_result",
   "dialogue",
@@ -73,29 +89,39 @@ export const RESERVED_GM_TAG_NAMES = Object.freeze([
   "direction",
   "element_attack",
   "extra",
+  "history",
   "inventory",
+  "item_used",
+  "loot",
   "main",
+  "map",
   "map_update",
   "music",
   "note",
+  "on",
   "party-chat",
   "party-turn",
   "party_add",
   "party_change",
+  "place",
   "qte",
   "qte_bonus",
   "qte_result",
   "reputation",
+  "roll",
   "session_end",
   "sfx",
+  "sheet",
   "side",
   "skill_check",
   "state",
   "status",
+  "story",
   "tag",
   "thought",
   "whisper",
   "widget",
+  "world",
 ] as const);
 
 const reservedGmTagNames = new Set<string>(RESERVED_GM_TAG_NAMES);
@@ -106,7 +132,8 @@ const reservedGmTagNames = new Set<string>(RESERVED_GM_TAG_NAMES);
  *
  *  Derived, and pinned by `capability-gm-verbs.regression.ts`, from:
  *    1. every top-level key of `ChatMetadata` (`packages/shared/src/types/chat.ts`), reduced to its
- *       leading lowercase run: `gameSetupConfig` → `game`, `lorebookTokenBudget` → `lorebook`;
+ *       leading lowercase run: `gameSetupConfig` → `game`, `lorebookTokenBudget` → `lorebook`,
+ *       unless an explicitly narrower compound namespace such as `advancedMemory` already covers it;
  *    2. every engine-owned `*_METADATA_KEY` constant in the server, reduced the same way — these
  *       are keys no interface declares (`metadataWriteOrdinals`, the write-ordinal mirror);
  *    3. the keys that live in the interface's `[key: string]: unknown` index signature instead of
@@ -132,9 +159,10 @@ const reservedGmTagNames = new Set<string>(RESERVED_GM_TAG_NAMES);
  *
  *  What the derivation CANNOT see, stated plainly, in two shapes. A write whose payload is a
  *  variable or a helper's return value (`patchMetadata(id, hydratedMeta)`, or the same shape on the
- *  metadata route) commits keys no static sweep in this repository can read; there are twenty such
- *  calls, and the regression pins that count, so a twenty-first fails until someone reads it by
- *  hand. And a read that happens INSIDE a helper, off a parameter rather than off a name a sweep
+ *  metadata route) commits keys no static sweep in this repository can read; there are twenty-one
+ *  such calls, and the regression pins that count so a new one fails until someone reads it by
+ *  hand. The Advanced Memory import remap is the twenty-first, audited under `advancedMemory`, `summary`,
+ *  and `last`. And a read that happens INSIDE a helper, off a parameter rather than off a name a sweep
  *  recognizes, is interprocedural and out of reach of every read arm here: `spatialContext` is
  *  written into chat metadata by the hierarchical-maps package's own client — code that ships from
  *  the Agents repository, so no write site here names it — and read back by
@@ -144,6 +172,7 @@ const reservedGmTagNames = new Set<string>(RESERVED_GM_TAG_NAMES);
  *  Everything else is derived. */
 export const ENGINE_OWNED_METADATA_KEY_PREFIXES = Object.freeze([
   "active",
+  "advancedMemory",
   "agent",
   "applied",
   "archived",
@@ -162,6 +191,7 @@ export const ENGINE_OWNED_METADATA_KEY_PREFIXES = Object.freeze([
   "cross",
   "custom",
   "day",
+  "decision",
   "discord",
   "dm",
   "embedding",
@@ -193,6 +223,7 @@ export const ENGINE_OWNED_METADATA_KEY_PREFIXES = Object.freeze([
   "manual",
   "mari",
   "metadata",
+  "multiplayer",
   "narrative",
   "noodle",
   "past",
@@ -209,6 +240,7 @@ export const ENGINE_OWNED_METADATA_KEY_PREFIXES = Object.freeze([
   "selfie",
   "semantic",
   "show",
+  "slurp2",
   "spatial",
   "spotify",
   "sprite",
@@ -219,6 +251,7 @@ export const ENGINE_OWNED_METADATA_KEY_PREFIXES = Object.freeze([
   "translate",
   "translation",
   "week",
+  "window",
 ] as const);
 
 /** The package id as it appears at the head of a metadata key: `hierarchical-maps` →
@@ -243,14 +276,18 @@ function extendsEngineOwnedPrefix(prefix: string): boolean {
 
 /** The three key-ownership rules (#5798 decision D1), as one reusable check: the key is the
  *  package's normalized id followed by a non-empty suffix starting at an uppercase boundary, and
- *  the normalized id is not an engine-owned namespace. Returns the refusal reason, or `null` when
- *  the key is the package's to write. Keys are flat and top-level because that is what the shipped
+ *  neither the normalized id nor its target key uses an engine-owned namespace. Returns the refusal
+ *  reason, or `null` when the key is the package's to write. Keys are flat and top-level because that is what the shipped
  *  reconciler already reads; an engine-owned subtree stays the recorded alternative. */
 export function gmVerbMetadataKeyIssue(packageId: string, metadataKey: string): string | null {
   const prefix = camelCaseCapabilityPackageId(packageId);
   if (!prefix) return "A verb table needs an owning package id to check metadata key ownership";
   if (extendsEngineOwnedPrefix(prefix)) {
     return `Package "${packageId}" normalizes to the engine-owned metadata namespace "${prefix}" and cannot own chat metadata keys`;
+  }
+  // A shorter package ID (e.g. `advanced`) must not claim a narrower host key (`advancedMemory`).
+  if (extendsEngineOwnedPrefix(metadataKey)) {
+    return `metadataKey "${metadataKey}" belongs to an engine-owned metadata namespace`;
   }
   if (!metadataKey.startsWith(prefix)) {
     return `metadataKey must start with "${prefix}" so the key belongs to package "${packageId}"`;

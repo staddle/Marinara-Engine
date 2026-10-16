@@ -14,7 +14,7 @@ export const ttsSourceSchema = z.enum([
 ]);
 export type TTSSource = z.infer<typeof ttsSourceSchema>;
 
-export const ttsAudioFormatSchema = z.enum(["mp3", "wav"]);
+export const ttsAudioFormatSchema = z.enum(["mp3", "wav", "pcm"]);
 export type TTSAudioFormat = z.infer<typeof ttsAudioFormatSchema>;
 
 export const ttsVoiceModeSchema = z.enum(["single", "per-character"]);
@@ -50,6 +50,38 @@ export const ttsVoiceAssignmentSchema = z.object({
   voice: z.string().default(""),
 });
 export type TTSVoiceAssignment = z.infer<typeof ttsVoiceAssignmentSchema>;
+
+/** Longest voice POST /api/tts/speak accepts; a longer saved voice could never be spoken. */
+export const TTS_VOICE_MAX_LENGTH = 200;
+
+/** Body of PUT /api/tts/config/voice-assignment: one character's voice; a blank voice removes its row. */
+export const ttsVoiceAssignmentInputSchema = z.object({
+  characterId: z.string().min(1).max(200),
+  // Card names have no length limit, so the name kept on the row has none either.
+  characterName: z.string(),
+  voice: z.string().max(TTS_VOICE_MAX_LENGTH),
+});
+export type TTSVoiceAssignmentInput = z.infer<typeof ttsVoiceAssignmentInputSchema>;
+
+/** Body of PUT /api/tts/config/voice-mode: one shared voice, or a voice per character. */
+export const ttsVoiceModeInputSchema = z.object({ voiceMode: ttsVoiceModeSchema });
+export type TTSVoiceModeInput = z.infer<typeof ttsVoiceModeInputSchema>;
+
+/**
+ * Give one character its own voice, or drop its rows when the voice is blank so
+ * it falls back to the default voice. Other characters' rows keep their order.
+ */
+export function setCharacterVoiceAssignment(
+  assignments: readonly TTSVoiceAssignment[] | undefined,
+  character: Pick<TTSVoiceAssignment, "characterId" | "characterName">,
+  voice: string,
+): TTSVoiceAssignment[] {
+  const rows = assignments ?? [];
+  const isOwnRow = (entry: TTSVoiceAssignment) => entry.characterId === character.characterId;
+  if (!voice.trim()) return rows.filter((entry) => !isOwnRow(entry));
+  if (!rows.some(isOwnRow)) return [...rows, { ...character, voice }];
+  return rows.map((entry) => (isOwnRow(entry) ? { ...entry, ...character, voice } : entry));
+}
 
 export const ELEVENLABS_TTS_LANGUAGE_OPTIONS = [
   { code: "", label: "Auto detect" },
@@ -169,6 +201,9 @@ const ttsConfigBaseSchema = z.object({
   autoplayGame: z.boolean().default(false),
   progressivePlayback: z.boolean().default(false),
   dialogueOnly: z.boolean().default(false),
+  skipTagContent: z.boolean().default(false),
+  skipCodeBlocks: z.boolean().default(true),
+  skipBracketedText: z.boolean().default(false),
   /** Use a short auxiliary LLM call to separate Roleplay dialogue by speaker before autoplay. */
   roleplaySpeakerExtractorEnabled: z.boolean().default(false),
   /** Empty uses the connection marked as the default for agents. */
@@ -326,3 +361,38 @@ export interface TTSModelsResponse {
   fromProvider: boolean;
   source: TTSSource;
 }
+
+// ── Speech to text ──────────────────────────────
+
+/** App-settings key for the speech-to-text server that Calls can use instead of Local Whisper. */
+export const SPEECH_TO_TEXT_SETTINGS_KEY = "speech-to-text";
+/** Sent when no model is set: the name the OpenAI transcription API and most compatible servers accept. */
+export const SPEECH_TO_TEXT_DEFAULT_MODEL = "whisper-1";
+
+/**
+ * An OpenAI-compatible speech-to-text server (POST `<baseUrl>/audio/transcriptions`), such as a
+ * self-hosted faster-whisper, Speaches, whisper.cpp or LocalAI server. While it is off or has no
+ * address, Calls keep using Local Whisper.
+ */
+export const speechToTextConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  baseUrl: z.string().trim().max(2_000).default(""),
+  /**
+   * Encrypted at rest. Responses carry TTS_API_KEY_MASK instead; sending the mask back keeps the saved key.
+   * A line break or NUL is refused: fetch would reject that header with the whole key in its error.
+   */
+  apiKey: z
+    .string()
+    .max(4_000)
+    .regex(/^[^\0\r\n]*$/u)
+    .default(""),
+  model: z.string().trim().max(200).default(""),
+  /** Optional language code such as "pl"; blank lets the server detect the language. */
+  language: z
+    .string()
+    .trim()
+    .max(16)
+    .regex(/^[A-Za-z-]*$/u)
+    .default(""),
+});
+export type SpeechToTextConfig = z.infer<typeof speechToTextConfigSchema>;

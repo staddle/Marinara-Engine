@@ -7,6 +7,8 @@ import { subscribeWithSelector } from "zustand/middleware";
 import type {
   Chat,
   ChatMode,
+  Message,
+  MessageReply,
   ConversationCallSession,
   ConversationPresenceStatus,
   PendingSpatialTransition,
@@ -189,6 +191,8 @@ function scheduleNotificationAutoDismiss(chatId: string, getState: () => ChatSta
   );
 }
 
+type ContinuationStream = { messageId: string; content: string; addNewline: boolean };
+
 interface ChatState {
   activeChatId: string | null;
   activeChat: Chat | null;
@@ -207,6 +211,8 @@ interface ChatState {
    * - absent — no Mari work in progress for that chat.
    */
   mariPhaseByChatId: Map<string, "thinking" | "updating">;
+  /** Professor Mari's provisional words for the round she is writing; never saved, cleared when it ends. */
+  mariDraftByChatId: Map<string, string>;
   streamBuffer: string;
   /** Per-chat stream text for active generations, so switching chats does not lose in-flight UI state. */
   streamBuffers: Map<string, string>;
@@ -227,8 +233,12 @@ interface ChatState {
    * toggles, which govern typed chatting only.
    */
   activeCallChatId: string | null;
+  /** Original text and target for in-place Roleplay continuations, retained across chat switches. */
+  continuationStreams: Map<string, ContinuationStream>;
   /** Persisted assistant row currently represented by each chat's live streaming row. */
   streamedMessageIds: Map<string, string>;
+  /** Completed generated replies awaiting their first VN display, including inactive chats. */
+  pendingVnReplies: Map<string, Pick<Message, "id" | "activeSwipeIndex" | "content">>;
   thinkingBuffer: string;
   /** Per-chat live thinking text for active generations. */
   thinkingBuffers: Map<string, string>;
@@ -272,6 +282,7 @@ interface ChatState {
   pendingNewChatOrigin: "home" | "sidebar" | null;
   /** Per-chat draft input text so typing isn't lost when navigating away. */
   inputDrafts: Map<string, string>;
+  replyDrafts: Map<string, MessageReply>;
   /** Per-chat structured movement staged for the next accepted owner turn. */
   pendingSpatialTransitions: Map<string, PendingSpatialTransitionDraft>;
   /** Whether the active composer contains non-whitespace input. */
@@ -288,22 +299,29 @@ interface ChatState {
   activeConversationCall: ActiveConversationCallSnapshot | null;
   /** When true, show the active Conversation call as the full call surface instead of the micro panel. */
   conversationCallExpanded: boolean;
+  /** F10: a Mari run failed before the server ever saw it (404/network error), so the server's
+   * in-memory workspace status has nothing to show — the top-bar edge needs its own signal. */
+  mariClientRunFailed: boolean;
 
   // Actions
+  setMariClientRunFailed: (failed: boolean) => void;
   setActiveChat: (chat: Chat | null) => void;
   setActiveChatId: (id: string | null) => void;
   setStreaming: (streaming: boolean, chatId?: string) => void;
   setStreamedMessageId: (chatId: string, messageId: string | null) => void;
+  setContinuationStream: (chatId: string, continuation: ContinuationStream) => void;
+  setPendingVnReply: (chatId: string, reply: Pick<Message, "id" | "activeSwipeIndex" | "content"> | null) => void;
   setMariPhase: (chatId: string, phase: "thinking" | "updating" | "idle") => void;
+  setMariDraft: (chatId: string, draft: string | null) => void;
   setAbortController: (chatId: string, controller: AbortController | null) => void;
   setBackgroundIllustration: (chatId: string, pending: boolean) => void;
   setNarrationSaved: (chatId: string, saved: boolean) => void;
   stopGeneration: (chatId?: string) => void;
   appendStreamBuffer: (text: string, chatId?: string) => void;
   setStreamBuffer: (text: string, chatId?: string) => void;
+  /** Also clears the chat's TTS mirror (`ttsStreamBuffer`), which shares the stream's lifetime. */
   clearStreamBuffer: (chatId?: string) => void;
   appendTTSStreamBuffer: (text: string, chatId?: string) => void;
-  clearTTSStreamBuffer: (chatId?: string) => void;
   setActiveCallChatId: (chatId: string | null) => void;
   appendThinkingBuffer: (text: string, chatId?: string) => void;
   setThinkingBuffer: (text: string, chatId?: string) => void;
@@ -325,6 +343,7 @@ interface ChatState {
   setShouldOpenWizardInShortcutMode: (v: boolean) => void;
   setPendingNewChatMode: (mode: ChatMode | null, origin?: "home" | "sidebar" | null) => void;
   setInputDraft: (chatId: string, text: string) => void;
+  setReplyDraft: (chatId: string, reply: MessageReply | null) => void;
   clearInputDraft: (chatId: string) => void;
   setPendingSpatialTransition: (chatId: string, draft: PendingSpatialTransitionDraft) => void;
   clearPendingSpatialTransition: (chatId: string, commandId?: string) => void;
@@ -382,12 +401,15 @@ export const useChatStore = create<ChatState>()(
     isStreaming: false,
     streamingChatId: null,
     mariPhaseByChatId: new Map(),
+    mariDraftByChatId: new Map(),
     streamBuffer: "",
     streamBuffers: new Map(),
     ttsStreamBuffer: "",
     ttsStreamBuffers: new Map(),
     activeCallChatId: null,
+    continuationStreams: new Map(),
     streamedMessageIds: new Map(),
+    pendingVnReplies: new Map(),
     thinkingBuffer: "",
     thinkingBuffers: new Map(),
     abortControllers: new Map(),
@@ -407,6 +429,7 @@ export const useChatStore = create<ChatState>()(
     pendingNewChatMode: null,
     pendingNewChatOrigin: null,
     inputDrafts: loadDrafts(),
+    replyDrafts: new Map(),
     pendingSpatialTransitions: loadPendingSpatialTransitions(),
     hasCurrentInput: false,
     unreadCounts: new Map(),
@@ -415,7 +438,9 @@ export const useChatStore = create<ChatState>()(
     gotoRequest: null,
     activeConversationCall: null,
     conversationCallExpanded: false,
+    mariClientRunFailed: false,
 
+    setMariClientRunFailed: (failed) => set({ mariClientRunFailed: failed }),
     setActiveChat: (chat) => set({ activeChat: chat }),
     setActiveChatId: (id) => {
       const prev = get().activeChatId;
@@ -456,9 +481,7 @@ export const useChatStore = create<ChatState>()(
       // Only reset agent + game state when actually switching chats — re-selecting the
       // same chat should not blow away loaded tracker data.
       if (id !== prev) {
-        // Professor Mari suggestions and guided plans are already scoped to their chat IDs.
-        // Keep them through temporary editor navigation so reopening the chat does not flash
-        // or replace them with the starter suggestions (#4953).
+        // Clear chat-scoped agent state so suggestions and guided plans cannot leak into another chat.
         useAgentStore.getState().resetForChatChange();
         useGameStateStore.getState().setGameState(null);
         if (id) {
@@ -524,6 +547,8 @@ export const useChatStore = create<ChatState>()(
         else next.delete(chatId);
         return { streamedMessageIds: next };
       }),
+    setContinuationStream: (chatId, continuation) =>
+      set((state) => ({ continuationStreams: new Map(state.continuationStreams).set(chatId, continuation) })),
     setMariPhase: (chatId, phase) =>
       set((state) => {
         const current = state.mariPhaseByChatId.get(chatId) ?? null;
@@ -537,6 +562,21 @@ export const useChatStore = create<ChatState>()(
         const next = new Map(state.mariPhaseByChatId);
         next.set(chatId, phase);
         return { mariPhaseByChatId: next };
+      }),
+    setMariDraft: (chatId, draft) =>
+      set((state) => {
+        if ((state.mariDraftByChatId.get(chatId) ?? null) === (draft || null)) return state;
+        const next = new Map(state.mariDraftByChatId);
+        if (draft) next.set(chatId, draft);
+        else next.delete(chatId);
+        return { mariDraftByChatId: next };
+      }),
+    setPendingVnReply: (chatId, reply) =>
+      set((state) => {
+        const pendingVnReplies = new Map(state.pendingVnReplies);
+        if (reply) pendingVnReplies.set(chatId, reply);
+        else pendingVnReplies.delete(chatId);
+        return { pendingVnReplies };
       }),
     setAbortController: (chatId, controller) =>
       set((state) => {
@@ -607,12 +647,27 @@ export const useChatStore = create<ChatState>()(
     clearStreamBuffer: (chatId) =>
       set((state) => {
         const targetChatId = chatId ?? state.streamingChatId ?? state.activeChatId ?? "";
-        if (!targetChatId) return { streamBuffer: "", streamBuffers: new Map() };
+        // The TTS mirror shares the stream's lifetime, so it is cleared with it.
+        if (!targetChatId) {
+          return {
+            streamBuffer: "",
+            streamBuffers: new Map(),
+            continuationStreams: new Map(),
+            ttsStreamBuffer: "",
+            ttsStreamBuffers: new Map(),
+          };
+        }
         const buffers = new Map(state.streamBuffers);
         buffers.delete(targetChatId);
+        const continuations = new Map(state.continuationStreams);
+        continuations.delete(targetChatId);
+        const ttsBuffers = new Map(state.ttsStreamBuffers);
+        ttsBuffers.delete(targetChatId);
         return {
           streamBuffers: buffers,
-          ...(state.activeChatId === targetChatId ? { streamBuffer: "" } : {}),
+          continuationStreams: continuations,
+          ttsStreamBuffers: ttsBuffers,
+          ...(state.activeChatId === targetChatId ? { streamBuffer: "", ttsStreamBuffer: "" } : {}),
         };
       }),
     appendTTSStreamBuffer: (text, chatId) =>
@@ -625,17 +680,6 @@ export const useChatStore = create<ChatState>()(
         return {
           ttsStreamBuffers: buffers,
           ...(state.activeChatId === targetChatId ? { ttsStreamBuffer: nextText } : {}),
-        };
-      }),
-    clearTTSStreamBuffer: (chatId) =>
-      set((state) => {
-        const targetChatId = chatId ?? state.streamingChatId ?? state.activeChatId ?? "";
-        if (!targetChatId) return { ttsStreamBuffer: "", ttsStreamBuffers: new Map() };
-        const buffers = new Map(state.ttsStreamBuffers);
-        buffers.delete(targetChatId);
-        return {
-          ttsStreamBuffers: buffers,
-          ...(state.activeChatId === targetChatId ? { ttsStreamBuffer: "" } : {}),
         };
       }),
     setActiveCallChatId: (chatId) => set({ activeCallChatId: chatId }),
@@ -794,6 +838,13 @@ export const useChatStore = create<ChatState>()(
         pendingNewChatOrigin: mode ? origin : null,
       }),
 
+    setReplyDraft: (chatId, reply) =>
+      set((state) => {
+        const replyDrafts = new Map(state.replyDrafts);
+        if (reply) replyDrafts.set(chatId, reply);
+        else replyDrafts.delete(chatId);
+        return { replyDrafts };
+      }),
     setInputDraft: (chatId: string, text: string) =>
       set((state) => {
         const m = new Map(state.inputDrafts);
@@ -1068,6 +1119,7 @@ export const useChatStore = create<ChatState>()(
       currentInputSnapshot = "";
       clearCurrentInputPresenceTimer();
       set({
+        mariDraftByChatId: new Map(),
         activeChatId: null,
         activeChat: null,
         isStreaming: false,
@@ -1078,7 +1130,9 @@ export const useChatStore = create<ChatState>()(
         ttsStreamBuffer: "",
         ttsStreamBuffers: new Map(),
         activeCallChatId: null,
+        continuationStreams: new Map(),
         streamedMessageIds: new Map(),
+        pendingVnReplies: new Map(),
         thinkingBuffer: "",
         thinkingBuffers: new Map(),
         abortControllers: new Map(),
@@ -1095,6 +1149,7 @@ export const useChatStore = create<ChatState>()(
         pendingNewChatMode: null,
         pendingNewChatOrigin: null,
         inputDrafts: new Map(),
+        replyDrafts: new Map(),
         pendingSpatialTransitions: new Map(),
         hasCurrentInput: false,
         unreadCounts: new Map(),
@@ -1103,6 +1158,7 @@ export const useChatStore = create<ChatState>()(
         gotoRequest: null,
         activeConversationCall: null,
         conversationCallExpanded: false,
+        mariClientRunFailed: false,
       });
       try {
         localStorage.removeItem(STORAGE_KEY);

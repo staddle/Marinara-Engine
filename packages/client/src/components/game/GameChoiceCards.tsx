@@ -7,6 +7,7 @@
 import { useState } from "react";
 import { X } from "lucide-react";
 import { cn } from "../../lib/utils";
+import { GAME_SECTION_CLASS } from "../../lib/chat-widget-colors";
 import { normalizeChoiceText } from "../../lib/game-choice-utils";
 import { AnimatedText } from "./AnimatedText";
 import { useTranslation as useUiTranslation } from "react-i18next";
@@ -57,7 +58,13 @@ export function GameChoiceCards({ choices, onSelect, onDismiss, disabled, replay
 
   return (
     <div className="mx-auto flex h-full max-h-full min-h-0 w-full max-w-2xl px-3 pb-2 sm:pb-3">
-      <div className="flex h-full max-h-[clamp(8rem,30svh,14rem)] min-h-0 w-full flex-col rounded-2xl border border-white/15 bg-black/50 p-3 shadow-[0_8px_24px_rgba(0,0,0,0.3)] backdrop-blur-md sm:max-h-[clamp(9rem,36svh,20rem)] md:max-h-[min(52dvh,32rem)]">
+      <div
+        data-game-section="choices"
+        className={cn(
+          GAME_SECTION_CLASS,
+          "flex h-full max-h-[clamp(8rem,30svh,14rem)] min-h-0 w-full flex-col rounded-2xl border border-white/15 bg-black/50 p-3 shadow-[0_8px_24px_rgba(0,0,0,0.3)] backdrop-blur-md sm:max-h-[clamp(9rem,36svh,20rem)] md:max-h-[min(52dvh,32rem)]",
+        )}
+      >
         <div className="mb-2 flex shrink-0 items-center justify-between gap-2">
           <span className="rounded-full bg-white/10 px-2 py-0.5 text-[0.625rem] font-semibold uppercase tracking-wide text-white/90">
             {replayMode

@@ -36,6 +36,18 @@ jobs:
               );
               pullRequests = response.data;
             }
+            // Fork commits are in neither list: match the reviewed commit against open PR heads.
+            if (pullRequests.length === 0) {
+              const openPullRequests = await github.paginate(github.rest.pulls.list, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'open',
+                per_page: 100,
+              });
+              pullRequests = openPullRequests.filter(
+                (pullRequest) => pullRequest.head.sha === context.payload.workflow_run.head_sha,
+              );
+            }
 
             const pullNumbers = [...new Set(pullRequests.map((pullRequest) => pullRequest.number))];
             if (pullNumbers.length === 0) {
@@ -58,7 +70,7 @@ jobs:
 
       - name: Set up Node.js
         if: steps.pull-request.outputs.number != ''
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
 

@@ -8,6 +8,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { X } from "lucide-react";
 import { cn } from "../../lib/utils";
+import { GAME_SECTION_CLASS } from "../../lib/chat-widget-colors";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface QteAction {
@@ -90,7 +91,13 @@ export function GameQteOverlay({ actions, timerSeconds, onSelect, onTimeout, onD
         )}
       />
 
-      <div className="relative z-10 w-full max-w-lg rounded-lg border border-white/20 bg-black/80 px-5 py-5 shadow-2xl shadow-black/60 ring-1 ring-amber-300/30 backdrop-blur-md">
+      <div
+        data-game-section="qte"
+        className={cn(
+          GAME_SECTION_CLASS,
+          "relative z-10 w-full max-w-lg rounded-lg border border-white/20 bg-black/80 px-5 py-5 shadow-2xl shadow-black/60 ring-1 ring-amber-300/30 backdrop-blur-md",
+        )}
+      >
         {onDismiss && (
           <button
             type="button"

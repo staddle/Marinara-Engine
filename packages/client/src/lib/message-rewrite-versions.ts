@@ -1,3 +1,5 @@
+import { parseMessageExtraRecord } from "./chat-message-extra";
+
 type MessageRewriteExtra = {
   proseGuardianOriginalText?: unknown;
   proseGuardianRewrittenText?: unknown;
@@ -38,4 +40,27 @@ export function resolveMessageRewriteVersions(
     showingOriginal,
     alternateText: hasVersions ? (showingOriginal ? rewrittenText : originalText) : null,
   };
+}
+
+/**
+ * A message as a rewrite agent left it: the new text, without the pending placeholder. A built-in agent's rewrite
+ * keeps the original beside it for the message shield action; any other rewrite clears that pair.
+ */
+export function applyMessageTextRewrite<T extends { content: string; extra?: unknown }>(
+  message: T,
+  rewrittenText: string,
+  originalText: string | null,
+): T {
+  const extra = { ...parseMessageExtraRecord(message.extra) };
+  delete extra.postProcessingPending;
+  if (originalText !== null) {
+    extra.proseGuardianOriginalText = originalText;
+    extra.proseGuardianRewrittenText = rewrittenText;
+    extra.proseGuardianRewrittenAt = new Date().toISOString();
+  } else {
+    delete extra.proseGuardianOriginalText;
+    delete extra.proseGuardianRewrittenText;
+    delete extra.proseGuardianRewrittenAt;
+  }
+  return { ...message, content: rewrittenText, extra: extra as T["extra"] };
 }

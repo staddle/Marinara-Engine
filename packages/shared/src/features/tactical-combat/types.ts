@@ -1,3 +1,6 @@
+import type { CombatWeather, CombatAttackTraits, GameDifficulty } from "../combat-conditions.js";
+import type { CombatController, CombatTactics } from "../combat-ai.js";
+import type { WorldElementSet } from "../world/elements.js";
 // ──────────────────────────────────────────────
 // Tactical Combat — shared types
 // ──────────────────────────────────────────────
@@ -13,7 +16,125 @@ export type { GameCombatStyle } from "../../types/game.js";
 
 // ── Terrain ──
 
-export type TacticalTerrain = "plains" | "forest" | "mountain" | "ruin" | "water" | "wall";
+export type { TacticalTerrain } from "./environments.js";
+import type { TacticalTerrain, TacticalEnvironment } from "./environments.js";
+
+/** Fixed board sizes for procedural tactical encounters. */
+export type TacticalBattlefieldSize = "small" | "medium" | "large";
+
+/** Setup-owned preferences for newly-created tactical encounters. */
+export interface TacticalBattlefieldSetup {
+  seed?: number;
+  size?: TacticalBattlefieldSize;
+  instructions?: string;
+}
+
+/** How a unit traverses the battlefield. Missing values retain walk-only rules. */
+export type TacticalMovementMode = "walk" | "fly" | "teleport";
+
+/** A bounded, directional landmark request for procedural terrain generation. */
+export interface TacticalBattlefieldFeature {
+  terrain: TacticalTerrain;
+  placement: "center" | "north" | "south" | "east" | "west";
+  shape: "patch" | "barrier";
+}
+
+/**
+ * Structured terrain input for a generated battlefield. It cannot express
+ * arbitrary coordinates; an exact board is painted by hand for a world's place
+ * instead (`TacticalMadeBattlefield`).
+ */
+export interface TacticalBattlefieldBrief {
+  exposure?: CombatWeather["exposure"];
+  size?: TacticalBattlefieldSize;
+  features?: TacticalBattlefieldFeature[];
+}
+
+/** Saved provenance for a grid: generated from a brief, or painted by hand for a world's place (worldgen
+ *  W9g). `grid` remains the resolved authority. */
+export type TacticalBattlefieldProvenance =
+  | {
+      kind: "generated";
+      /** 1: flat; 2: with foothills (combat C6b). A saved fight keeps the board it was fought on. */
+      generatorVersion: 1 | 2;
+      size: TacticalBattlefieldSize;
+      brief?: TacticalBattlefieldBrief;
+    }
+  | { kind: "hand-made"; size: TacticalBattlefieldSize; id: string; name: string; scene: TacticalEnvironment };
+
+/** A board painted by hand (worldgen W9g), already checked: one of the standard sizes, its deployment
+ *  strips plains and every tile a fighter can stand on connected. Used exactly as painted. */
+export interface TacticalMadeBattlefield {
+  id: string;
+  name: string;
+  size: TacticalBattlefieldSize;
+  /** The battlefield it looks like: its colours, and the weather's reach. */
+  scene: TacticalEnvironment;
+  grid: TacticalGrid;
+  /** What stands on it that may be broken (Capability API 1.316), as painted. */
+  props?: Array<{
+    id: string;
+    label: string;
+    cells: Array<{ x: number; y: number }>;
+    health: number;
+    defense?: number;
+    resist?: string[];
+    vulnerable?: string[];
+    immune?: string[];
+    blocks?: { move?: boolean; sight?: boolean };
+    fragile?: boolean;
+    relight?: { light: "bright" | "dim" | "sunlight"; squares: number; budget?: string };
+    /** Its sprite in the board's pack (1.333). */
+    art?: string;
+  }>;
+  /** The board pack it is drawn with (1.333), by id; none for its scene's. */
+  pack?: string;
+  /** What it does on its own each round (Capability API 1.318), as painted. */
+  events?: Array<{
+    id: string;
+    label?: string;
+    at: "round-start" | "round-end";
+    from?: number;
+    every?: number;
+    until?: number;
+    where:
+      | { cells: Array<{ x: number; y: number }> }
+      | { block: { x: number; y: number; w: number; h: number } }
+      | { ring: { x: number; y: number; start: number; step: number; filled?: true } }
+      | { sweep: { from: "north" | "south" | "east" | "west"; start: number; step: number; filled?: true } }
+      | { spread: "growth" };
+    onlyOn?: TacticalTerrain[];
+    change: {
+      terrain?: TacticalTerrain;
+      height?: number;
+      light?: "bright" | "dim" | "dark" | "sunlight" | "clear";
+      obscured?: "light" | "heavy" | "clear";
+      growth?: boolean;
+      season?: string | null;
+      rotate?: 1 | 2 | 3;
+      /** Whoever stands on it carried toward an edge (1.329): a millrace. */
+      push?: { toward: "north" | "south" | "east" | "west"; squares: number };
+      /** What obscures carried toward an edge (1.329): a snow drift. */
+      drift?: { toward: "north" | "south" | "east" | "west"; squares: number };
+      tell?: string;
+    };
+  }>;
+  /** The cells growth lies on from the start (1.318), as painted. */
+  growth?: Array<{ x: number; y: number }>;
+  /** The season on each cell, by "x,y" (shared with the season work of 1.364). */
+  seasons?: Record<string, string>;
+  /** What standing in some light does here (Capability API 1.319): Noonfield's bright light. */
+  lightRule?: {
+    label?: string;
+    in?: Array<"sunlight" | "bright" | "dim" | "dark">;
+    rounds?: number;
+    tracks?: Array<{ track: string; by: number; upTo?: number }>;
+    applies?: string[];
+    spares?: { types?: string[]; tags?: string[] };
+    /** A save that escapes it this time (1.321). */
+    save?: { save: string; difficulty: number; against?: { conditions?: string[]; damage?: string[] } };
+  };
+}
 
 export interface TerrainInfo {
   /** Movement points required to ENTER this tile. */
@@ -24,16 +145,18 @@ export interface TerrainInfo {
   avoidBonus: number;
   /** Units may never enter or stop on this tile. */
   impassable?: boolean;
+  /** Nothing is seen through it (combat C6): a wall, a mountain. Water and woods are seen across. */
+  blocksSight?: true;
   label: string;
 }
 
 export const TERRAIN_DATA: Record<TacticalTerrain, TerrainInfo> = {
   plains: { moveCost: 1, defenseBonus: 0, avoidBonus: 0, label: "Plains" },
   forest: { moveCost: 2, defenseBonus: 1, avoidBonus: 15, label: "Forest" },
-  mountain: { moveCost: 99, defenseBonus: 0, avoidBonus: 0, impassable: true, label: "Mountain" },
+  mountain: { moveCost: 99, defenseBonus: 0, avoidBonus: 0, impassable: true, blocksSight: true, label: "Mountain" },
   ruin: { moveCost: 1, defenseBonus: 1, avoidBonus: 10, label: "Ruins" },
   water: { moveCost: 99, defenseBonus: 0, avoidBonus: 0, impassable: true, label: "Water" },
-  wall: { moveCost: 99, defenseBonus: 0, avoidBonus: 0, impassable: true, label: "Wall" },
+  wall: { moveCost: 99, defenseBonus: 0, avoidBonus: 0, impassable: true, blocksSight: true, label: "Wall" },
 };
 
 // ── Environment & formation ──
@@ -42,23 +165,7 @@ export const TERRAIN_DATA: Record<TacticalTerrain, TerrainInfo> = {
 // spawn placement (grid-gen placeSpawns). Both are optional on state so old
 // snapshots (schemaVersion 1) keep working; unknown strings normalize away.
 
-export type TacticalEnvironment =
-  | "forest"
-  | "dungeon"
-  | "desert"
-  | "cave"
-  | "city"
-  | "ruins"
-  | "snow"
-  | "water"
-  | "castle"
-  | "wasteland"
-  | "plains"
-  | "mountains"
-  | "swamp"
-  | "volcanic"
-  | "spaceship"
-  | "mansion";
+export type { TacticalEnvironment } from "./environments.js";
 
 export type TacticalFormation = "line" | "ambush" | "surrounded" | "skirmish" | "defense";
 
@@ -78,6 +185,23 @@ export interface TacticalGrid {
   height: number;
   /** tiles[y][x] — row-major. */
   tiles: TacticalTerrain[][];
+  /** How high each cell stands (combat C6b), elevation[y][x] from 0 to 3. Absent on a flat board, which
+   *  every board before it was. */
+  elevation?: number[][];
+  /** Cells a standing wall closes (Capability API 1.177), by "x,y": 1 nobody moves into, 2 nobody
+   *  sees through, 3 both. Only a ruleset fight's zones set it, and they take it away as they end. */
+  walls?: Record<string, number>;
+  /** What lies on each cell over its terrain (Capability API 1.318), by "x,y": growth (hard going,
+   *  lightly obscuring), its own light, a fog, a season. Only a ruleset fight sets it. */
+  ground?: Record<string, TacticalGroundCell>;
+}
+
+/** What lies on one cell over its terrain (1.318). */
+export interface TacticalGroundCell {
+  growth?: true;
+  light?: "bright" | "dim" | "dark" | "sunlight";
+  obscured?: "light" | "heavy";
+  season?: string;
 }
 
 export interface TacticalCoord {
@@ -98,7 +222,11 @@ export interface TacticalAttackRange {
  * A combatant placed on the tactical grid. Carries the source `Combatant`
  * fields verbatim (so summaries + hydration stay lossless) plus grid state.
  */
-export interface TacticalUnit {
+export interface TacticalUnit extends CombatAttackTraits {
+  boss?: import("../combat-director.js").CombatBoss;
+  spellSlots?: Record<string, number>;
+  tactics?: CombatTactics;
+  controller?: CombatController;
   // ── carried from Combatant ──
   id: string;
   name: string;
@@ -134,6 +262,8 @@ export interface TacticalUnit {
   movement: number;
   /** Basic-attack reach in Manhattan distance (from the unit's class profile). */
   attackRange: TacticalAttackRange;
+  /** Flight and teleport rules. Absent legacy snapshots walk. */
+  movementMode?: TacticalMovementMode;
   hasMoved: boolean;
   hasActed: boolean;
   /** Set when the unit chose Defend last turn — halves incoming damage until its next turn. */
@@ -145,6 +275,7 @@ export interface TacticalUnit {
 // ── Actions ──
 
 export type TacticalAction =
+  | { type: "control"; unitId: string; controller: CombatController }
   | { type: "move"; unitId: string; to: TacticalCoord }
   | { type: "attack"; unitId: string; targetId: string; to?: TacticalCoord }
   | { type: "skill"; unitId: string; skillName: string; targetId?: string; tile?: TacticalCoord; to?: TacticalCoord }
@@ -175,6 +306,7 @@ export type TacticalEventKind =
   | "flee";
 
 export interface TacticalEvent {
+  message?: import("../combat-director.js").CombatLogMessage;
   kind: TacticalEventKind;
   /** Human-readable line — drives the combat log, damage popups, and the GM's post-battle report. */
   text: string;
@@ -194,10 +326,16 @@ export interface TacticalEvent {
 // ── State ──
 
 export type TacticalPhase = "player" | "enemy";
+/** Who acts when in a tactical fight (combat C6c): the party's phase then the enemies', or one unit at a
+ *  time in an order rolled at the start. */
+export type TacticalTurnOrder = "side" | "initiative";
 export type TacticalOutcome = "victory" | "defeat" | "fled";
-export type TacticalDifficulty = "casual" | "normal" | "hard" | "brutal";
+export type TacticalDifficulty = GameDifficulty;
 
 export interface TacticalCombatState {
+  weather?: CombatWeather;
+  /** The game's elements (worldgen W6c); the classic six when absent. */
+  elements?: WorldElementSet;
   schemaVersion: 1;
   grid: TacticalGrid;
   units: TacticalUnit[];
@@ -213,6 +351,12 @@ export interface TacticalCombatState {
   environment?: TacticalEnvironment;
   /** Scene-derived spawn arrangement (Round 2). Optional — defaults to "line" behavior when absent. */
   formation?: TacticalFormation;
+  /** Provenance for a generated grid. Optional so legacy snapshots remain valid. */
+  battlefield?: TacticalBattlefieldProvenance;
+  /** Individual initiative (combat C6c): the order units take their turns in every round, rolled once
+   *  at the start. The unit whose turn it is is the first standing one in it that has not acted. Absent
+   *  on fights by side, which every fight before this was. */
+  initiative?: { order: string[] };
 }
 
 // ── Forecast (shown FE-style before confirming an attack) ──
@@ -237,7 +381,6 @@ export interface TacticalForecast {
 // ── Results ──
 
 export type ApplyActionResult =
-  | { ok: true; state: TacticalCombatState; events: TacticalEvent[] }
-  | { ok: false; error: string };
+  { ok: true; state: TacticalCombatState; events: TacticalEvent[] } | { ok: false; error: string };
 
 export type { Combatant } from "../../types/game.js";

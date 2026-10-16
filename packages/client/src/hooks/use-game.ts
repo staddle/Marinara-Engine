@@ -5,7 +5,7 @@ import { useEffect, useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { api, isJsonRepairApiError } from "../lib/api-client";
+import { ApiError, api, isJsonRepairApiError } from "../lib/api-client";
 import { captureChatMetadataVersion, chatKeys, guardServerChatSnapshot } from "./use-chats";
 import { lorebookKeys } from "./use-lorebooks";
 import {
@@ -15,6 +15,8 @@ import {
   registerPendingHudWidgetPersistence,
   useGameModeStore,
 } from "../stores/game-mode.store";
+export { patchChatMetadata } from "../lib/chat-metadata-patch";
+import { patchChatMetadata } from "../lib/chat-metadata-patch";
 import { useGameAssetStore } from "../stores/game-asset.store";
 import { useGameStateStore } from "../stores/game-state.store";
 import { useChatStore } from "../stores/chat.store";
@@ -28,22 +30,41 @@ import type {
   DiceRollResult,
   SessionSummary,
   Combatant,
+  CombatWeather,
   CombatRoundResult,
   CombatPlayerAction,
   HudWidget,
   GameBlueprint,
   TacticalCombatState,
+  TacticalBattlefieldBrief,
   TacticalAction,
   TacticalEvent,
   RPGStatPool,
 } from "@marinara-engine/shared";
-import type { Chat } from "@marinara-engine/shared";
+import type {
+  Chat,
+  GameDungeonMap,
+  GameDungeonWalk,
+  GameWorld,
+  WorldJournal,
+  WorldRoute,
+  WorldInterior,
+  WorldTown,
+  WorldTownVisit,
+  WorldWalk,
+} from "@marinara-engine/shared";
+import { isJsonRecord } from "@marinara-engine/shared";
 
 // ── Query Keys ──
 
 export const gameKeys = {
   all: ["game"] as const,
   sessions: (gameId: string) => [...gameKeys.all, "sessions", gameId] as const,
+  overworld: (chatId: string) => [...gameKeys.all, "overworld", chatId] as const,
+  world: (chatId: string) => [...gameKeys.all, "world", chatId] as const,
+  town: (chatId: string) => [...gameKeys.all, "town", chatId] as const,
+  worldJournal: (chatId: string) => [...gameKeys.all, "world-journal", chatId] as const,
+  dungeonMap: (chatId: string) => [...gameKeys.all, "dungeon-map", chatId] as const,
 };
 
 // ── Types ──
@@ -99,11 +120,23 @@ interface UpdateCampaignProgressionResponse {
   };
 }
 
+export interface PartyCardChoice {
+  id: string;
+  name: string;
+  title: string | null;
+  avatarPath: string | null;
+  avatarCrop: unknown;
+  /** The card's library preview text, shown when it has no title. */
+  summary: string | null;
+}
+
 interface RecruitPartyMemberResponse {
   sessionChat: Chat;
   added: boolean;
   characterName: string;
   cardCreated: boolean;
+  /** Set when several characters share the name: nothing changed, and the player picks one. */
+  cardChoices?: PartyCardChoice[];
 }
 
 interface RegenerateCharacterSheetResponse {
@@ -155,33 +188,6 @@ interface UpdateGameWidgetsResponse {
   ok: boolean;
 }
 
-export function patchChatMetadata(chat: Chat | null | undefined, patch: Record<string, unknown>): Chat | null {
-  if (!chat) return null;
-  const rawMetadata = chat.metadata as unknown;
-  const metadata =
-    typeof rawMetadata === "string"
-      ? (() => {
-          try {
-            const parsed = JSON.parse(rawMetadata);
-            return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-              ? (parsed as Record<string, unknown>)
-              : {};
-          } catch {
-            return {};
-          }
-        })()
-      : rawMetadata && typeof rawMetadata === "object" && !Array.isArray(rawMetadata)
-        ? (rawMetadata as Record<string, unknown>)
-        : {};
-  return {
-    ...chat,
-    metadata: {
-      ...metadata,
-      ...patch,
-    } as Chat["metadata"],
-  };
-}
-
 // Mirror a guarded snapshot into the active-chat store when it targets the
 // active chat: several game surfaces read useChatStore.activeChat directly,
 // and ChatArea only re-syncs it from the detail cache in a later effect —
@@ -199,9 +205,18 @@ function syncActiveChatIfCurrent(chat: Chat) {
 
 // ── Mutations ──
 
+/** The layer choices `/game/create` turns a new game down over, in words that say what to do about
+ *  it. The server's own message names the layers, but it is written for a log; a player who picked
+ *  toggles in the wizard needs to be sent back to them. Any other refusal keeps the server's text. */
+const RULESET_LAYER_REFUSAL_KEYS: Readonly<Record<string, string>> = Object.freeze({
+  ruleset_layer_unknown: "game.ruleset.setup.layerUnknownRefusal",
+  ruleset_layer_conflict: "game.ruleset.setup.layerConflictRefusal",
+});
+
 export function useCreateGame() {
   const qc = useQueryClient();
   const store = useGameModeStore;
+  const { t } = useTranslation();
 
   return useMutation({
     mutationFn: (data: {
@@ -222,9 +237,17 @@ export function useCreateGame() {
     },
     onError: (err) => {
       console.error("[createGame] Error:", err);
-      toast.error(err.message || "Failed to create game. Check the selected connection and try again.", {
-        duration: 10000,
-      });
+      const code =
+        err instanceof ApiError && isJsonRecord(err.payload) && typeof err.payload.code === "string"
+          ? err.payload.code
+          : null;
+      const layerRefusal = code ? RULESET_LAYER_REFUSAL_KEYS[code] : undefined;
+      toast.error(
+        layerRefusal
+          ? t(layerRefusal)
+          : err.message || "Failed to create game. Check the selected connection and try again.",
+        { duration: 10000 },
+      );
     },
   });
 }
@@ -500,7 +523,7 @@ export function useRecruitPartyMember() {
   const qc = useQueryClient();
 
   return useMutation({
-    mutationFn: (data: { chatId: string; characterName: string; connectionId?: string }) =>
+    mutationFn: (data: { chatId: string; characterName: string; characterId?: string | null; connectionId?: string }) =>
       api.post<RecruitPartyMemberResponse>("/game/party/recruit", data),
     onMutate: (variables) => ({ metadataVersion: captureChatMetadataVersion(variables.chatId) }),
     onSuccess: (res, variables, context) => {
@@ -586,10 +609,19 @@ export function useSkillCheck() {
     mutationFn: (data: {
       chatId: string;
       skill: string;
-      dc: number;
+      /** Absent only beside `difficulty`, which a ruleset game reads off its own ladder. */
+      dc?: number;
       advantage?: boolean;
       disadvantage?: boolean;
       preRolledD20?: number;
+      who?: string;
+      withAbility?: string;
+      threshold?: number;
+      bonusDice?: number;
+      difficulty?: string;
+      explode?: number;
+      double?: number;
+      reroll?: string;
       messageId?: string;
     }) =>
       api.post<{ result: import("@marinara-engine/shared").SkillCheckResult; updatedContent?: string }>(
@@ -836,6 +868,8 @@ export function useCombatRound() {
       combatants: Array<Omit<Combatant, "sprite">>;
       round: number;
       playerAction?: CombatPlayerAction;
+      partyActions?: Record<string, CombatPlayerAction>;
+      controlledId?: string;
       mechanics?: import("@marinara-engine/shared").CombatMechanic[];
     }) => api.post<{ result: CombatRoundResult; combatants: Combatant[] }>("/game/combat/round", data),
   });
@@ -854,12 +888,19 @@ export function useTacticalCombatStart() {
       chatId: string;
       party: Combatant[];
       enemies: Combatant[];
+      weather?: CombatWeather | null;
       seed?: number;
+      battlefield?: TacticalBattlefieldBrief;
       /** Blueprint scene context — themes the terrain (styleNotes.environmentType). */
       environment?: string;
       /** Blueprint battlefield.formation — drives spawn placement. */
       formation?: string;
-    }) => api.post<{ state: TacticalCombatState }>("/game/combat/tactical/start", data),
+    }) =>
+      api.post<{
+        state: TacticalCombatState;
+        /** By initiative, the turns taken before the first one the player commands (combat C6c). */
+        opening?: { before: TacticalCombatState; events: TacticalEvent[] };
+      }>("/game/combat/tactical/start", data),
   });
 }
 
@@ -874,8 +915,13 @@ export function useTacticalCombatAction() {
 export function useAdvanceTime() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (data: { chatId: string; action: string }) =>
-      api.post<{ time: unknown; formatted: string }>("/game/time/advance", data),
+    // An action's span, or a number of minutes (the overworld's real time, worldgen W8).
+    mutationFn: (data: { chatId: string; action: string } | { chatId: string; minutes: number; keepalive?: boolean }) =>
+      api.post<{ time: unknown; formatted: string }>(
+        "/game/time/advance",
+        "minutes" in data ? { chatId: data.chatId, minutes: data.minutes } : data,
+        "minutes" in data && data.keepalive ? { keepalive: true } : undefined,
+      ),
     onSuccess: (res, variables) => {
       qc.invalidateQueries({ queryKey: chatKeys.detail(variables.chatId) });
       // Sync time into the game state snapshot so WeatherEffects updates immediately
@@ -924,6 +970,198 @@ export function useUpdateReputation() {
       store.getState().setNpcs(res.npcs as any[]);
       qc.invalidateQueries({ queryKey: chatKeys.detail(variables.chatId) });
       qc.invalidateQueries({ queryKey: [...gameKeys.all, "journal", variables.chatId] });
+    },
+  });
+}
+
+// ── The overworld (worldgen W8) ──
+
+/** Where the party is on the overworld, the walk its next turn tells, and the places in ruins. */
+export interface OverworldState {
+  here: string | null;
+  walk: WorldWalk | null;
+  ruined: string[];
+  /** Sites the story keeps closed until the Game Master opens them, shown sealed (older servers: none). */
+  locked?: Record<string, "sealed">;
+  /** Sites the story keeps off the overworld until revealed. */
+  hidden?: string[];
+}
+
+/** The world as the party knows it (the Journal's World tab), read again after each turn (`turnKey`), so
+ *  a swipe or branch never shows another turn's world. */
+export function useWorldJournal(chatId: string, turnKey: string | null) {
+  return useQuery({
+    queryKey: [...gameKeys.worldJournal(chatId), turnKey],
+    queryFn: () => api.get<{ journal: WorldJournal | null }>(`/game/${chatId}/world-journal`),
+    select: (data) => data.journal,
+    enabled: !!chatId,
+  });
+}
+
+/** The overworld of a game with a world, read again after each turn (`turnKey`). */
+/** The game's world (worldgen W8, W11) as the server keeps it, never made again here from its recipe.
+ *  `recipe` names the stored recipe, so a world whose edits were saved is read again. */
+export function useGameWorld(chatId: string, recipe: string | null) {
+  return useQuery({
+    queryKey: [...gameKeys.world(chatId), recipe],
+    queryFn: () => api.get<{ world: GameWorld | null }>(`/game/${chatId}/world`),
+    select: (data) => data.world,
+    enabled: recipe !== null && !!chatId,
+    staleTime: Infinity,
+    // The same game's world stays on screen while its edits are read again, never another game's.
+    placeholderData: (previous, previousQuery) => (previousQuery?.queryKey[2] === chatId ? previous : undefined),
+  });
+}
+
+export function useOverworld(chatId: string, turnKey: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: [...gameKeys.overworld(chatId), turnKey],
+    queryFn: () => api.get<{ overworld: OverworldState | null }>(`/game/${chatId}/overworld`),
+    select: (data) => data.overworld,
+    enabled: enabled && !!chatId,
+    staleTime: 30_000,
+  });
+}
+
+/** A walk to a settlement: the server reads the route and passes its days on the game's clock. */
+export function useOverworldWalk() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { chatId: string; to: string }) =>
+      api.post<{ walk: WorldWalk; route: WorldRoute; formatted: string }>(`/game/${data.chatId}/overworld/walk`, {
+        to: data.to,
+      }),
+    // The party is where it walked at once, so the overworld never shows it back where it set out.
+    onSuccess: (res, variables) => {
+      qc.setQueriesData<{ overworld: OverworldState | null }>(
+        { queryKey: gameKeys.overworld(variables.chatId) },
+        (old) => (old?.overworld ? { overworld: { ...old.overworld, here: res.walk.to, walk: res.walk } } : old),
+      );
+    },
+    onSettled: (_res, _error, variables) => {
+      qc.invalidateQueries({ queryKey: gameKeys.overworld(variables.chatId) });
+      qc.invalidateQueries({ queryKey: chatKeys.detail(variables.chatId) });
+    },
+  });
+}
+
+// ── The town (worldgen W8b) ──
+
+/** The town the party is in, where in it the party stands, and the visit its next turn tells. */
+export type TownState = WorldTown & { at: string; visit: WorldTownVisit | null };
+
+export function useTown(chatId: string, turnKey: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: [...gameKeys.town(chatId), turnKey],
+    queryFn: () => api.get<{ town: TownState | null }>(`/game/${chatId}/town`),
+    select: (data) => data.town,
+    enabled: enabled && !!chatId,
+    staleTime: 30_000,
+  });
+}
+
+/** The rooms of a building in the town the party is in (worldgen W13). */
+export function useTownInterior(chatId: string, buildingId: string | null) {
+  return useQuery({
+    queryKey: [...gameKeys.town(chatId), "interior", buildingId],
+    queryFn: () =>
+      api.get<{ interior: WorldInterior }>(`/game/${chatId}/town/interior?building=${encodeURIComponent(buildingId!)}`),
+    select: (data) => data.interior,
+    enabled: !!chatId && !!buildingId,
+    staleTime: 5 * 60_000,
+  });
+}
+
+/** A walk across town to a building or the square: its minutes go on the game's clock. */
+export function useTownVisit() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { chatId: string; to: string }) =>
+      api.post<{
+        visit: WorldTownVisit;
+        at: string;
+        /** The way walked, as the cells after the door the party left (older servers: none). */
+        path?: Array<{ x: number; y: number }>;
+        minutes: number;
+        formatted: string;
+      }>(`/game/${data.chatId}/town/visit`, { to: data.to }),
+    // The party is where it walked at once, so the town never shows it back where it set out.
+    onSuccess: (res, variables) => {
+      qc.setQueriesData<{ town: TownState | null }>({ queryKey: gameKeys.town(variables.chatId) }, (old) =>
+        old?.town ? { town: { ...old.town, at: res.at, visit: res.visit } } : old,
+      );
+    },
+    onSettled: (_res, _error, variables) => {
+      qc.invalidateQueries({ queryKey: gameKeys.town(variables.chatId) });
+      qc.invalidateQueries({ queryKey: chatKeys.detail(variables.chatId) });
+    },
+  });
+}
+
+// ── Dungeon, cave and station maps ──
+
+/** The map the party is on, and the walk on it its next turn tells. */
+export function useDungeonMap(chatId: string, turnKey: string | null, enabled: boolean) {
+  return useQuery({
+    queryKey: [...gameKeys.dungeonMap(chatId), turnKey],
+    queryFn: () => api.get<{ map: GameDungeonMap | null; walk: GameDungeonWalk | null }>(`/game/${chatId}/map`),
+    enabled: enabled && !!chatId,
+    staleTime: 30_000,
+  });
+}
+
+/** A walk on the map to a cell, by the shortest way: its minutes go on the game's clock. */
+export function useDungeonWalk() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { chatId: string; map: string; x: number; y: number }) =>
+      api.post<{
+        map: GameDungeonMap;
+        walk: GameDungeonWalk;
+        path: Array<{ x: number; y: number }>;
+        minutes: number;
+        formatted: string;
+      }>(`/game/${data.chatId}/map/walk`, { map: data.map, x: data.x, y: data.y }),
+    // The party is where it walked at once, so the map never shows it back where it set out.
+    onSuccess: (res, variables) => {
+      qc.setQueriesData<{ map: GameDungeonMap | null; walk: GameDungeonWalk | null }>(
+        { queryKey: gameKeys.dungeonMap(variables.chatId) },
+        (old) => (old ? { map: res.map, walk: res.walk } : old),
+      );
+    },
+    onSettled: (_res, _error, variables) => {
+      qc.invalidateQueries({ queryKey: gameKeys.dungeonMap(variables.chatId) });
+      qc.invalidateQueries({ queryKey: chatKeys.detail(variables.chatId) });
+    },
+  });
+}
+
+/** The party leaves the map by the way out it stands on. */
+export function useDungeonLeave() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { chatId: string; map: string }) =>
+      api.post<{ left: string }>(`/game/${data.chatId}/map/leave`, { map: data.map }),
+    onSettled: (_res, _error, variables) => {
+      qc.invalidateQueries({ queryKey: gameKeys.dungeonMap(variables.chatId) });
+      qc.invalidateQueries({ queryKey: chatKeys.detail(variables.chatId) });
+    },
+  });
+}
+
+/** Going down into a place in town the party stands at (a cave, a mine, a crypt, by its words), or into a
+ *  site out in the world the party is at on the overworld. */
+export function useDungeonEnter() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { chatId: string; at?: string; place?: string }) =>
+      api.post<{ map: GameDungeonMap }>(
+        `/game/${data.chatId}/map/enter`,
+        data.place ? { place: data.place } : { at: data.at },
+      ),
+    onSettled: (_res, _error, variables) => {
+      qc.invalidateQueries({ queryKey: gameKeys.dungeonMap(variables.chatId) });
+      qc.invalidateQueries({ queryKey: chatKeys.detail(variables.chatId) });
     },
   });
 }

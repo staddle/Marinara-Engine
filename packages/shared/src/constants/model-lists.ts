@@ -13,10 +13,110 @@ export interface KnownModel {
   maxOutput: number;
 }
 
+const BRACKET_PAIRS: Record<string, string> = { "[": "]", "【": "】", "(": ")", "（": "）" };
+
+/** Channel tags that new-api/one-api resellers put in front of a model id, such as `[次]`, `[SP]`, `【限时】`. */
+function stripTagPrefix(id: string): string {
+  let s = id.trimStart();
+  for (let close = BRACKET_PAIRS[s[0] ?? ""]; close; close = BRACKET_PAIRS[s[0] ?? ""]) {
+    const end = s.indexOf(close);
+    if (end < 0) break;
+    s = s.slice(end + 1).trimStart();
+  }
+  return s;
+}
+
+/**
+ * Modifiers after a model id: CLIProxyAPI `(high)`/`(8192)`, Claude Code `[1m]`, new-api `@thinking:on` and
+ * Vertex `@20250805`. No catalog id contains brackets or `@`. Linear scans, because ids are user input.
+ */
+function stripModifierSuffix(id: string): string {
+  let t = id.trimEnd();
+  // Proxies add one or two suffixes; the cap keeps a crafted imported id from looping once per character.
+  for (let pass = 0; pass < 4; pass++) {
+    const open = Object.keys(BRACKET_PAIRS).find((o) => t.endsWith(BRACKET_PAIRS[o]!));
+    const start = open ? t.lastIndexOf(open) : -1;
+    if (start >= 0) {
+      t = t.slice(0, start).trimEnd();
+      continue;
+    }
+    const at = t.lastIndexOf("@");
+    if (at < 0 || t.indexOf("/", at) >= 0) break;
+    t = t.slice(0, at).trimEnd();
+  }
+  return t;
+}
+
+/**
+ * The id that capability checks read: trimmed, lower case, without proxy tags or modifiers.
+ * `[次]claude-opus-4-6` and `claude-opus-4-6(high)` are checked as `claude-opus-4-6`. Vendor paths (`anthropic/…`)
+ * stay, because OpenRouter rules read them. Never send this id to a provider; the request keeps the configured id.
+ */
+export function capabilityModelId(model: string): string {
+  return stripModifierSuffix(stripTagPrefix(model.trim().toLowerCase()));
+}
+
+/**
+ * Proxy ids that make the proxy turn thinking on whatever the request says: new-api's `-thinking`,
+ * `-thinking-<budget>`, effort tails (`-high`) and `@thinking:<on|budget>`, AiHubMix `-think`, CLIProxyAPI
+ * `(<level|budget>)`. Treat them like a thinking request: no sampling and no forced tool choice, which Anthropic and
+ * GPT-5 reject while reasoning runs. Thinking settings Marinara sends still apply where the proxy keeps them.
+ */
+export function impliesProxyThinking(model: string): boolean {
+  let raw = model.trim().toLowerCase();
+  // The modifier nearest the end that carries a thinking setting decides; plain labels such as `(free)` or `[1m]` are skipped.
+  for (let pass = 0; pass < 4; pass++) {
+    const closer = raw.trimEnd().slice(-1);
+    const open = Object.keys(BRACKET_PAIRS).find((o) => BRACKET_PAIRS[o] === closer);
+    const start = open ? raw.trimEnd().lastIndexOf(open) : -1;
+    if (start >= 0) {
+      const inner = raw
+        .trimEnd()
+        .slice(start + 1, -1)
+        .trim();
+      if (open === "(" || open === "（") {
+        if (/^(?:minimal|low|medium|high|xhigh|max|auto|[1-9]\d*)$/u.test(inner)) return true;
+        if (["none", "off", "0"].includes(inner)) return false;
+      }
+      raw = raw.slice(0, start);
+      continue;
+    }
+    const at = raw.lastIndexOf("@");
+    if (at < 0 || raw.indexOf("/", at) >= 0) break;
+    if (raw.startsWith("@thinking:", at)) return !["", "off", "none", "0"].includes(raw.slice(at + 10).trim());
+    raw = raw.slice(0, at);
+  }
+  const id = capabilityModelId(raw);
+  return (
+    /(?<!-no|-non)-think(?:ing(?:-[1-9]\d*)?)?$/u.test(id) ||
+    /^(?:claude-|gpt-5|o[134])\S*-(?:minimal|low|medium|high|xhigh|max)$/u.test(id)
+  );
+}
+
 const CLAUDE_ADAPTIVE_ONLY_OPUS_RE = /claude-opus-4-(?:[7-9]|\d{2,})/;
 
+/** Native Claude ID and the dotted ID used by OpenRouter/compatible gateways. */
+export function isClaudeOpus55Model(model: string): boolean {
+  return /(?:^|\/)claude-opus-5[.-]5(?:$|[-:])/u.test(capabilityModelId(model));
+}
+
+/** Native Claude ID and the dotted ID used by OpenRouter/compatible gateways. */
+export function isClaudeSonnet55Model(model: string): boolean {
+  return /(?:^|\/)claude-sonnet-5[.-]5(?:$|[-:])/u.test(capabilityModelId(model));
+}
+
+/**
+ * Claude models that reject disabled thinking, forced tool choice, assistant prefill and
+ * non-default sampling. Sonnet 5.5 can still skip up-front thinking, but only with the native
+ * `between_tools` setting, which OpenAI-compatible gateways cannot send.
+ * https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5
+ */
+export function isClaudeStrictRequestModel(model: string): boolean {
+  return isClaudeOpus55Model(model) || isClaudeSonnet55Model(model);
+}
+
 export function isClaudeAdaptiveOnlyNoSamplingModel(model: string): boolean {
-  const normalized = model.toLowerCase();
+  const normalized = capabilityModelId(model);
   return (
     CLAUDE_ADAPTIVE_ONLY_OPUS_RE.test(normalized) ||
     /claude-(?:opus|sonnet)-5(?:$|[-.])/u.test(normalized) ||
@@ -26,23 +126,64 @@ export function isClaudeAdaptiveOnlyNoSamplingModel(model: string): boolean {
 }
 
 export function supportsXhighReasoningEffort(model: string): boolean {
-  const normalized = model.toLowerCase();
+  const normalized = capabilityModelId(model);
   return (
-    isOpenAIGpt6AstraModel(normalized) ||
+    isOpenAIGpt6Model(normalized) ||
     normalized.startsWith("gpt-5.6") ||
     normalized.startsWith("gpt-5.5") ||
     normalized.startsWith("gpt-5.4") ||
+    /^grok-4\.[67](?:$|-)/.test(normalized.replace(/^x-ai\//, "")) ||
     normalized === "grok-4.20-multi-agent" ||
     isClaudeAdaptiveOnlyNoSamplingModel(normalized)
   );
 }
 
+/**
+ * GLM 5.2 and GLM 5.3 accept `reasoning_effort: "max"` on Z.AI's native
+ * endpoint, so a preset set to Maximum should reach it instead of being
+ * lowered to `high` on the way to the provider.
+ */
+export function isZaiMaxReasoningEffortModel(model: string): boolean {
+  return /(?:^|\/)glm-5\.[23](?:$|[-:])/u.test(capabilityModelId(model));
+}
+
+/**
+ * Native Mistral models whose `reasoning_effort` can be set. They accept only "high" and "none". Other Mistral models
+ * (Magistral, older releases) are not listed as taking it, so they get no effort and keep their own behaviour.
+ * https://docs.mistral.ai/capabilities/reasoning
+ */
+export function isMistralAdjustableReasoningModel(model: string): boolean {
+  const normalized = capabilityModelId(model);
+  return (
+    normalized === "mistral-small-latest" ||
+    /^mistral-large-4(?:$|[-.])/u.test(normalized) ||
+    /^mistral-medium-3[-.]5(?:$|[-.])/u.test(normalized)
+  );
+}
+
+/** GLM 5.3 on Mistral (`zai-glm-5-3`) always reasons and takes only "low", "high" or "max", never "none". */
+export function isMistralGlm53Model(model: string): boolean {
+  return /^zai-glm-5-3(?:$|-)/u.test(capabilityModelId(model));
+}
+
 export function isOpenAIGpt56Model(model: string): boolean {
-  return model.toLowerCase().startsWith("gpt-5.6");
+  return capabilityModelId(model).startsWith("gpt-5.6");
 }
 
 export function isOpenAIGpt6AstraModel(model: string): boolean {
-  return /^gpt-6-astra(?:$|-)/i.test(model);
+  return /^(?:openai\/)?gpt-6-astra(?:$|[-:])/u.test(capabilityModelId(model));
+}
+
+export function isOpenAIGpt6Model(model: string): boolean {
+  return /^(?:openai\/)?gpt-6(?:-(?:astra|sol|luna)|\.1-sol)(?:$|[-:])/u.test(capabilityModelId(model));
+}
+
+/**
+ * GPT-6 models that cannot turn reasoning off. GPT-6 only takes sampling with effort "none",
+ * so these never take it at all. https://developers.openai.com/api/docs/models/gpt-6.1-sol
+ */
+export function isOpenAIGpt6AlwaysReasoningModel(model: string): boolean {
+  return isOpenAIGpt6AstraModel(model) || /^(?:openai\/)?gpt-6\.1-sol(?:$|[-:])/u.test(capabilityModelId(model));
 }
 
 export function isOpenAIGpt56SolProAlias(model: string): boolean {
@@ -61,21 +202,41 @@ export function resolveProviderReasoningEffort(args: {
   model: string;
   reasoningEffort: StoredReasoningEffort | undefined;
 }): ProviderReasoningEffort {
-  if (!args.reasoningEffort || args.reasoningEffort === "none") return null;
-  const modelLower = args.model.toLowerCase();
   const providerLower = args.provider.toLowerCase();
+  // Argon cannot turn thinking off; without a level it thinks at Google's default, medium, so name that level.
+  if (
+    (!args.reasoningEffort || args.reasoningEffort === "none") &&
+    (providerLower === "google" || providerLower === "google_vertex") &&
+    isGeminiArgonModel(args.model)
+  ) {
+    return "medium";
+  }
+  if (!args.reasoningEffort || args.reasoningEffort === "none") return null;
+  const modelLower = capabilityModelId(args.model);
 
   const xaiUsesAutoReasoning =
     (providerLower === "xai" && isXaiAutoReasoningModel(modelLower)) ||
     (providerLower === "openrouter" && modelLower.startsWith("x-ai/grok-"));
   if (xaiUsesAutoReasoning) return null;
+  // Mistral reasoning models have a single level besides "none".
+  if (providerLower === "mistral" && isMistralAdjustableReasoningModel(modelLower)) return "high";
+  if (providerLower === "mistral" && isMistralGlm53Model(modelLower)) {
+    if (args.reasoningEffort === "low") return "low";
+    return args.reasoningEffort === "medium" || args.reasoningEffort === "high" ? "high" : "max";
+  }
 
   const isNativeAnthropicAdaptiveOnly =
     (providerLower === "anthropic" || providerLower === "claude_subscription") &&
     isClaudeAdaptiveOnlyNoSamplingModel(modelLower);
   const supportsXhigh = supportsXhighReasoningEffort(modelLower);
   const supportsMax =
-    isOpenAIGpt6AstraModel(modelLower) || isOpenAIGpt56Model(modelLower) || isNativeAnthropicAdaptiveOnly;
+    isOpenAIGpt6Model(modelLower) ||
+    isOpenAIGpt56Model(modelLower) ||
+    isNativeAnthropicAdaptiveOnly ||
+    // DeepSeek takes max for every chat model; xhigh is not one of its levels, so maximum maps to max rather than
+    // collapsing to high.
+    providerLower === "deepseek" ||
+    (providerLower === "zai" && isZaiMaxReasoningEffortModel(modelLower));
 
   if (args.reasoningEffort === "maximum") {
     return supportsMax ? "max" : supportsXhigh ? "xhigh" : "high";
@@ -86,16 +247,51 @@ export function resolveProviderReasoningEffort(args: {
   if (args.reasoningEffort === "xhigh") {
     return supportsXhigh ? "xhigh" : "high";
   }
+  // DeepSeek accepts medium for compatibility but serves it as high, so mapping it here keeps the offered levels
+  // honest: without this, "Medium" and "High" would be two buttons that send a different value yet behave the same.
+  if (providerLower === "deepseek" && args.reasoningEffort === "medium") return "high";
   return args.reasoningEffort;
 }
 
+/** Gemini 3 and later set thinking with `thinkingLevel`; Gemini 2.5 and older take `thinkingBudget`. */
+export function isGeminiThinkingLevelModel(model: string): boolean {
+  return /gemini-(?:[3-9]|[1-9]\d)(?!\d)/u.test(capabilityModelId(model));
+}
+
+/**
+ * Gemini 4 Argon takes thinking levels low to high only and cannot turn thinking off. Its sampler, penalty and prefill
+ * rules are shared with the newer Flash models (isGeminiStrictRequestModel).
+ * https://ai.google.dev/gemini-api/docs/models/gemini-4-argon
+ * https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-4-argon
+ */
+export function isGeminiArgonModel(model: string): boolean {
+  return /(?:^|\/)gemini-4-argon(?:$|-)/u.test(capabilityModelId(model));
+}
+
+/** Any Gemini model id, bare or with a router prefix such as OpenRouter's `google/`. */
+export function isGeminiModel(model: string): boolean {
+  return /(?:^|\/)gemini-/u.test(capabilityModelId(model));
+}
+
+/**
+ * Gemini models that ignore temperature, top-p and top-k and reject frequency and presence penalties and a request
+ * ending on a model turn (a prefill): Argon, 3.5 Flash-Lite and 3.6 to 3.8 Flash. OpenRouter variants such as
+ * `:online` count too.
+ * https://ai.google.dev/gemini-api/docs/whats-new-gemini-3.6
+ * https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/gemini/3-5-flash-lite
+ * https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/guides/gemini-3-6-flash (also 3-7, 3-8)
+ */
+export function isGeminiStrictRequestModel(model: string): boolean {
+  return /(?:^|\/)gemini-(?:4-argon|3\.5-flash-lite|3\.[6-8]-flash)(?:$|[-:])/u.test(capabilityModelId(model));
+}
+
 export function isXaiConfigurableReasoningModel(model: string): boolean {
-  const normalized = model.toLowerCase().replace(/^x-ai\//, "");
-  return normalized.startsWith("grok-4.5") || normalized.startsWith("grok-4.3");
+  const normalized = capabilityModelId(model).replace(/^x-ai\//, "");
+  return /^grok-4\.[3567](?:$|-)/.test(normalized);
 }
 
 export function isXaiAutoReasoningModel(model: string): boolean {
-  const normalized = model.toLowerCase().replace(/^x-ai\//, "");
+  const normalized = capabilityModelId(model).replace(/^x-ai\//, "");
   return normalized.startsWith("grok-4-1-fast");
 }
 
@@ -108,8 +304,11 @@ export const OPENAI_MODELS: KnownModel[] = [
   { id: "gpt-5.6-sol-pro", name: "gpt-5.6-sol-pro (Sol with pro mode)", context: 1050000, maxOutput: 128000 },
   { id: "gpt-5.6-terra", name: "gpt-5.6-terra", context: 1050000, maxOutput: 128000 },
   { id: "gpt-5.6-luna", name: "gpt-5.6-luna", context: 1050000, maxOutput: 128000 },
-  // GPT-6 Astra
+  // GPT-6
+  { id: "gpt-6.1-sol", name: "gpt-6.1-sol", context: 1050000, maxOutput: 128000 },
   { id: "gpt-6-astra", name: "gpt-6-astra", context: 1050000, maxOutput: 128000 },
+  { id: "gpt-6-sol", name: "gpt-6-sol", context: 1050000, maxOutput: 128000 },
+  { id: "gpt-6-luna", name: "gpt-6-luna", context: 1050000, maxOutput: 128000 },
   // GPT-5.5
   { id: "gpt-5.5", name: "gpt-5.5", context: 1050000, maxOutput: 128000 },
   { id: "gpt-5.5-2026-04-23", name: "gpt-5.5-2026-04-23", context: 1050000, maxOutput: 128000 },
@@ -210,7 +409,9 @@ export const OPENAI_MODELS: KnownModel[] = [
 // ── Anthropic / Claude (from #model_claude_select) ──
 
 export const ANTHROPIC_MODELS: KnownModel[] = [
+  { id: "claude-opus-5-5", name: "claude-opus-5-5", context: 1000000, maxOutput: 128000 },
   { id: "claude-opus-5", name: "claude-opus-5", context: 1000000, maxOutput: 128000 },
+  { id: "claude-sonnet-5-5", name: "claude-sonnet-5-5", context: 1000000, maxOutput: 128000 },
   { id: "claude-sonnet-5", name: "claude-sonnet-5", context: 1000000, maxOutput: 128000 },
   { id: "claude-fable-5-1", name: "claude-fable-5-1", context: 1000000, maxOutput: 128000 },
   { id: "claude-fable-5", name: "claude-fable-5", context: 1000000, maxOutput: 128000 },
@@ -230,8 +431,8 @@ export const ANTHROPIC_MODELS: KnownModel[] = [
   { id: "claude-opus-4-1-20250805", name: "claude-opus-4-1-20250805", context: 200000, maxOutput: 32000 },
   { id: "claude-opus-4-0", name: "claude-opus-4-0", context: 200000, maxOutput: 32000 },
   { id: "claude-opus-4-20250514", name: "claude-opus-4-20250514", context: 200000, maxOutput: 32000 },
-  { id: "claude-sonnet-4-0", name: "claude-sonnet-4-0", context: 200000, maxOutput: 16000 },
-  { id: "claude-sonnet-4-20250514", name: "claude-sonnet-4-20250514", context: 200000, maxOutput: 16000 },
+  { id: "claude-sonnet-4-0", name: "claude-sonnet-4-0", context: 200000, maxOutput: 64000 },
+  { id: "claude-sonnet-4-20250514", name: "claude-sonnet-4-20250514", context: 200000, maxOutput: 64000 },
   { id: "claude-3-7-sonnet-latest", name: "claude-3-7-sonnet-latest", context: 200000, maxOutput: 128000 },
   { id: "claude-3-7-sonnet-20250219", name: "claude-3-7-sonnet-20250219", context: 200000, maxOutput: 128000 },
   { id: "claude-3-5-sonnet-latest", name: "claude-3-5-sonnet-latest", context: 200000, maxOutput: 8192 },
@@ -246,12 +447,17 @@ export const ANTHROPIC_MODELS: KnownModel[] = [
 // ── Claude (Subscription via Claude Agent SDK) ──
 // Models reachable through the local `claude` CLI auth (Pro / Max). Anthropic
 // gates which model IDs are available per plan tier; the SDK surfaces a clear
-// error if the signed-in plan can't run the requested model. We keep this list
-// to the current tool-eligible families to avoid offering retired aliases that
-// the subscription path no longer accepts.
+// error if the signed-in plan can't run the requested model. The model picker
+// shows Claude Code's cached catalog for the account; this curated list is the
+// fallback before Claude Code has cached one. We keep it to the current tool-eligible
+// families to avoid offering retired aliases the subscription path rejects.
 export const CLAUDE_SUBSCRIPTION_MODELS: KnownModel[] = [
+  { id: "claude-opus-5-5", name: "Claude Opus 5.5", context: 1000000, maxOutput: 128000 },
   { id: "claude-opus-5", name: "Claude Opus 5", context: 1000000, maxOutput: 128000 },
+  { id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", context: 1000000, maxOutput: 128000 },
   { id: "claude-sonnet-5", name: "Claude Sonnet 5", context: 1000000, maxOutput: 128000 },
+  { id: "claude-haiku-5-5", name: "Claude Haiku 5.5", context: 1000000, maxOutput: 128000 },
+  { id: "claude-fable-5-1", name: "Claude Fable 5.1", context: 1000000, maxOutput: 128000 },
   { id: "claude-fable-5", name: "Claude Fable 5", context: 1000000, maxOutput: 128000 },
   { id: "claude-opus-4-8", name: "Claude Opus 4.8", context: 1000000, maxOutput: 128000 },
   { id: "claude-opus-4-7", name: "Claude Opus 4.7", context: 1000000, maxOutput: 128000 },
@@ -265,9 +471,18 @@ export const CLAUDE_SUBSCRIPTION_MODELS: KnownModel[] = [
 // ── OpenAI (ChatGPT login via Codex auth) ──
 // The ChatGPT-backed Codex endpoint can return an account-specific model
 // catalog when authenticated. This curated fallback keeps the selector useful
-// before the user has run `codex login`.
+// before the user has run `codex login`. GPT-6 and GPT-5.6 contexts are Codex's
+// default window from its model catalog (October 2026). GPT-5.5 stays first so
+// new connections keep it as their default model.
 export const OPENAI_CHATGPT_MODELS: KnownModel[] = [
   { id: "gpt-5.5", name: "GPT-5.5", context: 1050000, maxOutput: 128000 },
+  { id: "gpt-6.1-sol", name: "GPT-6.1-Sol", context: 272000, maxOutput: 128000 },
+  { id: "gpt-6-astra", name: "GPT-6-Astra", context: 272000, maxOutput: 128000 },
+  { id: "gpt-6-sol", name: "GPT-6-Sol", context: 272000, maxOutput: 128000 },
+  { id: "gpt-6-luna", name: "GPT-6-Luna", context: 272000, maxOutput: 128000 },
+  { id: "gpt-5.6-sol", name: "GPT-5.6-Sol", context: 272000, maxOutput: 128000 },
+  { id: "gpt-5.6-terra", name: "GPT-5.6-Terra", context: 272000, maxOutput: 128000 },
+  { id: "gpt-5.6-luna", name: "GPT-5.6-Luna", context: 272000, maxOutput: 128000 },
   { id: "gpt-5.4", name: "GPT-5.4", context: 1050000, maxOutput: 128000 },
   { id: "gpt-5.4-mini", name: "GPT-5.4 Mini", context: 400000, maxOutput: 128000 },
   { id: "gpt-5.3-codex-spark", name: "GPT-5.3 Codex Spark", context: 400000, maxOutput: 128000 },
@@ -285,10 +500,17 @@ export const OPENAI_CHATGPT_MODELS: KnownModel[] = [
 // ── Google AI Studio (from #model_google_select) ──
 
 export const GOOGLE_MODELS: KnownModel[] = [
+  // Gemini 3.8. New Google and Vertex connections start on the first entry, so keep a widely available Flash here.
+  { id: "gemini-3.8-flash", name: "gemini-3.8-flash", context: 1000000, maxOutput: 65536 },
+  // Gemini 4. Argon needs a paid tier and, on Vertex, the global, us or eu location.
+  { id: "gemini-4-argon", name: "gemini-4-argon", context: 1000000, maxOutput: 65536 },
+  // Gemini 3.7
+  { id: "gemini-3.7-flash", name: "gemini-3.7-flash", context: 1000000, maxOutput: 65536 },
   // Gemini 3.6
   { id: "gemini-3.6-flash", name: "gemini-3.6-flash", context: 1000000, maxOutput: 65536 },
   // Gemini 3.5
   { id: "gemini-3.5-flash", name: "gemini-3.5-flash", context: 1000000, maxOutput: 65536 },
+  { id: "gemini-3.5-flash-lite", name: "gemini-3.5-flash-lite", context: 1000000, maxOutput: 65536 },
   // Gemini 3.1
   { id: "gemini-3.1-pro-preview", name: "gemini-3.1-pro-preview", context: 1000000, maxOutput: 65536 },
   {
@@ -300,8 +522,9 @@ export const GOOGLE_MODELS: KnownModel[] = [
   { id: "gemini-3.1-pro", name: "gemini-3.1-pro", context: 1000000, maxOutput: 65536 },
   { id: "gemini-3.1-flash-lite", name: "gemini-3.1-flash-lite", context: 1000000, maxOutput: 65536 },
   { id: "gemini-3.1-flash-lite-preview", name: "gemini-3.1-flash-lite-preview", context: 1000000, maxOutput: 65536 },
-  { id: "gemini-3.1-flash-image", name: "gemini-3.1-flash-image", context: 65535, maxOutput: 8192 },
-  { id: "gemini-3.1-flash-image-preview", name: "gemini-3.1-flash-image-preview", context: 65535, maxOutput: 8192 },
+  { id: "gemini-3.1-flash-image", name: "gemini-3.1-flash-image", context: 131072, maxOutput: 32768 },
+  { id: "gemini-3.1-flash-image-preview", name: "gemini-3.1-flash-image-preview", context: 131072, maxOutput: 32768 },
+  { id: "gemini-3.1-flash-lite-image", name: "gemini-3.1-flash-lite-image", context: 65536, maxOutput: 4096 },
   // Gemini 3.0
   { id: "gemini-3-pro-preview", name: "gemini-3-pro-preview", context: 1000000, maxOutput: 65536 },
   {
@@ -311,8 +534,8 @@ export const GOOGLE_MODELS: KnownModel[] = [
     maxOutput: 65536,
   },
   { id: "gemini-3-flash", name: "gemini-3-flash", context: 1000000, maxOutput: 65536 },
-  { id: "gemini-3-pro-image-preview", name: "gemini-3-pro-image-preview", context: 65535, maxOutput: 8192 },
-  { id: "gemini-3-pro-image", name: "gemini-3-pro-image", context: 65535, maxOutput: 8192 },
+  { id: "gemini-3-pro-image-preview", name: "gemini-3-pro-image-preview", context: 65536, maxOutput: 32768 },
+  { id: "gemini-3-pro-image", name: "gemini-3-pro-image", context: 65536, maxOutput: 32768 },
   { id: "gemini-3-flash-preview", name: "gemini-3-flash-preview", context: 1000000, maxOutput: 65536 },
   // Gemini 2.5
   { id: "gemini-2.5-pro", name: "gemini-2.5-pro", context: 1000000, maxOutput: 65536 },
@@ -340,8 +563,8 @@ export const GOOGLE_MODELS: KnownModel[] = [
     context: 1000000,
     maxOutput: 65536,
   },
-  { id: "gemini-2.5-flash-image", name: "gemini-2.5-flash-image", context: 32767, maxOutput: 8192 },
-  { id: "gemini-2.5-flash-image-preview", name: "gemini-2.5-flash-image-preview", context: 32767, maxOutput: 8192 },
+  { id: "gemini-2.5-flash-image", name: "gemini-2.5-flash-image", context: 65536, maxOutput: 32768 },
+  { id: "gemini-2.5-flash-image-preview", name: "gemini-2.5-flash-image-preview", context: 65536, maxOutput: 32768 },
   // Gemini 2.0
   {
     id: "gemini-2.0-pro-exp-02-05",
@@ -449,8 +672,10 @@ export const OPENROUTER_MODELS: KnownModel[] = [];
 // ── xAI / Grok (OpenAI-compatible API) ──
 
 export const XAI_MODELS: KnownModel[] = [
-  // Grok 4.5 launched July 8, 2026. The launch post gives the API ID; xAI's
-  // current Grok text family uses a 1M context window in the model docs.
+  // https://docs.x.ai/developers/grok-4-7 and /grok-4-6: 500k context,
+  // no separate output limit; xhigh reasoning is supported on both models.
+  { id: "grok-4.7", name: "Grok 4.7", context: 500000, maxOutput: 0 },
+  { id: "grok-4.6", name: "Grok 4.6", context: 500000, maxOutput: 0 },
   { id: "grok-4.5", name: "Grok 4.5", context: 1000000, maxOutput: 0 },
   { id: "grok-4.5-latest", name: "Grok 4.5 Latest", context: 1000000, maxOutput: 0 },
   { id: "grok-4.3", name: "Grok 4.3", context: 1000000, maxOutput: 0 },
@@ -509,11 +734,12 @@ export const GROQ_MODELS: KnownModel[] = [
 
 // DeepSeek (from #model_deepseek_select)
 export const DEEPSEEK_MODELS: KnownModel[] = [
+  // The current names. `deepseek-v4-flash` is a legacy alias of `deepseek-flash`
+  // and still resolves, while deepseek-chat / deepseek-coder / deepseek-reasoner
+  // were retired on 2026-07-24.
+  { id: "deepseek-flash", name: "deepseek-flash", context: 1_000_000, maxOutput: 384_000 },
   { id: "deepseek-v4-pro", name: "deepseek-v4-pro", context: 1_000_000, maxOutput: 384_000 },
-  { id: "deepseek-v4-flash", name: "deepseek-v4-flash", context: 1_000_000, maxOutput: 384_000 },
-  { id: "deepseek-chat", name: "deepseek-chat", context: 131072, maxOutput: 8192 },
-  { id: "deepseek-coder", name: "deepseek-coder", context: 131072, maxOutput: 8192 },
-  { id: "deepseek-reasoner", name: "deepseek-reasoner", context: 131072, maxOutput: 8192 },
+  { id: "deepseek-v4-flash", name: "deepseek-v4-flash (legacy alias)", context: 1_000_000, maxOutput: 384_000 },
 ];
 
 // Xiaomi MiMo (available through OAI-compatible aggregators and direct APIs)
@@ -551,6 +777,8 @@ export const MOONSHOT_MODELS: KnownModel[] = [
 
 // Z.AI / GLM (from #model_zai_select)
 export const ZAI_MODELS: KnownModel[] = [
+  { id: "glm-5.3", name: "glm-5.3", context: 1000000, maxOutput: 128000 },
+  { id: "glm-5.3-flash", name: "glm-5.3-flash", context: 1000000, maxOutput: 128000 },
   { id: "glm-5.2", name: "glm-5.2", context: 1000000, maxOutput: 128000 },
   { id: "glm-5.1", name: "glm-5.1", context: 200_000, maxOutput: 128_000 },
   { id: "glm-5", name: "glm-5", context: 200000, maxOutput: 128000 },
@@ -666,6 +894,9 @@ export const VIDEO_GENERATION_SOURCES: VideoGenSource[] = [
   },
 ];
 
+/** The image model Codex's own image tool uses through a ChatGPT login. */
+export const CODEX_IMAGE_MODEL = "gpt-image-2";
+
 export const IMAGE_GENERATION_SOURCES: ImageGenSource[] = [
   {
     id: "openai",
@@ -673,6 +904,15 @@ export const IMAGE_GENERATION_SOURCES: ImageGenSource[] = [
     description: "DALL-E 2, DALL-E 3, and GPT Image via the OpenAI API.",
     defaultBaseUrl: "https://api.openai.com/v1",
     requiresApiKey: true,
+  },
+  {
+    id: "codex_chatgpt",
+    name: "ChatGPT (Codex login)",
+    description: "Generate images with your ChatGPT plan instead of API credits.",
+    // Saved on the connection so fallbacks and request slots key on the real endpoint. The login
+    // token is only ever sent to this fixed URL, never to a stored or edited one.
+    defaultBaseUrl: "https://chatgpt.com/backend-api/codex",
+    requiresApiKey: false,
   },
   {
     id: "stability",
@@ -735,6 +975,20 @@ export const IMAGE_GENERATION_SOURCES: ImageGenSource[] = [
     name: "Atlas Cloud",
     description: "Image generation across Atlas Cloud's model catalog.",
     defaultBaseUrl: "https://api.atlascloud.ai/api/v1",
+    requiresApiKey: true,
+  },
+  {
+    id: "fal",
+    name: "fal.ai",
+    description: "Text-to-image generation with FLUX and other fal.ai models.",
+    defaultBaseUrl: "https://fal.run",
+    requiresApiKey: true,
+  },
+  {
+    id: "spicyapi",
+    name: "SpicyAPI",
+    description: "Uncensored image models from SpicyAPI's catalog.",
+    defaultBaseUrl: "https://api.spicyapi.ai/api/v1",
     requiresApiKey: true,
   },
   {
@@ -819,6 +1073,17 @@ export const ZAI_IMAGE_MODELS: KnownModel[] = [
   { id: "cogview-4-250304", name: "CogView 4", context: 0, maxOutput: 0 },
 ];
 
+export const FAL_IMAGE_MODELS: KnownModel[] = [
+  { id: "fal-ai/flux/schnell", name: "FLUX.1 Schnell (fal.ai)", context: 0, maxOutput: 0 },
+  { id: "fal-ai/flux/dev", name: "FLUX.1 Dev (fal.ai)", context: 0, maxOutput: 0 },
+];
+
+export const SPICYAPI_IMAGE_MODELS: KnownModel[] = [
+  { id: "alibaba/z-image-spicy-pro/text-to-image", name: "Z-Image Spicy Pro (SpicyAPI)", context: 0, maxOutput: 0 },
+  { id: "bytedance/seedream-5.0-pro/text-to-image", name: "Seedream 5.0 Pro (SpicyAPI)", context: 0, maxOutput: 0 },
+  { id: "alibaba/qwen-image-2.1/text-to-image", name: "Qwen Image 2.1 (SpicyAPI)", context: 0, maxOutput: 0 },
+];
+
 export const ATLAS_CLOUD_VIDEO_MODELS: KnownModel[] = [
   { id: "google/veo3.1/text-to-video", name: "Veo 3.1 Text to Video (Atlas Cloud)", context: 0, maxOutput: 0 },
   { id: "google/veo3.1/image-to-video", name: "Veo 3.1 Image to Video (Atlas Cloud)", context: 0, maxOutput: 0 },
@@ -838,6 +1103,8 @@ export const ATLAS_CLOUD_VIDEO_MODELS: KnownModel[] = [
 
 const IMAGE_GEN_MODELS: KnownModel[] = [
   // OpenAI
+  { id: "gpt-image-2.5-flare", name: "GPT Image 2.5 Flare", context: 0, maxOutput: 0 },
+  { id: "gpt-image-2.5-sunburst", name: "GPT Image 2.5 Sunburst", context: 0, maxOutput: 0 },
   { id: "gpt-image-2", name: "GPT Image 2", context: 0, maxOutput: 0 },
   { id: "gpt-image-1.5", name: "GPT Image 1.5", context: 0, maxOutput: 0 },
   { id: "chatgpt-image-latest", name: "ChatGPT Image Latest", context: 0, maxOutput: 0 },
@@ -891,6 +1158,8 @@ const IMAGE_GEN_MODELS: KnownModel[] = [
   { id: "flux-2-pro", name: "FLUX 2 Pro (Venice)", context: 0, maxOutput: 0 },
   { id: "venice-sd35", name: "Venice SD3.5", context: 0, maxOutput: 0 },
   ...ZAI_IMAGE_MODELS,
+  ...FAL_IMAGE_MODELS,
+  ...SPICYAPI_IMAGE_MODELS,
   ...ATLAS_CLOUD_IMAGE_MODELS,
   // NovelAI
   { id: "nai-diffusion-3", name: "NAI Diffusion 3 (Anime V3)", context: 0, maxOutput: 0 },
@@ -936,6 +1205,10 @@ const AUDIO_GEN_MODELS: KnownModel[] = [
   { id: "grok-tts", name: "Grok TTS", context: 0, maxOutput: 0 },
 ];
 
+function isProviderHost(hostname: string, domain: string): boolean {
+  return hostname === domain || hostname.endsWith(`.${domain}`);
+}
+
 export function inferVideoSource(model: string, baseUrl: string): string {
   const m = model.toLowerCase();
   const u = baseUrl.toLowerCase();
@@ -947,15 +1220,15 @@ export function inferVideoSource(model: string, baseUrl: string): string {
   }
   if (m === "swarmui" || u.includes(":7801") || u.includes("swarmui")) return "swarmui";
   if (m === "comfyui" || u.includes(":8188") || u.includes("comfyui")) return "comfyui";
-  if (m === "atlas" || u.includes("atlascloud.ai")) return "atlas";
-  if (m === "seedance" || m.startsWith("seedance-") || u.includes("seedance2.ai")) return "seedance";
-  if (m === "nanogpt" || hostname === "nano-gpt.com" || hostname.endsWith(".nano-gpt.com")) {
+  if (m === "atlas" || isProviderHost(hostname, "atlascloud.ai")) return "atlas";
+  if (m === "seedance" || m.startsWith("seedance-") || isProviderHost(hostname, "seedance2.ai")) return "seedance";
+  if (m === "nanogpt" || isProviderHost(hostname, "nano-gpt.com")) {
     return "nanogpt";
   }
-  if (m === "openrouter" || u.includes("openrouter.ai")) return "openrouter";
+  if (m === "openrouter" || isProviderHost(hostname, "openrouter.ai")) return "openrouter";
   if (m.includes("/") && (m.includes("veo") || m.includes("wan"))) return "openrouter";
   if (m === "google_veo" || m === "veo" || /^veo-[\d.]+/.test(m)) return "google_veo";
-  if (m === "xai" || u.includes("api.x.ai") || u.includes("x.ai")) return "xai";
+  if (m === "xai" || isProviderHost(hostname, "x.ai")) return "xai";
   if (m.includes("grok") && m.includes("imagine") && m.includes("video")) return "xai";
   return "gemini_omni";
 }
@@ -975,6 +1248,7 @@ export function inferImageSource(model: string, baseUrl: string): string {
   }
   if (
     m === "openai" ||
+    m === "codex_chatgpt" ||
     m === "stability" ||
     m === "togetherai" ||
     m === "arli" ||
@@ -987,6 +1261,8 @@ export function inferImageSource(model: string, baseUrl: string): string {
     m === "venice" ||
     m === "zai" ||
     m === "atlas" ||
+    m === "fal" ||
+    m === "spicyapi" ||
     m === "comfyui" ||
     m === "swarmui" ||
     m === "automatic1111" ||
@@ -996,26 +1272,29 @@ export function inferImageSource(model: string, baseUrl: string): string {
     return m;
   }
   if (m === "drawthings") return "automatic1111";
-  if (hostname === "nano-gpt.com" || hostname.endsWith(".nano-gpt.com")) return "nanogpt";
-  if (u.includes("openrouter.ai")) return "openrouter";
-  if (u.includes("api.x.ai") || u.includes("x.ai")) return "xai";
-  if (u.includes("venice.ai")) return "venice";
-  if (u.includes("api.z.ai")) return "zai";
-  if (u.includes("atlascloud.ai")) return "atlas";
-  if (u.includes("arliai.com")) return "arli";
+  if (hostname === "fal.run") return "fal";
+  if (isProviderHost(hostname, "spicyapi.ai")) return "spicyapi";
+  if (isProviderHost(hostname, "nano-gpt.com")) return "nanogpt";
+  if (isProviderHost(hostname, "openrouter.ai")) return "openrouter";
+  if (isProviderHost(hostname, "x.ai")) return "xai";
+  if (isProviderHost(hostname, "venice.ai")) return "venice";
+  if (isProviderHost(hostname, "api.z.ai")) return "zai";
+  if (isProviderHost(hostname, "atlascloud.ai")) return "atlas";
+  if (isProviderHost(hostname, "arliai.com")) return "arli";
+  if (m.startsWith("fal-ai/")) return "fal";
   if (m === "glm-image" || m.startsWith("cogview")) return "zai";
   if (m.startsWith("grok-") && m.includes("image")) return "xai";
   if (m.includes("grok") && m.includes("imagine")) return "xai";
-  if (m.startsWith("dall-e") || m.startsWith("gpt-image") || u.includes("openai.com")) return "openai";
-  if (m.startsWith("sd3") || u.includes("stability.ai")) return "stability";
-  if (m.includes("nai-diffusion") || u.includes("novelai.net")) return "novelai";
-  if (m === "pollinations" || u.includes("pollinations.ai")) return "pollinations";
-  if (m.includes("black-forest") || m.includes("flux") || u.includes("together.xyz")) return "togetherai";
-  if (u.includes("stablehorde.net")) return "horde";
-  if (u.includes("blockentropy")) return "blockentropy";
+  if (m.startsWith("dall-e") || m.startsWith("gpt-image") || isProviderHost(hostname, "openai.com")) return "openai";
+  if (m.startsWith("sd3") || isProviderHost(hostname, "stability.ai")) return "stability";
+  if (m.includes("nai-diffusion") || isProviderHost(hostname, "novelai.net")) return "novelai";
+  if (m === "pollinations" || isProviderHost(hostname, "pollinations.ai")) return "pollinations";
+  if (m.includes("black-forest") || m.includes("flux") || isProviderHost(hostname, "together.xyz")) return "togetherai";
+  if (isProviderHost(hostname, "stablehorde.net")) return "horde";
+  if (isProviderHost(hostname, "blockentropy.ai")) return "blockentropy";
   if (u.includes(":7801") || u.includes("swarmui")) return "swarmui";
   if (u.includes(":8188") || u.includes("comfyui")) return "comfyui";
-  if (u.includes("runpod.ai")) return "runpod_comfyui";
+  if (isProviderHost(hostname, "runpod.ai")) return "runpod_comfyui";
   if (u.includes(":7860") && !u.includes("drawthings")) return "automatic1111";
   // Gemini image models generate via chat completions (native or proxy)
   if (m.includes("gemini") && m.includes("image")) return "gemini_image";
@@ -1040,11 +1319,14 @@ export const MODEL_LISTS: Record<APIProvider, KnownModel[]> = {
   nanogpt: [], // NanoGPT aggregator — models fetched dynamically via API
   xai: XAI_MODELS,
   arli: [], // Arli AI — models fetched dynamically via the /models endpoint
+  zai: ZAI_MODELS,
+  deepseek: DEEPSEEK_MODELS,
   // Seed OAI-compatible endpoints with the OpenAI catalog; remote /models still merge on top.
   custom: [...OPENAI_MODELS, ...ZAI_MODELS],
   image_generation: IMAGE_GEN_MODELS,
   video_generation: VIDEO_GEN_MODELS,
   audio: AUDIO_GEN_MODELS,
+  decision: [],
 };
 
 const OPENAI_COMPATIBLE_AGGREGATOR_MODELS: KnownModel[] = [
@@ -1059,18 +1341,56 @@ const OPENAI_COMPATIBLE_AGGREGATOR_MODELS: KnownModel[] = [
 ];
 
 /**
- * Look up a known model by ID across all providers.
+ * Variant suffixes proxies add to a catalog id: thinking switches (new-api `-thinking[-<budget>]`/`-nothinking`,
+ * AiHubMix `-think`/`-nothink`), effort tails (new-api, AiHubMix `gpt-5.4-high`), AiHubMix `-search`, LinkAPI `-r`,
+ * Chutes `-tee`, and date pins (`-20250929`, `-2024-08-06`, `-0731`). findKnownModel removes them one at a time,
+ * and only while the id is still unknown, so a real catalog id that ends the same way (`command-r`,
+ * `gpt-5.1-codex-max`, `grok-4-0709`) always matches as it is.
+ */
+const PROXY_MODEL_SUFFIX_RE =
+  /-(?:thinking(?:-\d+)?|think|nothinking|nothink|no-thinking|non-thinking|none|minimal|low|medium|high|xhigh|max|search|r|tee|\d{4}-\d{2}-\d{2}|\d{8}|\d{4})$/u;
+
+/**
+ * The catalog form of a proxy or gateway id: no tags or modifiers, no namespace path (OpenRouter, Bifrost and
+ * LiteLLM `vendor/…`, Chutes `deepseek-ai/…`, CLIProxyAPI `provider://…`), no `:variant` (OpenRouter `:free`, NanoGPT
+ * `:thinking`), no Bedrock wrapper (`us.anthropic.…-v1:0`), Vertex date pins as Anthropic's (`@20250805` is
+ * `-20250805`), and hyphenated Claude versions (Poe and OpenRouter `claude-opus-4.6`).
+ */
+function catalogModelId(modelId: string): string {
+  return (
+    capabilityModelId(modelId.trim().replace(/@(\d{8})$/u, "-$1"))
+      .split("/")
+      .pop() ?? ""
+  )
+    .split(":", 1)[0]!
+    .replace(/^(?:[a-z]+\.)?anthropic\.(claude-.+)-v\d+$/u, "$1")
+    .replace(/^(claude-(?:opus|sonnet|haiku|fable|mythos)-\d+)\.(\d+)/u, "$1-$2");
+}
+
+/**
+ * Look up a known model by ID across all providers. A proxy id resolves to the catalog model it serves:
+ * `[次]claude-opus-4-6-thinking` is `claude-opus-4-6`.
  */
 export function findKnownModel(provider: APIProvider, modelId: string): KnownModel | undefined {
   const exact = MODEL_LISTS[provider]?.find((model) => model.id === modelId);
-  if (exact || (provider !== "openrouter" && provider !== "nanogpt" && provider !== "custom")) return exact;
+  if (exact) return exact;
 
   // Aggregators namespace model IDs (for example, `deepseek/deepseek-v4-pro`)
   // while direct OAI-compatible endpoints generally do not. Resolve both
   // forms without exposing a large, stale static list in their model pickers.
-  const normalizedId = modelId.trim().toLowerCase();
-  const unqualifiedId = normalizedId.split("/").pop()?.split(":", 1)[0] ?? normalizedId;
-  return OPENAI_COMPATIBLE_AGGREGATOR_MODELS.find((model) => model.id.toLowerCase() === unqualifiedId);
+  const catalog =
+    provider === "openrouter" || provider === "nanogpt" || provider === "custom"
+      ? OPENAI_COMPATIBLE_AGGREGATOR_MODELS
+      : MODEL_LISTS[provider];
+  if (!catalog?.length) return undefined;
+  let id = catalogModelId(modelId);
+  // At most 4 suffix passes: a crafted imported id must not loop once per character.
+  for (let pass = 0; ; pass++) {
+    const known = catalog.find((model) => model.id.toLowerCase() === id);
+    const shorter = id.replace(PROXY_MODEL_SUFFIX_RE, "");
+    if (known || shorter === id || pass === 4) return known;
+    id = shorter;
+  }
 }
 
 function normalizeProviderForCatalog(provider: APIProvider | string): APIProvider | null {

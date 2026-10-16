@@ -1,7 +1,7 @@
 // ──────────────────────────────────────────────
 // Grouped multi-speaker message layout (merged group chat / Name: text format)
 // ──────────────────────────────────────────────
-import { Fragment, type RefObject } from "react";
+import { Fragment, type ReactNode, type RefObject } from "react";
 import { normalizeTextForMatch } from "@marinara-engine/shared";
 import { cn, getAvatarCropStyle } from "../../lib/utils";
 import {
@@ -16,6 +16,7 @@ import {
   type MessageRenderContext,
 } from "./ConversationMessageShared";
 import { ConversationMessageActions } from "./ConversationMessageActions";
+import { MessageMarkIndicators } from "./MessageMarks";
 import { MessageReactions } from "./MessageReactions";
 import { ReactionAddButton } from "./ReactionAddButton";
 import {
@@ -28,9 +29,11 @@ import { useTranslation as useUiTranslation } from "react-i18next";
 export function ConversationMessageGrouped({
   ctx,
   msgRef,
+  reactionRow,
 }: {
   ctx: MessageRenderContext;
   msgRef: RefObject<HTMLDivElement | null>;
+  reactionRow?: ReactNode;
 }) {
   const { t: localizeUi } = useUiTranslation();
   const {
@@ -60,9 +63,6 @@ export function ConversationMessageGrouped({
     hideTimestamp,
     showMessageNumbers,
     messageIndex,
-    hasSwipes,
-    swipeCount,
-    onSetActiveSwipe,
     renderedContent,
     onImageOpen,
     onRemoveAttachment,
@@ -119,14 +119,13 @@ export function ConversationMessageGrouped({
   };
   const hasTranslationContent = Boolean(translatedText || isTranslating);
   const hasAttachmentContent = (extra.attachments?.length ?? 0) > 0 && !IMAGE_URL_RE.test(renderedContent.trim());
-  const hasSwipeContent = !hideActions && (hasSwipes || Boolean(canRegenerate && onRegenerate));
-  const hasTrailingContent =
-    isStreaming || (!isHiddenCollapsed && (hasTranslationContent || hasAttachmentContent || hasSwipeContent));
+  const hasTrailingContent = isStreaming || (!isHiddenCollapsed && (hasTranslationContent || hasAttachmentContent));
 
   return (
     <div
       ref={msgRef}
       data-component="ConversationMessage.Grouped"
+      tabIndex={0}
       data-message-id={message.id}
       data-message-role={message.role}
       className={cn(
@@ -226,7 +225,7 @@ export function ConversationMessageGrouped({
               <div
                 key={i}
                 {...cardCssProps}
-                className="pl-14 py-0.5 text-[0.875rem] leading-relaxed break-words whitespace-pre-wrap text-[var(--muted-foreground)] italic animate-[fadeSlideIn_0.4s_ease-out]"
+                className="mari-chat-style-text pl-14 py-0.5 text-[0.875rem] leading-relaxed break-words whitespace-pre-wrap text-[var(--muted-foreground)] italic animate-[fadeSlideIn_0.4s_ease-out]"
                 style={messageTextStyle}
               >
                 <MessageContent
@@ -279,7 +278,7 @@ export function ConversationMessageGrouped({
                         {segAddButton}
                       </div>
                       <div
-                        className="mari-message-bubble texting-bubble texting-bubble-other rounded-2xl px-3.5 py-2 text-[0.9375rem] leading-relaxed break-words whitespace-pre-wrap shadow-sm"
+                        className="mari-message-bubble mari-chat-style-conversation texting-bubble texting-bubble-other rounded-2xl px-3.5 py-2 text-[0.9375rem] leading-relaxed break-words whitespace-pre-wrap shadow-sm"
                         style={messageTextStyle}
                       >
                         <MessageContent
@@ -357,7 +356,7 @@ export function ConversationMessageGrouped({
                       {segAddButton}
                     </div>
                     <div
-                      className="text-[0.9375rem] leading-relaxed break-words whitespace-pre-wrap"
+                      className="mari-chat-style-text text-[0.9375rem] leading-relaxed break-words whitespace-pre-wrap"
                       style={messageTextStyle}
                     >
                       <MessageContent
@@ -375,7 +374,7 @@ export function ConversationMessageGrouped({
                 {paragraphs.slice(1).map((para, pi) => (
                   <div
                     key={pi}
-                    className="pl-14 mt-0.5 text-[0.9375rem] leading-relaxed break-words whitespace-pre-wrap"
+                    className="mari-chat-style-text pl-14 mt-0.5 text-[0.9375rem] leading-relaxed break-words whitespace-pre-wrap"
                     style={messageTextStyle}
                   >
                     <MessageContent
@@ -396,11 +395,11 @@ export function ConversationMessageGrouped({
         })
       )}
 
-      {/* Trailing content (cursor, translation, attachments, swipes): kept in a
+      {/* Trailing content (cursor, translation, attachments): kept in a
           [data-card-css] wrapper so themes retain the reach they had when the
           attribute lived on the block root — but only rendered when it has
           content, so container-styling themes can't paint an empty box. The
-          action row stays OUTSIDE the wrapper because it is app chrome, like
+          control rows stay OUTSIDE the wrapper because they are app chrome, like
           the reaction chip rows. */}
       {hasTrailingContent && (
         <div {...cardCssProps}>
@@ -429,27 +428,21 @@ export function ConversationMessageGrouped({
                   onRemove={onRemoveAttachment}
                 />
               </div>
-
-              {!hideActions && (hasSwipes || (canRegenerate && onRegenerate)) && (
-                <div className="ml-14 mt-1.5">
-                  <ConversationMessageSwipes
-                    isUser={false}
-                    messageId={message.id}
-                    activeSwipeIndex={message.activeSwipeIndex}
-                    swipeCount={swipeCount}
-                    onSetActiveSwipe={(idx) => onSetActiveSwipe?.(message.id, idx)}
-                    onCreateNextSwipe={canRegenerate && onRegenerate ? () => onRegenerate(message.id) : undefined}
-                  />
-                </div>
-              )}
             </>
           )}
         </div>
       )}
 
+      <ConversationMessageSwipes ctx={ctx} />
+
+      <MessageMarkIndicators message={message} className="px-1" />
+      {reactionRow}
+
       {/* Action bar */}
       {(!hideActions || hasReasoning) && (
         <ConversationMessageActions
+          message={message}
+          name={ctx.displayName}
           isUser={false}
           showActions={showActions}
           forceShowActions={hideActions && hasReasoning ? true : forceShowActions}

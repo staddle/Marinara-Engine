@@ -1,5 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
+import { seedUIState } from "./ui-state-fixture";
 
 const appVersion = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version as string;
 test.use({ actionTimeout: 10_000 });
@@ -8,22 +9,14 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/api/app-settings/ui", (route) =>
     route.fulfill({ json: route.request().method() === "GET" ? { value: null } : { success: true } }),
   );
-  await page.addInitScript((version) => {
-    localStorage.setItem("marinara:whats-new:seen-version", version);
-    localStorage.setItem(
-      "marinara-engine-ui",
-      JSON.stringify({
-        state: {
-          hasCompletedOnboarding: true,
-          professorMariNavigationEnabled: false,
-          sidebarOpen: false,
-          rightPanelOpen: false,
-          chatHelpSeenModes: ["conversation", "roleplay", "game"],
-        },
-        version: 96,
-      }),
-    );
-  }, appVersion);
+  await page.addInitScript((version) => localStorage.setItem("marinara:whats-new:seen-version", version), appVersion);
+  // The shared seed also dismisses the one-time chat layout video (7f4e6ae98), which otherwise covers Chat Settings.
+  await seedUIState(page, {
+    hasCompletedOnboarding: true,
+    sidebarOpen: false,
+    rightPanelOpen: false,
+    chatHelpSeenModes: ["conversation", "roleplay", "game"],
+  });
 });
 
 async function openPreset(page: Page, id: string) {

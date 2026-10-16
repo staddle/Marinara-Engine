@@ -337,7 +337,9 @@ assert.ok(mariDbFlat.includes('column === "updatedAt" && change.table === "app_s
 // Echoed mismatch values are size-capped.
 assert.match(mariDbSource, /READ_BACK_VALUE_LIMIT = 300/u);
 
-const workspaceAgent = readSource("packages/server/src/services/professor-mari/workspace-agent.service.ts");
+const workspaceAgent =
+  readSource("packages/server/src/services/professor-mari/workspace-agent.service.ts") +
+  readSource("packages/server/src/services/professor-mari/workspace-commands.ts");
 const workspaceAgentFlat = flatten(workspaceAgent);
 // The sentinels are engine-written at position zero and only startsWith counts.
 assert.match(workspaceAgent, /export const READ_BACK_VERIFIED_SENTINEL = "Readback: store-verified";/u);

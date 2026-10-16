@@ -44,3 +44,22 @@ export function formatRelativeContact(isoTimestamp: string, now = Date.now()): s
 
   return format.format(-Math.floor(days / 365), "year");
 }
+
+/**
+ * "in 40m" / "in 2h" / "in 5d" for a future epoch-millisecond time, in the
+ * active UI language. Returns null once the time has passed.
+ */
+export function formatRelativeUntil(timestamp: number, now = Date.now()): string | null {
+  const diffMs = timestamp - now;
+  if (!Number.isFinite(diffMs) || diffMs <= 0) return null;
+
+  const format = formatterFor(i18n.resolvedLanguage ?? i18n.language ?? "en");
+  const minutes = Math.ceil(diffMs / 60_000);
+  if (minutes < 60) return format.format(minutes, "minute");
+
+  // Minutes round up, so 59m01s lands here; keep it from reading "in 0h".
+  const hours = Math.max(1, Math.floor(diffMs / 3_600_000));
+  if (hours < 24) return format.format(hours, "hour");
+
+  return format.format(Math.floor(diffMs / 86_400_000), "day");
+}

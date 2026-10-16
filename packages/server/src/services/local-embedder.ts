@@ -33,7 +33,7 @@ let loadingPromise: Promise<any> | null = null;
 let loadFailed = false;
 let nativeBindingChecked = false;
 
-function resolveOnnxRuntimeBindingPath(): string | null {
+export function resolveOnnxRuntimeBindingPath(): string | null {
   try {
     const packageJsonPath = require.resolve("onnxruntime-node/package.json");
     return join(dirname(packageJsonPath), "bin", "napi-v6", process.platform, process.arch, "onnxruntime_binding.node");

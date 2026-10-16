@@ -1,9 +1,18 @@
 import { FileJson, ImageDown, Layers, X } from "lucide-react";
 import { Modal } from "./Modal";
 import { cn } from "../../lib/utils";
+import { SETTINGS_BUTTON_CLASS } from "../panels/settings/SettingControls";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
 export type ExportFormatChoice = "native" | "compatible" | "compatible-png";
+
+/** Additional formats a caller can offer next to the standard ones. */
+export interface ExportFormatExtraOption {
+  id: string;
+  label: string;
+  icon: typeof Layers;
+  description: string;
+}
 
 interface ExportFormatDialogProps {
   open: boolean;
@@ -13,8 +22,10 @@ interface ExportFormatDialogProps {
   compatibleDescription?: string;
   pngDescription?: string;
   showPngOption?: boolean;
+  extraOptions?: ExportFormatExtraOption[];
   onClose: () => void;
   onSelect: (format: ExportFormatChoice) => void;
+  onSelectExtra?: (id: string) => void;
 }
 
 export function ExportFormatDialog({
@@ -25,12 +36,14 @@ export function ExportFormatDialog({
   compatibleDescription = "Uses folderless, platform-friendly JSON where possible for tools like SillyTavern and Chub.",
   pngDescription = "Chara Card V2 PNG with the avatar baked in — works in SillyTavern, Chub, and Risu.",
   showPngOption = false,
+  extraOptions = [],
   onClose,
   onSelect,
+  onSelectExtra,
 }: ExportFormatDialogProps) {
   const { t: localizeUi } = useUiTranslation();
   const options: Array<{
-    id: ExportFormatChoice;
+    id: ExportFormatChoice | string;
     label: string;
     icon: typeof Layers;
     description: string;
@@ -40,7 +53,9 @@ export function ExportFormatDialog({
     ...(showPngOption
       ? [{ id: "compatible-png" as const, label: "Compatible PNG Card", icon: ImageDown, description: pngDescription }]
       : []),
+    ...extraOptions,
   ];
+  const extraIds = new Set(extraOptions.map((option) => option.id));
   const gridColumns = options.length === 3 ? "sm:grid-cols-3" : "sm:grid-cols-2";
 
   return (
@@ -54,7 +69,9 @@ export function ExportFormatDialog({
               <button
                 key={option.id}
                 type="button"
-                onClick={() => onSelect(option.id)}
+                onClick={() =>
+                  extraIds.has(option.id) ? onSelectExtra?.(option.id) : onSelect(option.id as ExportFormatChoice)
+                }
                 className={cn(
                   "group flex min-h-[8.5rem] flex-col items-start gap-3 rounded-xl border border-[var(--border)] bg-[var(--secondary)]/55 p-4 text-left transition-all",
                   "hover:border-[var(--primary)]/45 hover:bg-[var(--accent)] focus:outline-none focus:ring-2 focus:ring-[var(--primary)]/35",
@@ -74,12 +91,8 @@ export function ExportFormatDialog({
           })}
         </div>
         <div className="flex justify-end">
-          <button
-            type="button"
-            onClick={onClose}
-            className="inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-medium text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
-          >
-            <X size="0.875rem" />
+          <button type="button" onClick={onClose} className={SETTINGS_BUTTON_CLASS}>
+            <X size="0.75rem" />
             {localizeUi("chat.delete.dialog.cancel")}
           </button>
         </div>

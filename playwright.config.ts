@@ -25,6 +25,12 @@ const serverPort = parsePort("PLAYWRIGHT_SERVER_PORT", 7971);
 const mobileClientPort = parsePort("PLAYWRIGHT_MOBILE_CLIENT_PORT", 5179);
 const mobileServerPort = parsePort("PLAYWRIGHT_MOBILE_SERVER_PORT", 7972);
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${clientPort}`;
+// Chromium with its audio output off (a Chromium-only switch, so never on WebKit). Opening an audio
+// device for the first AudioContext, such as the generation-complete sound, can block a headless
+// page's main thread for many seconds on a Linux audio stack; toasts, timers and Playwright's own
+// checks all stall with it, and a toast can be gone before it is checked. Audio still plays, to a
+// device nobody hears.
+const chromiumLaunchOptions = { args: ["--disable-audio-output"] };
 const mobileBaseURL = process.env.PLAYWRIGHT_MOBILE_BASE_URL ?? `http://127.0.0.1:${mobileClientPort}`;
 
 export default defineConfig({
@@ -63,6 +69,8 @@ export default defineConfig({
             LOG_DISABLE_REQUEST_LOGGING: "true",
             LOG_LEVEL: "silent",
             MARINARA_E2E_DISABLE_RATE_LIMIT: "true",
+            // The world, town and map specs make Overworld games, which are locked by default.
+            MARINARA_OVERWORLD_GAMES: "true",
             PLAYWRIGHT_CLIENT_PORT: String(clientPort),
             PLAYWRIGHT_MOBILE_CLIENT_PORT: String(mobileClientPort),
             PLAYWRIGHT_MOBILE_SERVER_PORT: String(mobileServerPort),
@@ -78,11 +86,21 @@ export default defineConfig({
   projects: [
     {
       name: "desktop-chromium",
-      use: { ...devices["Desktop Chrome"], baseURL, viewport: { width: 1440, height: 900 } },
+      use: {
+        ...devices["Desktop Chrome"],
+        baseURL,
+        viewport: { width: 1440, height: 900 },
+        launchOptions: chromiumLaunchOptions,
+      },
     },
     {
       name: "mobile-chromium",
-      use: { ...devices["Pixel 7"], baseURL: mobileBaseURL, viewport: { width: 390, height: 844 } },
+      use: {
+        ...devices["Pixel 7"],
+        baseURL: mobileBaseURL,
+        viewport: { width: 390, height: 844 },
+        launchOptions: chromiumLaunchOptions,
+      },
     },
     {
       name: "mobile-webkit",

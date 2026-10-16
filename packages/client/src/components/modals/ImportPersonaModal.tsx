@@ -2,11 +2,13 @@
 // Modal: Import Persona (JSON / Marinara export)
 // ──────────────────────────────────────────────
 import { useState, useRef } from "react";
+import { createDecisionImportTracker } from "../../lib/decision-import-notice";
 import { Modal } from "../ui/Modal";
 import { Download, FileJson, CheckCircle, XCircle, Loader2 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { characterKeys } from "../../hooks/use-characters";
 import { api, formatFirstApiValidationIssue } from "../../lib/api-client";
+import { isOversizedMarinaraJson } from "../../lib/character-import";
 import { useTranslation as useUiTranslation } from "react-i18next";
 
 interface Props {
@@ -34,22 +36,28 @@ export function ImportPersonaModal({ open, onClose }: Props) {
     setResults([]);
 
     const nextResults: Array<{ filename: string; success: boolean; message: string }> = [];
+
+    const decisionImports = createDecisionImportTracker();
     for (const file of files) {
       try {
         // Marinara native packages are .marinara files (zip with data.json +
         // avatar binary). Detect via the zip signature so a renamed file
-        // still works.
-        if (await isZipFile(file)) {
+        // still works. A native .marinara.json too large for a JSON request
+        // is uploaded the same way.
+        if ((await isZipFile(file)) || (await isOversizedMarinaraJson(file))) {
           const form = new FormData();
           form.append("file", file, file.name);
           form.append(
             "timestampOverrides",
             JSON.stringify({ createdAt: file.lastModified, updatedAt: file.lastModified }),
           );
-          const data = await api.upload<{ success: boolean; name?: string; error?: string }>(
-            "/import/marinara-package",
-            form,
-          );
+          const data = await api.upload<{
+            success: boolean;
+            name?: string;
+            error?: string;
+            usesDecisions?: boolean;
+          }>("/import/marinara-package", form);
+          decisionImports.mark(file.name, data.usesDecisions);
           nextResults.push({
             filename: file.name,
             success: data.success,
@@ -60,6 +68,7 @@ export function ImportPersonaModal({ open, onClose }: Props) {
 
         const text = await file.text();
         const json = JSON.parse(text) as Record<string, unknown>;
+        decisionImports.note(file.name, json);
 
         const isMarinaraEnvelope =
           json.version === 1 && typeof json.type === "string" && (json.type as string).startsWith("marinara_");
@@ -102,6 +111,7 @@ export function ImportPersonaModal({ open, onClose }: Props) {
     }
 
     setResults(nextResults);
+    decisionImports.notify(nextResults, localizeUi);
     setStatus("done");
     if (nextResults.some((result) => result.success)) {
       qc.invalidateQueries({ queryKey: characterKeys.personas });

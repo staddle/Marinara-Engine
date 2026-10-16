@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
+  extractCharacterCardCastMembers,
   ANIME_GAME_PROMPT_TEMPLATE_ID,
   ANIME_GAME_SYSTEM_PROMPT,
   ANIME_GAME_VIDEO_PROMPT_TEMPLATE_ID,
@@ -11,12 +12,15 @@ import {
   applyTrackerFieldLocksToGameStatePatch,
   roleplayInventoryTrackerLockKey,
   characterTrackerLockKey,
+  worldCustomFieldTrackerLockKey,
   applyRegexReplacement,
   buildNarratorInstructionMessage,
   compileChatSummaryEntries,
   compileImagePrompt,
   createRegexScriptSchema,
   createDefaultImageStyleProfileSettings,
+  removeCopiedPromptGuidance,
+  resolveImageStyleGuidanceText,
   characterTrackerCustomFieldDefaultsToRecord,
   getDefaultBuiltInAgentSettings,
   mergeBuiltInAgentSettings,
@@ -25,6 +29,7 @@ import {
   isPatternSafe,
   normalizeChatSummaryEntries,
   normalizeChatSummaryPromptSettings,
+  normalizeSemanticSummaryRetrievalSettings,
   normalizeStoryboardAgentSettings,
   LONG_TERM_MEMORY_CHAT_SUMMARY_PROMPT_ID,
   DEFAULT_AGENT_TOOLS,
@@ -50,7 +55,6 @@ import {
   DEFAULT_CONVERSATION_PROMPT,
   getDefaultAgentPrompt,
   replaceBuiltInAgentDefinitions,
-  GAME_GM_BUILT_IN_PROMPT_TEMPLATES,
   GAME_VIDEO_BUILT_IN_PROMPT_TEMPLATES,
   GAME_VIDEO_PROMPT_TEMPLATE,
   STORYBOARD_OPTIMIZED_IMAGE_PROMPT_TEMPLATE_ID,
@@ -59,6 +63,7 @@ import {
   hasDeferredRelocationConditionals,
   normalizeGameStoryboardKeyframeCount,
   parseDeferredConditionalPayload,
+  attachConditionalLineBreaks,
   resolveDeferredCharacterMacros,
   resolveCharacterScopedMacros,
   selectConditionalPayloadBranch,
@@ -66,6 +71,7 @@ import {
   normalizeInventoryTrackerRows,
   normalizeInventoryTrackerPlayerStats,
   findInvalidInventoryTrackerRow,
+  nameToXmlTag,
 } from "../../packages/shared/src/index.js";
 import { replaceBuiltInAgentDefinitions as replaceBuiltInAgentDefinitionsDist } from "../../packages/shared/dist/index.js";
 import { buildInventoryTrackerEditPatch } from "../../packages/client/src/features/tracker-panel/lib/inventory-tracker-edit.js";
@@ -94,6 +100,33 @@ import {
   normalizeCyoaChoiceOutput,
   normalizeCyoaDialogueQuotes,
 } from "../../packages/server/src/services/agents/cyoa-choice-normalization.js";
+
+import {
+  appendNonLeadingSystemMessagesToLastUser,
+  appendReadableAttachmentsToContent,
+  applyTrackerCharacterCardIdentity,
+  canonicalizeGamePartySpeakerLabels,
+  buildGenerationGuideInstruction,
+  buildLockedInventoryTrackerPatch,
+  buildLockedPlayerStatsArrayPatch,
+  resolveTrackerGroupUpdate,
+  appendSeparateAgentInjectionMessage,
+  collectLatestTrackerCharacterHistory,
+  computeSummaryHideIds,
+  formatSeparateAgentInjection,
+  getMessageHiddenFromAICharacterIds,
+  injectIntoOutputFormatOrLastUser,
+  isMessageHiddenFromAIForCharacter,
+  preserveTrackerCharacterUiFields,
+  prefixGroupIndividualHistorySpeakers,
+  readPersonaSnapshotName,
+  resolveActivePersonaCandidate,
+  resolveRoleplaySummaryTail,
+  shouldEnableAgentsForGeneration,
+  shouldInjectIdentityFallback,
+  stripSpeakerTagsExceptLastAssistant,
+  type SimpleMessage,
+} from "../../packages/server/src/routes/generate/generate-route-utils.js";
 
 const personaA = {
   id: "noodle-account-a",
@@ -224,10 +257,7 @@ const REGRESSION_AGENT_IDS = [
 const regressionAgentDefinitions = REGRESSION_AGENT_IDS.map((id) => ({
   id,
   name: id === "html" ? "Immersive HTML" : id === "illustrator" ? "Illustrator" : id,
-  description:
-    id === "html"
-      ? "Post-processes the latest Roleplay response with diegetic HTML/CSS/JS visual artifacts without changing the story meaning."
-      : `Regression fixture for ${id}`,
+  description: id === "html" ? "Adds HTML/CSS/JS visual effects to AI messages." : `Regression fixture for ${id}`,
   phase: "post_processing" as const,
   enabledByDefault: false,
   category: "misc" as const,
@@ -285,9 +315,15 @@ import { applyRegexScriptsToPromptText } from "../../packages/server/src/service
 import { shouldSkipAgentByMessageInterval } from "../../packages/server/src/services/generation/agent-cadence.js";
 import {
   DIRECTOR_SECRET_PLOT_LAST_MESSAGE_KEY,
+  buildDirectorSecretPlotAgent,
   shouldRunDirectorSecretPlotMaintenance,
 } from "../../packages/server/src/services/generation/director-secret-plot-runtime.js";
-import { filterPromptMessagesForCharacterAudience } from "../../packages/server/src/services/generation/prompt-message-scope.js";
+import { NARRATIVE_DIRECTOR_SECRET_PLOT_PROMPT } from "../../packages/shared/src/constants/agent-prompts.js";
+import {
+  filterPromptHistoryByMessageIds,
+  filterPromptMessagesForCharacterAudience,
+  selectHistoryMessagesForRecall,
+} from "../../packages/server/src/services/generation/prompt-message-scope.js";
 import {
   mergeAdjacentMessages,
   squashLeadingSystemMessages,
@@ -429,6 +465,27 @@ assert.equal(
   false,
   "Narrative Director cadence should not invent a new message for continuations",
 );
+{
+  const director = { type: "director", promptTemplate: "direction prompt", settings: {} } as unknown as Parameters<
+    typeof buildDirectorSecretPlotAgent
+  >[0];
+  assert.equal(
+    buildDirectorSecretPlotAgent(director).promptTemplate,
+    NARRATIVE_DIRECTOR_SECRET_PLOT_PROMPT,
+    "Secret Plot should use the built-in prompt when the Director has no custom one",
+  );
+  assert.equal(
+    buildDirectorSecretPlotAgent({ ...director, settings: { secretPlotPromptTemplate: "  " } }).promptTemplate,
+    NARRATIVE_DIRECTOR_SECRET_PLOT_PROMPT,
+    "a blank custom Secret Plot prompt should fall back to the built-in one",
+  );
+  const custom = buildDirectorSecretPlotAgent({
+    ...director,
+    settings: { secretPlotPromptTemplate: "Keep the arc about the relationship." },
+  });
+  assert.equal(custom.promptTemplate, "Keep the arc about the relationship.");
+  assert.equal(custom.settings.resultType, "secret_plot");
+}
 assert.equal(
   formatAgentMainResponseForPrompt({
     mainResponse: "I tighten my gloves.",
@@ -645,7 +702,12 @@ import {
   resolveConversationMembershipHistoryEvent,
   selectConversationSummariesForPrompt,
 } from "../../packages/server/src/routes/generate/conversation-history-runtime.js";
-import { formatConversationGroupOutputFormat } from "../../packages/server/src/routes/generate/conversation-prompt-formatting.js";
+import {
+  formatConversationDateHistoryMessages,
+  formatConversationGroupOutputFormat,
+  formatSentSelfieNotes,
+} from "../../packages/server/src/routes/generate/conversation-prompt-formatting.js";
+import { captionSentSelfies } from "../../packages/server/src/services/generation/image-captioning-runtime.js";
 import {
   buildConversationCurrentContextBlock,
   replaceConversationContextBlockForTarget,
@@ -658,7 +720,6 @@ import {
   buildBackgroundProviderPrompt,
   buildNpcPortraitProviderPrompt,
   buildSceneIllustrationProviderPrompt,
-  chatBackgroundTags,
   safeGeneratedAssetSlug,
 } from "../../packages/server/src/services/game/game-asset-generation.js";
 import { MAPS_LOCATION_ARTWORK } from "../../packages/server/src/services/prompt-overrides/registry/game-assets.js";
@@ -682,7 +743,10 @@ import {
   resolveLorebookTokenBudget,
 } from "../../packages/server/src/services/generation/lorebook-generation-runtime.js";
 import { createAgentLorebookTriggerResolver } from "../../packages/server/src/services/generation/agent-lorebook-triggers.js";
+import { readImageAppearanceOverride } from "../../packages/shared/src/utils/image-appearance.js";
 import {
+  addChatPersonaIllustrationAssets,
+  addPersonaIllustrationAssets,
   buildGameIllustratorAppearanceContextBlock,
   buildDynamicGameImagePromptMessages,
   buildIllustrationNarrationSummaryMessages,
@@ -717,7 +781,9 @@ import {
 import {
   buildRuntimeAgentSectionEligibleTypesForTest,
   clearUnusedRuntimeAgentSectionsForTest,
+  formatAgentInjections,
   makeRuntimeAgentSectionTokens,
+  pruneEmptyPromptWrappers,
   splitRuntimeHandledAgentInjectionsForTest,
 } from "../../packages/server/src/services/generation/runtime-agent-sections.js";
 import {
@@ -727,35 +793,13 @@ import {
   TEXT_REWRITE_PENDING_MESSAGE,
 } from "../../packages/server/src/services/generation/prose-guardian-settings.js";
 import type { DB } from "../../packages/server/src/db/connection.js";
-import { passThroughLeaf } from "../../packages/server/src/services/prompt/prompt-escaping.js";
+import { passThroughLeaf, sanitizePromptLeaf } from "../../packages/server/src/services/prompt/prompt-escaping.js";
+import { wrapContent } from "../../packages/server/src/services/prompt/format-engine.js";
 import {
   escapeStandaloneGameNarrationAngleLines,
   hasVisibleGameNarrationText,
 } from "../../packages/client/src/lib/game-tag-parser.js";
-import {
-  appendNonLeadingSystemMessagesToLastUser,
-  appendReadableAttachmentsToContent,
-  applyTrackerCharacterCardIdentity,
-  canonicalizeGamePartySpeakerLabels,
-  buildGenerationGuideInstruction,
-  buildLockedInventoryTrackerPatch,
-  appendSeparateAgentInjectionMessage,
-  collectLatestTrackerCharacterHistory,
-  computeSummaryHideIds,
-  formatSeparateAgentInjection,
-  getMessageHiddenFromAICharacterIds,
-  injectIntoOutputFormatOrLastUser,
-  isMessageHiddenFromAIForCharacter,
-  preserveTrackerCharacterUiFields,
-  prefixGroupIndividualHistorySpeakers,
-  readPersonaSnapshotName,
-  resolveActivePersonaCandidate,
-  resolveRoleplaySummaryTail,
-  shouldEnableAgentsForGeneration,
-  shouldInjectIdentityFallback,
-  stripSpeakerTagsExceptLastAssistant,
-  type SimpleMessage,
-} from "../../packages/server/src/routes/generate/generate-route-utils.js";
+
 import {
   appendContinuationMessageContent,
   CONTINUE_ASSISTANT_MESSAGE_DIRECT_PROMPT,
@@ -791,9 +835,16 @@ import {
 } from "../../packages/server/src/services/professor-mari/workspace-agent.service.js";
 import { fitMessagesForModelAccess } from "../../packages/server/src/services/generation/model-access-policy.js";
 import {
+  resolveAdvancedMemoryPrompt,
+  describeAdvancedMemoryPlacements,
+  createAdvancedMemoryPlacement,
+  type AdvancedMemoryPromptParts,
+} from "../../packages/server/src/services/prompt/advanced-memory-prompt.js";
+import {
   assemblePrompt,
   appendFallbackChatSummaryToSystemPrompt,
   resolveChoiceVariableValue,
+  resolveMacrosForPreview,
   resolvePromptMessageMacros,
   scopePromptMacroContextToCharacter,
   type AssemblerInput,
@@ -834,7 +885,10 @@ import {
   extractDialogueUtterances,
   resolveTTSVoiceForSpeaker,
 } from "../../packages/client/src/lib/tts-dialogue.js";
-import { resolveCharacterAdvancedPromptIds } from "../../packages/server/src/services/prompt/macro-context.js";
+import {
+  resolveCharacterAdvancedPromptIds,
+  resolveChatSummaryMacros,
+} from "../../packages/server/src/services/prompt/macro-context.js";
 import {
   illustratorPromptRequestsRenderedText,
   illustratorPromptTemplateOwnsComposition,
@@ -940,6 +994,7 @@ function promptSection(
     injectionDepth: 0,
     injectionOrder: 0,
     forbidOverrides: "false",
+    skipWrap: "false",
     ...overrides,
   };
 }
@@ -1207,7 +1262,12 @@ const cases: RegressionCase[] = [
         "utf8",
       );
       assert.match(generateRouteSource, /shouldSuppressIllustratorForegroundForStoryboard\(\{/u);
-      assert.match(generateRouteSource, /if \(automaticBackgroundsEnabled && illustratorBackgroundAgent\)/u);
+      // Explicit image commands request foreground art; automatic backgrounds
+      // retain their independent setting when Storyboard owns foreground art.
+      assert.match(
+        generateRouteSource,
+        /if \(!commandTarget && automaticBackgroundsEnabled && illustratorBackgroundAgent\)/u,
+      );
       assert.match(generateRouteSource, /if \(!storyboardSuppressesForeground && shouldGenerate && imagePrompt\)/u);
     },
   },
@@ -1453,6 +1513,10 @@ const cases: RegressionCase[] = [
         "The experimentcontinues.",
       );
       assert.equal(appendContinuationMessageContent("The experiment", "continues."), "The experiment\n\ncontinues.");
+      assert.equal(
+        appendContinuationMessageContent("  The experiment \r\n", "\n continues.\t"),
+        "  The experiment\n\ncontinues.\t",
+      );
       assert.match(CONTINUE_ASSISTANT_MESSAGE_DIRECT_PROMPT, /appended directly/i);
       assert.match(CONTINUE_ASSISTANT_MESSAGE_DIRECT_PROMPT, /no newline or separator/i);
     },
@@ -1763,6 +1827,26 @@ const cases: RegressionCase[] = [
         ],
       );
 
+      // Reassigned persona snapshot name reflects immediately into historical speaker prefixing
+      const reassignedPersonaName = readPersonaSnapshotName({
+        personaSnapshot: { personaId: "new-identity", name: "Reassigned Hero" },
+      });
+      const updatedMessages = prefixGroupIndividualHistorySpeakers(
+        [
+          {
+            role: "user" as const,
+            content: "A decree from the old Persona.",
+            personaSnapshotName: reassignedPersonaName,
+          },
+          { role: "assistant" as const, content: "An answer.", characterId: "dottore" },
+        ],
+        {
+          personaName: "Mari",
+          characterNamesById: new Map([["dottore", "Dottore"]]),
+        },
+      );
+      assert.equal(updatedMessages[0]?.content, "Reassigned Hero: A decree from the old Persona.");
+
       const generateRouteSource = readFileSync(
         new URL("../../packages/server/src/routes/generate.routes.ts", import.meta.url),
         "utf8",
@@ -1780,7 +1864,7 @@ const cases: RegressionCase[] = [
       }
       assert.match(
         generateRouteSource,
-        /usesIndividualGroupGeneration && requestedNarrativeDirectorMode && directorAgent[\s\S]{0,700}appendSeparateAgentInjectionMessage\([\s\S]{0,400}requestedNarrativeDirectorMode === "random"/u,
+        /chatMode === "roleplay" && requestedNarrativeDirectorMode && directorAgent[\s\S]{0,700}appendSeparateAgentInjectionMessage\([\s\S]{0,400}requestedNarrativeDirectorMode === "random"/u,
         "individual group prompts should retain the armed Narrative Director instruction at the responder boundary",
       );
     },
@@ -2984,6 +3068,53 @@ const cases: RegressionCase[] = [
         "another chat must not inherit local variables",
       );
 
+      // Chat variables: a name defined in Chat Settings, or set by an earlier
+      // message, resolves as a bare tag in the user's own typed message.
+      const typedMessageVariables: Record<string, string> = { char1: "Mary" };
+      const typedMessageContext = {
+        user: "Mari",
+        char: "Dottore",
+        characters: ["Dottore"],
+        variables: {},
+        localVariables: typedMessageVariables,
+      };
+      const resolvedTypedMessages = resolvePromptMessageMacros(
+        [
+          { id: "m1", role: "user" as const, content: "{{setvar::mood::tense}}{{char1}} walks in." },
+          { id: "m2", role: "user" as const, content: "{{char1}} looks {{getvar::mood}}." },
+        ],
+        typedMessageContext,
+      );
+      assert.equal(resolvedTypedMessages[0]!.content, "Mary walks in.");
+      assert.equal(
+        resolvedTypedMessages[1]!.content,
+        "Mary looks tense.",
+        "a value set in one message must reach a later one through the shared chat map",
+      );
+      assert.equal(typedMessageVariables.mood, "tense", "history writes must reach the persisted map");
+      assert.equal(
+        resolvePromptMessageMacros([{ id: "m3", role: "user" as const, content: "{{char1}}" }], {
+          ...typedMessageContext,
+          localVariables: {},
+        })[0]!.content,
+        "{{char1}}",
+        "another chat keeps the tag literal",
+      );
+
+      // Peek Prompt must never persist what a preview resolved.
+      const previewVariables: Record<string, string> = { char1: "Mary" };
+      assert.equal(
+        resolveMacrosForPreview("{{setvar::char1::Anna}}{{char1}}", {
+          user: "Mari",
+          char: "Dottore",
+          characters: ["Dottore"],
+          variables: {},
+          localVariables: previewVariables,
+        }),
+        "Anna",
+      );
+      assert.deepEqual(previewVariables, { char1: "Mary" }, "a preview must not write the chat's variables");
+
       const conditionalVariables = { score: "10" };
       resolveMacros("{{#if addnumvar::score::5}}unchanged{{/if}}", {
         user: "Mari",
@@ -3295,6 +3426,18 @@ const cases: RegressionCase[] = [
       });
 
       assert.equal(result.length <= 16, true);
+
+      const budget = { expansions: 0, exceeded: false };
+      const truncated = resolveMacros(
+        "{{user}}",
+        { ...context, user: "x".repeat(32) },
+        {
+          maxMacroOutputLength: 16,
+          macroBudget: budget,
+        },
+      );
+      assert.equal(truncated, "x".repeat(16));
+      assert.equal(budget.exceeded, true, "Callers must be able to refuse silently truncated macro output");
     },
   },
   {
@@ -3902,7 +4045,7 @@ const cases: RegressionCase[] = [
       );
       assert.match(chatsRouteSource, /const customPrompt = resolveGameGmPromptTemplate\(chatMeta, setupConfig\);/u);
       assert.match(editorSource, /StoryboardAgentSettingsPanel/u);
-      assert.match(editorSource, /\{!isStoryboardAgent && \(\s*<FieldGroup[\s\S]*?agentBudget/u);
+      assert.match(editorSource, /\{!isStoryboardAgent && !isAvatarAgent && \(\s*<FieldGroup[\s\S]*?agentBudget/u);
       assert.doesNotMatch(
         editorSource,
         /\.\.\.\(localContextSize !== "" \? \{ contextSize: Number\(localContextSize\) \} : \{\}\)/u,
@@ -4019,7 +4162,7 @@ const cases: RegressionCase[] = [
       assert.doesNotMatch(editorSource, /StoryboardAdvancedPromptLibrary|storyboardPromptLibraryOpen/u);
       assert.match(
         editorSource,
-        /\{!isStoryboardAgent \? \(\s*<FieldGroup\s*label=\{localizeUi\("ui\.agents\.agenteditor\.promptTemplate"\)\}/u,
+        /\{!isStoryboardAgent && !isAvatarAgent \? \(\s*<FieldGroup\s*label=\{localizeUi\("ui\.agents\.agenteditor\.promptTemplate"\)\}/u,
         "Storyboard should not render a second global prompt library below its numbered stages",
       );
       assert.match(editorSource, /onPlannerPromptChange=\{setLocalPrompt\}/u);
@@ -4630,6 +4773,195 @@ const cases: RegressionCase[] = [
     },
   },
   {
+    name: "Auto style guidance never reaches the final image prompt as text (#7318)",
+    async run() {
+      const styleProfiles = createDefaultImageStyleProfileSettings();
+      const autoInstruction = /Infer a consistent visual style/iu;
+      const prompt = "1girl, solo, silver hair, red eyes, black coat, rain, night city street";
+      for (const kind of ["avatar", "illustration", "background", "selfie"] as const) {
+        const compiled = compileImagePrompt({ kind, prompt, styleProfiles, styleProfileId: "auto" });
+        assert.doesNotMatch(compiled.prompt, autoInstruction, `${kind}: ${compiled.prompt}`);
+        assert.match(compiled.prompt, /silver hair/u, `${kind} kept the source prompt: ${compiled.prompt}`);
+      }
+
+      const background = await buildBackgroundProviderPrompt({
+        chatId: "auto-style-background",
+        locationSlug: "rainy-street",
+        sceneDescription: "Rain-soaked neon street at night",
+        imgModel: "unused",
+        imgBaseUrl: "",
+        imgApiKey: "",
+        styleProfiles,
+        styleProfileId: "auto",
+      });
+      assert.doesNotMatch(background.prompt, autoInstruction, background.prompt);
+
+      // A real style profile's Style text is still applied when no prompt writer handled it.
+      const anime = compileImagePrompt({ kind: "illustration", prompt, styleProfiles, styleProfileId: "anime" });
+      assert.match(anime.prompt, /Anime illustration with clean character design/u, anime.prompt);
+
+      // Style text the user wrote into a clone of Auto (Clone keeps the auto base style) still applies.
+      const autoProfile = styleProfiles.profiles.find((profile) => profile.id === "auto")!;
+      const autoClone = {
+        ...autoProfile,
+        id: "auto-custom",
+        builtIn: false,
+        styleText: "watercolor, soft pastel palette",
+      };
+      const cloneProfiles = { ...styleProfiles, profiles: [...styleProfiles.profiles, autoClone] };
+      for (const kind of ["avatar", "illustration"] as const) {
+        const custom = compileImagePrompt({
+          kind,
+          prompt,
+          styleProfiles: cloneProfiles,
+          styleProfileId: "auto-custom",
+        });
+        assert.match(custom.prompt, /watercolor, soft pastel palette/u, `${kind}: ${custom.prompt}`);
+      }
+    },
+  },
+  {
+    name: "Image prompt writers follow Style text and Image Prompting Instructions without pasting them (#7357)",
+    run() {
+      const styleProfiles = createDefaultImageStyleProfileSettings();
+      const danbooruStyle = styleProfiles.profiles.find((profile) => profile.id === "danbooru")!.styleText;
+      const instructions = "Write everything in capital letters. Use comma-separated Danbooru tags only.";
+      const quotedStyle = /Danbooru-tagged anime generation/iu;
+
+      // An Illustrator writer told to carry the style into its JSON "style" field echoes the Style
+      // text there and in its prompt. The Engine cleans the writer's own output before it adds
+      // configured text, so none of the guidance reaches the image model, but a configured positive
+      // prompt that happens to repeat an instruction stays as the user wrote it.
+      const writerGuidance = [danbooruStyle, instructions];
+      const echoedStyle = danbooruStyle.replace(/\.$/u, "");
+      const writerStyle = removeCopiedPromptGuidance(`${echoedStyle}, cel shading`, writerGuidance);
+      const writerPrompt = removeCopiedPromptGuidance(
+        `${echoedStyle}, 1GIRL, SOLO, SILVER HAIR, RAIN\n${instructions}`,
+        writerGuidance,
+      );
+      assert.equal(writerStyle, "cel shading");
+      const configuredPositive = "Write everything in capital letters";
+      const written = compileImagePrompt({
+        kind: "illustration",
+        prompt: [writerStyle, writerPrompt, configuredPositive].filter(Boolean).join(", "),
+        generatedStyle: writerStyle,
+        styleProfiles,
+        styleProfileId: "danbooru",
+        omitProfileStyleText: true,
+      });
+      assert.doesNotMatch(written.prompt, quotedStyle, written.prompt);
+      assert.doesNotMatch(written.prompt, /comma-separated Danbooru tags only/iu, written.prompt);
+      assert.match(written.prompt, /1GIRL, SOLO, SILVER HAIR, RAIN/u, written.prompt);
+      assert.match(written.prompt, /Write everything in capital letters$/u, "configured text stays: " + written.prompt);
+      assert.match(written.prompt, /^masterpiece, best quality/u, "literal profile tags stay: " + written.prompt);
+
+      // Tag lists and tag phrases are words for the image model, so a writer that uses them keeps them.
+      const tagGuidance = "masterpiece, best quality, absurdres";
+      assert.equal(removeCopiedPromptGuidance(`${tagGuidance}, 1girl`, [tagGuidance]), `${tagGuidance}, 1girl`);
+      const tagPhrase = "cold lighting with deep shadows, film grain";
+      assert.equal(removeCopiedPromptGuidance(`1girl, ${tagPhrase}`, [tagPhrase]), `1girl, ${tagPhrase}`);
+      assert.equal(
+        removeCopiedPromptGuidance(
+          "1girl, solo\n\nWRITE EVERYTHING IN CAPITAL LETTERS\n\nMira's Appearance: red hair",
+          ["Write everything in capital letters."],
+        ),
+        "1girl, solo\n\nMira's Appearance: red hair",
+      );
+      // A writer that returned nothing but the guidance keeps its text, so the image still has a subject.
+      assert.equal(removeCopiedPromptGuidance(echoedStyle, [danbooruStyle]), echoedStyle);
+      // A JSON "style" that was only the copied Style text is dropped; the prompt keeps the subject.
+      assert.equal(removeCopiedPromptGuidance(echoedStyle, [danbooruStyle], { allowEmpty: true }), "");
+      // A sentence the user wrapped over two lines is still one sentence.
+      assert.equal(
+        removeCopiedPromptGuidance("1girl, Use moody lighting and show long shadows in rain., solo", [
+          "Use moody lighting\nand show long shadows in rain.",
+        ]),
+        "1girl, solo",
+      );
+
+      // Every writer path cleans its own output before configured text is added.
+      const routeSource = (path: string) =>
+        readFileSync(new URL(`../../packages/server/src/${path}`, import.meta.url), "utf8");
+      const generateRoute = routeSource("routes/generate.routes.ts");
+      assert.match(generateRoute, /const writerPrompt = removeCopiedPromptGuidance\(imagePrompt, writerGuidance\);/u);
+      assert.match(
+        generateRoute,
+        /let fullPrompt = writerStyle \? `\$\{writerStyle\}, \$\{writerPrompt\}` : writerPrompt;/u,
+      );
+      assert.equal(generateRoute.match(/generatedStyle: writerStyle,/gu)?.length, 2);
+      const retryRoute = routeSource("routes/generate/retry-agents-route.ts");
+      assert.match(
+        retryRoute,
+        /style: writerStyle,\s+imagePrompt: removeCopiedPromptGuidance\(imagePrompt, writerGuidance\),/u,
+      );
+      assert.equal(retryRoute.match(/generatedStyle: writerStyle,/gu)?.length, 2);
+      for (const selfiePath of [
+        "routes/gallery.routes.ts",
+        "services/generation/conversation-selfie-command-runtime.ts",
+      ]) {
+        assert.match(
+          routeSource(selfiePath),
+          /removeCopiedPromptGuidance\(\(promptResult\.content \?\? ""\)\.trim\(\), \[/u,
+        );
+      }
+      assert.match(
+        routeSource("services/generation/illustrator-background-generation.ts"),
+        /sceneDescription: removeCopiedPromptGuidance\(plan\.prompt, \[styleInstruction, imagePromptInstructions\]\)/u,
+      );
+
+      // Without a prompt writer, the profile's Style text still applies as written (#7318).
+      const unwritten = compileImagePrompt({
+        kind: "illustration",
+        prompt: "1girl, solo",
+        styleProfiles,
+        styleProfileId: "danbooru",
+      });
+      assert.match(unwritten.prompt, quotedStyle, unwritten.prompt);
+
+      // Style text a user writes into Auto or a copy of it is guidance for selfie writers too,
+      // instead of being dropped; the built-in Auto sentence is not.
+      const autoProfile = styleProfiles.profiles.find((profile) => profile.id === "auto")!;
+      const cloneProfiles = {
+        ...styleProfiles,
+        profiles: [
+          ...styleProfiles.profiles,
+          { ...autoProfile, id: "auto-custom", builtIn: false, styleText: "watercolor" },
+        ],
+      };
+      assert.equal(resolveImageStyleGuidanceText(cloneProfiles, "auto-custom"), "watercolor");
+      assert.equal(resolveImageStyleGuidanceText(cloneProfiles, "auto"), "");
+
+      // The manual Illustration writer gets the instructions next to its request, as the automatic
+      // Illustrator does, not above the character cards and chat history.
+      const manualMessages = buildManualIllustratorPromptMessages({
+        context: {
+          chatId: "manual-instructions",
+          chatMode: "roleplay",
+          recentMessages: [{ role: "assistant", content: "Mira steps into the rain." }],
+          mainResponse: "Mira steps into the rain.",
+          gameState: null,
+          characters: [],
+          persona: null,
+          memory: {},
+          writableLorebookIds: null,
+          chatSummary: null,
+        },
+        contextSize: 1,
+        styleInstruction: danbooruStyle,
+        imagePromptInstructions: instructions,
+      });
+      const manualRequest = manualMessages.at(-1)!;
+      assert.equal(manualRequest.role, "user");
+      assert.match(manualRequest.content, /<image_prompting_instructions>[\s\S]*capital letters/u);
+      assert.doesNotMatch(manualMessages[0]!.content, /capital letters/u);
+
+      // The scene background writer gets them too.
+      const backgroundSystemPrompt = buildIllustratorBackgroundPlanSystemPrompt(danbooruStyle, instructions);
+      assert.match(backgroundSystemPrompt, /<image_prompting_instructions>[\s\S]*capital letters/u);
+      assert.match(backgroundSystemPrompt, /Visual style instruction for the image prompt you write/u);
+    },
+  },
+  {
     name: "avatar portrait and sprite prompts honor a profile's natural-language grammar",
     run() {
       const styleProfiles = createDefaultImageStyleProfileSettings();
@@ -4858,6 +5190,111 @@ const cases: RegressionCase[] = [
     },
   },
   {
+    name: "A character's sent selfie reaches later prompt history, Illustrator images do not",
+    run() {
+      assert.equal(
+        formatSentSelfieNotes([
+          {
+            type: "image",
+            filename: "selfie_maukie_1.png",
+            prompt: "Maukie grins at the camera,\n  holding a coffee\n\nAppearance notes: auburn hair",
+          },
+          { type: "image", filename: "illustration_1.png", prompt: "A dark forest." },
+          { type: "image/png", filename: "selfie_upload.png", prompt: null },
+        ]),
+        "\n[Sent a selfie: Maukie grins at the camera, holding a coffee]",
+      );
+      assert.equal(formatSentSelfieNotes([{ type: "image", filename: "selfie_maukie_2.png" }]), "\n[Sent a selfie]");
+      // Merged group replies hold several speakers, so the note names who sent each selfie.
+      assert.equal(
+        formatSentSelfieNotes([
+          { type: "image", filename: "selfie_maukie_1.png", prompt: "A mirror selfie.", characterName: "Maukie" },
+          { type: "image", filename: "selfie_dottore_1.png", prompt: "A lab selfie.", characterName: "Dottore" },
+        ]),
+        "\n[Maukie sent a selfie: A mirror selfie.]\n[Dottore sent a selfie: A lab selfie.]",
+      );
+      assert.equal(formatSentSelfieNotes(undefined), "");
+      assert.equal(
+        formatSentSelfieNotes([
+          {
+            type: "image",
+            filename: "selfie_maukie_3.png",
+            prompt: "Prompt text.",
+            imageCaption: "Maukie  in a\nred scarf.",
+            characterName: "Maukie",
+          },
+        ]),
+        "\n[Maukie sent a selfie: Maukie in a red scarf.]",
+      );
+    },
+  },
+  {
+    name: "Selfie captions are made once, cached, and never stop the turn",
+    async run() {
+      const calls: string[] = [];
+      const runtime = {
+        enabled: true,
+        connectionId: "cap-conn",
+        connection: { id: "cap-conn", provider: "openai", model: "vision-1" },
+        provider: {
+          chatComplete: async () => {
+            calls.push("caption");
+            return { content: "A smiling selfie." };
+          },
+        },
+        prompt: null,
+      } as any;
+      const readImageDataUrl = async () => "data:image/png;base64,AAAA";
+      const signal = new AbortController().signal;
+      const attachments = [
+        { type: "image", filename: "selfie_maukie_1.png", galleryId: "g1", prompt: "A selfie." },
+        { type: "image", filename: "illustration_1.png", galleryId: "g2" },
+      ];
+
+      const captioned = await captionSentSelfies({ attachments, imageCaptioning: runtime, readImageDataUrl, signal });
+      assert.ok(Array.isArray(captioned));
+      assert.equal(captioned[0]!.imageCaption, "A smiling selfie.");
+      assert.equal(captioned[0]!.imageCaptionConnectionId, "cap-conn");
+      assert.equal(captioned[1]!.imageCaption, undefined);
+      assert.equal(calls.length, 1);
+
+      assert.equal(
+        await captionSentSelfies({ attachments: captioned, imageCaptioning: runtime, readImageDataUrl, signal }),
+        null,
+      );
+      assert.equal(calls.length, 1);
+
+      const failingRuntime = {
+        ...runtime,
+        provider: {
+          chatComplete: async () => {
+            throw new Error("vision model down");
+          },
+        },
+      };
+      assert.equal(
+        await captionSentSelfies({ attachments, imageCaptioning: failingRuntime, readImageDataUrl, signal }),
+        null,
+      );
+
+      const disabledReads: string[] = [];
+      const disabledRuntime = { ...runtime, enabled: false };
+      assert.equal(
+        await captionSentSelfies({
+          attachments,
+          imageCaptioning: disabledRuntime,
+          readImageDataUrl: async () => {
+            disabledReads.push("read");
+            return null;
+          },
+          signal,
+        }),
+        null,
+      );
+      assert.equal(disabledReads.length, 0);
+    },
+  },
+  {
     name: "Storyboard appearance always reaches the planner and is injected once into render prompts",
     async run() {
       const appearance = "auburn hair, green eyes, leather jacket";
@@ -4913,6 +5350,122 @@ const cases: RegressionCase[] = [
       assert.match(appearanceContextBlock, /^<character_appearance_context>/u);
       assert.match(appearanceContextBlock, new RegExp(appearance, "u"));
       assert.doesNotMatch(appearanceContextBlock, new RegExp(description, "u"));
+
+      // #7053: a persona with the image override enabled must contribute its
+      // override text to the Game illustration appearance context, exactly like a
+      // character. The /game/generate-assets illustration path previously loaded
+      // only character rows, so the persona produced no line at all — with or
+      // without an override.
+      const personaOverrideTags = "1boy, caucasian, tall male, muscular, black hair, green eyes";
+      const personaProse = "Lean-muscular build with a velvety voice and forest-toned wardrobe.";
+      const personaOverrideLine = readImageAppearanceOverride(
+        { imageAppearanceEnabled: true, imageAppearance: personaOverrideTags },
+        personaProse,
+      );
+      assert.equal(personaOverrideLine, personaOverrideTags, "the persona override wins for the game context");
+      const personaContextBlock = buildGameIllustratorAppearanceContextBlock([
+        `Fel Lockheart's Appearance: ${personaOverrideLine}`,
+        `Jessica's Appearance: ${appearance}`,
+      ]);
+      assert.match(personaContextBlock, /Fel Lockheart's Appearance: 1boy, caucasian/u);
+      assert.doesNotMatch(personaContextBlock, /velvety voice/u, "persona prose must not reach the game context");
+
+      // The helper call above would still pass if the route stopped loading the
+      // persona, which is the actual defect. Exercise the shared loader the Game
+      // illustration routes call, so removing that wiring fails this regression.
+      const gamePersonaGallery = { kind: "persona-gallery" } as never;
+      const gamePersonaMaps = () => ({
+        charReferenceByName: new Map<string, string>(),
+        charReferenceSourceByName: new Map<string, string>(),
+        charAvatarByName: new Map<string, string>(),
+        charDescriptionByName: new Map<string, string>(),
+      });
+      const enabledPersonaRow = {
+        id: "persona-fel",
+        name: "Fel Lockheart",
+        appearance: personaProse,
+        imageAppearanceEnabled: "true",
+        imageAppearance: personaOverrideTags,
+      };
+      const disabledPersonaRow = { ...enabledPersonaRow, imageAppearanceEnabled: "false" };
+
+      const enabledMaps = gamePersonaMaps();
+      const enabledName = await addChatPersonaIllustrationAssets({
+        maps: enabledMaps,
+        characters: { getPersona: async () => enabledPersonaRow } as never,
+        personaGallery: gamePersonaGallery,
+        chat: { personaId: "persona-fel" },
+        setupConfig: null,
+      });
+      assert.equal(enabledName, "Fel Lockheart", "the selected persona must resolve by name");
+      // `addNameLookupEntry` keys by normalized aliases (lowercase, per word), not
+      // by the display name, so assert on the stored text rather than the raw key.
+      assert.ok(
+        [...enabledMaps.charDescriptionByName.values()].includes(personaOverrideTags),
+        "the persona's enabled override must reach the Game illustration appearance maps",
+      );
+
+      const disabledMaps = gamePersonaMaps();
+      await addChatPersonaIllustrationAssets({
+        maps: disabledMaps,
+        characters: { getPersona: async () => disabledPersonaRow } as never,
+        personaGallery: gamePersonaGallery,
+        chat: { personaId: "persona-fel" },
+        setupConfig: null,
+      });
+      assert.ok(
+        [...disabledMaps.charDescriptionByName.values()].includes(personaProse),
+        "a disabled persona override must fall back to the persona appearance",
+      );
+      assert.ok(
+        ![...disabledMaps.charDescriptionByName.values()].includes(personaOverrideTags),
+        "a disabled persona override must not leak into the Game illustration maps",
+      );
+
+      // No persona selected -> nothing added, and no throw.
+      const nothingMaps = gamePersonaMaps();
+      assert.equal(
+        await addChatPersonaIllustrationAssets({
+          maps: nothingMaps,
+          characters: { getPersona: async () => enabledPersonaRow } as never,
+          personaGallery: gamePersonaGallery,
+          chat: { personaId: null },
+          setupConfig: null,
+        }),
+        null,
+      );
+      assert.equal(nothingMaps.charDescriptionByName.size, 0, "no persona means no appearance entry");
+
+      // Both Game illustration routes must share the loader, so a fix in one
+      // cannot leave the other behind.
+      const gameRoutesSource = readFileSync(
+        new URL("../../packages/server/src/routes/game.routes.ts", import.meta.url),
+        "utf8",
+      );
+      const listenerCalls = gameRoutesSource.match(/await addChatPersonaIllustrationAssets\(\{/gu) ?? [];
+      assert.equal(
+        listenerCalls.length,
+        2,
+        "both /generate-assets and /generate-assets/preview must load the chat persona",
+      );
+      assert.equal(
+        (gameRoutesSource.match(/addPersonaIllustrationAssets\(/gu) ?? []).length,
+        3,
+        "the persona asset helper should have exactly one definition and two shared-loader call sites",
+      );
+
+      // Disabled or empty persona override falls back to the persona prose.
+      assert.equal(
+        readImageAppearanceOverride(
+          { imageAppearanceEnabled: false, imageAppearance: personaOverrideTags },
+          personaProse,
+        ),
+        personaProse,
+      );
+      assert.equal(
+        readImageAppearanceOverride({ imageAppearanceEnabled: true, imageAppearance: "   " }, personaProse),
+        personaProse,
+      );
 
       assert.deepEqual(
         selectStoryboardAppearanceCharacterNames({
@@ -5641,6 +6194,89 @@ const cases: RegressionCase[] = [
     },
   },
   {
+    name: "Manual Illustrator preserves custom prompts with schema-first and inline instructions",
+    async run() {
+      for (const promptTemplate of [
+        "Respond with a valid JSON object.\nDraw a three-panel comic from {{user}} POV.",
+        "Decide whether to generate an image. Draw a three-panel comic from {{user}} POV.",
+        '<output_format>{"prompt":"Draw a three-panel comic from {{user}} POV."}</output_format>',
+        `${"Scene guidance. ".repeat(900)}Draw a three-panel comic from {{user}} POV.`,
+      ]) {
+        const capture = makeCapturingProvider('{"prompt":"A three-panel comic from Mari POV."}');
+        const selectedPrompt = resolveAgentPromptTemplate({
+          promptTemplate: "Draw an ordinary scene using the global default.",
+          settings: { promptTemplates: [{ id: "user-pov", name: "User POV", promptTemplate }] },
+          selectedPromptTemplateId: "user-pov",
+        });
+        await writeManualIllustratorPromptPlan({
+          illustratorAgent: {
+            ...makeRegressionAgentConfig({ type: "illustrator", promptTemplate: selectedPrompt }),
+            provider: capture.provider,
+            model: "regression-model",
+          } as any,
+          context: { ...makeRegressionAgentContext(), persona: { name: "Mari" } },
+        });
+        const system = capture.calls[0]![0]!.content;
+        assert.match(system, /Draw a three-panel comic from Mari POV\./u);
+        assert.doesNotMatch(system, /ordinary scene using the global default/u);
+        assert.doesNotMatch(system, /No selected Illustrator prompt mode supplied/u);
+        assert.match(system, /<\/selected_illustrator_prompt_mode>/u);
+        assert.ok(
+          system.indexOf("For this manual request, ignore") > system.indexOf("</selected_illustrator_prompt_mode>"),
+        );
+      }
+    },
+  },
+  {
+    name: "Manual Illustrator honors configured output tokens and connection/model caps before context fitting",
+    async run() {
+      for (const { maxTokens, connectionCap, modelCap, maxContext = 65_536, expected } of [
+        { maxTokens: 32_800, connectionCap: 32_800, modelCap: 131_072, expected: 32_800 },
+        { maxTokens: "32800", connectionCap: null, modelCap: undefined, expected: 32_800 },
+        { maxTokens: 32_800, connectionCap: 1024, modelCap: undefined, maxContext: 4096, expected: 1024 },
+        { maxTokens: 32_800, connectionCap: 16_384, modelCap: 8192, expected: 8192 },
+        { maxTokens: undefined, connectionCap: null, modelCap: undefined, expected: 1800 },
+        { maxTokens: undefined, connectionCap: 1024, modelCap: undefined, expected: 1024 },
+      ]) {
+        const capture = makeCapturingProvider('{"prompt":"A detailed comic page."}');
+        await writeManualIllustratorPromptPlan({
+          illustratorAgent: {
+            ...makeRegressionAgentConfig({ type: "illustrator", settings: { maxTokens } }),
+            provider: { ...capture.provider, maxTokensOverrideValue: connectionCap, maxContextValue: maxContext },
+            model: "regression-model",
+            maxOutputTokens: modelCap,
+          } as any,
+          context: makeRegressionAgentContext(),
+        });
+        assert.equal(capture.callOptions[0]?.maxTokens, expected);
+      }
+    },
+  },
+  {
+    name: "Manual Illustrator rejects oversized initial and retry requests without truncating prompts",
+    async run() {
+      for (const retry of [false, true]) {
+        const capture = makeCapturingProvider("!? ".repeat(2300));
+        await assert.rejects(
+          writeManualIllustratorPromptPlan({
+            illustratorAgent: {
+              ...makeRegressionAgentConfig({
+                type: "illustrator",
+                promptTemplate: retry ? "Draw a comic page." : "!? ".repeat(8000),
+                settings: { maxTokens: 256 },
+              }),
+              provider: { ...capture.provider, maxContextValue: 2048 },
+              model: "regression-model",
+            } as any,
+            context: makeRegressionAgentContext(),
+          }),
+          /Manual Illustrator request exceeds the connection context limit/u,
+        );
+        assert.equal(capture.calls.length, retry ? 1 : 0);
+      }
+    },
+  },
+  {
     name: "Roleplay Illustrator background decisions are gated and produce reusable library metadata",
     async run() {
       assert.equal(
@@ -5770,13 +6406,15 @@ const cases: RegressionCase[] = [
       assert.match(manualIllustrationPrompt, /Style target: colored comic page, 2-6 panels/u);
       assert.match(manualIllustrationPrompt, /Build the prompt as a complete comic page/u);
       assert.match(manualIllustrationPrompt, /Combine it with the selected Illustrator prompt mode/u);
-      assert.doesNotMatch(manualIllustrationPrompt, /Generate only for a visually important moment/u);
-      assert.doesNotMatch(manualIllustrationPrompt, /Decide whether the current turn deserves an illustration/u);
-      assert.doesNotMatch(manualIllustrationPrompt, /Only illustrate when the moment deserves a picture/u);
-      assert.doesNotMatch(manualIllustrationPrompt, /Respond with a valid JSON object/u);
+      assert.match(manualIllustrationPrompt, /Generate only for a visually important moment/u);
+      assert.match(manualIllustrationPrompt, /Decide whether the current turn deserves an illustration/u);
+      assert.match(manualIllustrationPrompt, /Only illustrate when the moment deserves a picture/u);
+      assert.match(manualIllustrationPrompt, /Respond with a valid JSON object/u);
       assert.match(manualIllustrationPrompt, /The Illustration button has already selected the output type/u);
-      assert.doesNotMatch(manualIllustrationPrompt, /"shouldGenerate"\s*:/u);
-      assert.doesNotMatch(manualIllustrationPrompt, /"generateBackground"\s*:/u);
+      const manualContract = manualIllustrationPrompt.split("</selected_illustrator_prompt_mode>")[1]!;
+      assert.match(manualContract, /ignore automatic-generation conditions, cadence, and response schemas/u);
+      assert.doesNotMatch(manualContract, /"shouldGenerate"\s*:/u);
+      assert.doesNotMatch(manualContract, /"generateBackground"\s*:/u);
 
       const macroCapture = makeCapturingProvider(
         JSON.stringify({
@@ -5832,7 +6470,18 @@ const cases: RegressionCase[] = [
         characters: ["Mari", "Dottore"],
         aspectRatio: "landscape",
         reason: "Manual Gallery illustration request.",
+        characterPrompts: [],
       });
+
+      const captionRoster = Array.from({ length: 25 }, (_, index) => `Guest ${index + 1}`);
+      const fullCastPlan = parseManualIllustratorPromptPlan(
+        JSON.stringify({ prompt: "A crowded banquet", characters: captionRoster }),
+      );
+      assert.deepEqual(
+        fullCastPlan.characters,
+        captionRoster.slice(0, 22),
+        "manual Illustrator keeps the complete V5 caption roster",
+      );
 
       const quarantinePrompt =
         "A cramped quarantine berth inside the Fontaine border checkpoint at night. A narrow iron-framed cot stands against a damp stone wall beside a battered table holding folded linen, simple medical supplies, an enamel basin, and a sprig of dried lavender. Heavy checkpoint doors and exposed brass pipes occupy the opposite wall. A high reinforced window reveals cold downpour streaming across the glass. A compact radiator and low amber utility lamp contrast with the blue-gray storm light. Chipped plaster, rust stains, patched bedding, old cargo crates, and hastily cleaned floorboards suggest an austere freight facility adapted for recovery.";
@@ -6484,7 +7133,7 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
 
       assert.equal(update.promptTemplate, "");
       assert.equal(update.phase, "post_processing");
-      assert.match(String(update.description), /Post-processes the latest Roleplay response/);
+      assert.match(String(update.description), /Adds HTML\/CSS\/JS visual effects to AI messages/);
       const settings = JSON.parse(String(update.settings)) as Record<string, unknown>;
       assert.equal(settings.resultType, "text_rewrite");
       assert.equal(settings.contextSize, 5);
@@ -7183,6 +7832,7 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
         "regression-model",
       );
       assert.equal(results.length, 2);
+      assert.match(calls[0]![0]!.content, /tracker_incremental_updates: supported/);
       const messages = calls[0]!;
       const system = messages[0]!;
       const last = messages[messages.length - 1]!;
@@ -8174,18 +8824,19 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
     },
   },
   {
-    name: "Roleplay preserves an explicit no-Persona selection",
+    name: "Every chat mode requires an explicit Persona selection",
     run() {
       const personas = [
         { id: "active-persona", isActive: "true" },
         { id: "selected-persona", isActive: "false" },
       ];
 
-      assert.equal(resolveChatPersonaCandidate(personas, null, "roleplay"), null);
-      assert.equal(resolveActivePersonaCandidate(personas, null, "roleplay"), null);
-      assert.equal(resolveActivePersonaCandidate(personas, null, "game"), null);
-      assert.equal(resolveActivePersonaCandidate(personas, null, "conversation")?.id, "active-persona");
-      assert.equal(resolveActivePersonaCandidate(personas, "selected-persona", "roleplay")?.id, "selected-persona");
+      for (const mode of ["conversation", "roleplay", "game"]) {
+        assert.equal(resolveChatPersonaCandidate(personas, null, mode), null);
+        assert.equal(resolveActivePersonaCandidate(personas, null, mode), null);
+        assert.equal(resolveChatPersonaCandidate(personas, "missing-persona", mode), null);
+        assert.equal(resolveActivePersonaCandidate(personas, "selected-persona", mode)?.id, "selected-persona");
+      }
     },
   },
   {
@@ -8751,6 +9402,90 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
     },
   },
   {
+    name: "identity aliases cannot cross macro boundaries or suppress ordinary prose",
+    run() {
+      const character = {
+        id: "alias-character",
+        name: "Alias Character",
+        description: "CHAR_DESCRIPTION",
+        personality: "CHAR_PERSONALITY",
+        backstory: "CHAR_BACKSTORY",
+        appearance: "CHAR_APPEARANCE",
+        scenario: "CHAR_SCENARIO",
+        systemPrompt: "CHAR_SYSTEM",
+        mesExample: "CHAR_EXAMPLE",
+        creatorNotes: "",
+        firstMes: "",
+        postHistoryInstructions: "",
+        tags: [],
+        talkativeness: 0.5,
+        avatarPath: null,
+        avatarCrop: null,
+      };
+      const markers = [
+        "CHAR_DESCRIPTION",
+        "CHAR_PERSONALITY",
+        "CHAR_BACKSTORY",
+        "CHAR_APPEARANCE",
+        "CHAR_SCENARIO",
+        "CHAR_SYSTEM",
+        "CHAR_EXAMPLE",
+        "PERSONA_DESCRIPTION",
+        "PERSONA_PERSONALITY",
+        "PERSONA_BACKSTORY",
+        "PERSONA_APPEARANCE",
+        "PERSONA_SCENARIO",
+      ];
+      const cases = [
+        {
+          source:
+            "{{charName}} follows their personality and description.\nRespond to the user/persona as {{charName}}.",
+          omitted: [],
+        },
+        {
+          source: "{{charName}} backstory appearance scenario charSysInfo example personaAppearance {{charName}}",
+          omitted: [],
+        },
+        { source: "{{descriptionExtra}} {{personalityExtra}}", omitted: [] },
+        { source: "{{ description }} {{ personality }}", omitted: [] },
+        { source: "{{description}} {{personality}}", omitted: ["CHAR_DESCRIPTION", "CHAR_PERSONALITY"] },
+        { source: "{{persona}}", omitted: markers.filter((marker) => marker.startsWith("PERSONA_")) },
+        { source: "{{personaAppearance}}", omitted: ["PERSONA_APPEARANCE"] },
+        { source: "{{// description}} {{if personality}}", omitted: [] },
+        { source: '{{#if personality != ""}}Authored choice{{/if}}', omitted: ["CHAR_PERSONALITY"] },
+        { source: '{{#if "x" == @personaAppearance}}Authored choice{{/if}}', omitted: ["PERSONA_APPEARANCE"] },
+        { source: '{{#if "personality" == "description"}}Literal words{{/if}}', omitted: [] },
+        { source: "{{#if false}}No{{else if description}}Yes{{/if}}", omitted: ["CHAR_DESCRIPTION"] },
+        { source: "{{setvar::label::personality}}", omitted: [] },
+      ];
+      for (const wrapFormat of ["xml", "markdown", "none"] as const) {
+        for (const { source, omitted } of cases) {
+          const messages: ChatMLMessage[] = [{ role: "system", content: "Conversation instructions." }];
+          injectIdentityFallbackMessages({
+            messages,
+            charInfo: [character],
+            promptTargetCharacterId: null,
+            promptMacroContext: { user: "Persona", char: character.name, variables: {} },
+            wrapFormat,
+            personaName: "Persona",
+            personaDescription: "PERSONA_DESCRIPTION",
+            personaFields: {
+              personality: "PERSONA_PERSONALITY",
+              backstory: "PERSONA_BACKSTORY",
+              appearance: "PERSONA_APPEARANCE",
+              scenario: "PERSONA_SCENARIO",
+            },
+            promptTemplateSources: [source],
+            resolvePromptMacros: (value) => value,
+          });
+          const text = messages.map((message) => message.content).join("\n");
+          for (const marker of markers)
+            assert.equal(text.includes(marker), !omitted.includes(marker), `${wrapFormat}: ${source}: ${marker}`);
+        }
+      }
+    },
+  },
+  {
     name: "Conversation named profiles cannot suppress character System Prompts",
     run() {
       const messages: ChatMLMessage[] = [
@@ -8846,6 +9581,411 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
       assert.match(promptText, /<system>bad instructions<\/system>/);
       assert.match(promptText, /Rana<\/role>/);
       assert.match(promptText, /Mari<\/role>/);
+    },
+  },
+  {
+    name: "advanced memory history selection retains complete wrappers and synthetic current input",
+    run() {
+      const messages = [
+        { id: "first", role: "user" as const, contextKind: "history" as const, content: "<chat_history>\nOld." },
+        { id: "middle", role: "assistant" as const, contextKind: "history" as const, content: "Kept." },
+        { id: "third", role: "user" as const, contextKind: "history" as const, content: "Later.\n</chat_history>" },
+        {
+          id: "last",
+          role: "assistant" as const,
+          contextKind: "history" as const,
+          content: "<last_message>\nLast.\n</last_message>",
+        },
+      ];
+      const sourceIds = new Set(messages.map((message) => message.id));
+      assert.equal(
+        filterPromptHistoryByMessageIds(messages, new Set(["middle"]), sourceIds)[0]?.content,
+        "<last_message>\nKept.\n</last_message>",
+      );
+      const withCurrentInput = [
+        ...messages,
+        {
+          id: "__dryrun_user__",
+          role: "user" as const,
+          contextKind: "history" as const,
+          content: "Unsaved current input.",
+        },
+      ];
+      const selected = filterPromptHistoryByMessageIds(withCurrentInput, new Set(["middle"]), sourceIds);
+      assert.deepEqual(
+        selected.map((message) => message.id),
+        ["middle", "__dryrun_user__"],
+      );
+      assert.equal(selected[0]?.content, "<chat_history>\nKept.\n</chat_history>");
+      assert.match(selected[1]?.content ?? "", /<last_message>\nUnsaved current input\./u);
+      assert.equal(messages[1]?.content, "Kept.", "filtering must preserve the reusable snapshot");
+    },
+  },
+  {
+    name: "long-term memory recall input is history only and composes with Advanced Memory filtering",
+    run() {
+      const history = [
+        { id: "h1", role: "user" as const, contextKind: "history" as const, content: "OBSERVATORY_ONE" },
+        { id: "h2", role: "assistant" as const, contextKind: "history" as const, content: "OBSERVATORY_TWO" },
+        { id: "h3", role: "system" as const, contextKind: "history" as const, content: "OBSERVATORY_NARRATOR" },
+        { id: "h4", role: "user" as const, contextKind: "history" as const, content: "OBSERVATORY_LATEST" },
+      ];
+      const nonHistory = [
+        { role: "system" as const, contextKind: "prompt" as const, content: "PINEAPPLE_PROMPT" },
+        { role: "user" as const, contextKind: "injection" as const, content: "PINEAPPLE_INJECTION" },
+        { role: "system" as const, content: "PINEAPPLE_UNTYPED_SYSTEM" },
+        { role: "user" as const, content: "PINEAPPLE_UNTYPED_USER" },
+      ];
+      const expected = history.map(({ role, content }) => ({ role, content }));
+
+      // Prompt text and injections may sit before, after or between history; only history reaches recall.
+      for (const messages of [
+        [...nonHistory, ...history],
+        [...history, ...nonHistory],
+        [...history.slice(0, 2), ...nonHistory, ...history.slice(2)],
+      ]) {
+        const snapshot = structuredClone(messages);
+        assert.deepEqual(selectHistoryMessagesForRecall(messages), expected);
+        assert.deepEqual(messages, snapshot, "recall selection leaves other prompt consumers' input unchanged");
+      }
+
+      // Advanced Memory filtering runs first; excluded history and non-history text stay out.
+      const advancedFiltered = filterPromptHistoryByMessageIds(
+        resolveAdvancedMemoryPrompt([...history, ...nonHistory], [], {}),
+        new Set(["h2", "h3", "h4"]),
+        new Set(history.map((message) => message.id)),
+      );
+      assert.deepEqual(
+        selectHistoryMessagesForRecall(advancedFiltered).map((message) => message.content),
+        ["OBSERVATORY_TWO", "OBSERVATORY_NARRATOR", "OBSERVATORY_LATEST"],
+      );
+    },
+  },
+  {
+    name: "advanced memory markers preserve scoped placement, formatting, fallback and empty groups",
+    async run() {
+      const parts: AdvancedMemoryPromptParts = {
+        chatSummary: "CONTINUITY_FACT",
+        currentSceneSummary: "OPEN_SCENE_FACT",
+        recalledScenes: "OLD_SCENE_FACT",
+        recalledMessages:
+          "Included below are recalled memories of scenes from the past chat history, together with small message excerpts from them. Present message range in the context is: #20–#24, with the last user message being #24. #12 Mari: EXACT_OLD_WORDS",
+      };
+      for (const format of ["xml", "markdown", "none"] as const) {
+        const headingParts = { chatSummary: "# A user heading\n<private>Literal tags & content</private>" };
+        const headingPlacement = createAdvancedMemoryPlacement("chat_summary", format);
+        for (const includeSlot of [true, false]) {
+          const headingText = resolveAdvancedMemoryPrompt(
+            [{ content: includeSlot ? headingPlacement.token : "LIVE_WORDS" }],
+            [headingPlacement],
+            headingParts,
+          )
+            .map((message) => message.content)
+            .join("\n");
+          assert.ok(headingText.includes("<private>Literal tags & content</private>"));
+          assert.ok(
+            headingText.includes(format === "markdown" ? "\\# A user heading" : "# A user heading"),
+            "authored and fallback memory slots use the existing format-specific leaf handling",
+          );
+          if (format === "markdown") assert.doesNotMatch(headingText, /^# A user heading$/mu);
+        }
+        const marker = (id: string, type: string, extra: Partial<AssemblerInput["sections"][number]> = {}) =>
+          promptSection({
+            id,
+            name: id,
+            identifier: id,
+            isMarker: "true",
+            markerConfig: JSON.stringify({ type }),
+            ...extra,
+          });
+        const sections = [
+          promptSection({ id: "main", identifier: "main", name: "Instructions", content: "STABLE_RULE" }),
+          marker("hidden_summary", "chat_summary", { groupId: "disabled" }),
+          marker("old_scene", "recalled_scenes", { groupId: "memory" }),
+          marker("history", "chat_history"),
+          marker("my_summary", "chat_summary", { role: "user" }),
+          marker("duplicate_summary", "chat_summary"),
+          marker("disabled_excerpt", "recalled_messages", { enabled: "false" }),
+        ];
+        const input: AssemblerInput = {
+          db: undefined as unknown as DB,
+          preset: {
+            id: "advanced-memory-markers",
+            name: "Memory fixture",
+            sectionOrder: JSON.stringify(sections.map((section) => section.id)),
+            groupOrder: JSON.stringify(["disabled", "memory"]),
+            wrapFormat: format,
+            parameters: JSON.stringify({}),
+            variableGroups: "[]",
+            variableValues: "{}",
+          },
+          sections,
+          groups: [
+            { id: "disabled", name: "Hidden group", enabled: "false" },
+            { id: "memory", name: "Memory group", enabled: "true" },
+          ].map((group) => ({
+            ...group,
+            presetId: "advanced-memory-markers",
+            parentGroupId: null,
+            order: 0,
+            createdAt: "",
+          })),
+          choiceBlocks: [],
+          chatChoices: {},
+          chatId: "advanced-memory-markers",
+          characterIds: [],
+          personaName: "Mari",
+          personaDescription: "",
+          chatMessages: [{ role: "user", content: "LIVE_WORDS" }],
+          chatSummary: "LEGACY_UNSCOPED_SECRET",
+          advancedMemory: parts,
+          previewOnly: true,
+        };
+        const assembled = await assemblePrompt(input);
+        const text = assembled.messages.map((message) => message.content).join("\n");
+        const automaticMemory = await assemblePrompt({
+          ...input,
+          sections: [sections[0]!, sections[3]!],
+          groups: [],
+          preset: {
+            ...input.preset,
+            sectionOrder: JSON.stringify(["main", "history"]),
+            parameters: JSON.stringify({ strictRoleFormatting: true, squashSystemMessages: true }),
+          },
+        });
+        assert.equal(automaticMemory.messages[0]?.role, "system");
+        for (const fact of Object.values(parts))
+          assert(
+            automaticMemory.messages[0]!.content.includes(fact!),
+            "default formatting merges automatic memory into the system prompt",
+          );
+        assert(
+          automaticMemory.messages[0]!.content.indexOf("STABLE_RULE") <
+            automaticMemory.messages[0]!.content.indexOf("OLD_SCENE_FACT"),
+        );
+        assert.equal(automaticMemory.messages[1]?.role, "user");
+        assert(automaticMemory.messages[1]?.content.includes("LIVE_WORDS"));
+        for (const fact of Object.values(parts)) assert.equal(text.split(fact!).length - 1, 1, fact!);
+        assert.doesNotMatch(text, /LEGACY_UNSCOPED_SECRET|duplicate_summary|hidden_summary|disabled_excerpt/u);
+        assert.equal(text.match(/Included below are recalled memories/gu)?.length, 1);
+        assert.match(text, /Present message range in the context is: #20–#24, with the last user message being #24/u);
+        assert.doesNotMatch(text, /Below is a small excerpt from earlier chat history/u);
+        const summaryIndex = assembled.messages.findIndex((message) => message.content.includes("CONTINUITY_FACT"));
+        assert.ok(
+          text.indexOf("CONTINUITY_FACT") > text.indexOf("LIVE_WORDS"),
+          "explicit summary placement stays after history, including merged user sections",
+        );
+        assert.equal(assembled.messages[summaryIndex]?.role, "user");
+        assert.ok(
+          text.indexOf("EXACT_OLD_WORDS") < text.indexOf("LIVE_WORDS"),
+          "missing markers fall back before history",
+        );
+        if (format === "xml") assert.match(text, /<my_summary>/u);
+        if (format === "markdown") {
+          assert.match(text, /## my_summary/u);
+          assert.doesNotMatch(text, /<my_summary>|<recalled_messages>/u);
+        }
+        if (format === "none") assert.doesNotMatch(text, /<my_summary>|## my_summary|## Recalled/u);
+
+        const deferred = await assemblePrompt({ ...input, deferAdvancedMemory: true });
+        const preparedSnapshot = JSON.stringify(deferred.messages);
+        assert.doesNotMatch(preparedSnapshot, /CONTINUITY_FACT|EXACT_OLD_WORDS|LEGACY_UNSCOPED_SECRET/u);
+        const resolved = resolveAdvancedMemoryPrompt(deferred.messages, deferred.advancedMemoryPlacements!, parts);
+        assert.deepEqual(resolved, assembled.messages, "preview and late per-responder rendering agree");
+        const empty = resolveAdvancedMemoryPrompt(deferred.messages, deferred.advancedMemoryPlacements!, {});
+        const emptyText = empty.map((message) => message.content).join("\n");
+        assert.match(emptyText, /STABLE_RULE/u);
+        assert.match(emptyText, /LIVE_WORDS/u);
+        assert.doesNotMatch(emptyText, /Memory group|memory_group|Below is|Below are|MARINARA_ADVANCED_MEMORY/u);
+        for (const groupId of [null, "memory"]) {
+          for (const position of [0, 1, 2]) {
+            const surrounding = [
+              promptSection({ id: "before", content: "Before.\n\n\nIntentional spacing.", groupId }),
+              promptSection({ id: "after", content: "After.", groupId }),
+            ];
+            surrounding.splice(position, 0, marker("empty_recall", "recalled_scenes", { groupId }));
+            const spacingInput = {
+              ...input,
+              advancedMemory: {},
+              chatSummary: null,
+              sections: surrounding,
+              preset: {
+                ...input.preset,
+                sectionOrder: JSON.stringify(surrounding.map((section) => section.id)),
+                parameters: JSON.stringify({ strictRoleFormatting: true, squashSystemMessages: true }),
+              },
+            };
+            const withEmptyRecall = await assemblePrompt(spacingInput);
+            const withoutRecall = await assemblePrompt({
+              ...spacingInput,
+              sections: surrounding.filter((section) => section.id !== "empty_recall"),
+            });
+            assert.deepEqual(
+              withEmptyRecall.messages,
+              withoutRecall.messages,
+              `an empty recall marker adds no whitespace (${format}, ${groupId}, position ${position})`,
+            );
+          }
+        }
+        assert.equal(
+          JSON.stringify(deferred.messages),
+          preparedSnapshot,
+          "budget probes must not mutate the prepared prompt",
+        );
+
+        const characterSections = [
+          ...input.sections.slice(0, 3),
+          promptSection({
+            id: "other_profile",
+            identifier: "other_profile",
+            name: "Other Profile",
+            groupId: "memory",
+            content: "CHARACTER_ONLY_PROFILE",
+          }),
+          ...input.sections.slice(3),
+        ];
+        const characterGrouped = await assemblePrompt({
+          ...input,
+          deferAdvancedMemory: true,
+          deferMessagePostProcessing: true,
+          sections: characterSections,
+          preset: { ...input.preset, sectionOrder: JSON.stringify(characterSections.map((section) => section.id)) },
+          groups: input.groups.map((group) => (group.id === "memory" ? { ...group, name: "Dottore" } : group)),
+        });
+        const characterScoped = scopeIndividualGroupMessagesForTarget(characterGrouped.messages, "visitor", [
+          { id: "dottore", name: "Dottore" },
+          { id: "visitor", name: "Visitor" },
+        ]);
+        const scopedText = resolveAdvancedMemoryPrompt(
+          characterScoped,
+          characterGrouped.advancedMemoryPlacements!,
+          parts,
+        )
+          .map((message) => message.content)
+          .join("\n");
+        for (const fact of Object.values(parts))
+          assert.equal(scopedText.split(fact!).length - 1, 1, "scoped-away slots still emit once");
+        assert.ok(scopedText.indexOf("OLD_SCENE_FACT") < scopedText.indexOf("LIVE_WORDS"));
+        if (format !== "none")
+          assert.doesNotMatch(
+            scopedText,
+            /CHARACTER_ONLY_PROFILE/u,
+            "memory group guards must not prevent ordinary character profile scoping",
+          );
+        const scenePlacement = describeAdvancedMemoryPlacements(
+          characterScoped,
+          characterGrouped.advancedMemoryPlacements!,
+        ).find((placement) => placement.markerType === "recalled_scenes")!;
+        assert.equal(
+          scenePlacement.fallback,
+          format !== "none",
+          "placement receipt reports a scoped-away authored group",
+        );
+
+        const deferredSquash = await assemblePrompt({
+          ...input,
+          deferAdvancedMemory: true,
+          deferMessagePostProcessing: true,
+          preset: { ...input.preset, parameters: JSON.stringify({ squashSystemMessages: true }) },
+          sections: [sections[0]!, sections[3]!],
+          chatMessages: [
+            { id: "old-narrator", role: "system", content: "OLD_NARRATOR_SECRET" },
+            { id: "current-user", role: "user", content: "LIVE_WORDS" },
+          ],
+        });
+        assert.ok(
+          deferredSquash.messages.some((message) => message.id === "old-narrator" && message.contextKind === "history"),
+          "deferred system squashing must preserve narrator source IDs",
+        );
+        const selectedNarrator = filterPromptHistoryByMessageIds(
+          deferredSquash.messages,
+          new Set(["current-user"]),
+          new Set(["old-narrator", "current-user"]),
+        );
+        assert.doesNotMatch(
+          resolveAdvancedMemoryPrompt(selectedNarrator, deferredSquash.advancedMemoryPlacements!, {})
+            .map((message) => message.content)
+            .join("\n"),
+          /OLD_NARRATOR_SECRET/u,
+        );
+
+        const disabled = await assemblePrompt({ ...input, advancedMemory: undefined });
+        const disabledText = disabled.messages.map((message) => message.content).join("\n");
+        assert.match(disabledText, /LEGACY_UNSCOPED_SECRET/u);
+        assert.doesNotMatch(disabledText, /OPEN_SCENE_FACT|OLD_SCENE_FACT|EXACT_OLD_WORDS|Below is|Below are/u);
+      }
+    },
+  },
+  {
+    name: "prompt blocks that skip wrapping are sent as written while the rest of the preset and markers stay wrapped",
+    async run() {
+      const assembleWith = async (wrapFormat: "xml" | "markdown") => {
+        const result = await assemblePrompt({
+          db: undefined as unknown as DB,
+          preset: {
+            id: "preset-skip-wrap",
+            name: "Skip Wrap Fixture",
+            sectionOrder: JSON.stringify(["main", "raw", "grouped", "summary"]),
+            groupOrder: JSON.stringify(["rules"]),
+            wrapFormat,
+            parameters: JSON.stringify({}),
+            variableGroups: JSON.stringify([]),
+            variableValues: JSON.stringify({}),
+          },
+          sections: [
+            promptSection({ id: "main", identifier: "main", name: "Main Prompt", content: "WRAPPED_MAIN" }),
+            promptSection({ id: "raw", identifier: "raw", name: "Raw Block", content: "RAW_TEXT", skipWrap: "true" }),
+            promptSection({
+              id: "grouped",
+              identifier: "grouped",
+              name: "Grouped Raw",
+              content: "GROUPED_RAW_TEXT",
+              groupId: "rules",
+              skipWrap: "true",
+            }),
+            promptSection({
+              id: "summary",
+              identifier: "chatSummary",
+              name: "Chat Summary",
+              isMarker: "true",
+              markerConfig: JSON.stringify({ type: "chat_summary" }),
+              skipWrap: "true",
+            }),
+          ],
+          groups: [
+            {
+              id: "rules",
+              presetId: "preset-skip-wrap",
+              name: "Rules",
+              parentGroupId: null,
+              order: 0,
+              enabled: "true",
+              createdAt: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+          choiceBlocks: [],
+          chatChoices: {},
+          chatId: "chat-skip-wrap",
+          characterIds: [],
+          personaName: "Mari",
+          personaDescription: "",
+          chatMessages: [],
+          chatSummary: "SUMMARY_TEXT",
+        });
+        return result.messages.map((message) => message.content).join("\n");
+      };
+
+      const xml = await assembleWith("xml");
+      assert.match(xml, /<main_prompt>\s*WRAPPED_MAIN\s*<\/main_prompt>/u);
+      assert.match(xml, /(^|\n)RAW_TEXT(\n|$)/u);
+      assert.doesNotMatch(xml, /raw_block|grouped_raw/u);
+      assert.match(xml, /<rules>\s*GROUPED_RAW_TEXT\s*<\/rules>/u, "the group still wraps an opted-out section");
+      assert.match(xml, /<chat_summary>[\s\S]*SUMMARY_TEXT[\s\S]*<\/chat_summary>/u, "markers ignore skipWrap");
+
+      const markdown = await assembleWith("markdown");
+      assert.match(markdown, /## Main Prompt\nWRAPPED_MAIN/u);
+      assert.doesNotMatch(markdown, /Raw Block|Grouped Raw/u);
+      assert.match(markdown, /# Rules\nGROUPED_RAW_TEXT/u);
     },
   },
   {
@@ -8947,7 +10087,9 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
         new URL("../../packages/server/src/routes/generate.routes.ts", import.meta.url),
         "utf8",
       );
-      const fallbackBranchStart = generateRouteSource.indexOf('if (chatMode === "roleplay" && !resolvedPreset) {');
+      const fallbackBranchStart = generateRouteSource.indexOf(
+        'if (chatMode === "roleplay" && !resolvedPreset && !advancedMemoryEnabled) {',
+      );
       const fallbackBranchEnd = generateRouteSource.indexOf("\n        }", fallbackBranchStart);
       assert.notEqual(fallbackBranchStart, -1);
       assert.notEqual(fallbackBranchEnd, -1);
@@ -8955,6 +10097,44 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
         generateRouteSource.slice(fallbackBranchStart, fallbackBranchEnd),
         /appendFallbackChatSummaryToSystemPrompt\(/u,
       );
+    },
+  },
+  {
+    name: "sequential Game agent phases do not overlap different model connections",
+    async run() {
+      for (const sequentialExecution of [false, true]) {
+        let active = 0;
+        let peak = 0;
+        const agents = [0, 1, 2].map((index) => {
+          const capture = makeCapturingProvider("Context checked.");
+          const complete = capture.provider.chatComplete;
+          capture.provider.chatComplete = async (...args) => {
+            active++;
+            peak = Math.max(peak, active);
+            try {
+              await new Promise((done) => setTimeout(done, 20));
+              return await complete(...args);
+            } finally {
+              active--;
+            }
+          };
+          return {
+            ...makeRegressionAgentConfig({
+              id: `custom:sequential-${index}`,
+              type: `sequential-${index}`,
+              isCustomAgent: true,
+              phase: "parallel",
+              promptTemplate: "Check the supplied context.",
+              settings: { resultType: "context_injection" },
+            }),
+            provider: capture.provider,
+            model: `model-${index}`,
+            maxParallelJobs: 4,
+          } as ResolvedAgent;
+        });
+        await runParallelAgents(agents, makeRegressionAgentContext({ chatMode: "game", sequentialExecution }));
+        assert.equal(peak, sequentialExecution ? 1 : 3);
+      }
     },
   },
   {
@@ -9255,6 +10435,147 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
     },
   },
   {
+    // Mari, 2026-10-14: a section for a character who is not replying is replaced with nothing, not an empty line.
+    name: "Chat Summary sections for someone who is not replying leave no empty line",
+    async run() {
+      const ctx = (char: string): MacroContext => ({ user: "Mari", char, characters: [char], variables: {} });
+      const section = (name: string, text: string) => `{{#if char == "${name}"}}\n${text}\n{{/if}}`;
+      const summary = `Shared opening.\n\n${section("Cyno", "Cyno alone saw the ruins.")}\n\n${section("Tighnari", "Tighnari found the herb.")}\n\nShared closing.`;
+      const tighnari = "Shared opening.\n\nTighnari found the herb.\n\nShared closing.";
+      const nobody = "Shared opening.\n\nShared closing.";
+      assert.equal(resolveChatSummaryMacros(summary, ctx("Tighnari")), tighnari, "one responder");
+      assert.equal(resolveChatSummaryMacros(summary, ctx("Maukie")), nobody, "a responder with no section");
+      // Individual replies in a Roleplay group defer the sections until each responder is known.
+      const deferred = resolveChatSummaryMacros(summary, ctx("Narrator"), { deferCharacterMacros: "all" });
+      assert.equal(resolveDeferredCharacterMacros(deferred, { name: "Tighnari" }), tighnari, "deferred, a reader");
+      assert.equal(resolveDeferredCharacterMacros(deferred, { name: "Maukie" }), nobody, "deferred, not a reader");
+      // A merged reply reads the summary for everyone present and marks who knows what.
+      assert.equal(
+        resolveChatSummaryMacros(summary, ctx("Narrator"), undefined, [{ name: "Tighnari" }, { name: "Maukie" }]),
+        "Shared opening.\n\n[Known only to Tighnari: Tighnari found the herb.]\n\nShared closing.",
+        "merged readers",
+      );
+
+      // Every reading agrees: now, or deferred and filled in for the responder.
+      const read = (template: string, who: string) => {
+        const now = resolveChatSummaryMacros(template, ctx(who), { trimResult: false });
+        const later = resolveDeferredCharacterMacros(
+          resolveChatSummaryMacros(template, ctx("Narrator"), { deferCharacterMacros: "all", trimResult: false }),
+          { name: who },
+        );
+        assert.equal(later, now, `${who} reads ${JSON.stringify(template)} the same now and deferred`);
+        return now;
+      };
+      const elseChain = `A\n{{#if char == "Cyno"}}\nc\n{{else if char == "Tighnari"}}\nt\n{{else}}\no\n{{/if}}\nB`;
+      const nested = `A\n\n{{#if char == "Cyno" || char == "Tighnari"}}\nBoth know.\n${section("Tighnari", "Tighnari more.")}\n{{/if}}\n\nB`;
+      const list = `List:\n  {{#if char == "Cyno"}}- c{{/if}}\n  {{#if char == "Tighnari"}}- t{{/if}}\n  {{#if char == "Cyno"}}\n  - standalone\n  {{/if}}\nEnd`;
+      const cases: Array<[string, Record<string, string>]> = [
+        [summary, { Cyno: "Shared opening.\n\nCyno alone saw the ruins.\n\nShared closing.", Maukie: nobody }],
+        // Sections written inline on lines of their own.
+        [
+          `A\n{{#if char == "Cyno"}}x{{/if}}\n{{#if char == "Tighnari"}}y{{/if}}\nB`,
+          { Tighnari: "A\ny\nB", Maukie: "A\nB" },
+        ],
+        // Tags on lines of their own, in a paragraph that goes on after a blank line.
+        [`A\n${section("Cyno", "x")}\n\nB`, { Cyno: "A\nx\n\nB", Maukie: "A\n\nB" }],
+        // Hidden at the start and at the end of the text, where deferred sections are filled in after the trim.
+        [
+          `${section("Cyno", "x")}\n\nMiddle.\n\n${section("Tighnari", "y")}`,
+          { Cyno: "x\n\nMiddle.", Tighnari: "Middle.\n\ny", Maukie: "Middle." },
+        ],
+        [elseChain, { Cyno: "A\nc\nB", Tighnari: "A\nt\nB", Maukie: "A\no\nB" }],
+        [`A\n{{#if char == "Cyno"}}{{else}}Not Cyno.{{/if}}\nB`, { Cyno: "A\nB", Maukie: "A\nNot Cyno.\nB" }],
+        [nested, { Cyno: "A\n\nBoth know.\n\nB", Tighnari: "A\n\nBoth know.\nTighnari more.\n\nB", Maukie: "A\n\nB" }],
+        [list, { Cyno: "List:\n  - c\n  - standalone\nEnd", Tighnari: "List:\n  - t\nEnd" }],
+        // A section that starts with a blank line keeps it.
+        [`P\n\n{{#if char == "Cyno"}}\n\nx\n{{/if}}\n\nQ`, { Cyno: "P\n\n\nx\n\nQ", Maukie: "P\n\nQ" }],
+        // A section at the top of another that is not a paragraph keeps the blank line written after it.
+        [
+          `A\n{{#if char == "Cyno" || char == "Tighnari"}}\n${section("Tighnari", "Tighnari note.")}\n\nShared by both.\n{{/if}}\nB`,
+          { Cyno: "A\n\nShared by both.\nB", Tighnari: "A\nTighnari note.\n\nShared by both.\nB", Maukie: "A\nB" },
+        ],
+        // A section that is all another one holds goes with that one's line break.
+        [`A\n{{#if char == "Cyno" || char == "Tighnari"}}\n${section("Tighnari", "t")}\n{{/if}}\nB`, { Cyno: "A\nB" }],
+        [
+          `A\n{{#if char == "Cyno"}}\nx\n{{#if char == "Tighnari"}}\nt\n{{else}}\n\no\n{{/if}}\n{{/if}}\nB`,
+          { Cyno: "A\nx\n\no\nB", Maukie: "A\nB" },
+        ],
+        // A comment line reads the same now and deferred.
+        [`A\n\n${section("Cyno", "c")}\n{{// note}}\n\nB`, { Cyno: "A\n\nc\n\n\nB", Maukie: "A\n\n\nB" }],
+        // A group block keeps its `[` and `]` lines, and the sections around and in it lose their lines too.
+        [
+          `A\n\n${section("Cyno", "c")}\n\n[\n{{char}}:\n${section("Cyno", "g")}\n]\nB`,
+          { Cyno: "A\n\nc\n\n[\nCyno:\ng\n]\nB", Maukie: "A\n\n[\nMaukie:\n]\nB" },
+        ],
+        // A section sharing its line with other text stays as written.
+        [`A {{#if char == "Cyno"}}x{{/if}} B\nC`, { Cyno: "A x B\nC", Maukie: "A  B\nC" }],
+      ];
+      for (const [template, expected] of cases) {
+        for (const [who, text] of Object.entries(expected))
+          assert.equal(read(template, who), text, `${who}: ${template}`);
+        const attached = attachConditionalLineBreaks(template);
+        assert.equal(attachConditionalLineBreaks(attached), attached, `rewriting is idempotent: ${template}`);
+      }
+      assert.equal(attachConditionalLineBreaks(cases.at(-1)![0]), cases.at(-1)![0], "a shared line is untouched");
+      // A section that renders reads exactly as before when nothing around it is hidden.
+      for (const [template, who] of [
+        [`A\n${section("Cyno", "x")}\n\nB`, "Cyno"],
+        [`Shared.\n\n${section("Cyno", "Cyno alone saw the ruins.")}\n\nEnd.`, "Cyno"],
+        [`A\n  {{#if char == "Cyno"}}\n  x\n  {{/if}}\nB`, "Cyno"],
+        [`P\n\n{{#if char == "Cyno"}}\n\nx\n{{/if}}\n\nQ`, "Cyno"],
+        ...["Cyno", "Tighnari", "Maukie"].map((who) => [elseChain, who]),
+        [nested, "Tighnari"],
+      ])
+        assert.equal(read(template!, who!), resolveMacros(template!, ctx(who!), { trimResult: false }), template);
+      const merged = (template: string) =>
+        resolveChatSummaryMacros(template, ctx("Narrator"), undefined, [{ name: "Cyno" }, { name: "Maukie" }]);
+      assert.equal(
+        merged(elseChain),
+        "A\n[Known only to Cyno: c]\n[Known only to Maukie: o]\nB",
+        "each reader's version of a section keeps its own line",
+      );
+      assert.equal(
+        merged(`T\n{{#if char == "Cyno"}}c{{else}}o{{/if}}`),
+        "T\n[Known only to Cyno: c]\n[Known only to Maukie: o]",
+        "at the end of the text too",
+      );
+      assert.equal(
+        merged(`T\n\n  {{#if char == "Cyno"}}\n  s\n  {{else}}\n  o\n  {{/if}}`),
+        "T\n\n  [Known only to Cyno: s]\n\n  [Known only to Maukie: o]",
+        "an indented section keeps its indent once",
+      );
+      // Windows line endings read as the same lines.
+      const windows = summary.replace(/\n/gu, "\r\n");
+      assert.equal(resolveChatSummaryMacros(windows, ctx("Tighnari")), tighnari, "Windows line endings");
+      assert.equal(
+        resolveDeferredCharacterMacros(
+          resolveChatSummaryMacros(windows, ctx("Narrator"), { deferCharacterMacros: "all" }),
+          { name: "Maukie" },
+        ),
+        nobody,
+        "Windows line endings, deferred",
+      );
+      // Filled in after the wrapper, the line after a section still starts its own line: Markdown escapes a
+      // heading there and XML indents it, whether the section shows or not.
+      const rules = `Shared.\n${section("Cyno", "Cyno saw the ruins.")}\n# Rules\nObey.`;
+      const wrapped = (format: "markdown" | "xml", who: string) =>
+        resolveDeferredCharacterMacros(
+          wrapContent(
+            sanitizePromptLeaf(
+              resolveChatSummaryMacros(rules, ctx("Narrator"), { deferCharacterMacros: "all" }),
+              format,
+            ),
+            "Chat Summary",
+            format,
+          ),
+          { name: who },
+        );
+      assert.equal(wrapped("markdown", "Cyno"), "## Chat Summary\nShared.\nCyno saw the ruins.\n\\# Rules\nObey.");
+      assert.equal(wrapped("markdown", "Maukie"), "## Chat Summary\nShared.\n\\# Rules\nObey.");
+      assert.equal(wrapped("xml", "Maukie"), "<chat_summary>\n    Shared.\n    # Rules\n    Obey.\n</chat_summary>");
+    },
+  },
+  {
     name: "lorebook markers preserve authored angle-bracket markup",
     async run() {
       const lorebookScanResult = {
@@ -9388,6 +10709,38 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
         }),
         false,
       );
+    },
+  },
+  {
+    name: "prompt assembly resolves the request model and keeps an absent model empty",
+    async run() {
+      for (const model of [undefined, "vendor/model-a", "override-model-b"]) {
+        const result = await assemblePrompt({
+          db: undefined as unknown as DB,
+          model,
+          preset: {
+            id: "model-macro",
+            name: "Model macro",
+            sectionOrder: JSON.stringify(["main"]),
+            groupOrder: "[]",
+            wrapFormat: "xml",
+            parameters: "{}",
+            variableGroups: "[]",
+            variableValues: "{}",
+          },
+          sections: [promptSection({ id: "main", identifier: "main", name: "Main", content: "Model: {{model}}." })],
+          groups: [],
+          choiceBlocks: [],
+          chatChoices: {},
+          chatId: "model-macro",
+          characterIds: [],
+          personaName: "Mari",
+          personaDescription: "",
+          chatMessages: [],
+          disableLorebooks: true,
+        });
+        assert.ok(result.messages.some((message) => message.content.includes(`Model: ${model ?? ""}.`)));
+      }
     },
   },
   {
@@ -9857,6 +11210,29 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
     },
   },
   {
+    name: "group regexes preserve attachments when they remove all message text",
+    run() {
+      const images = ["data:image/png;base64,fixture"];
+      const files = [{ type: "application/pdf", data: "fixture", filename: "note.pdf" }];
+      const scoped = scopeIndividualGroupMessagesForTarget(
+        [
+          { role: "user", content: "*thought*", contextKind: "history", images },
+          { role: "user", content: "*thought*", contextKind: "history", files },
+          { role: "user", content: "*thought*", contextKind: "history" },
+        ],
+        "maukie",
+        [{ id: "maukie", name: "Maukie" }],
+        (history) =>
+          history.forEach((message) => {
+            message.content = "";
+          }),
+      );
+      assert.equal(scoped.length, 2);
+      assert.deepEqual(scoped[0]?.images, images);
+      assert.deepEqual(scoped[1]?.files, files);
+    },
+  },
+  {
     name: "individual Conversation turns attach only the responding character card",
     run() {
       const scoped = scopeIndividualGroupMessagesForTarget(
@@ -9887,6 +11263,131 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
       assert.doesNotMatch(scoped[0]?.content ?? "", /Pantalone card only\./u);
       assert.equal(scoped[1]?.role, "user");
       assert.match(scoped[1]?.content ?? "", /Pantalone spoke earlier/u);
+    },
+  },
+  {
+    name: "non-Latin names stay in prompt XML tags and Markdown headings",
+    run() {
+      assert.equal(nameToXmlTag("World Info (Before)"), "world_info_before");
+      assert.equal(nameToXmlTag("홍길동"), "홍길동");
+      assert.equal(nameToXmlTag("Dr. 김 철수"), "dr_김_철수");
+      assert.equal(nameToXmlTag("Amélie"), "amélie");
+      assert.equal(nameToXmlTag("राम"), "राम");
+      assert.equal(nameToXmlTag("\u0301Ana"), "ana");
+      assert.equal(nameToXmlTag("★\u0301Ana"), "ana");
+      assert.equal(wrapContent("Card.", "홍길동", "xml"), "<홍길동>\n    Card.\n</홍길동>");
+      assert.equal(wrapContent("Card.", "Dr. 김 철수", "markdown"), "## Dr 김 철수\nCard.");
+      assert.equal(
+        formatAgentInjections([{ agentType: "custom-memory", agentName: "기억 관리자", text: "Note." }], "xml"),
+        "<기억_관리자>\nNote.\n</기억_관리자>",
+      );
+
+      const messages = [{ content: "<홍길동>\n</홍길동>" }, { content: "<홍길동>\nCard.\n</홍길동>" }];
+      pruneEmptyPromptWrappers(messages);
+      assert.deepEqual(messages, [{ content: "<홍길동>\nCard.\n</홍길동>" }]);
+    },
+  },
+  {
+    name: "emoji in names leave no invisible marks in prompt tags",
+    run() {
+      assert.equal(nameToXmlTag("Luna ❤️"), "luna");
+      assert.equal(nameToXmlTag("1️⃣ Ana"), "1_ana");
+      assert.equal(nameToXmlTag("สมศักดิ์"), "สมศักดิ์");
+      assert.equal(wrapContent("Card.", "Luna ❤️", "markdown"), "## Luna\nCard.");
+      assert.equal(
+        formatAgentInjections(
+          [
+            { agentType: "affection", agentName: "❤️ Affection Tracker", text: "Note." },
+            { agentType: "weather", agentName: "☀️", text: "Sunny." },
+          ],
+          "xml",
+        ),
+        "<affection_tracker>\nNote.\n</affection_tracker>\n\n<weather>\nSunny.\n</weather>",
+      );
+
+      const combatTag = nameToXmlTag("⚔️ Combat");
+      const messages = [{ content: `<${combatTag}>\n</${combatTag}>` }];
+      pruneEmptyPromptWrappers(messages);
+      assert.deepEqual(messages, []);
+
+      for (const format of ["xml", "markdown"] as const) {
+        const scoped = scopeIndividualGroupMessagesForTarget(
+          [
+            {
+              role: "system",
+              content: [
+                wrapContent("Hong card only.", "홍길동", format, 1),
+                wrapContent("Luna card only.", "Luna ❤️ Star", format, 1),
+              ].join("\n"),
+              contextKind: "prompt",
+            },
+          ],
+          "hong",
+          [
+            { id: "hong", name: "홍길동" },
+            { id: "luna", name: "Luna ❤️ Star" },
+          ],
+        );
+
+        assert.match(scoped[0]?.content ?? "", /Hong card only\./u, format);
+        assert.doesNotMatch(scoped[0]?.content ?? "", /Luna card only\./u, format);
+      }
+    },
+  },
+  {
+    name: "individual group turns drop other cards with non-Latin names",
+    run() {
+      for (const format of ["xml", "markdown"] as const) {
+        const scoped = scopeIndividualGroupMessagesForTarget(
+          [
+            {
+              role: "system",
+              content: [
+                wrapContent("Hong card only.", "홍길동", format, 1),
+                wrapContent("Kim card only.", "김 철수", format, 1),
+                wrapContent("Ram card only.", "Dr. राम", format, 1),
+              ].join("\n"),
+              contextKind: "prompt",
+            },
+          ],
+          "hong",
+          [
+            { id: "hong", name: "홍길동" },
+            { id: "kim", name: "김 철수" },
+            { id: "ram", name: "Dr. राम" },
+          ],
+        );
+
+        const content = scoped[0]?.content ?? "";
+        assert.match(content, /Hong card only\./u, format);
+        assert.doesNotMatch(content, /Kim card only\./u, format);
+        assert.doesNotMatch(content, /Ram card only\./u, format);
+      }
+    },
+  },
+  {
+    name: "a non-Latin character card does not hide a non-Latin persona",
+    run() {
+      const messages: ChatMLMessage[] = [
+        { role: "system", content: wrapContent("Hong card only.", "홍길동", "xml", 1) },
+        { role: "user", content: "Hello." },
+      ];
+
+      injectIdentityFallbackMessages({
+        messages,
+        charInfo: [],
+        promptTargetCharacterId: null,
+        promptMacroContext: { user: "김철수", char: "홍길동", characters: ["홍길동"], variables: {} },
+        wrapFormat: "xml",
+        personaName: "김철수",
+        personaDescription: "Kim persona only.",
+        personaFields: {},
+        persona: null,
+        resolvePromptMacros: (value) => value,
+      });
+
+      const promptText = messages.map((message) => message.content).join("\n");
+      assert.match(promptText, /<김철수>[\s\S]*Kim persona only\.[\s\S]*<\/김철수>/u);
     },
   },
   {
@@ -9925,6 +11426,16 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
   {
     name: "Conversation semantic summaries keep recent weeks and retrieve relevant older context",
     async run() {
+      assert.deepEqual(normalizeSemanticSummaryRetrievalSettings({}), {
+        semanticSummaryRecentCount: 2,
+        semanticSummaryOlderCount: 3,
+        semanticSummaryMinSimilarity: 0.15,
+      });
+      assert.deepEqual(
+        normalizeSemanticSummaryRetrievalSettings({ semanticSummaryRecentCount: 21 }),
+        { semanticSummaryRecentCount: 2, semanticSummaryOlderCount: 3, semanticSummaryMinSimilarity: 0.15 },
+        "out-of-range persisted summary settings must fall back to bounded defaults",
+      );
       const weekSummaries = {
         "01.06.2026": { summary: "The user hid a silver key under the observatory stairs.", keyDetails: [] },
         "08.06.2026": { summary: "They compared several tea blends in the kitchen.", keyDetails: [] },
@@ -9933,6 +11444,7 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
       };
       const embeddingSource = {
         label: "semantic-summary regression embedder",
+        spaceId: "conversation-summary-regression-v1",
         async embed(texts: string[], _signal?: AbortSignal, inputType?: "document" | "query") {
           if (inputType === "query") {
             return texts.map((_, index) =>
@@ -9953,6 +11465,21 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
       });
       assert.deepEqual(Object.keys(selected.weekSummaries), ["01.06.2026", "15.06.2026", "22.06.2026"]);
       assert.equal(selected.semanticApplied, true);
+
+      const limited = await selectConversationSummariesForPrompt({
+        daySummaries: {},
+        weekSummaries,
+        query: "Where did I leave the silver key?",
+        enabled: true,
+        vectorizerAvailable: true,
+        settings: {
+          semanticSummaryRecentCount: 1,
+          semanticSummaryOlderCount: 0,
+          semanticSummaryMinSimilarity: 1,
+        },
+        embeddingOptions: { embeddingSource },
+      });
+      assert.deepEqual(Object.keys(limited.weekSummaries), ["22.06.2026"]);
 
       const unavailable = await selectConversationSummariesForPrompt({
         daySummaries: {},
@@ -10078,6 +11605,7 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
         connection: { provider: "openai", apiKey: "", model: "regression-model" },
         connectionId: "regression-connection",
         baseUrl: "https://example.invalid/v1",
+        includeRecallHistory: true,
       });
       const promptText = prepared.finalMessages.map((message) => message.content).join("\n");
 
@@ -10088,6 +11616,22 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
       assert.match(promptText, new RegExp(authoredSystemInstruction, "u"));
       assert.equal(promptText.includes(legacySetupMembership), false, promptText);
       assert.match(promptText, new RegExp(currentMembership, "u"));
+
+      const recallText = selectHistoryMessagesForRecall(prepared.recallHistoryMessages!)
+        .map((message) => message.content)
+        .join("\n");
+      assert.equal(
+        recallText.includes("Compact day summary."),
+        false,
+        "synthesized day summaries are not recall history",
+      );
+      assert.equal(
+        recallText.includes("COMPACT_WEEK_SUMMARY"),
+        false,
+        "synthesized week summaries are not recall history",
+      );
+      assert.match(recallText, new RegExp(currentSceneSummary, "u"));
+      assert.match(recallText, new RegExp(currentMembership, "u"));
     },
   },
   {
@@ -10106,7 +11650,7 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
         createdAt: "2026-07-15T12:00:00.000Z",
       };
       const chatMessages = [...olderMessages, currentMessage];
-      const prepared = await prepareConversationPromptHistory({
+      const historyInput: Parameters<typeof prepareConversationPromptHistory>[0] = {
         finalMessages: chatMessages.map((message) => ({
           id: message.id,
           role: message.role,
@@ -10144,12 +11688,73 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
         connection: { provider: "openai", apiKey: "", model: "regression-model" },
         connectionId: "regression-connection",
         baseUrl: "https://example.invalid/v1",
-      });
+      };
+      const prepared = await prepareConversationPromptHistory(historyInput);
       const promptText = prepared.finalMessages.map((message) => message.content).join("\n");
 
       assert.match(promptText, /UNCAPPED_TAIL_MESSAGE_0/u);
       assert.match(promptText, /UNCAPPED_TAIL_MESSAGE_54/u);
       assert.match(promptText, /CURRENT_CONVERSATION_MESSAGE/u);
+
+      // The recall copy keeps the raw tail and excludes synthesized summaries without touching the main prompt.
+      assert.equal(prepared.recallHistoryMessages, undefined, "disabled LTM does not prepare a recall copy");
+      const withRecall = await prepareConversationPromptHistory({ ...historyInput, includeRecallHistory: true });
+      assert.deepEqual(withRecall.finalMessages, prepared.finalMessages, "LTM does not change the main prompt");
+      assert.ok(withRecall.recallHistoryMessages);
+      const recallText = selectHistoryMessagesForRecall(withRecall.recallHistoryMessages)
+        .map((message) => message.content)
+        .join("\n");
+      assert.equal(
+        recallText.includes("Compact prior-day summary."),
+        false,
+        "synthesized summaries are not recall history",
+      );
+      for (const marker of ["UNCAPPED_TAIL_MESSAGE_0", "UNCAPPED_TAIL_MESSAGE_54", "CURRENT_CONVERSATION_MESSAGE"]) {
+        assert.match(recallText, new RegExp(marker, "u"));
+      }
+      assert.ok(
+        prepared.finalMessages
+          .filter((message) => message.content.includes("UNCAPPED_TAIL_MESSAGE_"))
+          .every((message) => message.contextKind === undefined),
+        "recall tagging does not leak into the main prompt",
+      );
+
+      // Unsummarized date history keeps its wrap format on the recall copy only.
+      for (const wrapFormat of ["xml", "markdown", "none"] as const) {
+        const pastMessages = [
+          {
+            id: "past-narrator",
+            role: "narrator",
+            content: "PAST_DAY_NARRATOR",
+            createdAt: "2026-07-14T10:00:00.000Z",
+          },
+          { id: "past-user", role: "user", content: "PAST_DAY_USER", createdAt: "2026-07-14T11:00:00.000Z" },
+        ];
+        const dateInput = {
+          ...historyInput,
+          chatMeta: { summaryTailMessages: 0 },
+          scopedMessages: [], // Keep this formatting fixture from requesting provider summaries.
+          chatMessages: pastMessages,
+          finalMessages: pastMessages.map((message) => ({
+            id: message.id,
+            role: message.role === "narrator" ? ("system" as const) : ("user" as const),
+            content: message.content,
+            contextKind: "history" as const,
+          })),
+          wrapFormat,
+        };
+        const withRecall = await prepareConversationPromptHistory({ ...dateInput, includeRecallHistory: true });
+        const expected = formatConversationDateHistoryMessages(
+          [
+            { role: "system", author: "Narrator", content: "PAST_DAY_NARRATOR" },
+            { role: "user", author: "User", content: "PAST_DAY_USER" },
+          ],
+          "14.07.2026",
+          wrapFormat,
+        );
+        assert.deepEqual(withRecall.finalMessages, expected, "normal date-history formatting stays unchanged");
+        assert.deepEqual(selectHistoryMessagesForRecall(withRecall.recallHistoryMessages!), expected);
+      }
     },
   },
   {
@@ -10163,6 +11768,11 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
         randomPick: "true",
       };
 
+      assert.equal(
+        resolveChoiceVariableValue({ ...input, randomPick: false, separator: "" }),
+        "tenderdramaticplayful",
+        "an explicitly empty multi-choice separator is preserved",
+      );
       assert.equal(resolveChoiceVariableValue({ ...input, random: () => 0 }), "tender");
       assert.equal(resolveChoiceVariableValue({ ...input, random: () => 0.5 }), "dramatic");
       assert.equal(resolveChoiceVariableValue({ ...input, random: () => 0.999999 }), "playful");
@@ -10413,6 +12023,270 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
         inventoryTrackerInventory: [{ name: "Scavenged axe", qty: 2 }],
       });
 
+      // Explicit incremental groups keep omitted state, while arrays still replace it.
+      const itemState = {
+        ...inventoryLockState,
+        playerStats: {
+          ...inventoryLockState.playerStats,
+          inventoryTrackerInventory: [{ name: "Billhook" }, { name: "Rope" }, { name: "Map" }],
+        },
+      };
+      const itemSnapshot = { playerStats: JSON.stringify(itemState.playerStats) };
+      const incrementalItems = buildLockedInventoryTrackerPatch({
+        data: {
+          currencies: { updates: [{ name: "Silver coin", qty: 2 }], removed: ["Silver coin"] },
+          inventory: { updates: [{ name: " rope ", qty: 3 }, { name: "Key" }], removed: ["Billhook", "unknown"] },
+        },
+        snapshot: itemSnapshot,
+        lockState: itemState,
+      });
+      assert.deepEqual(incrementalItems.playerStats.inventoryTrackerCurrencies, [{ name: "Silver coin", qty: 6 }]);
+      assert.deepEqual(incrementalItems.playerStats.inventoryTrackerInventory, [
+        { name: "Rope", qty: 3 },
+        { name: "Map" },
+        { name: "Key" },
+      ]);
+      assert.deepEqual(
+        buildLockedInventoryTrackerPatch({
+          data: { inventory: { updates: [{ name: "Rope", qty: 1 }] } },
+          snapshot: { playerStats: incrementalItems.playerStats },
+          lockState: null,
+        }).playerStats.inventoryTrackerInventory?.find((row) => row.name === "Rope"),
+        { name: "Rope" },
+        "qty:1 explicitly reduces an existing quantity",
+      );
+      assert.deepEqual(
+        buildLockedInventoryTrackerPatch({
+          data: { inventory: { updates: [{ name: "Rope" }] } },
+          snapshot: { playerStats: incrementalItems.playerStats },
+          lockState: null,
+        }).playerStats.inventoryTrackerInventory?.find((row) => row.name === "Rope"),
+        { name: "Rope", qty: 3 },
+        "omitted quantity preserves the existing total",
+      );
+      assert.equal(
+        itemSnapshot.playerStats,
+        JSON.stringify(itemState.playerStats),
+        "normalization does not mutate its source",
+      );
+      assert.deepEqual(
+        buildLockedInventoryTrackerPatch({ data: { inventory: [] }, snapshot: itemSnapshot, lockState: null })
+          .playerStats.inventoryTrackerInventory,
+        [],
+        "legacy empty arrays still clear their group",
+      );
+      assert.equal(
+        buildLockedInventoryTrackerPatch({
+          data: { inventory: { updates: "bad", removed: ["Map"] } },
+          snapshot: itemSnapshot,
+          lockState: null,
+        }).changed,
+        false,
+        "malformed operation must not partially delete state",
+      );
+
+      const customFields = [
+        { name: "Health", value: "10", locked: true },
+        { name: "Clue", value: "gate" },
+        { name: "Mood", value: "calm" },
+      ];
+      const customState = {
+        ...currentState,
+        playerStats: { ...itemState.playerStats, customTrackerFields: customFields },
+      };
+      const updatedFields = resolveTrackerGroupUpdate(
+        {
+          updates: [
+            { name: "Clue", value: "north gate" },
+            { name: "Count", value: "1" },
+          ],
+          removed: ["Mood", "Health"],
+        },
+        customFields,
+        customState,
+        "customTrackerFields",
+      )!;
+      const customPatch = buildLockedPlayerStatsArrayPatch({
+        field: "customTrackerFields",
+        values: updatedFields,
+        snapshot: { playerStats: customState.playerStats },
+        lockState: customState,
+      });
+      assert.deepEqual(customPatch.values, [
+        { name: "Health", value: "10", locked: true },
+        { name: "Clue", value: "north gate" },
+        { name: "Count", value: "1" },
+      ]);
+
+      const attemptedUnlock = resolveTrackerGroupUpdate(
+        {
+          updates: [
+            { name: "Health", value: "0", locked: false },
+            { name: "New", value: "kept" },
+          ],
+          removed: ["Health"],
+        },
+        customFields,
+        customState,
+        "customTrackerFields",
+      )!;
+      const lockedResult = buildLockedPlayerStatsArrayPatch({
+        field: "customTrackerFields",
+        values: attemptedUnlock,
+        snapshot: { playerStats: customState.playerStats },
+        lockState: customState,
+      });
+      assert.deepEqual(lockedResult.values, [...customFields, { name: "New", value: "kept" }]);
+      const nextLockedState = { ...customState, playerStats: lockedResult.playerStats };
+      const subsequentRemoval = resolveTrackerGroupUpdate(
+        { removed: ["Health"] },
+        lockedResult.values,
+        nextLockedState,
+        "customTrackerFields",
+      );
+      assert.deepEqual(subsequentRemoval, lockedResult.values, "a model update cannot unlock the saved row");
+
+      const trackedCharacters = [
+        {
+          characterId: "guard-a",
+          name: "Guard",
+          mood: "calm",
+          outfit: "coat",
+          customFields: { Goal: "Watch", Secret: "kept" },
+          stats: [
+            { name: "HP", value: 10, max: 20 },
+            { name: "MP", value: 4, max: 5 },
+          ],
+        },
+        { characterId: "guard-b", name: "Guard", mood: "tired" },
+        { characterId: "visitor", name: "Visitor", mood: "happy" },
+      ];
+      const characterState = { ...currentState, presentCharacters: trackedCharacters };
+      assert.deepEqual(
+        resolveTrackerGroupUpdate(
+          { removed: ["guard-a", "Guard"] },
+          trackedCharacters,
+          characterState,
+          "presentCharacters",
+        ),
+        trackedCharacters.slice(1),
+        "removing an ID must not disambiguate a name in the original snapshot",
+      );
+      assert.deepEqual(
+        resolveTrackerGroupUpdate(
+          { updates: [{ characterId: "guard-a", name: "Captain" }], removed: ["Guard"] },
+          trackedCharacters,
+          characterState,
+          "presentCharacters",
+        ),
+        [{ ...trackedCharacters[0], name: "Captain" }, ...trackedCharacters.slice(1)],
+        "renaming an ID must not disambiguate a removal from the original snapshot",
+      );
+      assert.deepEqual(
+        resolveTrackerGroupUpdate(
+          {
+            updates: [
+              { characterId: "guard-a", name: "Captain" },
+              { name: "Guard", mood: "angry" },
+              { characterId: "arrival", name: "Arrival", mood: "calm" },
+              { name: "Arrival", mood: "happy" },
+            ],
+          },
+          trackedCharacters,
+          characterState,
+          "presentCharacters",
+        ),
+        [
+          { ...trackedCharacters[0], name: "Captain" },
+          ...trackedCharacters.slice(1),
+          { characterId: "arrival", name: "Arrival", mood: "happy" },
+        ],
+        "renaming cannot disambiguate existing names, while a new row accepts repeated updates",
+      );
+      const updatedCharacters = resolveTrackerGroupUpdate(
+        {
+          updates: [
+            {
+              characterId: "guard-a",
+              mood: "alert",
+              customFields: { Goal: "Search" },
+              stats: [{ name: "HP", value: 9 }],
+            },
+            { name: "Guard", mood: "wrong" },
+            { characterId: "unknown", name: "Guard", mood: "wrong" },
+          ],
+          removed: ["Guard", "unknown", "visitor"],
+        },
+        trackedCharacters,
+        characterState,
+        "presentCharacters",
+      )!;
+      assert.equal(updatedCharacters.length, 2, "ambiguous names and unknown IDs do not remove or replace characters");
+      assert.deepEqual(updatedCharacters[0], {
+        ...trackedCharacters[0],
+        mood: "alert",
+        customFields: { Goal: "Search", Secret: "kept" },
+        stats: [
+          { name: "HP", value: 9, max: 20 },
+          { name: "MP", value: 4, max: 5 },
+        ],
+      });
+      preserveTrackerCharacterUiFields(updatedCharacters, trackedCharacters);
+      assert.equal(updatedCharacters.length, 2, "history enrichment must not resurrect a removed character");
+      assert.deepEqual(
+        resolveTrackerGroupUpdate(
+          { removed: ["guard-a", "guard-b", "visitor"] },
+          trackedCharacters,
+          characterState,
+          "presentCharacters",
+        ),
+        [],
+        "explicit removal can remove the last character",
+      );
+      const lockedCharacterState = {
+        ...characterState,
+        fieldLocks: { [characterTrackerLockKey(trackedCharacters[0]!, 0, "mood")]: true },
+      };
+      assert.equal(
+        resolveTrackerGroupUpdate(
+          { removed: ["guard-a"], updates: [{ characterId: "arrival", name: "Arrival" }] },
+          trackedCharacters,
+          lockedCharacterState,
+          "presentCharacters",
+        )?.length,
+        4,
+        "locked removal does not consume a new arrival",
+      );
+
+      const worldOps = { updates: [{ name: "Tension", value: "High" }], removed: ["Moon Phase", "unknown"] };
+      const worldPatch = applyTrackerFieldLocksToGameStatePatch({ worldCustomFields: worldOps }, currentState);
+      assert.deepEqual(worldPatch.worldCustomFields, [{ name: "Tension", value: "High", icon: "flame" }]);
+      const worldStreamPatch = {
+        worldCustomFields: { updates: worldPatch.worldCustomFields, removed: ["Moon Phase"] },
+      };
+      assert.deepEqual(
+        applyTrackerFieldLocksToGameStatePatch(worldStreamPatch, currentState).worldCustomFields,
+        worldPatch.worldCustomFields,
+        "live client merge honors explicit removal",
+      );
+      assert.deepEqual(
+        applyTrackerFieldLocksToGameStatePatch(worldStreamPatch, null).worldCustomFields,
+        worldPatch.worldCustomFields,
+        "early SSE seeds arrays before a snapshot is loaded",
+      );
+      const worldLockedState = {
+        ...currentState,
+        fieldLocks: { [worldCustomFieldTrackerLockKey(currentState.worldCustomFields[0]!, "value", 0)]: true },
+      };
+      assert.equal(
+        (
+          applyTrackerFieldLocksToGameStatePatch({ worldCustomFields: worldOps }, worldLockedState)
+            .worldCustomFields as unknown as unknown[]
+        ).length,
+        2,
+        "locked world rows survive explicit removal",
+      );
+
       // A group the agent did not mention must survive the turn. Treating an
       // absent key as an empty array silently wipes tracked state (#2370, #2724).
       const partialInventoryPatch = buildLockedInventoryTrackerPatch({
@@ -10535,6 +12409,54 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
       // findInvalidInventoryTrackerRow is what lets the Agent Suite editor refuse bad
       // input instead of silently normalizing a hand-written group down to [].
       assert.equal(findInvalidInventoryTrackerRow([{ name: "Rope" }]), null, "well-formed rows must validate");
+      const detailedItem = {
+        name: "Painkillers",
+        qty: 3,
+        description: "Small white tablets",
+        location: "Backpack side pocket",
+      };
+      assert.deepEqual(normalizeInventoryTrackerRows([detailedItem]), [detailedItem]);
+      assert.deepEqual(
+        normalizeInventoryTrackerRows([
+          { name: "Key", description: "Marked 17" },
+          { name: "key", location: "Coat pocket", description: "Ignored duplicate" },
+        ]),
+        [{ name: "Key", qty: 2, description: "Marked 17", location: "Coat pocket" }],
+        "deduplication keeps first details and fills missing fields",
+      );
+      assert.equal(findInvalidInventoryTrackerRow([detailedItem]), null);
+      assert.match(String(findInvalidInventoryTrackerRow([{ name: "Key", description: 42 }])), /description/);
+      assert.match(String(findInvalidInventoryTrackerRow([{ name: "Key", location: {} }])), /location/);
+      const detailedState = {
+        ...currentState,
+        playerStats: { ...itemState.playerStats, inventoryTrackerInventory: [detailedItem] },
+        fieldLocks: {
+          [roleplayInventoryTrackerLockKey("inventory", detailedItem, "description")]: true,
+          [roleplayInventoryTrackerLockKey("inventory", detailedItem, "location")]: true,
+        },
+      };
+      const detailPatch = buildLockedInventoryTrackerPatch({
+        data: { inventory: { updates: [{ name: "Painkillers", qty: 1, description: "Wrong", location: "Unknown" }] } },
+        snapshot: { playerStats: detailedState.playerStats },
+        lockState: detailedState,
+      });
+      const singleItem = {
+        name: detailedItem.name,
+        description: detailedItem.description,
+        location: detailedItem.location,
+      };
+      assert.deepEqual(
+        detailPatch.values.inventoryTrackerInventory,
+        [singleItem],
+        "quantity changes retain locked details",
+      );
+      assert.deepEqual(
+        buildInventoryTrackerEditPatch(detailedState.playerStats, "inventory", [
+          { ...singleItem, description: "", location: "Bedside table" },
+        ]).inventoryTrackerInventory,
+        [{ ...singleItem, description: "", location: "Bedside table" }],
+        "manual edits can explicitly clear details and retain quantity-one metadata",
+      );
       assert.match(
         String(findInvalidInventoryTrackerRow([{ foo: 1 }])),
         /row 0/u,
@@ -10749,6 +12671,151 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
       applyTrackerCharacterCardIdentity(unrelatedLongName, [{ id: "party-card", name: "Mari" }]);
       assert.deepEqual(unrelatedLongName, [{ name: "Mari Calder" }]);
 
+      // Multi-character cards: two distinctly named members of one card stay separate.
+      const castCard = { id: "resort-card", name: "Vacation Resort", avatarPath: "/api/avatars/file/resort.png" };
+      const castBatch: Array<Record<string, unknown>> = [
+        { characterId: "resort-card", name: "Ana", mood: "Playful", avatarPath: "/api/avatars/file/resort.png" },
+        { characterId: "resort-card", name: "Julia", mood: "Sleeping" },
+      ];
+      const castMatches = applyTrackerCharacterCardIdentity(castBatch, [castCard]);
+      assert.equal(castMatches.has("resort-card"), false);
+      assert.deepEqual(castBatch, [
+        { characterId: "resort-card:cast:ana", name: "Ana", mood: "Playful", avatarPath: null, avatarCrop: null },
+        { characterId: "resort-card:cast:julia", name: "Julia", mood: "Sleeping" },
+      ]);
+
+      // A lone member on a later turn keeps the cast identity when earlier state remembers the cast.
+      const loneMember: Array<Record<string, unknown>> = [{ characterId: "resort-card", name: "Ana", mood: "Bored" }];
+      applyTrackerCharacterCardIdentity(loneMember, [castCard], {
+        previousCharacters: [{ characterId: "resort-card:cast:julia", name: "Julia" }],
+      });
+      assert.deepEqual(loneMember, [{ characterId: "resort-card:cast:ana", name: "Ana", mood: "Bored" }]);
+
+      // A model echoing a cast id resolves to the same member, and duplicates merge.
+      const echoedCast: Array<Record<string, unknown>> = [
+        { characterId: "resort-card:cast:ana", name: "Ana", mood: "Smug" },
+        { characterId: "resort-card", name: "ana", outfit: "hoodie" },
+      ];
+      applyTrackerCharacterCardIdentity(echoedCast, [castCard]);
+      assert.deepEqual(echoedCast, [
+        { characterId: "resort-card:cast:ana", name: "ana", mood: "Smug", outfit: "hoodie" },
+      ]);
+
+      // Without cast evidence a single differently named entry still canonicalizes to the card.
+      const soloAlias: Array<Record<string, unknown>> = [{ characterId: "resort-card", name: "Ana" }];
+      const soloMatches = applyTrackerCharacterCardIdentity(soloAlias, [castCard]);
+      assert.equal(soloMatches.has("resort-card"), true);
+      assert.equal(soloAlias[0]?.name, "Vacation Resort");
+
+      // A card whose text lists its cast is multi-character from the first turn:
+      // the old merged row named after the card is dropped, and bare member names link to the card.
+      const declaredCastCard = {
+        ...castCard,
+        description:
+          "[PREMISE]\nA trip.\n\n[CHARACTER: Ana]\nFull Name: Ana\nAge: 20\n\n[CHARACTER: Julia]\nFull Name: Julia\nAge: 41",
+      };
+      assert.deepEqual(extractCharacterCardCastMembers(declaredCastCard), ["Ana", "Julia"]);
+      assert.deepEqual(
+        extractCharacterCardCastMembers({ name: "Mira", description: "[CHARACTER: Mira]\nA lone knight." }),
+        [],
+      );
+      assert.deepEqual(
+        extractCharacterCardCastMembers({
+          name: "Party",
+          description: "Name: Rook\nRole: scout\n\nName: Vale\nRole: mage",
+        }),
+        ["Rook", "Vale"],
+      );
+      assert.deepEqual(
+        extractCharacterCardCastMembers({
+          name: "Party",
+          description: '> **Full Name:** "Rook" (scout)\r\n- _Name_： **Vale** (mage)\r\nName: Rook',
+        }),
+        ["Rook", "Vale"],
+      );
+      // Long malformed fields used to trigger polynomial regex backtracking; the runner has a fixed timeout.
+      const longWhitespace = " ".repeat(100_000);
+      assert.deepEqual(
+        extractCharacterCardCastMembers({
+          name: "Party",
+          description: [
+            `Name${longWhitespace}`,
+            `Name:${longWhitespace}${"x".repeat(121)}`,
+            `Full${longWhitespace}namo: Decoy`,
+            `Name: ${"(".repeat(119)}x`,
+            `Name:${longWhitespace}Rook (scout)`,
+            "Name: Vale (mage)",
+          ].join("\n"),
+        }),
+        ["Rook", "Vale"],
+      );
+      const declaredBatch: Array<Record<string, unknown>> = [
+        {
+          characterId: "resort-card",
+          name: "Vacation Resort",
+          mood: "Excited",
+          avatarPath: "/api/avatars/file/resort.png",
+        },
+        { name: "Julia", mood: "Sleeping" },
+      ];
+      const declaredMatches = applyTrackerCharacterCardIdentity(declaredBatch, [declaredCastCard]);
+      assert.equal(declaredMatches.has("resort-card"), false);
+      assert.deepEqual(declaredBatch, [{ characterId: "resort-card:cast:julia", name: "Julia", mood: "Sleeping" }]);
+
+      // A manual row sharing a declared member's name keeps its manual identity and portrait guards.
+      const manualMember = {
+        characterId: "manual-ana",
+        name: "Ana",
+        mood: "Calm",
+        avatarPath: "/api/avatars/file/manual-ana.png",
+        avatarCrop: { zoom: 2, offsetX: 0, offsetY: 0 },
+      };
+      const manualBatch: Array<Record<string, unknown>> = [{ ...manualMember }];
+      assert.equal(applyTrackerCharacterCardIdentity(manualBatch, [declaredCastCard]).size, 0);
+      assert.deepEqual(manualBatch, [manualMember]);
+
+      // Preserve a legacy title row until this result actually provides a member to replace it.
+      const legacyTitle = {
+        characterId: "resort-card",
+        name: "Vacation Resort",
+        mood: "Excited",
+        outfit: "Summer clothes",
+        customFields: { Goal: "Reach the resort" },
+        avatarPath: "/api/avatars/file/resort.png",
+        avatarCrop: null,
+      };
+      const legacyBatch: Array<Record<string, unknown>> = [{ ...legacyTitle }];
+      const legacyMatches = applyTrackerCharacterCardIdentity(legacyBatch, [declaredCastCard], {
+        previousCharacters: [{ characterId: "resort-card:cast:julia", name: "Julia" }],
+      });
+      assert.equal(legacyMatches.has("resort-card"), true);
+      assert.deepEqual(legacyBatch, [legacyTitle]);
+
+      // The same replacement rule applies to a cast inferred from this batch or remembered from history.
+      for (const rememberedCast of [false, true]) {
+        const inferredBatch: Array<Record<string, unknown>> = [
+          { ...legacyTitle },
+          { characterId: "resort-card", name: "Ana", mood: "Calm" },
+          ...(rememberedCast ? [] : [{ characterId: "resort-card", name: "Julia", mood: "Sleeping" }]),
+        ];
+        const inferredMatches = applyTrackerCharacterCardIdentity(inferredBatch, [castCard], {
+          previousCharacters: rememberedCast ? [{ characterId: "resort-card:cast:julia", name: "Julia" }] : [],
+        });
+        assert.equal(inferredMatches.has("resort-card"), false);
+        assert.deepEqual(inferredBatch, [
+          { characterId: "resort-card:cast:ana", name: "Ana", mood: "Calm" },
+          ...(rememberedCast ? [] : [{ characterId: "resort-card:cast:julia", name: "Julia", mood: "Sleeping" }]),
+        ]);
+      }
+
+      const ordinaryAliasBatch: Array<Record<string, unknown>> = [
+        { ...legacyTitle },
+        { characterId: "resort-card", name: "Ana" },
+      ];
+      assert.equal(applyTrackerCharacterCardIdentity(ordinaryAliasBatch, [castCard]).has("resort-card"), true);
+      assert.equal(ordinaryAliasBatch.length, 1, "A lone alias does not establish a multi-character card");
+      assert.equal(ordinaryAliasBatch[0]?.name, "Vacation Resort");
+
       assert.equal(
         canonicalizeGamePartySpeakerLabels(
           '[Marisol "Mari"] [main] [happy]: "Ready."\n\nMarisol "Mari" crosses the room.',
@@ -10796,16 +12863,30 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
       assert.match(promptBlock ?? "", /Field 62: 62/);
       assert.doesNotMatch(promptBlock ?? "", /Field 63: 63/);
 
-      const inventoryPromptBlock = buildCommittedTrackerContextBlock({
-        chatEnableAgents: true,
-        activeAgentIds: ["inventory-tracker"],
-        latestGameState: { playerStats: inventoryTrackerPatch.playerStats },
-        chatMetadata: {},
-        wrapFormat: "markdown",
-      });
-      assert.match(inventoryPromptBlock ?? "", /Currencies:\n- Silver coin x6/);
-      assert.match(inventoryPromptBlock ?? "", /Equipped:\n- Family heirloom longsword/);
-      assert.match(inventoryPromptBlock ?? "", /Inventory:\n- Scavenged axe x2/);
+      for (const wrapFormat of ["xml", "markdown", "none"] as const) {
+        const inventoryPromptBlock = buildCommittedTrackerContextBlock({
+          chatEnableAgents: true,
+          activeAgentIds: ["inventory-tracker"],
+          latestGameState: {
+            playerStats: {
+              ...inventoryTrackerPatch.playerStats,
+              inventoryTrackerInventory: [
+                { name: "Scavenged axe", qty: 2, description: "Chipped iron blade", location: "Backpack" },
+                { name: "Blank note", description: "", location: "  " },
+              ],
+            },
+          },
+          chatMetadata: {},
+          wrapFormat,
+        });
+        assert.match(inventoryPromptBlock ?? "", /Currencies:\n\s*- Silver coin x6/);
+        assert.match(inventoryPromptBlock ?? "", /Equipped:\n\s*- Family heirloom longsword/);
+        assert.match(
+          inventoryPromptBlock ?? "",
+          /Inventory:\n\s*- Scavenged axe x2 \(description: Chipped iron blade; location: Backpack\)/,
+        );
+        assert.doesNotMatch(inventoryPromptBlock ?? "", /Blank note \(/);
+      }
 
       const beholderState = normalizeBeholderState({
         characters: [
@@ -10838,6 +12919,31 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
       assert.match(beholderPromptBlock ?? "", /left hand: holding: silver key/u);
       assert.match(beholderPromptBlock ?? "", /shallow cut \(minor, bleeding\)/u);
       assert.equal(resolveAgentResultType({ type: "beholder", settings: {} }), "context_injection");
+    },
+  },
+  {
+    name: "tracker singleton requests advertise incremental support without changing parsed responses",
+    async run() {
+      for (const type of ["world-state", "character-tracker", "custom-tracker", "inventory-tracker"]) {
+        const output = { fields: { updates: [{ name: "Clue", value: "found" }], removed: [] } };
+        const { calls, provider } = makeCapturingProvider(JSON.stringify(output));
+        const config = makeRegressionAgentConfig({
+          id: `builtin:${type}`,
+          type,
+          name: type,
+          promptTemplate: "Return tracker JSON.",
+          settings: {},
+        });
+        const result = await executeAgent(
+          config as any,
+          makeRegressionAgentContext(),
+          provider as any,
+          "regression-model",
+        );
+        assert.equal(result.success, true);
+        assert.deepEqual(result.data, output);
+        assert.match(calls[0]!.map((message) => message.content).join("\n"), /tracker_incremental_updates: supported/);
+      }
     },
   },
   {
@@ -11216,6 +13322,82 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
       assert.equal(fencedTrailingComma.commands[0]?.arguments.action, "lorebook.search");
       assert.equal(fencedTrailingComma.protocolValid, true);
 
+      const updateArgs = {
+        action: "lorebook.updateEntry",
+        entryId: "entry-1",
+        patch: { content: "Changed" },
+        apply: true,
+      };
+      for (const raw of [
+        { name: "app_data", parameters: updateArgs },
+        { tool: "app_data", arguments: updateArgs },
+        { tool_name: "app_data", parameters: updateArgs },
+        { type: "function", function: { name: "app_data", arguments: JSON.stringify(updateArgs) } },
+      ]) {
+        for (const commands of [[raw], raw]) {
+          const recovered = parseAssistantWorkspaceAction(
+            JSON.stringify({ say: "I’ve updated the entry.", commands, stop: false }),
+          );
+          assert.equal(recovered.protocolValid, true);
+          assert.equal(recovered.commands.length, 1);
+          assert.deepEqual(recovered.commands[0]?.arguments, updateArgs);
+        }
+      }
+      const nestedCalls = [
+        { name: "app_data", arguments: updateArgs },
+        { name: "read", arguments: { path: "README.md" } },
+      ];
+      const nestedFrame = parseAssistantWorkspaceAction(
+        JSON.stringify({ commands: [{ tool_calls: nestedCalls }], stop: false }),
+      );
+      assert.equal(nestedFrame.protocolValid, true);
+      assert.equal(nestedFrame.commands.length, 2);
+      for (const commands of [
+        [{ tool_calls: nestedCalls }, { name: "unknown_tool" }],
+        [{ tool_calls: [...nestedCalls, { name: "unknown_tool" }] }],
+      ]) {
+        const invalid = parseAssistantWorkspaceAction(JSON.stringify({ commands, stop: false }));
+        assert.equal(invalid.protocolValid, false, "expanded nested commands cannot cancel out an unrecognized entry");
+        assert.deepEqual(invalid.commands, []);
+      }
+      const malformed = parseAssistantWorkspaceAction(
+        JSON.stringify({
+          say: "Done!",
+          commands: [{ name: "app_data", arguments: updateArgs }, { name: "unknown_tool" }],
+          stop: true,
+        }),
+      );
+      assert.equal(malformed.protocolValid, false, "a dropped command must enter protocol repair");
+      assert.equal(malformed.stop, false, "an explicit stop cannot hide malformed commands");
+      assert.equal(malformed.commands.length, 0, "repair the whole frame before applying only part of it");
+      for (const claim of [
+        "I added the entry.",
+        "I’ve created the entry.",
+        "I have now updated the card.",
+        "I just created it.",
+        "Updated.",
+        "Edit applied.",
+        "Done!",
+        "Before you ask: I created the entry.",
+      ]) {
+        assert.equal(workspaceTextClaimsMutationCompletion(claim), true, claim);
+      }
+      for (const text of [
+        "I have not updated it.",
+        "Have I updated it?",
+        "I verified the entry.",
+        "Here are the updated instructions.",
+        "I can create it.",
+        "Set its type to Constant",
+        "Added fields appear",
+        "Removed entries cannot be restored",
+        // Slice 68: feature descriptions from a docs answer are not completion claims.
+        "A chunk needs at least 5 new messages before it's created.",
+        "It is enabled by default in Conversation chats.",
+      ]) {
+        assert.equal(workspaceTextClaimsMutationCompletion(text), false, text);
+      }
+
       const unsupportedCompletion = parseAssistantWorkspaceAction(
         '{"say":"Done — I created it and verified it saved.","commands":[],"stop":true}',
       );
@@ -11331,19 +13513,25 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
         "staged",
       );
       // ── Loop wiring pins: the pure function is only half the contract ────
-      const agentSourceForPins = readFileSync(
-        new URL("../../packages/server/src/services/professor-mari/workspace-agent.service.ts", import.meta.url),
-        "utf8",
+      const agentSourceForPins = (
+        readFileSync(
+          new URL("../../packages/server/src/services/professor-mari/workspace-agent.service.ts", import.meta.url),
+          "utf8",
+        ) +
+        readFileSync(
+          new URL("../../packages/server/src/services/professor-mari/workspace-round-review.ts", import.meta.url),
+          "utf8",
+        )
       ).replace(/\s+/gu, " ");
       assert.ok(
         agentSourceForPins.includes(
-          "auditWorkspaceCompletionClaim(action, commandResultsForContinuity, { auditFrom: claimAuditWatermark, hadPassedClaimAudit, })",
+          "auditWorkspaceCompletionClaim(action, args.commandResultsForContinuity, { auditFrom: state.claimAuditWatermark, hadPassedClaimAudit: state.hadPassedClaimAudit, })",
         ),
         "the loop audits against the live watermark, never from zero",
       );
       assert.ok(
         agentSourceForPins.includes(
-          "if (claimAudit.advanceWatermark) { claimAuditWatermark = commandResultsForContinuity.length; hadPassedClaimAudit = true; }",
+          "if (claimAudit.advanceWatermark) { state.claimAuditWatermark = args.commandResultsForContinuity.length; state.hadPassedClaimAudit = true; }",
         ),
         "a passing audit consumes its evidence and arms the summary allowance",
       );
@@ -11353,7 +13541,7 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
       );
       assert.ok(
         agentSourceForPins.includes(
-          "auditWorkspaceCompletionClaim(finalAction, commandResultsForContinuity, { auditFrom: claimAuditWatermark, hadPassedClaimAudit, })",
+          "auditWorkspaceCompletionClaim(finalAction, commandResultsForContinuity, { auditFrom: reviewState.claimAuditWatermark, hadPassedClaimAudit: reviewState.hadPassedClaimAudit, })",
         ),
         "the command-limit audit shares the run's scope state",
       );
@@ -11629,6 +13817,81 @@ Use HTML sparingly and diegetically. Do not replace normal prose/dialogue unless
         semanticThreshold: 0.3,
       });
       assert.equal(unknownProvenance.length, 0, "legacy vectors without provenance must be re-vectorized");
+
+      const characterContent = "Alex steps into the shade because the sunlight hurts his eyes.";
+      const mixedMessages = [
+        { role: "assistant", content: "An older unrelated character reply." },
+        { role: "user", content: "An older unrelated user reply." },
+        { role: "assistant", content: characterContent },
+        { role: "user", content: "Are you okay?" },
+      ];
+      const characterEntry = { ...entry, id: "character-context", embedding: [0, 1] };
+      const defaultEntry = { ...characterEntry, id: "default-context", lorebookId: "default-book" };
+      let embeddingCalls = 0;
+      const withCharacter = await buildLorebookSemanticEmbeddingsById({
+        lorebooks: [
+          {
+            id: entry.lorebookId,
+            excludeFromVectorization: false,
+            vectorQueryDepth: 1,
+            vectorIncludeAssistant: true,
+          } as any,
+          { id: defaultEntry.lorebookId, excludeFromVectorization: false, vectorQueryDepth: 1 } as any,
+        ],
+        entries: [entry, characterEntry, defaultEntry] as any,
+        scanMessages: mixedMessages,
+        embeddingSource: {
+          ...embeddingSource,
+          async embed(texts: string[], _signal?: AbortSignal, inputType?: "document" | "query") {
+            embeddingCalls++;
+            assert.equal(inputType, "query");
+            assert.deepEqual(
+              texts.slice(0, 2),
+              ["Are you okay?", characterContent],
+              "roles stay separate at the same depth",
+            );
+            assert.ok(texts.every((text) => !text.includes("older unrelated")));
+            return texts.map((_, index) =>
+              index === 0 ? [1, 0] : index === 1 ? [0, 1] : index === 2 ? [0, -1] : [-1, 0],
+            );
+          },
+        },
+      });
+      assert.equal(embeddingCalls, 1, "user, character and calibration queries share one embedding call");
+      assert.equal(withCharacter.similarityBaseline, 1 / 3, "only the three calibration vectors set the baseline");
+      const withoutCharacter = await buildLorebookSemanticEmbeddingsById({
+        lorebooks: [{ id: entry.lorebookId, vectorQueryDepth: 1, vectorIncludeAssistant: true } as any],
+        entries: [entry as any],
+        scanMessages: [{ role: "user", content: "Rocks stones mountain ore" }],
+        embeddingSource,
+      });
+      assert.deepEqual(
+        withoutCharacter.embeddingsByLorebookId?.get(entry.lorebookId),
+        [1, 0],
+        "an opted-in book with no character messages keeps the single user vector",
+      );
+      const matches = scanForActivatedEntries(mixedMessages, [entry, characterEntry, defaultEntry] as any, {
+        chatEmbedding: withCharacter.defaultEmbedding,
+        semanticEmbeddingsByLorebookId: withCharacter.embeddingsByLorebookId,
+        semanticEmbeddingSpaceId: withCharacter.embeddingSpaceId,
+        semanticSimilarityBaseline: withCharacter.similarityBaseline,
+        semanticThreshold: 0.9,
+      });
+      assert.deepEqual(
+        new Set(matches.map((match) => match.entry.id)),
+        new Set([entry.id, characterEntry.id]),
+        "the stronger separate score preserves user matches and adds character matches only for the opted-in book",
+      );
+      const wrongDimensions = scanForActivatedEntries(mixedMessages, [characterEntry] as any, {
+        semanticEmbeddingsByLorebookId: new Map([[entry.lorebookId, [[1], [0, 1]]]]),
+        semanticEmbeddingSpaceId: "test-space",
+        semanticThreshold: 0.9,
+      });
+      assert.equal(
+        wrongDimensions[0]?.entry.id,
+        characterEntry.id,
+        "one incompatible vector does not hide a compatible query",
+      );
     },
   },
   {

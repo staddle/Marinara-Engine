@@ -55,6 +55,8 @@ jobs:
       BUNNY_REVIEW_MODE: ${{ inputs.review_mode || 'auto' }}
       BUNNY_IS_DRAFT: ${{ inputs.is_draft || 'false' }}
       BUNNY_LAST_REVIEWED_SHA: ${{ inputs.last_reviewed_sha || '' }}
+      # The PR head is the working directory; keep it off Python's import path so its files can't shadow modules.
+      PYTHONSAFEPATH: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

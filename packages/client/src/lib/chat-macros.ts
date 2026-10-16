@@ -1,4 +1,14 @@
-import { normalizeTextForMatch, resolveMacros, type MacroContext, type Persona } from "@marinara-engine/shared";
+import {
+  normalizeTextForMatch,
+  resolveChatPersonaCandidate,
+  resolveMacros,
+  usesLorebookIncludes,
+  type MacroContext,
+  type Persona,
+  type ScopedRegexMode,
+} from "@marinara-engine/shared";
+import { api, requestTimeoutSignal } from "./api-client";
+import { parseChatMetadata } from "./chat-display";
 
 export interface MacroCharacterData {
   id?: string;
@@ -126,11 +136,7 @@ export function selectActivePersona(
 ): MacroPersonaData | undefined {
   if (!personas?.length) return undefined;
 
-  const chatPersonaId = typeof chat?.personaId === "string" ? chat.personaId : null;
-  const allowGlobalFallback = chat?.mode !== "game";
-  const selectedPersona =
-    (chatPersonaId ? personas.find((persona) => persona.id === chatPersonaId) : null) ??
-    (allowGlobalFallback ? personas.find((persona) => persona.isActive) : null);
+  const selectedPersona = resolveChatPersonaCandidate(personas, chat?.personaId);
 
   return selectedPersona ? toMacroPersonaData(selectedPersona) : undefined;
 }
@@ -212,6 +218,8 @@ export function resolveMessageMacros(
  * context; reads observe them), so templates containing them are never cached.
  */
 const VARIABLE_OP_MACRO_RE = /\{\{\s*(?:setvar|addvar|addnumvar|incvar|decvar|getvar)\b/i;
+/** Macros that change a chat variable. Only the server saves a chat variable's new value. */
+export const VARIABLE_WRITE_MACRO_RE = /\{\{\s*(?:setvar|addvar|addnumvar|incvar|decvar)\b/i;
 /** Only short templates (regex replacements, trims, patterns) are worth caching. */
 const RESOLVER_CACHE_MAX_TEMPLATE_LENGTH = 2048;
 
@@ -255,6 +263,7 @@ export function createInputMacroResolverForChat(
   characters: Array<{ id: string; data: unknown }> | undefined,
   personas: Persona[] | undefined,
   lastInput?: string,
+  variables?: Record<string, string>,
 ) {
   const chatCharacters = selectChatCharacters(chat, characters);
   const characterPersona = chat?.personaCharacterId
@@ -270,5 +279,84 @@ export function createInputMacroResolverForChat(
     primaryCharacter: chatCharacters[0] ?? null,
     characters: chatCharacters,
     lastInput,
+    variables,
   });
+}
+
+/** How long a send waits for the server to put lorebook entries in before sending the include as written. */
+const EXPAND_INCLUDES_TIMEOUT_MS = 10_000;
+
+/**
+ * `{{include::...}}` reads lorebooks, which only the server has, so the server puts the
+ * entries in and the caller's macro pass then fills in their macros with the rest (#7607).
+ * Without a chat, or if the server fails or does not answer in time, the include stays as
+ * written and the prompt fills it in, as before. Exported for turns that skip
+ * prepareUserInputMessage but fill in macros the same way (Game).
+ */
+export async function expandMessageIncludes(text: string, chatId: string | null | undefined): Promise<string> {
+  // A short-form name is looked up in the chat's lorebooks, so without a chat it would read as empty.
+  if (!chatId || !usesLorebookIncludes(text)) return text;
+  try {
+    const result = await api.post<{ text?: unknown }>(
+      "/lorebooks/expand-includes",
+      { text, chatId },
+      { signal: requestTimeoutSignal(EXPAND_INCLUDES_TIMEOUT_MS) },
+    );
+    return typeof result?.text === "string" ? result.text : text;
+  } catch (error) {
+    console.warn("[chat-macros] Could not fill in lorebook includes; sending them as written", error);
+    return text;
+  }
+}
+
+/**
+ * What a composer send stores as the user's message: user-input regex scripts, optional
+ * input translation, then the macros. Send, Post Only and /send all store this text, so
+ * a stored message holds the resolved macros the chat shows and the model reads (#7585),
+ * lorebook includes too (#7607).
+ */
+export async function prepareUserInputMessage(
+  text: string,
+  {
+    chat,
+    characters,
+    personas,
+    applyToUserInput,
+    onTranslationError,
+  }: {
+    chat:
+      | (NonNullable<Parameters<typeof createInputMacroResolverForChat>[0]> & { id?: string; metadata?: unknown })
+      | null
+      | undefined;
+    characters: Array<{ id: string; data: unknown }> | undefined;
+    personas: Persona[] | undefined;
+    applyToUserInput: (
+      text: string,
+      options: { resolveMacros: (value: string) => string; scopedMode?: ScopedRegexMode | null },
+    ) => string;
+    onTranslationError: () => void;
+  },
+): Promise<string> {
+  const resolveInputMacros = createInputMacroResolverForChat(chat, characters, personas, text);
+  const chatMeta = parseChatMetadata(chat?.metadata);
+  // First pass: resolve macros against raw input, so {{input}} uses the pre-translation text.
+  let message = applyToUserInput(text, {
+    resolveMacros: resolveInputMacros,
+    scopedMode: chatMeta.scopedRegexMode,
+  });
+
+  // Input translation: translate user's message before sending
+  if (chatMeta.translateInput && message.trim()) {
+    try {
+      const { translateText } = await import("./translate-text");
+      const translated = await translateText(message, "input");
+      if (translated.trim()) message = translated;
+    } catch {
+      onTranslationError();
+    }
+  }
+
+  // Final pass: resolve macros introduced by translation while {{input}} still points to raw.
+  // Lorebook includes go in first, as resolveMacros puts them in before every other macro.
+  return resolveInputMacros(await expandMessageIncludes(message, chat?.id));
 }

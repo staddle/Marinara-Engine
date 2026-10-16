@@ -15,14 +15,18 @@ import {
   updateChoiceBlockSchema,
   createFolderEntry,
   isStockMarinaraUniversalPreset,
+  normalizeAdvancedMemorySettings,
   type LorebookEntryTimingState,
 } from "@marinara-engine/shared";
 import type { ExportEnvelope } from "@marinara-engine/shared";
 import { createPromptsStorage } from "../services/storage/prompts.storage.js";
-import { assemblePrompt, type AssemblerInput } from "../services/prompt/index.js";
+import { assemblePrompt, normalizeChatMacroVariables, type AssemblerInput } from "../services/prompt/index.js";
+import { parsePresetParameters } from "../services/prompt/assembler.js";
+import { resolveReasoningMacroValue } from "../services/generation/provider-generation-runtime.js";
 import { cardPromptText } from "../services/prompt/card-text.js";
 import { resolveLorebookScopeExclusions } from "../services/lorebook/game-lorebook-scope.js";
 import { createChatsStorage } from "../services/storage/chats.storage.js";
+import { createConnectionsStorage } from "../services/storage/connections.storage.js";
 import { createCharactersStorage } from "../services/storage/characters.storage.js";
 import { resolveChatUserIdentity } from "../services/chat-user-identity.js";
 import { normalizeTimestampOverrides } from "../services/import/import-timestamps.js";
@@ -30,6 +34,7 @@ import AdmZip from "adm-zip";
 import { DATA_DIR } from "../utils/data-dir.js";
 import { assertInsideDir, extensionFromImageMime, isAllowedImageBuffer } from "../utils/security.js";
 import { logger } from "../lib/logger.js";
+import { forwardPromptPreview } from "./generate/prompt-preview.js";
 
 const PROMPT_IMAGES_DIR = join(DATA_DIR, "prompts", "images");
 const PROMPT_IMAGE_URL_PREFIX = "/api/prompts/images/file/";
@@ -273,6 +278,7 @@ export async function promptsRoutes(app: FastifyInstance) {
     }
 
     const zip = new AdmZip();
+    const usedSegments = new Set<string>();
     let exportedCount = 0;
     for (const id of ids) {
       const result = await buildPresetExportEnvelope(storage, id);
@@ -283,6 +289,7 @@ export async function promptsRoutes(app: FastifyInstance) {
         itemKind: "marinara.preset",
         config: result.envelope,
         fallbackName: `preset-${exportedCount + 1}`,
+        usedSegments,
       });
       zip.addFile(entry.path, Buffer.from(JSON.stringify(entry.manifest, null, 2), "utf-8"));
       exportedCount++;
@@ -479,6 +486,17 @@ export async function promptsRoutes(app: FastifyInstance) {
     } catch {
       chatMeta = {};
     }
+    if (chat.mode === "roleplay" && normalizeAdvancedMemorySettings(chatMeta.advancedMemory).enabled) {
+      const preview = await forwardPromptPreview(app, req, { chatId, presetId: preset.id, presetChoices: choices });
+      if (preview.statusCode >= 400) return reply.status(preview.statusCode).send(preview.body);
+      const messages = preview.body.prompt?.messages ?? [];
+      return {
+        messages,
+        parameters: preview.body.parameters ?? {},
+        messageCount: messages.length,
+        advancedMemory: preview.body.prompt?.advancedMemory,
+      };
+    }
     const lorebookScopeExclusions = resolveLorebookScopeExclusions(chat.mode, chatMeta);
     const mappedMessages = chatMessages.map((m: any) => ({
       role: m.role === "narrator" ? ("system" as const) : (m.role as "user" | "assistant" | "system"),
@@ -519,13 +537,29 @@ export async function promptsRoutes(app: FastifyInstance) {
       storage.listChoiceBlocksForPreset(req.params.id),
     ]);
 
+    const connections = createConnectionsStorage(app.db);
+    const connection = chat.connectionId
+      ? await connections.getById(chat.connectionId)
+      : await connections.getDefault();
     const assemblerInput: AssemblerInput = {
       db: app.db,
+      model: connection?.model,
+      reasoning: connection
+        ? resolveReasoningMacroValue({
+            connection,
+            chatMode: chat.mode,
+            isSceneChat: chatMeta.sceneStatus === "active",
+            chatParameters: chatMeta.chatParameters,
+            baseReasoningEffort: parsePresetParameters(preset.parameters).reasoningEffort ?? null,
+          })
+        : undefined,
       preset: preset as any,
       sections: sections as any,
       groups: groups as any,
       choiceBlocks: choiceBlocks as any,
       chatChoices: choices ?? {},
+      // Chat variables win over built-in macros of the same name, as in generation.
+      localVariables: normalizeChatMacroVariables(chatMeta.macroVariables),
       chatId,
       characterIds,
       lorebookCharacterIds,

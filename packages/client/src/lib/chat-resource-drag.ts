@@ -5,13 +5,7 @@ export const CHAT_RESOURCE_ASSIGN_EVENT = "marinara:assign-chat-resource";
 export const CHAT_RESOURCE_AGENT_SETUP_EVENT = "marinara:setup-chat-agent";
 
 export type ChatResourceDragKind =
-  | "character"
-  | "lorebook"
-  | "agent"
-  | "persona"
-  | "preset"
-  | "connection"
-  | "background";
+  "character" | "lorebook" | "agent" | "persona" | "preset" | "connection" | "background";
 
 export type ChatResourceDragPayload = {
   version: 1;
@@ -23,6 +17,7 @@ export type ChatResourceDragPayload = {
 };
 
 let activeChatResourceDrag: ChatResourceDragPayload | null = null;
+let mouseDrag = false;
 let pendingChatAgentSetup: { chatId: string; ids: string[] } | null = null;
 
 /**
@@ -30,6 +25,7 @@ let pendingChatAgentSetup: { chatId: string; ids: string[] } | null = null;
  * the mobile drop dock subscribes to it (the dock has to render while the finger is still down).
  */
 let activeChatResourceTouchDrag: ChatResourceDragPayload | null = null;
+let activeTouchIdentifier: number | null = null;
 const touchDragListeners = new Set<() => void>();
 
 export function subscribeChatResourceTouchDrag(listener: () => void) {
@@ -59,10 +55,24 @@ export function getActiveChatResourceTouchDrag() {
   return activeChatResourceTouchDrag;
 }
 
-export function beginChatResourceTouchDrag(payload: ChatResourceDragPayload) {
+export function getActiveChatResourceTouch(touches: TouchList) {
+  return Array.from(touches).find((touch) => touch.identifier === activeTouchIdentifier);
+}
+
+export function beginChatResourceTouchDrag(payload: ChatResourceDragPayload, touchIdentifier: number) {
   activeChatResourceDrag = payload;
   activeChatResourceTouchDrag = payload;
+  activeTouchIdentifier = touchIdentifier;
   touchDragListeners.forEach((listener) => listener());
+}
+
+export function beginChatResourceMouseDrag(payload: ChatResourceDragPayload) {
+  activeChatResourceDrag = payload;
+  mouseDrag = true;
+}
+
+export function getActiveChatResourceMouseDrag() {
+  return mouseDrag ? activeChatResourceDrag : null;
 }
 
 export function parseChatResourceDragPayload(value: unknown): ChatResourceDragPayload | null {
@@ -116,6 +126,8 @@ export function getActiveChatResourceDrag() {
 
 export function clearActiveChatResourceDrag() {
   activeChatResourceDrag = null;
+  mouseDrag = false;
+  activeTouchIdentifier = null;
   if (activeChatResourceTouchDrag) {
     activeChatResourceTouchDrag = null;
     touchDragListeners.forEach((listener) => listener());
@@ -132,6 +144,25 @@ export function isFileDrag(dataTransfer: DataTransfer) {
 
 export function requestChatResourceAssignment(payload: ChatResourceDragPayload) {
   window.dispatchEvent(new CustomEvent<ChatResourceDragPayload>(CHAT_RESOURCE_ASSIGN_EVENT, { detail: payload }));
+}
+
+let pendingChatResourceAssign: { chatId: string; payload: ChatResourceDragPayload } | null = null;
+
+/**
+ * Queues an attach for a chat that is not open yet ("add Eliza to Tavern
+ * Night" from elsewhere). The omnibar navigates to that chat right after
+ * calling this; `ChatResourceDropOverlay` picks the payload up once it mounts
+ * for that chat, the same handoff `requestChatAgentSetup` uses for agent setup.
+ */
+export function requestChatResourceAssignmentFor(chatId: string, payload: ChatResourceDragPayload) {
+  pendingChatResourceAssign = { chatId, payload };
+}
+
+export function takePendingChatResourceAssign(chatId: string): ChatResourceDragPayload | null {
+  if (pendingChatResourceAssign?.chatId !== chatId) return null;
+  const payload = pendingChatResourceAssign.payload;
+  pendingChatResourceAssign = null;
+  return payload;
 }
 
 export function requestChatAgentSetup(chatId: string, ids: string[]) {

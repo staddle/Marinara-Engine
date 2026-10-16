@@ -16,8 +16,8 @@ import {
   ConversationMessageEditForm,
   ConversationMessageAttachments,
   ConversationMessageTranslation,
-  ConversationMessageSwipes,
   ConversationMessageName,
+  diceRollReplacesMessageContent,
   nameColorStyle,
   formatTimestamp,
   type MessageRenderContext,
@@ -58,17 +58,11 @@ export function ConversationMessageBubble({ ctx }: { ctx: MessageRenderContext }
     isHiddenCollapsed,
     hiddenFromAIHeader,
     onExpandHidden,
-    hideActions,
     hideTimestamp,
     showActions,
     forceShowActions,
     showMessageNumbers,
     messageIndex,
-    hasSwipes,
-    swipeCount,
-    onSetActiveSwipe,
-    canRegenerate,
-    onRegenerate,
     onImageOpen,
     onRemoveAttachment,
     translatedText,
@@ -235,7 +229,7 @@ export function ConversationMessageBubble({ ctx }: { ctx: MessageRenderContext }
                   return (
                     <div
                       key={`${grp.start}-${i}`}
-                      className="mari-message-content py-0.5 text-[0.875rem] leading-relaxed break-words whitespace-pre-wrap text-[var(--muted-foreground)] italic animate-[fadeSlideIn_0.25s_ease-out]"
+                      className="mari-message-content mari-chat-style-text py-0.5 text-[0.875rem] leading-relaxed break-words whitespace-pre-wrap text-[var(--muted-foreground)] italic animate-[fadeSlideIn_0.25s_ease-out]"
                       style={messageTextStyle}
                     >
                       <MessageContent
@@ -254,7 +248,7 @@ export function ConversationMessageBubble({ ctx }: { ctx: MessageRenderContext }
                 return displayLines.map((line, lineIndex) => (
                   <div
                     key={`${grp.start}-${i}-${lineIndex}`}
-                    className="mari-message-content mari-message-bubble texting-bubble texting-bubble-other relative rounded-2xl rounded-tl-md px-3.5 py-2 text-[0.9375rem] leading-relaxed break-words whitespace-pre-wrap shadow-sm animate-[fadeSlideIn_0.25s_ease-out]"
+                    className="mari-message-content mari-chat-style-text mari-message-bubble mari-chat-style-conversation texting-bubble texting-bubble-other relative rounded-2xl rounded-tl-md px-3.5 py-2 text-[0.9375rem] leading-relaxed break-words whitespace-pre-wrap shadow-sm animate-[fadeSlideIn_0.25s_ease-out]"
                     style={messageTextStyle}
                   >
                     <div
@@ -279,8 +273,8 @@ export function ConversationMessageBubble({ ctx }: { ctx: MessageRenderContext }
           ) : (
             <div
               className={cn(
-                "mari-message-content text-[0.9375rem] leading-relaxed break-words whitespace-pre-wrap",
-                "mari-message-bubble texting-bubble relative px-3.5 py-2 shadow-sm",
+                "mari-message-content mari-chat-style-text text-[0.9375rem] leading-relaxed break-words whitespace-pre-wrap",
+                "mari-message-bubble mari-chat-style-conversation texting-bubble relative px-3.5 py-2 shadow-sm",
                 isUser ? "texting-bubble-user" : "texting-bubble-other",
                 bubbleCornerClass,
                 isStreaming && !renderedContent && "py-2.5",
@@ -306,18 +300,23 @@ export function ConversationMessageBubble({ ctx }: { ctx: MessageRenderContext }
                     dotClassName="bg-[var(--muted-foreground)]/60"
                   />
                 </div>
-              ) : extra.diceRollResult ? (
+              ) : diceRollReplacesMessageContent(message.role, extra.diceRollResult) ? (
                 <DiceMessageContent diceRollResult={extra.diceRollResult} createdAt={message.createdAt} />
               ) : (
-                <MessageContent
-                  content={renderedContent}
-                  mentionNames={mentionNames}
-                  emojiMap={emojiMap}
-                  stickerMap={stickerMap}
-                  onImageOpen={(url) => onImageOpen(url)}
-                  selfCharacterId={selfCharacterId}
-                  galleryIndex={galleryIndex}
-                />
+                <>
+                  {extra.diceRollResult ? (
+                    <DiceMessageContent diceRollResult={extra.diceRollResult} createdAt={message.createdAt} />
+                  ) : null}
+                  <MessageContent
+                    content={renderedContent}
+                    mentionNames={mentionNames}
+                    emojiMap={emojiMap}
+                    stickerMap={stickerMap}
+                    onImageOpen={(url) => onImageOpen(url)}
+                    selfCharacterId={selfCharacterId}
+                    galleryIndex={galleryIndex}
+                  />
+                </>
               )}
             </div>
           )}
@@ -338,20 +337,6 @@ export function ConversationMessageBubble({ ctx }: { ctx: MessageRenderContext }
           )}
         </div>
       </div>
-
-      {/* Swipe controls — separate row so avatar never drifts */}
-      {!hideActions && (hasSwipes || (canRegenerate && onRegenerate)) && (
-        <div className={cn("mt-1", isUser ? "flex justify-end" : "pl-12")}>
-          <ConversationMessageSwipes
-            isUser={isUser}
-            messageId={message.id}
-            activeSwipeIndex={message.activeSwipeIndex}
-            swipeCount={swipeCount}
-            onSetActiveSwipe={(idx) => onSetActiveSwipe?.(message.id, idx)}
-            onCreateNextSwipe={canRegenerate && onRegenerate ? () => onRegenerate(message.id) : undefined}
-          />
-        </div>
-      )}
     </>
   );
 }

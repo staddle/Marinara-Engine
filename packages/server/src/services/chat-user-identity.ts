@@ -1,4 +1,10 @@
-import { characterDataSchema, normalizeAvatarCrop, resolveChatPersonaCandidate } from "@marinara-engine/shared";
+import {
+  characterDataSchema,
+  normalizeAvatarCrop,
+  readImageAppearanceOverride,
+  resolveChatPersonaCandidate,
+  withoutUnreadableOnboarding,
+} from "@marinara-engine/shared";
 import type { createCharactersStorage } from "./storage/characters.storage.js";
 
 type CharactersStorage = ReturnType<typeof createCharactersStorage>;
@@ -13,6 +19,12 @@ export type ChatUserIdentity = {
   scenario: string;
   backstory: string;
   appearance: string;
+  /**
+   * Image-prompt appearance override (#7053) for the IMAGE path only. Empty when
+   * the user has not enabled an override, in which case `appearance` is used.
+   * Callers must not use this for narrator/roleplay prompt text.
+   */
+  imageAppearanceOverride: string;
   avatarPath: string | null;
   avatarCrop: unknown;
   nameColor: string | null;
@@ -52,7 +64,7 @@ export async function resolveChatUserIdentity(
         return null;
       }
     }
-    const parsed = characterDataSchema.safeParse(rawData);
+    const parsed = characterDataSchema.safeParse(withoutUnreadableOnboarding(rawData));
     if (!parsed.success) return null;
     const data = parsed.data;
     const extensions = data.extensions ?? {};
@@ -66,6 +78,7 @@ export async function resolveChatUserIdentity(
       scenario: data.scenario,
       backstory: stringValue(extensions.backstory),
       appearance: stringValue(extensions.appearance),
+      imageAppearanceOverride: readImageAppearanceOverride(extensions, null) ?? "",
       avatarPath: row.avatarPath ?? null,
       avatarCrop: normalizeAvatarCrop(extensions.avatarCrop),
       nameColor: stringValue(extensions.nameColor) || null,
@@ -81,8 +94,9 @@ export async function resolveChatUserIdentity(
     };
   }
 
+  if (!chat.personaId) return null;
   const personas = preloadedPersonas ?? (await storage.listPersonas());
-  const persona = resolveChatPersonaCandidate(personas, chat.personaId, chat.mode);
+  const persona = resolveChatPersonaCandidate(personas, chat.personaId);
   if (!persona) return null;
   return {
     source: "persona",
@@ -94,6 +108,21 @@ export async function resolveChatUserIdentity(
     scenario: persona.scenario ?? "",
     backstory: persona.backstory ?? "",
     appearance: persona.appearance ?? "",
+    // Personas store the override as TOP-LEVEL fields (no extensions bag), so
+    // the helper is fed an object literal (#7053, task-7).
+    //
+    // `listPersonas()` returns RAW storage rows, not projected Personas, so the
+    // flag is the table's text convention here — coerce it exactly as
+    // `projectPersona` does. The helper's strict `=== true` would otherwise
+    // treat a stored "true" as disabled and silently drop the override.
+    imageAppearanceOverride:
+      readImageAppearanceOverride(
+        {
+          imageAppearanceEnabled: persona.imageAppearanceEnabled === "true",
+          imageAppearance: persona.imageAppearance,
+        },
+        null,
+      ) ?? "",
     avatarPath: persona.avatarPath ?? null,
     avatarCrop: normalizeAvatarCrop(persona.avatarCrop),
     nameColor: persona.nameColor ?? null,

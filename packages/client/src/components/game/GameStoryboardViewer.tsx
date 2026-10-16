@@ -15,6 +15,7 @@ import {
 import { useTranslation as useUiTranslation } from "react-i18next";
 import type { GameTurnStoryboard, GameTurnStoryboardKeyframe } from "@marinara-engine/shared";
 import { cn } from "../../lib/utils";
+import { GAME_SECTION_CLASS } from "../../lib/chat-widget-colors";
 import { getChatToolbarButtonClass } from "../chat/ChatToolbarControls";
 import { getStoryboardViewerWidthBounds } from "./game-storyboard-ui";
 
@@ -116,7 +117,13 @@ export function GameStoryboardInlineViewer({
         >
           <X size={14} />
         </button>
-        <div className="overflow-hidden rounded-xl border border-white/15 bg-black/75 shadow-2xl backdrop-blur-md">
+        <div
+          data-game-section="storyboard"
+          className={cn(
+            GAME_SECTION_CLASS,
+            "overflow-hidden rounded-xl border border-white/15 bg-black/75 shadow-2xl backdrop-blur-md",
+          )}
+        >
           <div className="flex items-center justify-between gap-2 border-b border-white/10 px-3 py-2">
             <div className="flex min-w-0 cursor-grab items-center gap-2 text-[0.6875rem] font-semibold uppercase tracking-wide text-white/75 active:cursor-grabbing">
               <GripHorizontal size={13} className="shrink-0 text-white/45" />

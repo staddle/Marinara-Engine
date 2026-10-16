@@ -1,11 +1,13 @@
+import { ConversationSceneInvitation } from "./ConversationSceneInvitation";
+import { useMessagePresetVariables } from "../../hooks/use-message-preset-variables";
 // ──────────────────────────────────────────────
 // Chat: Conversation message shell
 // Resolves character/persona identity, builds render context,
 // and delegates to the appropriate layout component.
 // ──────────────────────────────────────────────
-import { useState, useCallback, useRef, useEffect, memo, useMemo, type CSSProperties } from "react";
+import { useState, useCallback, useRef, useEffect, memo, useMemo, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Phone, PhoneIncoming, PhoneOff, Trash2 } from "lucide-react";
+import { AlertTriangle, Phone, PhoneIncoming, PhoneOff, Trash2 } from "lucide-react";
 import { useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import {
   formatTextQuotes,
@@ -30,16 +32,20 @@ import { GenerationReplayDetailsModal, hasGenerationReplayDetails } from "./Gene
 import {
   HiddenFromAIConversationButton,
   ConversationMessageLightbox,
+  ConversationMessageSwipes,
   type MessageData,
   type MessageRenderContext,
 } from "./ConversationMessageShared";
+import { MessageReplyPreview } from "./MessageReplyPreview";
 import { ConversationMessageActions } from "./ConversationMessageActions";
+import { MessageMarkIndicators } from "./MessageMarks";
 import { ConversationMessageGrouped } from "./ConversationMessageGrouped";
 import { ConversationMessageBubble } from "./ConversationMessageBubble";
 import { ConversationMessageLine } from "./ConversationMessageLine";
 import { MessageReactions } from "./MessageReactions";
 import { MessageThinkingModal } from "./MessageThinkingModal";
 import { useChatStore } from "../../stores/chat.store";
+import { hasActiveTextSelection } from "../../lib/text-selection";
 import { parseChatMetadata } from "../../lib/chat-display";
 import { resolveMessageReasoningDisplay } from "../../lib/message-reasoning";
 import {
@@ -95,6 +101,12 @@ interface ConversationMessageProps {
   onDelete?: (messageId: string) => void;
   onRegenerate?: (messageId: string) => void;
   onEdit?: (messageId: string, content: string) => void;
+  /** N1: this message's reply failed — renders the quiet "Failed · Retry" line. */
+  failedReply?: boolean;
+  failedReplyReason?: string;
+  onRetryFailedReply?: () => void;
+  /** R2: the reply checkup's quiet line, set only on the reply it describes. */
+  replyCheckup?: ReactNode;
   onSetActiveSwipe?: (messageId: string, index: number) => void;
   onToggleHiddenFromAI?: (messageId: string, current: boolean) => void;
   onPeekPrompt?: () => void;
@@ -137,6 +149,10 @@ export const ConversationMessage = memo(function ConversationMessage({
   onDelete,
   onRegenerate,
   onEdit,
+  failedReply,
+  failedReplyReason,
+  onRetryFailedReply,
+  replyCheckup,
   onSetActiveSwipe,
   onToggleHiddenFromAI,
   onPeekPrompt,
@@ -181,6 +197,7 @@ export const ConversationMessage = memo(function ConversationMessage({
   const quoteFormat = useUIStore((s) => s.quoteFormat);
   const conversationAvatarShape = useUIStore((s) => s.conversationAvatarShape);
   const activeChatMetadata = useChatStore((s) => s.activeChat?.metadata);
+  const presetVariables = useMessagePresetVariables(`${message.id}:${message.activeSwipeIndex ?? 0}`);
   const scopedRegexMode = useMemo(() => parseChatMetadata(activeChatMetadata).scopedRegexMode, [activeChatMetadata]);
   const { applyToAIOutput } = useApplyRegex();
 
@@ -200,7 +217,10 @@ export const ConversationMessage = memo(function ConversationMessage({
     ? "text-[var(--primary)] bg-[var(--primary)]/15 ring-1 ring-[var(--primary)]/30 hover:text-[var(--primary)] hover:bg-[var(--primary)]/20"
     : undefined;
   const messageTextStyle = useMemo<CSSProperties>(
-    () => ({ fontSize: `${chatFontSize}px`, ...(chatFontColor ? { color: chatFontColor } : {}) }),
+    () => ({
+      fontSize: `${chatFontSize}px`,
+      ...(chatFontColor ? { color: `var(--mari-chat-resolved-text, ${chatFontColor})` } : {}),
+    }),
     [chatFontSize, chatFontColor],
   );
 
@@ -311,7 +331,7 @@ export const ConversationMessage = memo(function ConversationMessage({
 
   // Conversation-only cosmetic display name (convoDisplayName). This component only
   // ever mounts in Conversation mode, so reading it here can't leak into RP/Game.
-  // It's read live (character map / active persona), so renaming reflects on
+  // It's read live (character map / chat persona), so renaming reflects on
   // existing messages. Identity and macros keep the base `name`; only the visible
   // label swaps. For personas we only have the *current* persona's live name, so we
   // never stamp it onto a different persona's historical messages.
@@ -323,12 +343,18 @@ export const ConversationMessage = memo(function ConversationMessage({
         : undefined
     : primaryCharInfo?.convoDisplayName;
   const headerDisplayName = convoDisplayName && convoDisplayName.trim() ? convoDisplayName : displayName;
+  const macroUserName = plainUserMessages
+    ? "User"
+    : msgPersona
+      ? (msgPersona.name ?? "User")
+      : (personaInfo?.name ?? "User");
 
   const macroContext = useMemo(
     () => ({
-      userName: displayName,
+      variables: presetVariables,
+      userName: macroUserName,
       persona: {
-        name: displayName,
+        name: macroUserName,
         description: plainUserMessages ? undefined : msgPersona ? msgPersona.description : personaInfo?.description,
         personality: plainUserMessages ? undefined : msgPersona ? msgPersona.personality : personaInfo?.personality,
         backstory: plainUserMessages ? undefined : msgPersona ? msgPersona.backstory : personaInfo?.backstory,
@@ -344,6 +370,8 @@ export const ConversationMessage = memo(function ConversationMessage({
     }),
     [
       displayName,
+      macroUserName,
+      presetVariables,
       msgPersona,
       personaInfo?.appearance,
       personaInfo?.backstory,
@@ -737,6 +765,7 @@ export const ConversationMessage = memo(function ConversationMessage({
     (e: React.MouseEvent) => {
       const target = e.target as HTMLElement;
       if (target.closest("button, a, textarea")) return;
+      if (matchMedia("(pointer: coarse)").matches && hasActiveTextSelection()) return;
       if (multiSelectMode) {
         onToggleSelect?.({
           messageId: message.id,
@@ -765,6 +794,11 @@ export const ConversationMessage = memo(function ConversationMessage({
   useEffect(() => {
     if (!showActions) return;
     const handleTouch = (e: TouchEvent) => {
+      if (
+        e.target instanceof Element &&
+        e.target.closest('[role="dialog"], [role="alertdialog"], [role="menu"], [data-chat-floating-panel]')
+      )
+        return;
       if (msgRef.current && !msgRef.current.contains(e.target as Node)) setShowActions(false);
     };
     document.addEventListener("touchstart", handleTouch);
@@ -936,17 +970,13 @@ export const ConversationMessage = memo(function ConversationMessage({
   // ── Reaction chip row ──
   // Rendered by the shell as a sibling of the message row, OUTSIDE the
   // [data-card-css] container, so a character's bubble theme can't restyle it.
-  // Indented to sit under the message body; right-aligned for user bubbles.
+  // Sits before the revealable action row, indented under the message body
+  // and right-aligned for user bubbles.
   // Holds the whole-message reactions; segment-targeted ones render inline under
   // their segment inside the grouped layout instead.
   const reactionRow =
     messageReactions.length > 0 && !isHiddenCollapsed ? (
-      <div
-        className={cn(
-          "mari-message-reactions-row pb-1",
-          isBubbleStyle && isUser ? "flex justify-end px-4" : "pl-[4.5rem] pr-4",
-        )}
-      >
+      <div className={cn("mari-message-reactions-row pb-1", isBubbleStyle && isUser ? "flex justify-end" : "pl-14")}>
         <MessageReactions
           reactions={messageReactions}
           resolveReactorName={resolveReactorName}
@@ -1087,12 +1117,18 @@ export const ConversationMessage = memo(function ConversationMessage({
     );
   }
 
+  const sceneInvitation =
+    !isUser && !isStreaming && !editing && !isHiddenCollapsed && extra.sceneRequest ? (
+      <ConversationSceneInvitation chatId={message.chatId} request={extra.sceneRequest} />
+    ) : null;
+
   // ── Grouped multi-speaker layout ──
   if (groupedLayoutActive) {
     return (
       <>
-        <ConversationMessageGrouped ctx={ctx} msgRef={msgRef} />
-        {reactionRow}
+        <ConversationMessageGrouped ctx={ctx} msgRef={msgRef} reactionRow={reactionRow} />
+        {replyCheckup && <div className="px-4">{replyCheckup}</div>}
+        {sceneInvitation}
         {modals}
       </>
     );
@@ -1103,69 +1139,98 @@ export const ConversationMessage = memo(function ConversationMessage({
     <>
       <div
         ref={msgRef}
-        className={cn(
-          "mari-message relative w-full min-w-0 max-w-full px-4 transition-colors",
-          !noHoverGroup && "group",
-          isBubbleStyle
-            ? cn("py-1", isUser ? "mari-message-user" : "mari-message-assistant", !isGrouped && "mt-0.5")
-            : cn(
-                "py-0.5 hover:bg-[var(--secondary)]/30",
-                isUser ? "mari-message-user" : "mari-message-assistant",
-                isGrouped ? "mt-0" : "mt-0.5",
-                isStreaming && "bg-[var(--secondary)]/20",
-              ),
-          isConversationStart && cn("rounded-lg ring-1", CONVERSATION_MESSAGE_CHROME_RING_CLASS),
-          isHiddenFromAI && cn("rounded-lg ring-1 saturate-75", CONVERSATION_MESSAGE_CHROME_RING_CLASS),
-          multiSelectMode && isSelected && MESSAGE_SELECTION_SURFACE_CLASS,
-        )}
+        className={cn("min-w-0", !noHoverGroup && "group")}
+        tabIndex={0}
         data-message-id={message.id}
         data-message-role={message.role}
-        data-card-css={message.characterId ?? undefined}
-        data-grouped={isGrouped || undefined}
         onClick={handleMobileTap}
       >
         <div
-          className={cn("min-w-0 max-w-full", !isBubbleStyle && "flex gap-4")}
-          data-component="ConversationMessage.Content"
+          className={cn(
+            "mari-message relative w-full min-w-0 max-w-full px-4 transition-colors",
+            isBubbleStyle
+              ? cn("py-1", isUser ? "mari-message-user" : "mari-message-assistant", !isGrouped && "mt-0.5")
+              : cn(
+                  "py-0.5 hover:bg-[var(--secondary)]/30",
+                  isUser ? "mari-message-user" : "mari-message-assistant",
+                  isGrouped ? "mt-0" : "mt-0.5",
+                  isStreaming && "bg-[var(--secondary)]/20",
+                ),
+            isConversationStart && cn("rounded-lg ring-1", CONVERSATION_MESSAGE_CHROME_RING_CLASS),
+            isHiddenFromAI && cn("rounded-lg ring-1 saturate-75", CONVERSATION_MESSAGE_CHROME_RING_CLASS),
+            multiSelectMode && isSelected && MESSAGE_SELECTION_SURFACE_CLASS,
+          )}
+          data-card-css={message.characterId ?? undefined}
+          data-grouped={isGrouped || undefined}
         >
-          {isBubbleStyle ? <ConversationMessageBubble ctx={ctx} /> : <ConversationMessageLine ctx={ctx} />}
-        </div>
+          {isUser && !isHiddenCollapsed && <MessageReplyPreview reply={extra.replyTo} />}
+          <div
+            className={cn("min-w-0 max-w-full", !isBubbleStyle && "flex gap-4")}
+            data-component="ConversationMessage.Content"
+          >
+            {isBubbleStyle ? <ConversationMessageBubble ctx={ctx} /> : <ConversationMessageLine ctx={ctx} />}
+          </div>
 
-        {(!hideActions || (hasReasoning && !isUser)) && (
-          <ConversationMessageActions
-            isUser={isUser}
-            showActions={showActions}
-            forceShowActions={hideActions && hasReasoning ? true : forceShowActions}
-            thinkingOnly={hideActions && hasReasoning}
-            copied={copied}
-            translatedText={translatedText}
-            isHiddenFromAI={isHiddenFromAI}
-            canRegenerate={canRegenerate}
-            isLastAssistantMessage={isLastAssistantMessage}
-            hasReasoning={hasReasoning}
-            reasoningSummaryUnavailable={reasoningSummaryUnavailable}
-            thinkingButtonRef={thinkingButtonRef}
-            generationReplay={generationReplay}
-            isGuided={isGuided}
-            regenerateButtonTitle={regenerateButtonTitle}
-            regenerateGuidedClass={regenerateGuidedClass}
-            onCopy={handleCopy}
-            onTranslate={handleTranslate}
-            onEdit={handleStartEdit}
-            onRegenerate={onRegenerate ? () => onRegenerate(message.id) : undefined}
-            onBranch={onBranch ? () => onBranch(message.id) : undefined}
-            onToggleHiddenFromAI={
-              onToggleHiddenFromAI ? () => onToggleHiddenFromAI(message.id, isHiddenFromAI) : undefined
-            }
-            onPeekPrompt={onPeekPrompt}
-            onDelete={onDelete ? () => onDelete(message.id) : undefined}
-            onShowGenerationReplay={() => setShowGenerationReplay(true)}
-            onShowThinking={() => setShowThinking(true)}
-            onPickReaction={handleToggleReaction}
-          />
-        )}
+          {sceneInvitation}
+          <ConversationMessageSwipes ctx={ctx} />
+        </div>
+        <div className="px-4">
+          <MessageMarkIndicators message={message} className="px-1" />
+          {!isUser && replyCheckup && <div className="px-1">{replyCheckup}</div>}
+          {isUser && failedReply && (
+            <p className="mari-send-failed" role="alert" title={failedReplyReason}>
+              <AlertTriangle size="0.8rem" aria-hidden="true" />
+              <button
+                type="button"
+                className="mari-send-failed__text bg-transparent p-0 text-start"
+                onClick={() => failedReplyReason && toast(failedReplyReason)}
+              >
+                {localizeUi("ui.chat.conversationmessage.failedReply")}
+              </button>
+              <span aria-hidden="true">·</span>
+              <button type="button" onClick={onRetryFailedReply} className="mari-link">
+                {localizeUi("ui.chat.conversationmessage.retryFailedReply")}
+              </button>
+            </p>
+          )}
+          {reactionRow}
+          {(!hideActions || (hasReasoning && !isUser)) && (
+            <ConversationMessageActions
+              message={message}
+              name={displayName}
+              isUser={isUser}
+              showActions={showActions}
+              forceShowActions={hideActions && hasReasoning ? true : forceShowActions}
+              thinkingOnly={hideActions && hasReasoning}
+              copied={copied}
+              translatedText={translatedText}
+              isHiddenFromAI={isHiddenFromAI}
+              canRegenerate={canRegenerate}
+              isLastAssistantMessage={isLastAssistantMessage}
+              hasReasoning={hasReasoning}
+              reasoningSummaryUnavailable={reasoningSummaryUnavailable}
+              thinkingButtonRef={thinkingButtonRef}
+              generationReplay={generationReplay}
+              isGuided={isGuided}
+              regenerateButtonTitle={regenerateButtonTitle}
+              regenerateGuidedClass={regenerateGuidedClass}
+              onCopy={handleCopy}
+              onTranslate={handleTranslate}
+              onEdit={handleStartEdit}
+              onRegenerate={onRegenerate ? () => onRegenerate(message.id) : undefined}
+              onBranch={onBranch ? () => onBranch(message.id) : undefined}
+              onToggleHiddenFromAI={
+                onToggleHiddenFromAI ? () => onToggleHiddenFromAI(message.id, isHiddenFromAI) : undefined
+              }
+              onPeekPrompt={onPeekPrompt}
+              onDelete={onDelete ? () => onDelete(message.id) : undefined}
+              onShowGenerationReplay={() => setShowGenerationReplay(true)}
+              onShowThinking={() => setShowThinking(true)}
+              onPickReaction={handleToggleReaction}
+            />
+          )}
+        </div>
       </div>
-      {reactionRow}
       {modals}
     </>
   );

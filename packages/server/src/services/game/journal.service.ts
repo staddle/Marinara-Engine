@@ -41,7 +41,7 @@ export interface Journal {
   /** Inventory changes log */
   inventoryLog: Array<{
     item: string;
-    action: "acquired" | "used" | "lost" | "removed";
+    action: "acquired" | "used" | "lost" | "removed" | "sold";
     quantity: number;
     timestamp: string;
   }>;
@@ -193,7 +193,7 @@ export function upsertQuest(
 export function addInventoryEntry(
   journal: Journal,
   item: string,
-  action: "acquired" | "used" | "lost" | "removed",
+  action: "acquired" | "used" | "lost" | "removed" | "sold",
   quantity: number = 1,
 ): Journal {
   const normalizedItem = typeof item === "string" ? item.trim() : "";
@@ -213,7 +213,15 @@ export function addInventoryEntry(
   }
 
   const actionLabel =
-    action === "acquired" ? "Found" : action === "used" ? "Used" : action === "removed" ? "Removed" : "Lost";
+    action === "acquired"
+      ? "Found"
+      : action === "used"
+        ? "Used"
+        : action === "removed"
+          ? "Removed"
+          : action === "sold"
+            ? "Sold"
+            : "Lost";
 
   return {
     ...journal,

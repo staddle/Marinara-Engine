@@ -2,7 +2,9 @@ import {
   formatRpgStatsForPrompt,
   nameToXmlTag,
   normalizeRpgStatPools,
+  readImageAppearanceOverride,
   resolveMacros,
+  templateReferencesAnyMacro,
   type CharacterMacroProfile,
   type MacroContext,
   type RPGStatsConfig,
@@ -22,6 +24,13 @@ export type CharacterPromptInfo = {
   systemPrompt: string;
   backstory: string;
   appearance: string;
+  /**
+   * Image-prompt-only appearance override (#7053). Set when the card enables
+   * `extensions.imageAppearanceEnabled` with non-empty `extensions.imageAppearance`.
+   * Kept SEPARATE from `appearance` so narrator/roleplay lore, `{{appearance}}`
+   * macros and the card-evolution-auditor keep reading the normal appearance.
+   */
+  imageAppearanceOverride?: string;
   mesExample: string;
   firstMes: string;
   postHistoryInstructions: string;
@@ -75,13 +84,7 @@ export function normalizeCharacterRpgStats(value: unknown): RPGStatsConfig | und
 }
 
 type CharacterFallbackFieldKey =
-  | "description"
-  | "personality"
-  | "scenario"
-  | "backstory"
-  | "appearance"
-  | "systemPrompt"
-  | "mesExample";
+  "description" | "personality" | "scenario" | "backstory" | "appearance" | "systemPrompt" | "mesExample";
 type PersonaFallbackFieldKey = "description" | "personality" | "backstory" | "appearance" | "scenario";
 
 const CHARACTER_FALLBACK_FIELDS: Array<{
@@ -154,6 +157,7 @@ export async function loadCharacterPromptInfo({
       systemPrompt: cardPromptText(charData.system_prompt),
       backstory: cardPromptText(charData.extensions?.backstory),
       appearance: cardPromptText(charData.extensions?.appearance),
+      imageAppearanceOverride: readImageAppearanceOverride(charData.extensions, null) ?? undefined,
       mesExample: cardPromptText(charData.mes_example),
       firstMes: cardPromptText(charData.first_mes),
       postHistoryInstructions: cardPromptText(charData.post_history_instructions),
@@ -218,15 +222,8 @@ function contentIncludesResolvedField(content: string, fieldValue: string): bool
   return marker.length > 0 && content.includes(marker);
 }
 
-function macroAliasPattern(alias: string): RegExp {
-  return new RegExp(`\\{\\{[\\s\\S]*?\\b${alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b[\\s\\S]*?\\}\\}`, "i");
-}
-
 function sourceReferencesAnyMacro(sources: readonly string[], aliases: readonly string[]): boolean {
-  return aliases.some((alias) => {
-    const pattern = macroAliasPattern(alias);
-    return sources.some((source) => pattern.test(source));
-  });
+  return sources.some((source) => templateReferencesAnyMacro(source, aliases));
 }
 
 export function injectIdentityFallbackMessages(args: {

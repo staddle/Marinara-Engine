@@ -66,10 +66,11 @@ interface ChatGalleryProps {
   onGenerateStoryboard?: () => void | Promise<void>;
   /** Show the latest Game Mode storyboard viewer. */
   onViewStoryboard?: () => void;
-  /** Generate a scene video from the latest illustration. */
-  onGenerateVideo?: () => void | Promise<void>;
+  /** Generate a scene video from the latest illustration, or a Conversation character's video message. */
+  onGenerateVideo?: (characterId?: string) => void | Promise<void>;
   /** Generate a scene video from a specific gallery illustration. */
-  onAnimateImage?: (image: ChatImage) => void | Promise<void>;
+  /** In Conversation, `characterId` is the character picked to send it. */
+  onAnimateImage?: (image: ChatImage, characterId?: string) => void | Promise<void>;
 }
 
 const EMPTY_SCENE_VIDEOS: GeneratedSceneVideo[] = [];
@@ -109,7 +110,7 @@ export function ChatGallery({
 }: ChatGalleryProps) {
   const { t: localizeUi } = useUiTranslation();
   const { data: images, isLoading } = useGalleryImages(chatId);
-  const sceneVideosEnabled = mode === "game" || mode === "roleplay";
+  const sceneVideosEnabled = mode === "game" || mode === "roleplay" || mode === "conversation";
   const sceneVideosQuery = useSceneVideos(chatId, sceneVideosEnabled);
   const sceneVideos = sceneVideosEnabled ? (sceneVideosQuery.data ?? EMPTY_SCENE_VIDEOS) : EMPTY_SCENE_VIDEOS;
   const upload = useUploadGalleryImage(chatId);
@@ -441,7 +442,8 @@ export function ChatGallery({
 
     setChatGeneratingVideo(chatId, true);
     try {
-      await onGenerateVideo();
+      // In Conversation the clip is a video message from the character picked for selfies.
+      await onGenerateVideo(selfieCharacters.length > 1 ? selectedSelfieCharacterId : selfieCharacters[0]?.id);
       await sceneVideosQuery.refetch();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : localizeUi("ui.chat.chatgallery.videoGenerationFailed"));
@@ -472,7 +474,7 @@ export function ChatGallery({
 
     setChatGeneratingVideo(chatId, true);
     try {
-      await onAnimateImage(image);
+      await onAnimateImage(image, selfieCharacters.length > 1 ? selectedSelfieCharacterId : selfieCharacters[0]?.id);
       await sceneVideosQuery.refetch();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : localizeUi("ui.chat.chatgallery.videoGenerationFailed"));
@@ -589,9 +591,27 @@ export function ChatGallery({
     }
   }, [activeTab, sceneVideosEnabled, videoLightbox]);
 
+  // Who sends a selfie or a video message: one picker, shown under Selfie, or under Video when selfies are off.
+  const renderCharacterPicker = () =>
+    selfieCharacters.length > 1 ? (
+      <select
+        value={selectedSelfieCharacterId}
+        onChange={(event) => setSelectedSelfieCharacterId(event.target.value)}
+        disabled={isGeneratingSelfie || isGeneratingVideo}
+        className="min-w-0 rounded-lg bg-[var(--secondary)] px-2 py-1.5 text-[0.6875rem] text-[var(--foreground)] outline-none ring-1 ring-[var(--border)] disabled:cursor-wait disabled:opacity-70"
+        aria-label={localizeUi("ui.chat.chatgallery.messageCharacter")}
+      >
+        {selfieCharacters.map((character) => (
+          <option key={character.id} value={character.id}>
+            {character.name}
+          </option>
+        ))}
+      </select>
+    ) : null;
+
   return (
     <>
-      <div className="flex flex-col gap-3 p-4 max-md:p-3">
+      <div className="flex flex-col gap-3">
         {(canIllustrate ||
           onGenerateSelfie ||
           onGenerateStoryboard ||
@@ -679,21 +699,7 @@ export function ChatGallery({
                       : localizeUi("ui.chat.chatgallery.selfie")}
                   </span>
                 </button>
-                {selfieCharacters.length > 1 && (
-                  <select
-                    value={selectedSelfieCharacterId}
-                    onChange={(event) => setSelectedSelfieCharacterId(event.target.value)}
-                    disabled={isGeneratingSelfie}
-                    className="min-w-0 rounded-lg bg-[var(--secondary)] px-2 py-1.5 text-[0.6875rem] text-[var(--foreground)] outline-none ring-1 ring-[var(--border)] disabled:cursor-wait disabled:opacity-70"
-                    aria-label={localizeUi("ui.chat.chatgallery.selfieCharacter")}
-                  >
-                    {selfieCharacters.map((character) => (
-                      <option key={character.id} value={character.id}>
-                        {character.name}
-                      </option>
-                    ))}
-                  </select>
-                )}
+                {renderCharacterPicker()}
               </div>
             )}
             {onGenerateStoryboard && (
@@ -717,24 +723,28 @@ export function ChatGallery({
               </button>
             )}
             {sceneVideosEnabled && onGenerateVideo && (
-              <button
-                type="button"
-                onClick={() => void handleGenerateVideo()}
-                disabled={isGeneratingVideo}
-                aria-busy={isGeneratingVideo}
-                className="flex min-w-0 items-center justify-center gap-2 rounded-xl bg-[var(--primary)]/15 px-3 py-3 text-xs font-medium text-[var(--primary)] transition-all hover:bg-[var(--primary)]/25 disabled:cursor-wait disabled:opacity-75"
-              >
-                {isGeneratingVideo ? (
-                  <Loader2 size="1rem" className="shrink-0 animate-spin" />
-                ) : (
-                  <Film size="1rem" className="shrink-0" />
-                )}
-                <span className="min-w-0 truncate">
-                  {isGeneratingVideo
-                    ? localizeUi("ui.chat.summarypopover.generating")
-                    : localizeUi("ui.chat.chatgallery.video")}
-                </span>
-              </button>
+              <div className="flex min-w-0 flex-col gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => void handleGenerateVideo()}
+                  disabled={isGeneratingVideo}
+                  aria-busy={isGeneratingVideo}
+                  className="flex min-w-0 items-center justify-center gap-2 rounded-xl bg-[var(--primary)]/15 px-3 py-3 text-xs font-medium text-[var(--primary)] transition-all hover:bg-[var(--primary)]/25 disabled:cursor-wait disabled:opacity-75"
+                >
+                  {isGeneratingVideo ? (
+                    <Loader2 size="1rem" className="shrink-0 animate-spin" />
+                  ) : (
+                    <Film size="1rem" className="shrink-0" />
+                  )}
+                  <span className="min-w-0 truncate">
+                    {isGeneratingVideo
+                      ? localizeUi("ui.chat.summarypopover.generating")
+                      : localizeUi("ui.chat.chatgallery.video")}
+                  </span>
+                </button>
+                {/* With Selfie hidden (selfies off), the picker for who sends the video sits under Video instead. */}
+                {!onGenerateSelfie && mode === "conversation" && renderCharacterPicker()}
+              </div>
             )}
             {onGenerateBackground && (
               <button
@@ -759,7 +769,7 @@ export function ChatGallery({
           </div>
         )}
 
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+        <div className="flex flex-col gap-2 @md:flex-row @md:items-center">
           <div className="relative min-w-0 flex-1">
             <Search
               size="0.875rem"
@@ -784,7 +794,7 @@ export function ChatGallery({
               </button>
             )}
           </div>
-          <div className="grid shrink-0 grid-cols-2 gap-2 sm:flex">
+          <div className="grid shrink-0 grid-cols-2 gap-2 @md:flex">
             <button
               type="button"
               disabled={!images?.length}
@@ -904,7 +914,7 @@ export function ChatGallery({
             )}
 
             {!assetsLoading && displayedAssets.length > 0 && (
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+              <div className="grid grid-cols-2 gap-2 @md:grid-cols-3">
                 {displayedAssets.map((asset) => {
                   const imageId = getChatGalleryImageId(asset, chatId);
                   const selected = imageId ? selectedImageIds.has(imageId) : false;
@@ -1050,7 +1060,7 @@ export function ChatGallery({
 
             {/* Image grid */}
             {hasImages && (
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-2">
+              <div className="grid grid-cols-2 gap-2">
                 {images!.map((img) => (
                   <div
                     key={img.id}
@@ -1183,9 +1193,11 @@ export function ChatGallery({
                 <Film size="1.5rem" className="opacity-40" />
                 <p className="text-xs">{localizeUi("ui.chat.chatgallery.noVideosYet")}</p>
                 <p className="text-[0.625rem] opacity-60">
-                  {onGenerateVideo || onAnimateImage
-                    ? localizeUi("ui.chat.chatgallery.generateOrAnimateSceneVideosToFillThisTab")
-                    : localizeUi("ui.chat.chatgallery.generatedSceneVideosWillAppearHere")}
+                  {mode === "conversation"
+                    ? localizeUi("ui.chat.chatgallery.sendOrAnimateVideoMessagesToFillThisTab")
+                    : onGenerateVideo || onAnimateImage
+                      ? localizeUi("ui.chat.chatgallery.generateOrAnimateSceneVideosToFillThisTab")
+                      : localizeUi("ui.chat.chatgallery.generatedSceneVideosWillAppearHere")}
                 </p>
               </div>
             )}
@@ -1194,9 +1206,11 @@ export function ChatGallery({
               <section className="space-y-2">
                 <div className="flex items-center gap-2 text-[0.6875rem] font-medium uppercase text-[var(--muted-foreground)]">
                   <Film size="0.75rem" />
-                  {localizeUi("ui.chat.chatgallery.sceneVideos")}
+                  {localizeUi(
+                    mode === "conversation" ? "ui.chat.chatgallery.videoMessages" : "ui.chat.chatgallery.sceneVideos",
+                  )}
                 </div>
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <div className="grid grid-cols-1 gap-2 @sm:grid-cols-2">
                   {sceneVideos.map((video) => (
                     <div
                       key={video.id}

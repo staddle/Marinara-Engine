@@ -550,10 +550,10 @@ try {
       });
       await mari.keepAppliedReview(created.approval?.id ?? "");
       const child = (
-        (await mari.executeAction({ action: "lorebook.entries", lorebookId: "cascade-supersede" })).output as Array<{
-          id: string;
-        }>
-      )[0]!;
+        (await mari.executeAction({ action: "lorebook.entries", lorebookId: "cascade-supersede" })).output as {
+          items: Array<{ id: string }>;
+        }
+      ).items[0]!;
       const deleted = await mari.executeCli({ argv: ["lorebooks", "delete", "cascade-supersede", "--cascade", "--apply"] });
       const reviewId = deleted.approval?.id;
       assert.ok(reviewId);

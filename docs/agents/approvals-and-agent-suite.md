@@ -9,9 +9,10 @@ Some agents want to write new data into your chat. A Lorebook agent can add lore
 To find the toggle:
 
 1. Open the chat you want to control.
-2. Open **Chat Settings** (the gear icon).
+2. Open **Chat Settings**.
 3. Scroll to the **Agents** section.
-4. Turn on **Review Agent Outputs**.
+4. In a Roleplay chat, open **Trackers Control**. In a Game, skip this step.
+5. Turn on **Review Agent Outputs**.
 
 When **Review Agent Outputs** is on, lorebook updates, summary updates, and other reviewable writer-agent outputs wait for your approval before they are saved. When it is off, lorebook and summary updates can be saved automatically.
 
@@ -60,7 +61,7 @@ The **Agent Suite** lets you view and edit everything the agents in this chat ha
 
 To open it:
 
-1. Open **Chat Settings** (the gear icon).
+1. Open **Chat Settings**.
 2. Scroll to the **Agents** section.
 3. Click **Agent Suite**.
 
@@ -90,7 +91,7 @@ A few notes:
 
 ## Cached prompt injections panel
 
-Before your reply is generated, some writer agents add text to the prompt. This is common for **Prose Guardian**, **Narrative Director**, and custom injection agents. The **Cached prompt injections** panel is a troubleshooting view of that added text. You find it in the Agents menu of a Roleplay chat. It covers the most recent reply.
+Before your reply is generated, some writer agents add text to the prompt. This is common for **Prose Guardian**, **Narrative Director**, and custom injection agents. The **Cached prompt injections** panel is a troubleshooting view of that added text. You find it on the **Injections** tab of **Agent activity** in a Roleplay chat, which shows while **Debug mode** is on. See [Agent activity](../roleplay/getting-started.md#agent-activity). It covers the most recent reply.
 
 For each cached injection you can:
 

@@ -6,20 +6,31 @@
 // ──────────────────────────────────────────────
 
 import {
+  attachConditionalLineBreaks,
   CHARACTER_REFERENCE_ID_PATTERN,
+  DEFERRED_RELOCATION_CONDITIONAL_TOKEN_RE,
+  hasDeferredRelocationConditionals,
+  parseDeferredConditionalPayload,
+  selectConditionalPayloadBranch,
+  CHAT_VARIABLE_STORED_NAME_RE,
+  MAX_CHAT_VARIABLES,
   PERSONA_REFERENCE_ID_PATTERN,
   formatRpgStatsForPrompt,
+  markReaderVersions,
   resolveMacros,
+  scopeCharacterSummary,
   stripMacroComments,
+  usesLorebookIncludes,
   type CharacterMacroProfile,
   type CharacterData,
+  type LorebookIncludeSource,
   type MacroContext,
   type RPGStatsConfig,
   type ResolveMacroOptions,
   type WrapFormat,
 } from "@marinara-engine/shared";
 import type { DB } from "../../db/connection.js";
-import { processLorebooks, type LorebookScanResult } from "../lorebook/index.js";
+import { loadLorebookIncludes, processLorebooks, type LorebookScanResult } from "../lorebook/index.js";
 import { createCharactersStorage, type PersonaStorageRow } from "../storage/characters.storage.js";
 import { createLorebooksStorage } from "../storage/lorebooks.storage.js";
 import { wrapContent } from "./format-engine.js";
@@ -43,11 +54,17 @@ export interface BuildPromptMacroContextInput {
   lastInput?: string;
   chatId?: string;
   model?: string;
+  reasoning?: string;
   lastGenerationType?: string;
   idleDuration?: string;
   timeZone?: string;
   /** Extra prompt templates that may contain macros outside card/persona fields. */
   macroSources?: readonly string[];
+  /**
+   * Name the `{{<card ID>}}` macros found in these sources. For prompts the preset
+   * assembler does not build: it names them itself, as it pulls their cards in (#6956).
+   */
+  nameCharacterReferences?: boolean;
 }
 
 export interface CharacterMacroData {
@@ -55,6 +72,8 @@ export interface CharacterMacroData {
   phoneticNames: string[];
   profiles: NonNullable<MacroContext["characterProfiles"]>;
   profilesById: Map<string, CharacterMacroProfile>;
+  /** Cards that exist but cannot be read: they have no profile here, yet still reply. */
+  unreadableIds: Set<string>;
   primaryFields?: NonNullable<MacroContext["characterFields"]>;
 }
 
@@ -86,11 +105,74 @@ export function normalizeChatMacroVariables(value: unknown): Record<string, stri
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   const entries: Array<[string, string]> = [];
   for (const [name, entry] of Object.entries(value as Record<string, unknown>)) {
-    if (!/^[\w.-]+$/u.test(name) || typeof entry !== "string") continue;
+    if (!CHAT_VARIABLE_STORED_NAME_RE.test(name) || typeof entry !== "string") continue;
     entries.push([name, entry]);
-    if (entries.length >= 500) break;
+    if (entries.length >= MAX_CHAT_VARIABLES) break;
   }
   return Object.fromEntries(entries);
+}
+
+/** Persist generation writes only while the saved value still matches its starting snapshot. */
+export function mergeGeneratedChatMacroVariables(
+  current: unknown,
+  previous: Record<string, string>,
+  generated: Record<string, string>,
+): Record<string, string> {
+  const merged = normalizeChatMacroVariables(current);
+  for (const [name, value] of Object.entries(generated)) {
+    const before = Object.hasOwn(previous, name) ? previous[name] : undefined;
+    const saved = Object.hasOwn(merged, name) ? merged[name] : undefined;
+    // A newer editor change (including removal/rename) wins over this request.
+    if (value !== before && saved === before) {
+      Object.defineProperty(merged, name, { value, enumerable: true, writable: true, configurable: true });
+    }
+  }
+  // A regeneration starts by undoing its reply, which removes what that reply created.
+  for (const [name, before] of Object.entries(previous)) {
+    if (!Object.hasOwn(generated, name) && Object.hasOwn(merged, name) && merged[name] === before) delete merged[name];
+  }
+  return normalizeChatMacroVariables(merged);
+}
+
+/**
+ * Names a preset defines through its stored variable values.
+ *
+ * Only the names matter to callers that need to know which names a preset owns
+ * before the assembler has resolved their values.
+ */
+export function parsePresetVariableNames(rawVariableValues: unknown): string[] {
+  if (typeof rawVariableValues !== "string" || !rawVariableValues.trim()) return [];
+  try {
+    const parsed: unknown = JSON.parse(rawVariableValues);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
+    return Object.keys(parsed as Record<string, unknown>);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Evaluate `{{#if}}` blocks that were deferred because a preset owned their
+ * operand, now that the assembler has merged the real values in.
+ *
+ * Deferral keeps a conditional from being decided off the chat's value while the
+ * preset's is still pending; this is the other half of it. Uses the same token
+ * as the conversation relocation deferral, which never overlaps: preset
+ * variables do not apply in Conversation mode. Mutates the messages in place.
+ */
+export function decodeDeferredPresetConditionals(messages: Array<{ content: string }>, macroCtx: MacroContext): void {
+  for (const message of messages) {
+    if (!hasDeferredRelocationConditionals(message.content)) continue;
+    message.content = message.content.replace(DEFERRED_RELOCATION_CONDITIONAL_TOKEN_RE, (_match, encoded: string) => {
+      const payload = parseDeferredConditionalPayload(encoded);
+      if (!payload) {
+        logger.error("[prompt] Malformed deferred preset conditional token; dropping block");
+        return "";
+      }
+      const selected = selectConditionalPayloadBranch(payload, macroCtx, { trimResult: false });
+      return resolveMacros(selected, macroCtx, { trimResult: false });
+    });
+  }
 }
 
 /** Clone mutable macro maps for preview-only resolution that must discard variable writes. */
@@ -119,7 +201,7 @@ export function resolveMacrosForPreview(
   return resolveMacros(template, cloneMacroContextForPreview(macroCtx), options);
 }
 
-export function extractCharacterReferenceIds(sources: readonly string[]): string[] {
+export function extractCharacterReferenceIds(sources: readonly string[], limit = MAX_REFERENCED_CHARACTERS): string[] {
   const ids: string[] = [];
   const seen = new Set<string>();
   for (const source of sources) {
@@ -128,7 +210,7 @@ export function extractCharacterReferenceIds(sources: readonly string[]): string
       if (seen.has(id)) continue;
       seen.add(id);
       ids.push(id);
-      if (ids.length >= MAX_REFERENCED_CHARACTERS) return ids;
+      if (ids.length >= limit) return ids;
     }
   }
   return ids;
@@ -417,29 +499,41 @@ export async function buildReferencedCharacterContext(input: {
   excludedLorebookIds?: string[];
   excludedLorebookSourceAgentIds?: string[];
   maxReferences?: number;
+  /** Only the names: no card text and no lorebook scan. */
+  namesOnly?: boolean;
 }): Promise<{ content: string; references: Record<string, string> }> {
   const characters = createCharactersStorage(input.db);
   const activeIds = new Set(input.activeCharacterIds);
   const sources = [...input.sources, ...input.chatMessages.map((message) => message.content)];
 
+  const activeNames = new Map<string, string>();
   const activeRows = await Promise.all([...activeIds].map((id) => characters.getById(id)));
-  for (const row of activeRows) {
-    const data = parseCharacterData(row?.data);
-    if (data) sources.push(...referencedCharacterSourceFields(data));
-  }
+  [...activeIds].forEach((id, index) => {
+    const data = parseCharacterData(activeRows[index]?.data);
+    if (!data) return;
+    activeNames.set(id, data.name || "Character");
+    sources.push(...referencedCharacterSourceFields(data));
+  });
 
-  const candidateIds = extractCharacterReferenceIds(sources)
-    .filter((id) => !activeIds.has(id))
-    .slice(0, Math.max(0, input.maxReferences ?? MAX_REFERENCED_CHARACTERS));
-  const referencedRows = await Promise.all(candidateIds.map((id) => characters.getById(id)));
-  const referenced = candidateIds.flatMap((id, index) => {
-    const data = parseCharacterData(referencedRows[index]?.data);
+  // Every referenced ID gets a name in every mode; the cap only limits which cards are added (#6956).
+  const mentionedIds = extractCharacterReferenceIds(sources, Infinity);
+  const outsideIds = mentionedIds.filter((id) => !activeIds.has(id));
+  const outsideRows = await Promise.all(outsideIds.map((id) => characters.getById(id)));
+  const outside = outsideIds.flatMap((id, index) => {
+    const data = parseCharacterData(outsideRows[index]?.data);
     return data ? [{ id, data }] : [];
   });
-  if (referenced.length === 0) return { content: "", references: {} };
+  const cardLimit = input.namesOnly ? 0 : Math.max(0, input.maxReferences ?? MAX_REFERENCED_CHARACTERS);
+  const referenced = outside.slice(0, cardLimit);
+  // A character already in the chat still resolves to its name; its card is
+  // already in the prompt, so it gets no second copy below (#6924).
+  const references = Object.fromEntries([
+    ...mentionedIds.flatMap((id) => (activeNames.has(id) ? [[id, activeNames.get(id)!] as const] : [])),
+    ...outside.map(({ id, data }) => [id, data.name || "Character"] as const),
+  ]);
+  if (referenced.length === 0 || input.namesOnly) return { content: "", references };
 
-  const references = Object.fromEntries(referenced.map(({ id, data }) => [id, data.name || "Character"]));
-  const macroCtx = { ...input.macroCtx, characterReferences: references };
+  const macroCtx = { ...input.macroCtx, characterReferences: { ...Object.fromEntries(activeNames), ...references } };
   const lorebooks = createLorebooksStorage(input.db);
   if (referenced.some(({ data }) => /\{\{\s*lorebooksize::/iu.test(JSON.stringify(data) ?? ""))) {
     try {
@@ -624,19 +718,24 @@ function parseCharacterData(raw: unknown): CharacterData | null {
 }
 
 export async function resolveCharacterMacroData(db: DB, characterIds: string[]): Promise<CharacterMacroData> {
-  if (characterIds.length === 0) return { names: [], phoneticNames: [], profiles: [], profilesById: new Map() };
+  if (characterIds.length === 0)
+    return { names: [], phoneticNames: [], profiles: [], profilesById: new Map(), unreadableIds: new Set() };
 
   const chars = createCharactersStorage(db);
   const names: string[] = [];
   const phoneticNames: string[] = [];
   const profiles: CharacterMacroData["profiles"] = [];
   const profilesById = new Map<string, CharacterMacroProfile>();
+  const unreadableIds = new Set<string>();
   let primaryFields: CharacterMacroData["primaryFields"] | undefined;
 
   for (const id of characterIds) {
     const row = await chars.getById(id);
     const data = parseCharacterData(row?.data);
-    if (!data) continue;
+    if (!data) {
+      if (row) unreadableIds.add(id);
+      continue;
+    }
 
     if (data.name) names.push(data.name);
     const phoneticName =
@@ -677,7 +776,22 @@ export async function resolveCharacterMacroData(db: DB, characterIds: string[]):
     }
   }
 
-  return { names, phoneticNames, profiles, profilesById, primaryFields };
+  return { names, phoneticNames, profiles, profilesById, unreadableIds, primaryFields };
+}
+
+/** What `{{include::...}}` reads (#6912), loaded only when one of `sources` uses it. */
+export async function loadLorebookIncludesFor(
+  db: DB,
+  chatId: string | undefined,
+  sources: readonly string[],
+): Promise<LorebookIncludeSource | undefined> {
+  if (!sources.some(usesLorebookIncludes)) return undefined;
+  try {
+    return await loadLorebookIncludes(db, chatId);
+  } catch (err) {
+    logger.warn(err, "Failed to load lorebooks for include macros; leaving them as written");
+    return undefined;
+  }
 }
 
 export async function buildPromptMacroContext(input: BuildPromptMacroContextInput): Promise<MacroContext> {
@@ -706,8 +820,9 @@ export async function buildPromptMacroContext(input: BuildPromptMacroContextInpu
       // If the count fails, continue with empty counts — {{lorebooksize::ID}} resolves to 0.
     }
   }
+  const lorebookIncludes = await loadLorebookIncludesFor(input.db, input.chatId, macroSources);
 
-  return {
+  const macroCtx: MacroContext = {
     user: input.personaName || "User",
     userPhonetic: input.personaPhoneticName || input.personaFields?.phoneticName || input.personaName || "User",
     char: characterMacroData.names[0] || "Character",
@@ -720,10 +835,12 @@ export async function buildPromptMacroContext(input: BuildPromptMacroContextInpu
     lastInput: input.lastInput,
     chatId: input.chatId,
     model: input.model,
+    reasoning: input.reasoning,
     lastGenerationType: input.lastGenerationType,
     idleDuration: input.idleDuration,
     timeZone: input.timeZone,
     lorebookEntryCounts,
+    ...(lorebookIncludes ? { lorebookIncludes } : {}),
     characterFields: {
       ...(characterMacroData.primaryFields ?? {}),
       ...(input.groupScenarioOverrideText ? { scenario: input.groupScenarioOverrideText } : {}),
@@ -733,6 +850,21 @@ export async function buildPromptMacroContext(input: BuildPromptMacroContextInpu
       ...(input.personaFields ?? {}),
     },
   };
+  if (input.nameCharacterReferences) {
+    macroCtx.characterReferences = (
+      await buildReferencedCharacterContext({
+        db: input.db,
+        activeCharacterIds: input.groupCharacterIds ?? input.characterIds,
+        sources: macroSources,
+        chatMessages: [],
+        macroCtx,
+        wrapFormat: "none",
+        chatId: input.chatId ?? "",
+        namesOnly: true,
+      })
+    ).references;
+  }
+  return macroCtx;
 }
 
 function characterFieldsFromProfile(profile: CharacterMacroProfile): NonNullable<MacroContext["characterFields"]> {
@@ -764,6 +896,36 @@ export function scopePromptMacroContextToCharacter(
     charPhonetic: profile.phoneticName || profile.name,
     characterFields: characterFieldsFromProfile(profile),
   };
+}
+
+/**
+ * Resolve the Chat Summary. A merged group reply may voice any of `readers` (#7252), so a section that
+ * depends on the character is resolved for each reader who gets it and marked with who knows it, as
+ * Advanced Memory does. Text outside every condition resolves once, as before, `{{char}}` included.
+ * Sections no reader gets, such as narrator-only ones, are left out.
+ */
+export function resolveChatSummaryMacros(
+  summary: string,
+  macroCtx: MacroContext,
+  options?: ResolveMacroOptions,
+  readers?: readonly CharacterMacroProfile[],
+): string {
+  // A section for someone who is not replying leaves no empty line: its line breaks go with it.
+  summary = attachConditionalLineBreaks(summary);
+  // ponytail: splitting a group block (`[` … `]`) at a condition would undo its per-character repeat, so a
+  // summary with one keeps the single reading. Expand group blocks before scoping if that ever matters.
+  if (!readers?.length || /^[ \t]*\[[ \t]*\r?$/mu.test(summary)) return resolveMacros(summary, macroCtx, options);
+  const profiles = new Map(readers.map((profile) => [profile.name, profile]));
+  const partOptions = { ...options, trimResult: false };
+  // A top-level part with a condition is one scoping kept whole, such as a name mixed with a variable.
+  const resolved = scopeCharacterSummary(summary, [...profiles.keys()], 0, (part, known, depth) =>
+    depth === 0 && !/\{\{\s*#if\b/iu.test(part)
+      ? resolveMacros(part, macroCtx, partOptions)
+      : markReaderVersions(known, profiles.size, (name) =>
+          resolveMacros(part, scopePromptMacroContextToCharacter(macroCtx, profiles.get(name)!), partOptions),
+        ),
+  );
+  return options?.trimResult === false ? resolved : resolved.trim();
 }
 
 function macroContextForMessage(

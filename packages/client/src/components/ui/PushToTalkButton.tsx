@@ -3,7 +3,7 @@ import { Loader2, Mic, Square } from "lucide-react";
 import { toast } from "sonner";
 import { cn } from "../../lib/utils";
 import { useMicRecorder } from "../../hooks/use-mic-recorder";
-import { useTranscribeAudio } from "../../hooks/use-stt";
+import { useTranscribeAudio } from "../../hooks/use-speech-to-text";
 import { useTranslation as useUiTranslation } from "react-i18next";
 import { classifyMicAccessError } from "../../lib/mic-access-error";
 

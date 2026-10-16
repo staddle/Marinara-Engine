@@ -111,9 +111,40 @@ assert.equal(probeHeapHelpers("resolve_default_node_heap_mb 1153434 8388608"), "
 assert.equal(probeHeapHelpers("resolve_default_node_heap_mb 1153434 4194304"), "1024");
 assert.equal(probeHeapHelpers("resolve_default_node_heap_mb 1153434 3145728"), "1024");
 assert.equal(probeHeapHelpers("resolve_default_node_heap_mb 1153434 0"), "1536");
+// The client build sets its own heap (termux-client-build.regression.mjs pins it).
+// The launcher only marks a heap the user chose, which the build keeps, and the
+// build helper never changes the server's limit. Execute the real setup block.
+const heapSetupBlockStart = termuxLauncherSource.indexOf("if ! has_explicit_node_heap_limit; then");
+const heapSetupBlockEnd = termuxLauncherSource.indexOf("\n# Resident chat cap", heapSetupBlockStart);
+assert.ok(heapSetupBlockStart >= 0 && heapSetupBlockEnd >= 0, "the Termux heap setup block must be present");
+const probeHeapSetup = (nodeOptions) =>
+  probeHeapHelpers(
+    `
+    DATA_DIR=/nonexistent-marinara-heap-probe
+    ${termuxLauncherSource.slice(heapSetupBlockStart, heapSetupBlockEnd)}
+    run_pnpm() { :; }
+    build_termux_client
+    printf '\\n%s|' "$NODE_OPTIONS"
+    node -p 'process.env.MARINARA_EXPLICIT_NODE_HEAP ?? ""'
+  `,
+    nodeOptions,
+  )
+    .trim()
+    .split("\n")
+    .at(-1);
+assert.equal(
+  probeHeapSetup("--trace-warnings"),
+  "--trace-warnings --max-old-space-size=1024|",
+  "an automatic heap must not be marked as the user's, and the client build must not leak into the server",
+);
+assert.equal(
+  probeHeapSetup("--max-old-space-size=1280 --trace-warnings"),
+  "--max-old-space-size=1280 --trace-warnings|1",
+  "the launcher must keep and mark an explicit heap so the client build keeps it too",
+);
 const wakeLockTrapIndex = termuxLauncherSource.search(/^[ \t]*trap release_termux_wake_lock EXIT[ \t]*$/mu);
 const wakeLockAcquireIndex = termuxLauncherSource.search(/^[ \t]*if[ \t]+termux-wake-lock\b[^\n]*;[ \t]*then[ \t]*$/mu);
-const serverStartIndex = termuxLauncherSource.lastIndexOf("node dist/index.js");
+const serverStartIndex = termuxLauncherSource.lastIndexOf("node ../../scripts/run-server.mjs dist/index.js");
 const persistentLogIndex = termuxLauncherSource.indexOf('exec > >(tee -a "$MARINARA_TERMUX_LOG_FILE") 2>&1');
 const dependencySetupIndex = termuxLauncherSource.indexOf("resolve_pnpm_runner || exit 1");
 assert.ok(
@@ -126,7 +157,7 @@ assert.ok(
 );
 assert.doesNotMatch(
   termuxLauncherSource,
-  /exec node dist\/index\.js/u,
+  /exec node (?:\.\.\/\.\.\/scripts\/run-server\.mjs )?dist\/index\.js/u,
   "the Termux launcher must retain its shell so the EXIT cleanup trap can run",
 );
 assert.match(
@@ -145,7 +176,7 @@ assert.ok(
 );
 assert.match(
   termuxLauncherSource,
-  /node dist\/index\.js\s+MARINARA_SERVER_STATUS=\$\?[\s\S]{0,900}exit "\$MARINARA_SERVER_STATUS"/u,
+  /node \.\.\/\.\.\/scripts\/run-server\.mjs dist\/index\.js\s+MARINARA_SERVER_STATUS=\$\?[\s\S]{0,900}exit "\$MARINARA_SERVER_STATUS"/u,
   "the Termux launcher must preserve the server process exit status",
 );
 assert.match(

@@ -1,6 +1,20 @@
 import { api } from "./api-client";
 import type { CharacterData } from "@marinara-engine/shared";
 
+// The server takes a native .marinara.json as a JSON request up to 256 MiB (IMPORT_BODY_LIMIT_BYTES), less
+// headroom for the fields sent with it. A bigger export, such as a character with a large gallery, is
+// uploaded as a file instead; the server reads it in pieces.
+const NATIVE_JSON_REQUEST_MAX_BYTES = 255 * 1024 * 1024;
+
+/**
+ * A JSON object too large to send as a JSON request. Only a Marinara export gets that big, and its "type" field may not
+ * come first if another tool re-saved it, so any object goes to the upload route, which rejects a non-Marinara file.
+ */
+export async function isOversizedMarinaraJson(file: File): Promise<boolean> {
+  if (file.size <= NATIVE_JSON_REQUEST_MAX_BYTES) return false;
+  return /^\uFEFF?\s*\{/.test(await file.slice(0, 256).text());
+}
+
 export interface EmbeddedLorebookImportPreview {
   filename: string;
   success: boolean;

@@ -10,7 +10,7 @@ The **Backgrounds** section has three parts:
 
 1. The **Chat Background** picker, where you choose the image for the chat you are in.
 2. The **Background Blur** slider.
-3. The background library, where you import, organize, filter, tag, rename, and delete images.
+3. The background library, where you import, organize, filter, tag, rename, download, and delete images.
 
 A chat background only shows in Roleplay and Game mode chats. Conversation mode uses a gradient instead, which you set in the **Conversation Theme** section. See [Appearance Settings](appearance-settings.md) for that.
 
@@ -73,7 +73,11 @@ Tags help you group and search your uploads. You can only tag images with the **
 1. Click the tag icon (**Edit tags**) on the image row.
 2. Type a tag in the **Add tag...** field. As you type, Marinara suggests tags you used before.
 3. Press Enter or click **Add**.
-4. To remove a tag, click the small X on that tag chip.
+4. To remove a tag, click it. While tag editing is open, each tag shows as a button with an X.
+
+### Download a background
+
+You can download any background, including the built-in ones. Hover over the image row and click the download icon (**Download background**). The image saves with its file name. On an iPhone or iPad, the share sheet opens so you can save it; if it does not open, tap **Save file** in the message that appears.
 
 ### Delete a background
 
@@ -84,10 +88,12 @@ You can only delete images with the **Library** label. Hover over the image row 
 The default Roleplay background is the image every new Roleplay chat starts with, before it picks its own. Set it once and every new Roleplay chat uses it.
 
 1. In the **Backgrounds** section, find the image you want in the grid.
-2. Click the star icon (**Set as default for new Roleplay chats**) on that image row.
-3. The star fills with color without moving from its position. New Roleplay chats now start with it.
+2. Click the pin icon (**Set as default for new Roleplay chats**) on that image row.
+3. The pin button stays highlighted, and a **Default** label appears on the thumbnail. New Roleplay chats now start with it.
 
-To go back, click the star on the current default image. You can also click the **Reset Roleplay default** link near the top of the grid. That link only appears when your default background differs from the built-in one.
+The star in the image's top-left corner adds it to your favorites. It does not change the default.
+
+To go back, click the pin on the current default image. You can also click the **Reset Roleplay default** button near the top of the grid. That button only appears when your default background differs from the built-in one.
 
 ## Background Blur
 

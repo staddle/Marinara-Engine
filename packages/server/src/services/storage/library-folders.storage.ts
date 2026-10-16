@@ -10,7 +10,7 @@ import type {
 } from "@marinara-engine/shared";
 import type { DB } from "../../db/connection.js";
 import { eq } from "../../db/file-query.js";
-import { libraryFolders } from "../../db/schema/index.js";
+import { libraryFolders, lorebooks } from "../../db/schema/index.js";
 import { newId, now } from "../../utils/id-generator.js";
 
 type LibraryFolderRow = typeof libraryFolders.$inferSelect;
@@ -93,6 +93,35 @@ export function createLibraryFoldersStorage(db: DB) {
       return true;
     },
 
+    async removeItemReferences(scope: LibraryFolderScope, itemIds: string[]) {
+      const removingIds = new Set(itemIds);
+      if (removingIds.size === 0) return 0;
+
+      const rows = await db.select().from(libraryFolders).where(eq(libraryFolders.scope, scope));
+
+      const timestamp = now();
+      let removedCount = 0;
+
+      for (const folder of rows) {
+        const currentIds = parseItemIds(folder.itemIds);
+        const nextIds = currentIds.filter((id) => !removingIds.has(id));
+
+        if (nextIds.length === currentIds.length) continue;
+
+        removedCount += currentIds.length - nextIds.length;
+
+        await db
+          .update(libraryFolders)
+          .set({
+            itemIds: JSON.stringify(nextIds),
+            updatedAt: timestamp,
+          })
+          .where(eq(libraryFolders.id, folder.id));
+      }
+
+      return removedCount;
+    },
+
     async moveItems(scope: LibraryFolderScope, input: MoveLibraryItemsInput) {
       const movingIds = new Set(input.itemIds);
       const timestamp = now();
@@ -115,6 +144,27 @@ export function createLibraryFoldersStorage(db: DB) {
             .where(eq(libraryFolders.id, folder.id));
         }
         return true;
+      });
+    },
+
+    async pruneMissingLorebookItemIds() {
+      return db.transaction(async (tx) => {
+        const existingIds = new Set((await tx.select({ id: lorebooks.id }).from(lorebooks)).map((book) => book.id));
+        const folders = await tx
+          .select({ itemIds: libraryFolders.itemIds })
+          .from(libraryFolders)
+          .where(eq(libraryFolders.scope, "lorebooks"));
+        const missingIds = new Set<string>();
+        for (const folder of folders) {
+          for (const id of parseItemIds(folder.itemIds)) {
+            if (!existingIds.has(id)) missingIds.add(id);
+          }
+        }
+        if (missingIds.size === 0) return 0;
+
+        await createLibraryFoldersStorage(tx).removeItemReferences("lorebooks", [...missingIds]);
+
+        return missingIds.size;
       });
     },
 

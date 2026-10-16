@@ -94,8 +94,14 @@ assert.equal(
 // ── Engine: the latch exists, arms where text streams, holds, and floors ────
 // Structural pins run against a whitespace-flattened copy so Prettier reflow
 // can never break them; behavior changes still do.
-const workspaceAgent = readSource("packages/server/src/services/professor-mari/workspace-agent.service.ts");
+const workspaceAgent =
+  readSource("packages/server/src/services/professor-mari/workspace-agent.service.ts") +
+  readSource("packages/server/src/services/professor-mari/workspace-commands.ts") +
+  readSource("packages/server/src/services/professor-mari/workspace-round-review.ts");
 const flat = workspaceAgent.replace(/\s+/gu, " ");
+// Line comments can themselves contain semicolons (prose), so adjacency
+// checks across a comment use this copy instead of `flat`.
+const flatNoLineComments = workspaceAgent.replace(/\/\/[^\n]*/gu, "").replace(/\s+/gu, " ");
 
 // Run-LOCAL latch declared BEFORE the round loop - run scope is the entire
 // property the fix rests on. A declaration moved into the loop body (fresh
@@ -123,10 +129,10 @@ assert.equal((flat.match(/runAskedForApproval = true/gu) ?? []).length, 1, "one 
 // user - lexically adjacent to the append, so a discarded repair round (whose
 // prose the user never sees) can never bind the run.
 assert.ok(
-  flat.includes(
-    "if (parsedAction.awaitingAuthorization || visibleTextAsksApplyPermission(action.visibleText)) { runAskedForApproval = true; } assistantText = appendVisibleText(assistantText, action.visibleText);",
+  flatNoLineComments.includes(
+    "if (parsedAction.awaitingAuthorization || visibleTextAsksApplyPermission(action.visibleText)) { runAskedForApproval = true; } assistantText = action.visibleText.trim();",
   ),
-  "arming must sit immediately before the visible-text append - only streamed asks bind the run",
+  "arming must sit immediately before the visible-text assignment - only streamed asks bind the run",
 );
 assert.ok(
   !flat.includes("visibleTextRequestsUserApproval(action.visibleText)) { runAskedForApproval"),
@@ -136,9 +142,9 @@ assert.ok(
 // consults the strict one, which covers interrogatives the loose regexes miss
 // ("Shall I save it now?") - a frame that asks and stages the mutation must
 // defer rather than execute past its own question.
-assert.ok(flat.includes("visibleTextRequestsUserApproval(parsedAction.visibleText) ||"));
+assert.ok(flat.includes("visibleTextRequestsUserApproval(args.parsedAction.visibleText) ||"));
 assert.ok(
-  flat.includes("visibleTextAsksApplyPermission(parsedAction.visibleText) ||"),
+  flat.includes("visibleTextAsksApplyPermission(args.parsedAction.visibleText) ||"),
   "the same-frame deferral must recognize every phrasing the latch would arm on",
 );
 assert.equal(
@@ -150,7 +156,7 @@ assert.equal(visibleTextAsksApplyPermission("Shall I save it now?"), true);
 // The latch joins the deferral disjunction, so later described mutations in
 // the same run are held behind Accept.
 assert.ok(
-  flat.includes("runAskedForApproval) && parsedAction.commands.some(isMutatingWorkspaceCommand);"),
+  flat.includes("args.runAskedForApproval) && args.parsedAction.commands.some(isMutatingWorkspaceCommand)"),
   "the deferral must consider the run's earlier ask, not only the current round's text",
 );
 // Silent mutating frames after an ask are refused at the executor (Manual is
@@ -162,7 +168,7 @@ assert.ok(
     'this.activeRoundAskLatchSilentMutationBlocked = runAskedForApproval && !action.visibleText && permissionsMode !== "manual" && permissionsMode !== "bypass";',
   ),
 );
-assert.ok(flat.includes("if (this.activeRoundAskLatchSilentMutationBlocked && isMutatingWorkspaceCommand(command)) {"));
+assert.ok(flat.includes("if (this.getRun().askLatchSilentMutationBlocked && isMutatingWorkspaceCommand(command)) {"));
 assert.match(workspaceAgent, /only their reply or Accept can answer it/u);
 
 // ── The dry-run result: truthful, conditional, mode-safe ────────────────────
